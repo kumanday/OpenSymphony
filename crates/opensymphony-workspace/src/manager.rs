@@ -1093,22 +1093,63 @@ impl WorkspaceManager {
             {
                 Ok(Some(checkout)) => checkout,
                 Ok(None) if handle.checkout_generation().is_some() => {
-                    let facts = self
+                    let receipt = self
+                        .load_manifest::<AfterCreateBootstrapReceipt>(
+                            &handle,
+                            &handle.after_create_receipt_path(),
+                        )
+                        .await?;
+                    let Some(receipt_binding) =
+                        receipt.and_then(|receipt| receipt.repository_binding)
+                    else {
+                        self.quarantine_checkout(
+                            &handle,
+                            "receipt-owned checkout is missing its repository binding".to_owned(),
+                        )
+                        .await?;
+                        continue;
+                    };
+                    if receipt_binding != *binding {
+                        self.quarantine_checkout(
+                            &handle,
+                            "receipt-owned checkout repository binding differs from the requested binding"
+                                .to_owned(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let facts = match self
                         .verify_git_checkout(
                             handle.workspace_path(),
-                            binding,
+                            &receipt_binding,
                             repository,
                             true,
                             true,
                         )
-                        .await?;
-                    let instruction = self
+                        .await
+                    {
+                        Ok(facts) => facts,
+                        Err(error) => {
+                            self.handle_receipt_owned_checkout_failure(&handle, &error)
+                                .await;
+                            continue;
+                        }
+                    };
+                    let instruction = match self
                         .load_instruction_provenance(
                             handle.workspace_path(),
                             repository,
                             &facts.head,
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(instruction) => instruction,
+                        Err(error) => {
+                            self.handle_receipt_owned_checkout_failure(&handle, &error)
+                                .await;
+                            continue;
+                        }
+                    };
                     let now = Utc::now();
                     let checkout = CheckoutManifest {
                         schema_version: 1,
@@ -1121,7 +1162,7 @@ impl WorkspaceManager {
                         run_id: issue.issue_id.clone(),
                         sanitized_workspace_key: handle.workspace_key().to_owned(),
                         workspace_path: handle.workspace_path().to_path_buf(),
-                        repository_binding: binding.clone(),
+                        repository_binding: receipt_binding,
                         remote_fingerprint: binding
                             .repository
                             .safe_remote_fingerprint
@@ -1296,6 +1337,10 @@ impl WorkspaceManager {
                     .staging_intent_is_orphaned(&canonical_staging_root, &path)
                     .await?
             {
+                if let Some(published_path) = self.staging_intent_published_path(&path).await? {
+                    self.remove_incomplete_published_checkout(&published_path)
+                        .await?;
+                }
                 match fs::remove_file(&path).await {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1368,13 +1413,83 @@ impl WorkspaceManager {
                 .staging_intent_claims_published_path(published_path)
                 .await?
         {
-            return Ok(false);
+            for path in [
+                published_path.join(".opensymphony").join("issue.json"),
+                published_path.join(".opensymphony").join("checkout.json"),
+                published_path.join(".opensymphony.after_create.json"),
+            ] {
+                if path_exists(&path).await? {
+                    return Ok(false);
+                }
+            }
         }
         Ok(marker.schema_version == 1
             && marker.generation == generation
             && marker.workspace_key == workspace_key
             && marker.staging_path == staging_path
             && !path_exists(&staging_path).await?)
+    }
+
+    async fn staging_intent_published_path(
+        &self,
+        marker_path: &Path,
+    ) -> Result<Option<PathBuf>, WorkspaceError> {
+        let raw = match fs::read_to_string(marker_path).await {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path: marker_path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let marker = serde_json::from_str::<StagingIntentMarker>(&raw).map_err(|source| {
+            WorkspaceError::DecodeManifest {
+                path: marker_path.to_path_buf(),
+                source,
+            }
+        })?;
+        let Some(published_path) = marker.published_path else {
+            return Ok(None);
+        };
+        let published_path = normalize_absolute_path(&published_path)?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_published = match fs::canonicalize(&published_path).await {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let parent =
+                    published_path
+                        .parent()
+                        .ok_or_else(|| WorkspaceError::Canonicalize {
+                            path: published_path.clone(),
+                            source: io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "published checkout path has no parent",
+                            ),
+                        })?;
+                let canonical_parent = self.canonicalize_path(parent).await?;
+                let file_name =
+                    published_path
+                        .file_name()
+                        .ok_or_else(|| WorkspaceError::Canonicalize {
+                            path: published_path.clone(),
+                            source: io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "published checkout path has no file name",
+                            ),
+                        })?;
+                canonical_parent.join(file_name)
+            }
+            Err(source) => {
+                return Err(WorkspaceError::Canonicalize {
+                    path: published_path,
+                    source,
+                });
+            }
+        };
+        ensure_descendant(&canonical_root, &canonical_published)?;
+        Ok(Some(canonical_published))
     }
 
     /// Sweep staging generations once during orchestrator startup, before any
@@ -3129,17 +3244,22 @@ impl WorkspaceManager {
                 return Ok(Some((handle, manifest)));
             }
             let generation = published_checkout_generation(&canonical_workspace);
-            let has_ownership_marker = match generation.as_deref() {
+            let has_published_marker = match generation.as_deref() {
                 Some(generation) => {
                     self.published_checkout_ownership_marker(&canonical_workspace, generation)
                         .await
-                        || self
-                            .staging_intent_claims_published_path(&canonical_workspace)
-                            .await?
                 }
                 None => false,
             };
-            if has_ownership_marker {
+            let has_staging_intent = self
+                .staging_intent_claims_published_path(&canonical_workspace)
+                .await?;
+            if has_staging_intent {
+                tracing::warn!(
+                    path = %canonical_workspace.display(),
+                    "preserving published checkout generation with an ownership marker"
+                );
+            } else if has_published_marker {
                 tracing::warn!(
                     path = %canonical_workspace.display(),
                     "sweeping incomplete published checkout generation with an ownership marker"

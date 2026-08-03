@@ -1145,13 +1145,41 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     .await
     .expect("published staging intent should be written");
     sweep_manager
-        .list_all_workspaces()
+        .recover_abandoned_staging_checkouts()
         .await
         .expect("published staging intent should prove ownership during recovery");
     assert!(
         !intent_owned_path.exists(),
         "a published generation claimed by a staging intent should be swept after a publish crash"
     );
+
+    let missing_published_path =
+        sweep_root.join("missing-published-generation--0123456789abcdef0123456789abcdef");
+    let missing_published_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("missing-published-generation--0123456789abcdef0123456789abcdef");
+    let missing_published_marker_path = missing_published_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("missing-published-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        missing_published_marker_path.clone(),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "missing-published-generation",
+            "staging_path": missing_published_staging_path,
+            "published_path": missing_published_path,
+        }))
+        .expect("missing published staging intent should encode"),
+    )
+    .await
+    .expect("missing published staging intent should be written");
+    sweep_manager
+        .recover_abandoned_staging_checkouts()
+        .await
+        .expect("orphan intent should be removable after published path disappearance");
+    assert!(!missing_published_marker_path.exists());
 }
 
 #[tokio::test]

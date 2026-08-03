@@ -671,6 +671,11 @@ async fn archive_superseded_harness_sessions(
                 "superseded OpenHands conversation evidence has no runtime envelope".to_owned(),
             ));
         };
+        if envelope.conversation_binding.as_deref() != Some(manifest.conversation_id.as_str()) {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded harness evidence is not bound to its own conversation".to_owned(),
+            ));
+        }
         let expected_persistence_dir = if conversation_manifest_is_codex(manifest) {
             workspace.metadata_dir()
         } else {
@@ -2291,7 +2296,16 @@ impl RuntimeWorkerBackend {
                             .model_profile
                             .clone()
                             .unwrap_or_else(|| "default".to_owned()),
-                        model: route.model.clone(),
+                        model: route.model.clone().or_else(|| {
+                            workflow
+                                .extensions
+                                .openhands
+                                .conversation
+                                .agent
+                                .llm
+                                .as_ref()
+                                .and_then(|llm| llm.model.clone())
+                        }),
                         requested_execution_scope: "single_checkout".to_owned(),
                         effective_containment: "trusted_host_process_cwd".to_owned(),
                         conversation_binding: persisted_conversation_binding,
