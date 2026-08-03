@@ -239,6 +239,15 @@ fn strict_recovery_configured(
         || repository_checkouts.is_some_and(|checkouts| !checkouts.is_empty())
 }
 
+fn live_openhands_checks_blocked(
+    repository_routing: Option<&RepositoryRouting>,
+    repository_checkouts: Option<
+        &BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>,
+    >,
+) -> bool {
+    strict_recovery_configured(repository_routing, repository_checkouts)
+}
+
 struct DoctorWorkflowEnvironment {
     fallback_linear_api_key: bool,
     blocked: BTreeSet<String>,
@@ -749,14 +758,17 @@ pub async fn run_doctor_command(
     let mut live_checks_supervisor = None;
 
     if live_openhands {
-        if strict_recovery_enabled(
+        if live_openhands_checks_blocked(
             central_config
                 .as_ref()
                 .map(|central| &central.repository_routing),
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_checkouts),
         ) {
             checks.push(CheckResult::fail(
                 "openhands-live",
-                "live OpenHands checks are unavailable for project_set until a verified issue checkout is selected",
+                "live OpenHands checks are unavailable when verified checkout policies are configured; use issue-scoped strict recovery",
             ));
         } else {
             let live_checks =
@@ -2963,6 +2975,10 @@ mod tests {
         )]);
 
         assert!(super::strict_recovery_configured(
+            Some(&routing),
+            Some(&checkouts)
+        ));
+        assert!(super::live_openhands_checks_blocked(
             Some(&routing),
             Some(&checkouts)
         ));

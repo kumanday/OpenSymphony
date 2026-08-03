@@ -3996,6 +3996,7 @@ async fn discover_agents_with_credentials(
     const MAX_VISITED_ENTRIES: usize = 100_000;
     let mut pending = vec![root.to_path_buf()];
     let mut paths = Vec::new();
+    let mut tracked_agents_paths = None;
     let mut instruction_candidates = 0;
     let mut visited_directories = 0;
     let mut visited_entries = 0;
@@ -4060,11 +4061,16 @@ async fn discover_agents_with_credentials(
                             | "dist"
                     )
                 );
-                if generated_tree
-                    && let Ok(relative) = path.strip_prefix(root)
-                    && !tracked_instruction_tree(root, relative, checkout_credential_envs).await?
-                {
-                    continue;
+                if generated_tree && let Ok(relative) = path.strip_prefix(root) {
+                    if tracked_agents_paths.is_none() {
+                        tracked_agents_paths =
+                            Some(tracked_instruction_paths(root, checkout_credential_envs).await?);
+                    }
+                    if !tracked_agents_paths.as_ref().is_some_and(|paths| {
+                        paths.iter().any(|tracked| tracked.starts_with(relative))
+                    }) {
+                        continue;
+                    }
                 }
                 pending.push(path);
             } else if file_type.is_file()
@@ -4086,11 +4092,22 @@ async fn discover_agents_with_credentials(
     Ok(paths)
 }
 
+#[cfg(test)]
 async fn tracked_instruction_tree(
     root: &Path,
     relative: &Path,
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<bool, WorkspaceError> {
+    Ok(tracked_instruction_paths(root, checkout_credential_envs)
+        .await?
+        .iter()
+        .any(|path| path.starts_with(relative)))
+}
+
+async fn tracked_instruction_paths(
+    root: &Path,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<Vec<PathBuf>, WorkspaceError> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -4112,11 +4129,13 @@ async fn tracked_instruction_tree(
             "tracked instruction probe exited unsuccessfully",
         ));
     }
-    Ok(output.stdout.split(|byte| *byte == 0).any(|entry| {
-        let path_string = String::from_utf8_lossy(entry);
-        let path = Path::new(path_string.as_ref());
-        path.starts_with(relative) && path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md"))
-    }))
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
+        .filter(|path| path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md")))
+        .collect())
 }
 
 async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>

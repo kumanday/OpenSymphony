@@ -1692,39 +1692,28 @@ async fn recovered_conversation_manifest(
     if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
         match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
             Ok(manifest) => {
-                if let Some(run_manifest) = run_manifest
-                    && manifest.runtime_envelope.as_ref() != run_manifest.runtime_envelope.as_ref()
-                {
+                if let Some(run_manifest) = run_manifest {
                     let pending_path = pending_conversation_manifest_path(handle);
                     if let Some(raw_pending) =
                         manager.read_text_artifact(handle, &pending_path).await?
                         && let Ok(Some(pending_manifest)) =
                             serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+                        && pending_manifest_matches_run_identity(
+                            &run_manifest.issue_id,
+                            &run_manifest.identifier,
+                            run_manifest.runtime_envelope.as_ref(),
+                            &pending_manifest,
+                        )
                     {
-                        if pending_manifest.conversation_id == manifest.conversation_id
-                            && runtime_envelope_matches_pending_binding(
-                                run_manifest.runtime_envelope.as_ref(),
-                                &pending_manifest,
-                            )
-                        {
+                        if pending_manifest.conversation_id == manifest.conversation_id {
                             run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
                             manager.write_run_manifest(handle, run_manifest).await?;
                             tracing::info!(
                                 manifest = %manifest_path.display(),
                                 conversation_id = %manifest.conversation_id,
-                                "reconciled pending Codex conversation binding into the run manifest"
+                                "reconciled pending conversation binding into the run manifest"
                             );
-                        } else if matches!(
-                            run_manifest.status,
-                            RunStatus::Preparing | RunStatus::Prepared
-                        ) && pending_manifest.issue_id.to_string()
-                            == run_manifest.issue_id
-                            && pending_manifest.identifier.to_string() == run_manifest.identifier
-                            && runtime_envelope_matches_pending_binding(
-                                run_manifest.runtime_envelope.as_ref(),
-                                &pending_manifest,
-                            )
-                        {
+                        } else {
                             run_manifest.runtime_envelope =
                                 pending_manifest.runtime_envelope.clone();
                             manager.write_run_manifest(handle, run_manifest).await?;
@@ -1831,6 +1820,17 @@ fn runtime_envelope_matches_pending_binding(
     run_without_binding.conversation_binding = None;
     pending_without_binding.conversation_binding = None;
     run_without_binding == pending_without_binding
+}
+
+fn pending_manifest_matches_run_identity(
+    run_issue_id: &str,
+    run_identifier: &str,
+    run_envelope: Option<&TerminalRuntimeEnvelope>,
+    pending_manifest: &IssueConversationManifest,
+) -> bool {
+    pending_manifest.issue_id.as_str() == run_issue_id
+        && pending_manifest.identifier.as_str() == run_identifier
+        && runtime_envelope_matches_pending_binding(run_envelope, pending_manifest)
 }
 
 fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
@@ -6230,6 +6230,12 @@ mod tests {
         ));
 
         assert!(runtime_envelope_matches_pending_binding(
+            Some(&envelope),
+            &pending_manifest,
+        ));
+        assert!(pending_manifest_matches_run_identity(
+            "issue-contract",
+            "COE-479",
             Some(&envelope),
             &pending_manifest,
         ));
