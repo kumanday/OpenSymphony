@@ -2203,6 +2203,38 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
+            let scheduler_workspace_path = match fs::canonicalize(&run.workspace_path).await {
+                Ok(path) => path,
+                Err(error) => {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to resolve scheduler-bound workspace: {error}"),
+                    );
+                    return;
+                }
+            };
+            let ensured_workspace_path =
+                match fs::canonicalize(ensured.handle.workspace_path()).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to resolve ensured workspace: {error}"),
+                        );
+                        return;
+                    }
+                };
+            if ensured_workspace_path != scheduler_workspace_path {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!(
+                        "workspace generation changed during worker launch: scheduler bound {}, ensured {}",
+                        run.workspace_path.display(),
+                        ensured.handle.workspace_path().display()
+                    ),
+                );
+                return;
+            }
             let mut prior_run_manifest =
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
                     Ok(manifest) => manifest,

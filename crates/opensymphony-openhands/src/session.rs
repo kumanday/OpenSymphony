@@ -2920,6 +2920,45 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        let created_at = Utc::now();
+        let mut manifest = IssueConversationManifest::new(
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ConversationId::new(conversation.conversation_id.to_string())
+                .expect("UUID-backed conversation ID should not be empty"),
+            self.config.reuse_policy.as_str(),
+            configured_persistence_dir(workflow, workspace),
+            created_at,
+            reset_reason,
+            launch_profile.clone(),
+            self.environment.as_ref(),
+        );
+        manifest.llm_config_fingerprint =
+            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
+        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+        }
+        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        let pending_manifest_path = pending_conversation_manifest_path(workspace);
+        if let Err(error) = workspace_manager
+            .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
+            .await
+        {
+            let retirement = self
+                .retire_conversation(&manifest, "failed to persist fresh conversation ownership")
+                .await
+                .err();
+            let mut detail = format!("failed to persist fresh conversation ownership: {error}");
+            if let Some(retirement) = retirement {
+                detail.push_str(&format!("; failed to retire conversation: {retirement}"));
+            }
+            return Err(IssueSessionError::RehydrationFailed(detail));
+        }
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await?;
+
         let stream = match self
             .client
             .attach_runtime_stream(
@@ -2971,6 +3010,19 @@ impl IssueSessionRunner {
                 detail,
             ))
             .await;
+            let mut failure_detail = failure_detail;
+            if let Err(error) = workspace_manager
+                .write_json_artifact_atomically(
+                    workspace,
+                    &pending_manifest_path,
+                    &Option::<IssueConversationManifest>::None,
+                )
+                .await
+            {
+                failure_detail.push_str(&format!(
+                    "; failed to clear pending conversation ownership: {error}"
+                ));
+            }
             return self
                 .persist_failure_without_stream(
                     workspace_manager,
@@ -2993,32 +3045,8 @@ impl IssueSessionRunner {
         }
 
         let attached_at = Utc::now();
-        let mut manifest = IssueConversationManifest::new(
-            issue.id.clone(),
-            issue.identifier.clone(),
-            ConversationId::new(conversation.conversation_id.to_string())
-                .expect("UUID-backed conversation ID should not be empty"),
-            self.config.reuse_policy.as_str(),
-            configured_persistence_dir(workflow, workspace),
-            attached_at,
-            reset_reason,
-            launch_profile,
-            self.environment.as_ref(),
-        );
-        manifest.llm_config_fingerprint =
-            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
-        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
-        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
-            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
-        }
-        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
-        let pending_manifest_path = pending_conversation_manifest_path(workspace);
-        workspace_manager
-            .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
-            .await?;
-        workspace_manager
-            .write_run_manifest(workspace, run_manifest)
-            .await?;
+        manifest.last_attached_at = attached_at;
+        manifest.updated_at = attached_at;
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
