@@ -2673,6 +2673,10 @@ impl RuntimeWorkerBackend {
             }
 
             if route.harness_kind == "codex_app_server" {
+                let fresh_conversation_grants = worker_memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.clone())
+                    .filter(|_| memory_grant_requires_fresh_conversation);
                 let outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
@@ -2690,6 +2694,9 @@ impl RuntimeWorkerBackend {
                     &worker_environment,
                     &checkout_credential_envs,
                     recovered,
+                    memory_grant_requires_fresh_conversation,
+                    fresh_conversation_grants,
+                    issue.identifier.as_str(),
                 )
                 .await;
                 if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -2743,6 +2750,16 @@ impl RuntimeWorkerBackend {
                     )
                     .await
             };
+
+            let launch_succeeded = observer.launch_tx.is_none();
+            if launch_succeeded
+                && memory_grant_requires_fresh_conversation
+                && let Some(grants) = worker_memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.as_ref())
+            {
+                grants.acknowledge_fresh_conversation(issue.identifier.as_str());
+            }
 
             if observer.launch_tx.is_some() {
                 report_launch_failure(
@@ -3030,6 +3047,9 @@ async fn run_codex_stdio_issue(
         worker_env,
         &BTreeSet::new(),
         false,
+        false,
+        None,
+        "",
     )
     .await
 }
@@ -3052,6 +3072,9 @@ async fn run_codex_stdio_issue_with_mode(
     worker_env: &BTreeMap<String, String>,
     checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
+    force_fresh_conversation: bool,
+    fresh_conversation_grants: Option<MemoryScopeGrantRegistry>,
+    fresh_conversation_issue: &str,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
         route,
@@ -3070,6 +3093,9 @@ async fn run_codex_stdio_issue_with_mode(
         worker_env,
         checkout_credential_envs,
         recovered,
+        force_fresh_conversation,
+        fresh_conversation_grants,
+        fresh_conversation_issue,
     )
     .await
     {
@@ -3149,6 +3175,9 @@ async fn try_run_codex_stdio_issue(
     worker_env: &BTreeMap<String, String>,
     checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
+    force_fresh_conversation: bool,
+    fresh_conversation_grants: Option<MemoryScopeGrantRegistry>,
+    fresh_conversation_issue: &str,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
@@ -3217,6 +3246,22 @@ async fn try_run_codex_stdio_issue(
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
     let mut superseded_manifest = None;
+    if force_fresh_conversation && let Some(incompatible) = existing_manifest.take() {
+        let archiveable_superseded_codex = superseded_codex_manifest_is_archiveable(&incompatible);
+        persist_superseded_harness_manifest(workspace_manager, workspace, &incompatible)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(incompatible.conversation_id.as_str()),
+                    "superseded manifest persistence",
+                    error,
+                )
+            })?;
+        if archiveable_superseded_codex {
+            superseded_manifest = Some(incompatible);
+        }
+    }
     let conversation_envelope_untrusted =
         run_manifest
             .runtime_envelope
@@ -3290,7 +3335,7 @@ async fn try_run_codex_stdio_issue(
             .await
             .map_err(|error| format!("failed to persist recovered Codex run state: {error}"))?;
     }
-    if recovered && existing_manifest.is_none() {
+    if recovered && existing_manifest.is_none() && !force_fresh_conversation {
         return Err(codex_lifecycle_error(
             issue,
             None,
@@ -3645,6 +3690,9 @@ async fn try_run_codex_stdio_issue(
             let _ = sender.send(LaunchReport::Conversation(Box::new(
                 codex_conversation_metadata(conversation_id.clone(), route),
             )));
+            if let Some(grants) = fresh_conversation_grants.as_ref() {
+                grants.acknowledge_fresh_conversation(fresh_conversation_issue);
+            }
         }
         let terminal = read_until_codex_terminal(
             &mut reader,
@@ -3809,6 +3857,9 @@ async fn try_run_codex_stdio_issue(
         let _ = sender.send(LaunchReport::Conversation(Box::new(
             codex_conversation_metadata(conversation_id.clone(), route),
         )));
+        if let Some(grants) = fresh_conversation_grants.as_ref() {
+            grants.acknowledge_fresh_conversation(fresh_conversation_issue);
+        }
     }
 
     let terminal = read_until_codex_terminal(
@@ -3846,15 +3897,15 @@ async fn cached_installed_codex_schema_validator(
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let key = codex_schema_cache_key(codex_bin).await;
-    if let Some(validator) = cache.lock().await.get(&key).cloned() {
+    let mut validators = cache.lock().await;
+    if let Some(validator) = validators.get(&key).cloned() {
         return Ok(validator);
     }
 
     let validator =
         load_installed_codex_schema_validator(codex_bin, checkout_credential_envs).await?;
-    let mut validators = cache.lock().await;
-    let validator = validators.entry(key).or_insert(validator);
-    Ok(validator.clone())
+    validators.insert(key, validator.clone());
+    Ok(validator)
 }
 
 async fn codex_schema_cache_key(codex_bin: &str) -> String {
@@ -7557,6 +7608,9 @@ mod tests {
             &BTreeMap::new(),
             &BTreeSet::new(),
             true,
+            false,
+            None,
+            "",
         )
         .await;
 
@@ -7650,6 +7704,9 @@ mod tests {
             &BTreeMap::new(),
             &BTreeSet::new(),
             true,
+            false,
+            None,
+            "",
         )
         .await;
 
@@ -7747,6 +7804,9 @@ mod tests {
             &BTreeMap::new(),
             &BTreeSet::new(),
             true,
+            false,
+            None,
+            "",
         )
         .await;
 

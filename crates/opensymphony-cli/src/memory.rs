@@ -1976,7 +1976,7 @@ impl MemoryScopeGrantRegistry {
         checkout_generation: Option<String>,
     ) -> (String, bool) {
         let mut state = self.state.write().expect("memory grant registry poisoned");
-        let requires_fresh_conversation = state.revoked_issues.remove(issue);
+        let requires_fresh_conversation = state.revoked_issues.contains(issue);
         if let Some((token, grant)) = state
             .grants
             .iter_mut()
@@ -2004,6 +2004,14 @@ impl MemoryScopeGrantRegistry {
             },
         );
         (token, requires_fresh_conversation)
+    }
+
+    pub(crate) fn acknowledge_fresh_conversation(&self, issue: &str) {
+        self.state
+            .write()
+            .expect("memory grant registry poisoned")
+            .revoked_issues
+            .remove(issue);
     }
 
     pub(crate) fn revoke_issue(&self, issue: &str) -> bool {
@@ -12973,6 +12981,15 @@ Public memory concept.
         assert!(fresh);
         assert_ne!(reopened_token, token);
 
+        let (_, still_fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(still_fresh);
+        registry.acknowledge_fresh_conversation("COE-549");
         let (_, fresh) = registry.issue_or_refresh_with_lifecycle(
             arguments().0,
             arguments().1,

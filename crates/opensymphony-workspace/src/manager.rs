@@ -106,6 +106,8 @@ where
     }
 }
 
+const RETAINED_CHECKOUT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn checkout_deadline(timeout_duration: Option<Duration>) -> Option<Instant> {
     timeout_duration.map(|duration| Instant::now() + duration)
 }
@@ -723,8 +725,24 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         expected: &TerminalRuntimeEnvelope,
     ) -> Result<CheckoutManifest, WorkspaceError> {
-        self.verify_runtime_envelope_with_worker_changes(workspace, expected, true)
-            .await
+        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
+        let manifest = self
+            .verify_checkout_with_worker_changes_timeout(workspace, true, deadline)
+            .await?;
+        if manifest.repository_binding != expected.repository_binding
+            || manifest.generation != expected.checkout_generation
+            || workspace.workspace_path() != expected.checkout_path
+            || manifest.target_branch != expected.target_branch
+            || manifest.target_commit != expected.target_commit
+            || manifest.instruction != expected.instruction
+        {
+            return Err(WorkspaceError::CheckoutVerification {
+                path: workspace.workspace_path().to_path_buf(),
+                generation: manifest.generation,
+                reason: "runtime envelope does not match the verified checkout".to_owned(),
+            });
+        }
+        Ok(manifest)
     }
 
     async fn verify_runtime_envelope_with_worker_changes(
@@ -903,7 +921,8 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<CheckoutManifest, WorkspaceError> {
-        self.verify_checkout_with_worker_changes(workspace, true)
+        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
+        self.verify_checkout_with_worker_changes_timeout(workspace, true, deadline)
             .await
     }
 
