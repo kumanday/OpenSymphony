@@ -2414,6 +2414,11 @@ impl RuntimeWorkerBackend {
                 scoped.authorized_repositories_by_project.clear();
                 scoped
             });
+            let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
+                || (memory_grant_registry_recovered
+                    && worker_memory_env
+                        .as_ref()
+                        .is_some_and(|memory| memory.scope_grants.is_some()));
             let mut worker_environment = worker_env.clone();
             if let Some(memory) = &worker_memory_env {
                 inject_memory_env(&mut worker_environment, memory);
@@ -2575,6 +2580,9 @@ impl RuntimeWorkerBackend {
                                         manifest,
                                     )
                             });
+                        initialize_fresh_conversation |= route.harness_kind
+                            != CODEX_APP_SERVER_KIND
+                            && memory_grant_requires_fresh_conversation;
                         if recoverable_run_manifest(
                             &run_manifest,
                             conversation_manifest.as_ref(),
@@ -3784,12 +3792,12 @@ async fn try_run_codex_stdio_issue(
         ));
     }
     let prompt = match (prompt_kind, first_run_prompt) {
-        (IssueSessionPromptKind::Full, _) if repository_instructions.is_some() => {
+        (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
+        (IssueSessionPromptKind::Full, None) if repository_instructions.is_some() => {
             repository_instructions
                 .expect("terminal prompt checked above")
                 .to_owned()
         }
-        (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
         (IssueSessionPromptKind::Full, None) => workflow
             .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
             .map_err(|source| {

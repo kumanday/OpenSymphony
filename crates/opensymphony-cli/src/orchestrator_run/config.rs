@@ -599,7 +599,8 @@ pub(super) async fn resolve_runtime_config(
     let workflow_path =
         central_repository_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
     let workflow = if central_project_set && central_config && !central_instruction_configured {
-        WorkflowDefinition::parse("").expect("empty central project-set workflow should parse")
+        WorkflowDefinition::parse(crate::opensymphony_workflow::DEFAULT_PROMPT_TEMPLATE)
+            .expect("default central project-set workflow should parse")
     } else {
         WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
             RunCommandError::LoadWorkflow {

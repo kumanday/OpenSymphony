@@ -485,7 +485,7 @@ impl WorkspaceManager {
 
         let generation = Uuid::new_v4().simple().to_string();
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
-        let published_path = canonical_root.join(format!("{workspace_key}--{generation}"));
+        let published_path = published_checkout_path(&canonical_root, &workspace_key, &generation);
         let staging_root = canonical_root.join(".opensymphony-staging");
         self.reject_symlinked_workspace_root(&staging_root).await?;
         self.create_directory(&staging_root).await?;
@@ -1445,6 +1445,18 @@ impl WorkspaceManager {
         };
         let canonical_marker_parent = self.canonicalize_path(marker_parent).await?;
         ensure_descendant(canonical_staging_root, &canonical_marker_parent)?;
+        if marker.published_path.is_some() {
+            let canonical_root = self.canonicalize_path(&self.config.root).await?;
+            let expected_published =
+                published_checkout_path(&canonical_root, &workspace_key, &generation);
+            let Some(published_path) = self.staging_intent_published_path(marker_path).await?
+            else {
+                return Ok(false);
+            };
+            if published_path != expected_published {
+                return Ok(false);
+            }
+        }
         if let Some(published_path) = marker.published_path.as_deref()
             && path_exists(published_path).await?
             && self
@@ -4733,6 +4745,10 @@ fn is_published_checkout_generation_directory(path: &Path) -> bool {
     published_checkout_generation(path).is_some()
 }
 
+fn published_checkout_path(root: &Path, workspace_key: &str, generation: &str) -> PathBuf {
+    root.join(format!("{workspace_key}--{generation}"))
+}
+
 fn published_checkout_generation(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -4814,10 +4830,54 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
-        path_from_git_bytes, remote_contains_credentials, sanitize_git_environment,
-        shell_single_quote, ssh_agent_socket_path_is_usable, tracked_instruction_tree,
+        StagingIntentMarker, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+        build_shell_command, discover_agents, git_askpass_username, path_from_git_bytes,
+        remote_contains_credentials, sanitize_git_environment, shell_single_quote,
+        ssh_agent_socket_path_is_usable, tracked_instruction_tree,
     };
+    use crate::opensymphony_workspace::{CleanupConfig, HookConfig};
+
+    #[tokio::test]
+    async fn abandoned_staging_intent_rejects_mismatched_published_target() {
+        let root = tempfile::tempdir().expect("workspace root should exist");
+        let staging_root = root.path().join(".opensymphony-staging");
+        tokio::fs::create_dir_all(&staging_root)
+            .await
+            .expect("staging root should exist");
+        let workspace_key = "COE-549";
+        let generation = "0123456789abcdef0123456789abcdef";
+        let staging_path = staging_root.join(format!("{workspace_key}--{generation}"));
+        let marker_path = super::staging_intent_marker_path(&staging_root, &staging_path);
+        let marker = StagingIntentMarker {
+            schema_version: 1,
+            generation: generation.to_owned(),
+            workspace_key: workspace_key.to_owned(),
+            staging_path: staging_path.clone(),
+            published_path: Some(root.path().join("COE-550--wrong-generation")),
+        };
+        tokio::fs::write(
+            &marker_path,
+            serde_json::to_vec(&marker).expect("marker should serialize"),
+        )
+        .await
+        .expect("marker should be written");
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: root.path().to_path_buf(),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        let canonical_staging_root = tokio::fs::canonicalize(&staging_root)
+            .await
+            .expect("staging root should canonicalize");
+
+        assert!(
+            !manager
+                .staging_intent_is_orphaned(&canonical_staging_root, &marker_path)
+                .await
+                .expect("staging intent inspection should succeed")
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
