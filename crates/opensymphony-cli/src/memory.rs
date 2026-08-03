@@ -3451,7 +3451,7 @@ fn memory_config_for_code_graph_scope(
     arguments: &Value,
 ) -> Result<MemoryConfig, MemoryError> {
     let mut scope = scope_filter_from_mcp(config, arguments, true)?;
-    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+    if let Some(repository_id) = repository_scope_argument(arguments)? {
         scope.repo = Some(repository_id);
     }
     if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
@@ -3636,11 +3636,6 @@ async fn call_memory_tool_with_workspace(
                     .to_owned(),
             ));
         }
-    }
-    if name == "code.graph.context" && !config.code_intel.enabled {
-        return Err(MemoryError::InvalidInput(
-            "indexed code graph tools are disabled".to_string(),
-        ));
     }
     let code_intel_config = if name == "code.ast.status" {
         None
@@ -3921,8 +3916,7 @@ fn validate_worker_memory_scope(
         ));
     }
     let requested_project = optional_string_arg(arguments, "project");
-    let requested_repo = optional_string_arg(arguments, "repo")
-        .or_else(|| optional_string_arg(arguments, "repository"));
+    let requested_repo = repository_scope_argument(arguments)?;
     let project_required = matches!(
         tool_name,
         "memory.brief"
@@ -4006,8 +4000,7 @@ async fn call_code_graph_context_tool(
     let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
     let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
-        let repo_id = optional_string_arg(&arguments, "repository")
-            .or_else(|| optional_string_arg(&arguments, "repo"))
+        let repo_id = repository_scope_argument(&arguments)?
             .or_else(|| config.default_repository_id.clone())
             .unwrap_or_else(|| {
                 config
@@ -6843,6 +6836,19 @@ fn optional_string_arg(arguments: &Value, key: &str) -> Option<String> {
         .and_then(non_empty)
 }
 
+fn repository_scope_argument(arguments: &Value) -> Result<Option<String>, MemoryError> {
+    let repo = optional_string_arg(arguments, "repo");
+    let repository = optional_string_arg(arguments, "repository");
+    if let (Some(repo), Some(repository)) = (&repo, &repository)
+        && repo != repository
+    {
+        return Err(MemoryError::InvalidInput(
+            "conflicting repository aliases `repo` and `repository`".to_owned(),
+        ));
+    }
+    Ok(repo.or(repository))
+}
+
 fn string_list_arg(arguments: &Value, key: &str) -> Vec<String> {
     match arguments.get(key) {
         Some(Value::Array(values)) => values
@@ -8884,6 +8890,60 @@ mod tests {
                 .any(|tool| tool["name"] == "code.graph.context")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "code.ast.status"));
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_uses_selected_repository_enablement() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repository = TempDir::new().expect("secondary repository");
+        std::fs::write(
+            catalog.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("catalog config");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: true\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-selected".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-selected".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let selected = super::memory_config_for_code_graph_scope(
+            &config,
+            &json!({ "repository": "repo-selected" }),
+        )
+        .expect("selected repository graph policy");
+        assert!(selected.enabled);
+        assert!(selected.code_intel.enabled);
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": "repo-selected", "query": "missing", "limit": 1 }
+            }),
+        )
+        .await
+        .expect_err("the fixture has no graph index");
+        assert!(
+            error
+                .to_string()
+                .contains("code graph index is unavailable")
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("disabled for the selected repository")
+        );
     }
 
     #[tokio::test]
@@ -12354,6 +12414,13 @@ Public memory concept.
         )
         .expect_err("foreign graph repository should be rejected");
         assert!(error.to_string().contains("not accessible"));
+
+        let error = super::memory_config_for_code_graph_scope(
+            &config,
+            &json!({"repo": "repo-a", "repository": "repo-b"}),
+        )
+        .expect_err("conflicting graph repository aliases should be rejected");
+        assert!(error.to_string().contains("conflicting repository aliases"));
     }
 
     #[tokio::test]

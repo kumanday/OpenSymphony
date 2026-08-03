@@ -881,6 +881,7 @@ async fn issue_states_by_ids_prefers_the_latest_snapshot_across_projects() {
                 "id": "issue-overlap",
                 "identifier": "COE-260",
                 "updatedAt": "2026-03-21T16:00:00Z",
+                "project": {"id": "project-old-id", "slugId": "old-project"},
                 "state": {"id": "state-progress", "name": "In Progress", "type": "started"}
               }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
             }"#,
@@ -891,6 +892,7 @@ async fn issue_states_by_ids_prefers_the_latest_snapshot_across_projects() {
                 "id": "issue-overlap",
                 "identifier": "COE-260",
                 "updatedAt": "2026-03-21T17:00:00Z",
+                "project": {"id": "project-new-id", "slugId": "new-project"},
                 "state": {"id": "state-done", "name": "Done", "type": "completed"}
               }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
             }"#,
@@ -908,6 +910,8 @@ async fn issue_states_by_ids_prefers_the_latest_snapshot_across_projects() {
 
     assert_eq!(snapshots.len(), 1);
     assert_eq!(snapshots[0].state.name, "Done");
+    assert_eq!(snapshots[0].project_id.as_deref(), Some("project-new-id"));
+    assert_eq!(snapshots[0].project_slug.as_deref(), Some("new-project"));
     assert_eq!(
         snapshots[0].updated_at.to_rfc3339(),
         "2026-03-21T17:00:00+00:00"

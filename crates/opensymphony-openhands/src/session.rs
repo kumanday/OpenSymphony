@@ -1061,6 +1061,15 @@ pub enum IssueSessionError {
     RehydrationFailed(String),
     #[error("conversation retirement failed: {0}")]
     ConversationRetirementFailed(String),
+    #[error("superseded conversation evidence is invalid: {0}")]
+    SupersededConversationEvidence(String),
+}
+
+fn decode_superseded_conversation_manifests(
+    raw: &str,
+) -> Result<Option<Vec<IssueConversationManifest>>, IssueSessionError> {
+    serde_json::from_str(raw)
+        .map_err(|error| IssueSessionError::SupersededConversationEvidence(error.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -2505,9 +2514,8 @@ impl IssueSessionRunner {
         let mut manifests = workspace_manager
             .read_text_artifact(workspace, &path)
             .await?
-            .and_then(|raw| {
-                serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(raw.as_str()).ok()
-            })
+            .map(|raw| decode_superseded_conversation_manifests(&raw))
+            .transpose()?
             .flatten()
             .unwrap_or_default();
         if manifests
@@ -2535,11 +2543,7 @@ impl IssueSessionRunner {
         else {
             return Ok(());
         };
-        let Some(mut manifests) =
-            serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
-                .ok()
-                .flatten()
-        else {
+        let Some(mut manifests) = decode_superseded_conversation_manifests(&raw)? else {
             return Ok(());
         };
         manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
@@ -4558,6 +4562,16 @@ mod tests {
             profile.api_key_fingerprint(&env).as_deref(),
             Some("9e6b6d3f6b582838")
         );
+    }
+
+    #[test]
+    fn malformed_superseded_conversation_evidence_is_not_treated_as_empty() {
+        let error = decode_superseded_conversation_manifests("{not-json")
+            .expect_err("malformed superseded evidence must fail closed");
+        assert!(matches!(
+            error,
+            IssueSessionError::SupersededConversationEvidence(_)
+        ));
     }
 
     #[test]

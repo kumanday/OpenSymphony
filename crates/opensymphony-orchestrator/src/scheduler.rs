@@ -188,6 +188,10 @@ pub struct WorkerStartRequest {
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
     pub route: HarnessRouteDecision,
+    /// The issue was restored from durable process-recovery state. A scoped
+    /// memory grant is process-local, so a reused conversation must be
+    /// replaced once before the next worker prompt installs the new bearer.
+    pub memory_grant_registry_recovered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +498,7 @@ pub struct Scheduler<T, W, M> {
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     pending_retry_recovery: Option<Vec<RetryPendingRecord>>,
+    recovered_memory_issue_ids: HashSet<IssueId>,
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
@@ -531,6 +536,7 @@ where
             pending_recovery: None,
             pending_retry_exhaustion: None,
             pending_retry_recovery: None,
+            recovered_memory_issue_ids: HashSet::new(),
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
@@ -1081,6 +1087,8 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        self.recovered_memory_issue_ids
+            .extend(records.iter().map(|record| record.issue.id.clone()));
         for record in &mut records {
             let issue_id = record.issue.id.clone();
             if let Some(pending) = pending_retry_by_issue.remove(&issue_id) {
@@ -1662,6 +1670,10 @@ where
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
                         issue.labels = snapshot.labels.clone();
+                        if snapshot.project_id.is_some() || snapshot.project_slug.is_some() {
+                            issue.project_id = snapshot.project_id.clone();
+                            issue.project_slug = snapshot.project_slug.clone();
+                        }
                         if snapshot.is_parent {
                             self.parent_issue_ids.insert(issue_id.clone());
                         } else {
@@ -1674,6 +1686,22 @@ where
                             issue.project_slug.as_deref(),
                             snapshot.is_parent,
                         );
+                        if !project_belongs_to_configured_project(
+                            &self.config,
+                            issue.project_id.as_deref(),
+                            issue.project_slug.as_deref(),
+                        ) {
+                            self.release_issue(
+                                issue_id.clone(),
+                                issue,
+                                observed_at,
+                                ReleaseReason::TrackerInactive,
+                                false,
+                                Some(WorkerAbortReason::TrackerInactive),
+                            )
+                            .await?;
+                            continue;
+                        }
                         if matches!(
                             existing.status(),
                             SchedulerStatus::Claimed
@@ -2266,6 +2294,7 @@ where
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),
+            memory_grant_registry_recovered: false,
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -2671,6 +2700,9 @@ where
                 workspace,
                 run: claimed_run.clone(),
                 route,
+                memory_grant_registry_recovered: self
+                    .recovered_memory_issue_ids
+                    .contains(&issue_id),
             };
 
             *planned_running_by_state.entry(state_key).or_default() += 1;
@@ -2693,6 +2725,7 @@ where
         {
             match result {
                 Ok(launch) => {
+                    self.recovered_memory_issue_ids.remove(&issue_id);
                     execution = execution.start_running(
                         observed_at,
                         effective_stall_timeout(self.config.stall_timeout_ms),
@@ -3467,6 +3500,10 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
+        self.recovered_memory_issue_ids
+            .extend(recoveries.iter().map(|record| record.issue.id.clone()));
+        self.recovered_memory_issue_ids
+            .extend(retry_pending.iter().map(|record| record.issue.id.clone()));
         self.pending_recovery = Some(recoveries);
         self.pending_retry_exhaustion = Some(retry_exhaustion);
         self.pending_retry_recovery = Some(retry_pending);
@@ -3714,6 +3751,18 @@ fn tracker_issue_belongs_to_configured_project(
     issue: &TrackerIssue,
     config: &SchedulerConfig,
 ) -> bool {
+    project_belongs_to_configured_project(
+        config,
+        issue.project_id.as_deref(),
+        issue.project_slug.as_deref(),
+    )
+}
+
+fn project_belongs_to_configured_project(
+    config: &SchedulerConfig,
+    project_id: Option<&str>,
+    project_slug: Option<&str>,
+) -> bool {
     if config.tracker_project_id.is_none()
         && config.tracker_project_slug.is_none()
         && config.tracker_project_ids.is_empty()
@@ -3721,15 +3770,19 @@ fn tracker_issue_belongs_to_configured_project(
     {
         return true;
     }
-    if let Some(project_id) = config.tracker_project_id.as_deref()
-        && issue
-            .project_id
-            .as_deref()
-            .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim())
+    // Older tracker adapters may not expose project identity on a state-only
+    // response. Preserve that compatibility path; a live Linear response now
+    // carries the identity so moved issues are still fenced immediately.
+    if project_id.is_none() && project_slug.is_none() {
+        return true;
+    }
+    if let Some(config_project_id) = config.tracker_project_id.as_deref()
+        && project_id
+            .is_some_and(|issue_project_id| issue_project_id.trim() == config_project_id.trim())
     {
         return true;
     }
-    if issue.project_id.as_deref().is_some_and(|issue_project_id| {
+    if project_id.is_some_and(|issue_project_id| {
         config
             .tracker_project_ids
             .iter()
@@ -3740,26 +3793,20 @@ fn tracker_issue_belongs_to_configured_project(
     config
         .tracker_project_slug
         .as_deref()
-        .is_some_and(|project_slug| {
-            issue
-                .project_slug
-                .as_deref()
-                .is_some_and(|issue_project_slug| {
-                    issue_project_slug
-                        .trim()
-                        .eq_ignore_ascii_case(project_slug.trim())
-                })
-        })
-        || issue
-            .project_slug
-            .as_deref()
-            .is_some_and(|issue_project_slug| {
-                config.tracker_project_slugs.iter().any(|project_slug| {
-                    issue_project_slug
-                        .trim()
-                        .eq_ignore_ascii_case(project_slug.trim())
-                })
+        .is_some_and(|config_project_slug| {
+            project_slug.is_some_and(|issue_project_slug| {
+                issue_project_slug
+                    .trim()
+                    .eq_ignore_ascii_case(config_project_slug.trim())
             })
+        })
+        || project_slug.is_some_and(|issue_project_slug| {
+            config.tracker_project_slugs.iter().any(|project_slug| {
+                issue_project_slug
+                    .trim()
+                    .eq_ignore_ascii_case(project_slug.trim())
+            })
+        })
 }
 
 fn normalize_tracker_issue(
@@ -3837,15 +3884,15 @@ fn minimal_issue_from_state_snapshot(
         pr_url: None,
         url: None,
         labels: snapshot.labels.clone(),
-        project_id: None,
-        project_slug: None,
+        project_id: snapshot.project_id.clone(),
+        project_slug: snapshot.project_slug.clone(),
         project_name: None,
         parent_id: None,
         repository_binding: resolve_repository_binding(
             config,
             &snapshot.labels,
-            None,
-            None,
+            snapshot.project_id.as_deref(),
+            snapshot.project_slug.as_deref(),
             snapshot.is_parent,
         ),
         blocked_by: Vec::new(),

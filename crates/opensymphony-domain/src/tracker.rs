@@ -64,6 +64,10 @@ pub struct TrackerIssueStateSnapshot {
     pub id: String,
     pub identifier: String,
     pub state: TrackerIssueState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default)]

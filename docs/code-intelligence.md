@@ -59,7 +59,11 @@ for repositories that are not present in the configured source registry.
 
 ## Target-branch repository snapshots
 
-The Code Graph repository index is an explicit, server-side operation:
+The Code Graph repository index is an explicit, server-side operation. Graph
+MCP calls resolve enablement from the selected registered repository rather
+than the catalog's default repository policy; `repo` and `repository` are
+accepted as compatibility aliases but conflicting values are rejected before
+scope authorization:
 
 ```text
 POST /api/v1/code/repos/{repo_id}/index

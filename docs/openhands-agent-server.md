@@ -113,6 +113,8 @@ the conflict alone does not prove that the recovered prompt was accepted.
 Untrusted conversation envelopes are preserved as evidence but are never used
 to retire a remote conversation. Codex evidence uses the workspace metadata
 directory, while OpenHands evidence uses its configured persistence directory.
+Malformed superseded-conversation evidence is a lifecycle error and is never
+treated as an empty list that could overwrite prior evidence.
 Condenser tool-matching recovery follows the same evidence rule: it preserves
 the old manifest before creating a replacement, and clears that evidence only
 after remote retirement succeeds.

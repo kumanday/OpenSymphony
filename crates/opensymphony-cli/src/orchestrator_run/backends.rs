@@ -2095,6 +2095,7 @@ impl RuntimeWorkerBackend {
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let issue = request.issue.clone();
+        let memory_grant_registry_recovered = request.memory_grant_registry_recovered;
         let mut runner_config = self.runner_config.clone();
         let mut worker_env = self.worker_env.clone();
         if let Some(memory) = runner_config.memory.as_mut() {
@@ -2333,7 +2334,8 @@ impl RuntimeWorkerBackend {
                     .with_memory(worker_memory_env.as_ref().map(|memory| {
                         memory_access_from_runtime(
                             memory,
-                            recovered && memory.scope_grants.is_some(),
+                            (recovered || memory_grant_registry_recovered)
+                                && memory.scope_grants.is_some(),
                         )
                     })),
                 OverlayEnvironment {
@@ -8336,6 +8338,7 @@ mod tests {
                 workspace,
                 run,
                 route: codex_test_route(true),
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect("dry-run worker should launch");
@@ -8439,6 +8442,7 @@ mod tests {
                 workspace,
                 run,
                 route: codex_test_route(true),
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect("recovered dry-run worker should launch");
@@ -8652,6 +8656,7 @@ mod tests {
                     dry_run: false,
                     user_override: false,
                 },
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");

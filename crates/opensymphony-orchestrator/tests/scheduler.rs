@@ -267,6 +267,8 @@ fn tracker_state_snapshot(
             tracker_type: tracker_type.to_string(),
             kind: TrackerIssueStateKind::from_tracker_type(tracker_type),
         },
+        project_id: None,
+        project_slug: None,
         labels: Vec::new(),
         is_parent: false,
         updated_at: dt(updated_at),

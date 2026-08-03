@@ -327,6 +327,10 @@ query IssueStatesByIds(
       id
       identifier
       updatedAt
+      project {
+        id
+        slugId
+      }
       state {
         id
         name
@@ -375,6 +379,10 @@ query IssueStatesByIdsUnscoped(
       id
       identifier
       updatedAt
+      project {
+        id
+        slugId
+      }
       state {
         id
         name
@@ -1060,11 +1068,20 @@ pub(super) struct LinearIssueStateNode {
     pub id: String,
     pub identifier: String,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub project: Option<LinearIssueStateProjectNode>,
     pub state: LinearWorkflowState,
     #[serde(default)]
     pub labels: LinearLabelConnection,
     #[serde(default)]
     pub children: LinearIssueStateChildrenConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearIssueStateProjectNode {
+    pub id: String,
+    pub slug_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
