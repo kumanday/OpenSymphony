@@ -3807,7 +3807,7 @@ fn tracker_issue_belongs_to_configured_project(
         config,
         issue.project_id.as_deref(),
         issue.project_slug.as_deref(),
-        true,
+        false,
     )
 }
 

@@ -992,7 +992,11 @@ fn linear_issue_node(id: &str, identifier: &str, title: &str, state: &str) -> Va
             "name": state,
             "type": "started"
         },
-        "project": null,
+        "project": {
+            "id": "project-test",
+            "slugId": "test-project",
+            "name": "Test Project"
+        },
         "parent": null,
         "projectMilestone": null,
         "attachments": {
