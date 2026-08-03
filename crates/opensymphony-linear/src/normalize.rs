@@ -62,6 +62,7 @@ pub(super) fn normalize_issue_state(node: LinearIssueStateNode) -> TrackerIssueS
         state: normalize_state(node.state),
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug: node.project.as_ref().map(|project| project.slug_id.clone()),
+        project_identity_known: true,
         labels: normalize_labels(node.labels.nodes),
         is_parent: !node.children.nodes.is_empty(),
         updated_at: node.updated_at,

@@ -68,6 +68,9 @@ pub struct TrackerIssueStateSnapshot {
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_slug: Option<String>,
+    /// True when the tracker supplied the project field, including explicit null.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_identity_known: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default)]

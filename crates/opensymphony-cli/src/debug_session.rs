@@ -1123,7 +1123,20 @@ async fn current_debug_runtime_envelope(
         .model_profile
         .clone()
         .unwrap_or_else(|| "default".to_owned());
-    desired.model = workflow.config.routing.model.clone();
+    desired.model = workflow.config.routing.model.clone().or_else(|| {
+        if workflow.config.routing.harness == "openhands_agent_server" {
+            workflow
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.model.clone())
+        } else {
+            None
+        }
+    });
     Ok(desired)
 }
 

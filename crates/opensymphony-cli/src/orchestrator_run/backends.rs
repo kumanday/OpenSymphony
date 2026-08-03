@@ -2297,14 +2297,18 @@ impl RuntimeWorkerBackend {
                             .clone()
                             .unwrap_or_else(|| "default".to_owned()),
                         model: route.model.clone().or_else(|| {
-                            workflow
-                                .extensions
-                                .openhands
-                                .conversation
-                                .agent
-                                .llm
-                                .as_ref()
-                                .and_then(|llm| llm.model.clone())
+                            if route.harness_kind == OPENHANDS_AGENT_SERVER_KIND {
+                                workflow
+                                    .extensions
+                                    .openhands
+                                    .conversation
+                                    .agent
+                                    .llm
+                                    .as_ref()
+                                    .and_then(|llm| llm.model.clone())
+                            } else {
+                                None
+                            }
                         }),
                         requested_execution_scope: "single_checkout".to_owned(),
                         effective_containment: "trusted_host_process_cwd".to_owned(),

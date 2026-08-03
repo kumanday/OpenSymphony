@@ -269,6 +269,7 @@ fn tracker_state_snapshot(
         },
         project_id: None,
         project_slug: None,
+        project_identity_known: false,
         labels: Vec::new(),
         is_parent: false,
         updated_at: dt(updated_at),

@@ -65,18 +65,18 @@ fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &Normalize
 }
 
 fn project_identity_changed(previous: &NormalizedIssue, current: &NormalizedIssue) -> bool {
-    if let (Some(previous_id), Some(current_id)) = (
+    match (
         previous.project_id.as_deref(),
         current.project_id.as_deref(),
     ) {
-        return previous_id.trim() != current_id.trim();
+        (Some(previous_id), Some(current_id)) => previous_id.trim() != current_id.trim(),
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => matches!(
+            (previous.project_slug.as_deref(), current.project_slug.as_deref()),
+            (Some(previous_slug), Some(current_slug))
+                if !previous_slug.eq_ignore_ascii_case(current_slug)
+        ),
     }
-
-    matches!(
-        (previous.project_slug.as_deref(), current.project_slug.as_deref()),
-        (Some(previous_slug), Some(current_slug))
-            if !previous_slug.eq_ignore_ascii_case(current_slug)
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1696,7 +1696,7 @@ where
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
                         issue.labels = snapshot.labels.clone();
-                        if snapshot.project_id.is_some() || snapshot.project_slug.is_some() {
+                        if snapshot.project_identity_known {
                             issue.project_id = snapshot.project_id.clone();
                             issue.project_slug = snapshot.project_slug.clone();
                         }
@@ -4350,5 +4350,13 @@ mod tests {
 
         let same_project = issue_with_project(Some("project-a"), Some("renamed-project-a"));
         assert!(!project_identity_changed(&previous, &same_project));
+    }
+
+    #[test]
+    fn project_identity_can_be_cleared_when_tracker_removes_project() {
+        let previous = issue_with_project(Some("project-a"), Some("project-a"));
+        let removed = issue_with_project(None, None);
+
+        assert!(project_identity_changed(&previous, &removed));
     }
 }

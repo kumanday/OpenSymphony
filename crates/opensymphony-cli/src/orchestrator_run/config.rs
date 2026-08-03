@@ -2182,7 +2182,8 @@ fn validate_repository(
 
 fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if let Ok(url) = Url::parse(value) {
-        if (!url.username().is_empty() && !url.scheme().eq_ignore_ascii_case("ssh"))
+        if ((!url.username().is_empty() && !url.scheme().eq_ignore_ascii_case("ssh"))
+            || is_credential_shaped_username(url.username()))
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
@@ -2197,12 +2198,36 @@ fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
     if let Some((user, host)) = value.split_once('@')
         && (user.is_empty()
             || user.contains(':')
-            || user.eq_ignore_ascii_case("token")
+            || is_credential_shaped_username(user)
             || host.is_empty())
     {
         return Err(CentralConfigError::CredentialBearingRemote);
     }
     Ok(())
+}
+
+fn is_credential_shaped_username(username: &str) -> bool {
+    let username = username.trim().to_ascii_lowercase();
+    [
+        "bearer ",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "oauth",
+        "pat-",
+        "pat_",
+        "token",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+    ]
+    .iter()
+    .any(|prefix| username.starts_with(prefix))
 }
 
 fn validate_tracker_endpoint(value: &str, field: &str) -> Result<(), CentralConfigError> {
@@ -3558,6 +3583,21 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("credential-bearing remote locator should fail");
         assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+    }
+
+    #[test]
+    fn central_config_rejects_credential_shaped_ssh_usernames() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        for clone in [
+            "ssh://ghp_secret@example.com/team/repo.git",
+            "github_pat_secret@example.com:team/repo.git",
+        ] {
+            let source = central_fixture(root.path())
+                .replace("git@github.com:kumanday/OpenSymphony.git", clone);
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("credential-shaped SSH username should fail");
+            assert!(matches!(error, CentralConfigError::CredentialBearingRemote));
+        }
     }
 
     #[test]
