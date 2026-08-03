@@ -381,6 +381,12 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     });
     let manager = WorkspaceManager::new(build_workspace_manager_config(&runtime.workflow))?
         .with_legacy_repository(legacy_repository)
+        .with_legacy_single_routing(runtime.repository_routing.as_ref().is_some_and(|routing| {
+            matches!(
+                routing.mode,
+                crate::opensymphony_domain::RepositoryRoutingMode::LegacySingle
+            )
+        }))
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
     let (workspace, strict_recovery) = if configured_strict {
         (

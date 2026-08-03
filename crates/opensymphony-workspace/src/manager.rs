@@ -48,6 +48,7 @@ use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
 pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
     legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
+    legacy_single_routing: bool,
     checkout_repositories: BTreeMap<String, CheckoutRepository>,
     checkout_credential_envs: BTreeSet<String>,
 }
@@ -226,6 +227,7 @@ impl WorkspaceManager {
         Ok(Self {
             config,
             legacy_repository: None,
+            legacy_single_routing: false,
             checkout_repositories: BTreeMap::new(),
             checkout_credential_envs: BTreeSet::new(),
         })
@@ -236,6 +238,11 @@ impl WorkspaceManager {
         legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
     ) -> Self {
         self.legacy_repository = legacy_repository;
+        self
+    }
+
+    pub fn with_legacy_single_routing(mut self, enabled: bool) -> Self {
+        self.legacy_single_routing = enabled;
         self
     }
 
@@ -273,7 +280,7 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         checkout_timeout: Duration,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        if !self.checkout_repositories.is_empty()
+        if !self.legacy_single_routing
             && let Some(binding) = issue
                 .repository_binding
                 .as_ref()
@@ -299,7 +306,7 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         run_id: Option<&str>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        if !self.checkout_repositories.is_empty()
+        if !self.legacy_single_routing
             && let Some(binding) = issue
                 .repository_binding
                 .as_ref()
@@ -993,7 +1000,18 @@ impl WorkspaceManager {
             &issue.issue_id,
             binding.repository_id().as_str(),
         )?;
-        let expected_generation_prefix = format!("{expected_workspace_key}--");
+        let mut expected_generation_prefixes = vec![format!("{expected_workspace_key}--")];
+        if let Some((base_identifier, _)) = issue.identifier.split_once('/') {
+            let base_workspace_key = checkout_workspace_key(
+                base_identifier,
+                &issue.issue_id,
+                binding.repository_id().as_str(),
+            )?;
+            if base_workspace_key != expected_workspace_key {
+                expected_generation_prefixes
+                    .push(format!("{}_", sanitize_workspace_key(base_identifier)?));
+            }
+        }
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
                 path: self.config.root.clone(),
@@ -1010,9 +1028,9 @@ impl WorkspaceManager {
                 })?
         {
             let name = entry.file_name();
-            if !name
-                .to_string_lossy()
-                .starts_with(&expected_generation_prefix)
+            if !expected_generation_prefixes
+                .iter()
+                .any(|prefix| name.to_string_lossy().starts_with(prefix))
             {
                 continue;
             }

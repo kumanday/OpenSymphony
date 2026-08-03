@@ -2324,6 +2324,12 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let workspace_manager = WorkspaceManager::new(workspace_config)
         .map_err(|e| format!("failed to create workspace manager: {}", e))?
         .with_legacy_repository(legacy_repository)
+        .with_legacy_single_routing(
+            runtime
+                .repository_routing
+                .as_ref()
+                .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::LegacySingle)),
+        )
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference

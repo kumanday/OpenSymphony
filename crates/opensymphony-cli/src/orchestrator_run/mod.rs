@@ -992,6 +992,12 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             ),
         )?
         .with_legacy_repository(legacy_repository)
+        .with_legacy_single_routing(runtime.repository_routing.as_ref().is_some_and(|routing| {
+            matches!(
+                routing.mode,
+                crate::opensymphony_domain::RepositoryRoutingMode::LegacySingle
+            )
+        }))
         .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default()),
     );
     workspace_manager
