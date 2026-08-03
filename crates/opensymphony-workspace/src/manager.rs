@@ -1413,15 +1413,7 @@ impl WorkspaceManager {
                 .staging_intent_claims_published_path(published_path)
                 .await?
         {
-            for path in [
-                published_path.join(".opensymphony").join("issue.json"),
-                published_path.join(".opensymphony").join("checkout.json"),
-                published_path.join(".opensymphony.after_create.json"),
-            ] {
-                if path_exists(&path).await? {
-                    return Ok(false);
-                }
-            }
+            return Ok(false);
         }
         Ok(marker.schema_version == 1
             && marker.generation == generation
@@ -1722,6 +1714,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        sanitize_git_environment(&mut command);
         command.env_remove("OPENSYMPHONY_CHECKOUT_CREDENTIAL");
         command.env_remove("GIT_SSH_COMMAND");
         if ssh_agent_credential {
@@ -2105,8 +2098,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
-        command.env_remove("GIT_OBJECT_DIRECTORY");
-        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        sanitize_git_environment(&mut command);
         command.env("GIT_NO_REPLACE_OBJECTS", "1");
         configure_process_group(&mut command);
         command
@@ -2153,8 +2145,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
-        command.env_remove("GIT_OBJECT_DIRECTORY");
-        command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        sanitize_git_environment(&mut command);
         command.env("GIT_NO_REPLACE_OBJECTS", "1");
         configure_process_group(&mut command);
         command
@@ -2211,6 +2202,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        sanitize_git_environment(&mut command);
         command.env_remove("GIT_OBJECT_DIRECTORY");
         command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
         command.env("GIT_NO_REPLACE_OBJECTS", "1");
@@ -3451,12 +3443,75 @@ impl WorkspaceManager {
         } else {
             None
         };
-        Ok(marker.schema_version == 1
+        let marker_matches = marker.schema_version == 1
             && marker.generation == generation
             && marker.workspace_key == workspace_key
             && marker.staging_path == staging_path
             && canonical_published.as_deref() == Some(canonical_workspace.as_path())
-            && ensure_descendant(&canonical_root, &canonical_workspace).is_ok())
+            && ensure_descendant(&canonical_root, &canonical_workspace).is_ok();
+        if !marker_matches {
+            return Ok(false);
+        }
+        if self
+            .receipt_owned_issue_manifest(&canonical_workspace)
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        self.published_checkout_has_complete_ownership(&canonical_workspace, &generation)
+            .await
+    }
+
+    async fn published_checkout_has_complete_ownership(
+        &self,
+        workspace_path: &Path,
+        generation: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let canonical_workspace = self.canonicalize_path(workspace_path).await?;
+        let issue_manifest_path = canonical_workspace.join(".opensymphony").join("issue.json");
+        let checkout_manifest_path = canonical_workspace
+            .join(".opensymphony")
+            .join("checkout.json");
+        let issue_manifest = match fs::read_to_string(&issue_manifest_path).await {
+            Ok(raw) => match serde_json::from_str::<IssueManifest>(&raw) {
+                Ok(manifest) => manifest,
+                Err(_) => return Ok(false),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path: issue_manifest_path,
+                    source,
+                });
+            }
+        };
+        let checkout_manifest = match fs::read_to_string(&checkout_manifest_path).await {
+            Ok(raw) => match serde_json::from_str::<CheckoutManifest>(&raw) {
+                Ok(manifest) => manifest,
+                Err(_) => return Ok(false),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path: checkout_manifest_path,
+                    source,
+                });
+            }
+        };
+        let handle = WorkspaceHandle::new(
+            issue_manifest.issue_id.clone(),
+            issue_manifest.identifier.clone(),
+            issue_manifest.sanitized_workspace_key.clone(),
+            canonical_workspace,
+        )
+        .with_checkout_generation(generation.to_owned());
+        Ok(
+            issue_manifest_owns_checkout(&handle, &issue_manifest, &checkout_manifest)
+                && checkout_manifest.schema_version == 1
+                && checkout_manifest.generation == generation
+                && !checkout_manifest.quarantined,
+        )
     }
 
     async fn checkout_generation_ownership_is_proven(
@@ -3498,6 +3553,7 @@ impl WorkspaceManager {
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
+        sanitize_git_environment(&mut command);
         command.env_remove("GIT_OBJECT_DIRECTORY");
         command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
 
@@ -4286,8 +4342,7 @@ async fn tracked_instruction_paths(
     for variable in checkout_credential_envs {
         command.env_remove(variable);
     }
-    command.env_remove("GIT_OBJECT_DIRECTORY");
-    command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    sanitize_git_environment(&mut command);
     command.env("GIT_NO_REPLACE_OBJECTS", "1");
     let mut child = command
         .stdout(Stdio::piped())
@@ -4395,6 +4450,17 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
+
+fn sanitize_git_environment(command: &mut Command) {
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(variable);
+    }
+}
 
 #[cfg(unix)]
 async fn terminate_process_tree(
@@ -4708,8 +4774,8 @@ mod tests {
 
     use super::{
         WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
-        path_from_git_bytes, remote_contains_credentials, shell_single_quote,
-        ssh_agent_socket_path_is_usable, tracked_instruction_tree,
+        path_from_git_bytes, remote_contains_credentials, sanitize_git_environment,
+        shell_single_quote, ssh_agent_socket_path_is_usable, tracked_instruction_tree,
     };
 
     #[cfg(unix)]
@@ -4927,6 +4993,35 @@ mod tests {
             args,
             vec![OsString::from("-c"), OsString::from("echo hook")]
         );
+    }
+
+    #[test]
+    fn git_environment_sanitization_removes_repository_selection_variables() {
+        let mut command = tokio::process::Command::new("git");
+        command
+            .env("GIT_DIR", "/tmp/foreign.git")
+            .env("GIT_WORK_TREE", "/tmp/foreign-worktree")
+            .env("GIT_OBJECT_DIRECTORY", "/tmp/foreign-objects")
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "/tmp/foreign-alternates",
+            );
+        sanitize_git_environment(&mut command);
+
+        assert!(command.as_std().get_envs().all(|(name, value)| {
+            !matches!(
+                (name.to_str(), value),
+                (
+                    Some(
+                        "GIT_DIR"
+                            | "GIT_WORK_TREE"
+                            | "GIT_OBJECT_DIRECTORY"
+                            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                    ),
+                    Some(_)
+                )
+            )
+        }));
     }
 
     #[test]

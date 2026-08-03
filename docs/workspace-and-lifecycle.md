@@ -79,9 +79,13 @@ launch with the verified checkout as `cwd`; the current trusted-host
 containment receipt describes process working-directory containment and does
 not claim sandbox isolation. During discovery, a directory whose name merely
 resembles a published generation is not enough to authorize deletion: an
-incomplete published generation is swept only when its durable checkout
-manifest (or completed `after_create` receipt) claims the exact path and
-generation. Foreign or malformed generation-shaped directories are preserved.
+incomplete published generation is swept only when its durable issue and
+checkout manifests form a mutually consistent ownership set (or a completed
+`after_create` receipt claims the exact path and generation). Foreign,
+partial, or malformed generation-shaped directories are preserved unless the
+matching staging intent proves them to be abandoned. Git verification and
+clone helpers clear inherited repository-selection variables such as `GIT_DIR`
+and `GIT_WORK_TREE` before using an explicit checkout path.
 Checkout retention and deletion remain `WorkspaceManager` decisions. Generated
 tree instruction pruning asks Git only for tracked `AGENTS.md` paths, so a
 large vendored tree with unrelated tracked files does not become an unbounded
@@ -338,9 +342,10 @@ Current repository note:
   The frequent state read also refreshes child presence, so a running issue that
   becomes a parent is made repository-neutral and its old generation is stopped
   before dispatch can continue it.
-- strict tracked-instruction discovery scrubs repository credential variables
-  from its Git path checks, including checks used while deciding whether a
-  generated-named tree contains tracked instructions.
+- strict tracked-instruction discovery scrubs repository credential and
+  repository-selection variables from its Git path checks, including checks
+  used while deciding whether a generated-named tree contains tracked
+  instructions.
 
 ## 8. Conversation metadata manifest
 

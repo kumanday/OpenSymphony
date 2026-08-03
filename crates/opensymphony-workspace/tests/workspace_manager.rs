@@ -1156,6 +1156,37 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     )
     .await
     .expect("published staging intent should be written");
+    let partial_published_path =
+        sweep_root.join("partial-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(partial_published_path.join(".opensymphony"))
+        .await
+        .expect("partial published generation directory should exist");
+    tokio::fs::write(
+        partial_published_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("partial checkout marker should be written");
+    let partial_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("partial-owned-generation--0123456789abcdef0123456789abcdef");
+    let partial_marker_path = partial_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("partial-owned-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        partial_marker_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "partial-owned-generation",
+            "staging_path": partial_staging_path,
+            "published_path": partial_published_path,
+        }))
+        .expect("partial staging intent should encode"),
+    )
+    .await
+    .expect("partial staging intent should be written");
     sweep_manager
         .recover_abandoned_staging_checkouts()
         .await
@@ -1163,6 +1194,10 @@ async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
     assert!(
         !intent_owned_path.exists(),
         "a published generation claimed by a staging intent should be swept after a publish crash"
+    );
+    assert!(
+        !partial_published_path.exists(),
+        "a checkout marker without a matching issue manifest must not preserve a generation"
     );
 
     let missing_published_path =

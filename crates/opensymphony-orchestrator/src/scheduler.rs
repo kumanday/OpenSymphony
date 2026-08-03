@@ -3809,7 +3809,7 @@ fn tracker_issue_belongs_to_configured_project(
         config,
         issue.project_id.as_deref(),
         issue.project_slug.as_deref(),
-        false,
+        true,
     )
 }
 
@@ -4401,6 +4401,11 @@ mod tests {
         ));
         assert!(project_belongs_to_configured_project(
             &config, None, None, false
+        ));
+        let full_detail = tracker_issue_from_normalized(&issue_with_project(None, None));
+        assert!(!tracker_issue_belongs_to_configured_project(
+            &full_detail,
+            &config
         ));
     }
 }
