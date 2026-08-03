@@ -67,6 +67,13 @@ pub struct InstructionProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalRuntimeEnvelope {
     pub repository_binding: RepositoryBinding,
+    /// Tracker project identity is part of the prompt/runtime binding. A
+    /// retained checkout must not silently resume a conversation created for
+    /// a different configured project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
     pub config_generation: String,
     pub inventory_generation: String,
     pub policy_generation: String,

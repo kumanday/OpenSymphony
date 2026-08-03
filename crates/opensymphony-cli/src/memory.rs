@@ -2026,9 +2026,11 @@ impl MemoryScopeGrantRegistry {
         for token in tokens {
             state.grants.remove(&token);
         }
-        if revoked {
-            state.revoked_issues.insert(issue.to_owned());
-        }
+        // Keep the lifecycle tombstone even when this process has no live
+        // grant for the issue (for example after a daemon restart). The next
+        // reopened run must not reuse a conversation carrying a bearer that
+        // this registry can no longer revoke or refresh.
+        state.revoked_issues.insert(issue.to_owned());
         revoked
     }
 
@@ -12945,6 +12947,22 @@ Public memory concept.
         assert!(registry.revoke_issue("COE-549"));
         assert!(registry.get(Some(&token)).is_none());
         assert!(!registry.revoke_issue("COE-549"));
+    }
+
+    #[test]
+    fn worker_memory_revoke_records_a_tombstone_without_a_live_grant() {
+        let registry = MemoryScopeGrantRegistry::default();
+
+        assert!(!registry.revoke_issue("COE-549"));
+        let (_, requires_fresh_conversation) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+
+        assert!(requires_fresh_conversation);
     }
 
     #[test]

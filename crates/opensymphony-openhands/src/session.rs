@@ -2921,6 +2921,18 @@ impl IssueSessionRunner {
         if let Err(detail) =
             verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
         {
+            let (failure_detail, conversation_metadata) = Box::pin(self.handle_workspace_mismatch(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                issue,
+                workflow,
+                &launch_profile,
+                &conversation,
+                stream,
+                detail,
+            ))
+            .await;
             return self
                 .persist_failure_without_stream(
                     workspace_manager,
@@ -2928,13 +2940,13 @@ impl IssueSessionRunner {
                     run_manifest,
                     observed_run,
                     IssueSessionPromptKind::Full,
-                    None,
+                    Some(conversation_metadata),
                     NormalizedOutcome {
                         kind: WorkerOutcomeKind::Failed,
                         summary:
                             "OpenHands runtime stream workspace did not match verified checkout"
                                 .to_owned(),
-                        error: Some(detail),
+                        error: Some(failure_detail),
                     },
                 )
                 .await
@@ -3006,6 +3018,94 @@ impl IssueSessionRunner {
         // Read existing token counts from conversation state on load
         session.accumulate_tokens();
         Ok(Step::Continue(session))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_workspace_mismatch(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &RunManifest,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        launch_profile: &ConversationLaunchProfile,
+        conversation: &Conversation,
+        mut stream: RuntimeEventStream,
+        detail: String,
+    ) -> (String, ConversationMetadata) {
+        let mut failed_manifest = IssueConversationManifest::new(
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ConversationId::new(conversation.conversation_id.to_string())
+                .expect("UUID-backed conversation ID should not be empty"),
+            self.config.reuse_policy.as_str(),
+            configured_persistence_dir(workflow, workspace),
+            Utc::now(),
+            Some("verified checkout/runtime workspace mismatch".to_owned()),
+            launch_profile.clone(),
+            self.environment.as_ref(),
+        );
+        failed_manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+        if let Some(envelope) = failed_manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
+        }
+        failed_manifest.apply_transport_diagnostics(
+            self.client.transport_diagnostics().ok().as_ref(),
+            self.client.base_url(),
+        );
+        failed_manifest.apply_runtime_snapshot(&stream);
+
+        let _ = stream.close().await;
+        let preserve_error = self
+            .preserve_superseded_conversation_manifest(
+                workspace_manager,
+                workspace,
+                &failed_manifest,
+            )
+            .await
+            .err();
+        let retire_error = self
+            .retire_conversation(
+                &failed_manifest,
+                "verified checkout/runtime workspace mismatch",
+            )
+            .await
+            .err();
+        if preserve_error.is_none()
+            && retire_error.is_none()
+            && let Err(error) = self
+                .clear_superseded_conversation_manifest(
+                    workspace_manager,
+                    workspace,
+                    &failed_manifest.conversation_id,
+                )
+                .await
+        {
+            tracing::warn!(
+                conversation_id = %failed_manifest.conversation_id,
+                %error,
+                "failed to clear retired workspace-mismatch conversation evidence"
+            );
+        }
+
+        let mut failure_detail = detail;
+        if let Some(error) = preserve_error {
+            failure_detail.push_str(&format!(
+                "; failed to preserve conversation evidence: {error}"
+            ));
+        }
+        if let Some(error) = retire_error {
+            failure_detail.push_str(&format!("; failed to retire conversation: {error}"));
+        }
+
+        let conversation_metadata = build_summary_metadata(
+            conversation,
+            true,
+            RuntimeStreamState::Failed,
+            self.client.transport_diagnostics().ok().as_ref(),
+            self.client.base_url(),
+        );
+        (failure_detail, conversation_metadata)
     }
 
     /// Explicitly rehydrate a conversation by creating a fresh one with the same

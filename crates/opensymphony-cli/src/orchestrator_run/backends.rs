@@ -2280,6 +2280,8 @@ impl RuntimeWorkerBackend {
                 } {
                     Ok(checkout) => Some(TerminalRuntimeEnvelope {
                         repository_binding: checkout.repository_binding.clone(),
+                        project_id: issue.project_id.clone(),
+                        project_slug: issue.project_slug.clone(),
                         config_generation: checkout.repository_binding.config_generation.clone(),
                         inventory_generation: checkout
                             .repository_binding
@@ -6328,6 +6330,19 @@ mod tests {
             "COE-479",
             Some(&envelope),
             &pending_manifest,
+        ));
+
+        pending_manifest
+            .runtime_envelope
+            .as_mut()
+            .expect("pending envelope")
+            .project_id = Some("project-after-drift".to_owned());
+        assert!(!runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
         ));
 
         pending_manifest
