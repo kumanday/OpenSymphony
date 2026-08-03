@@ -2302,6 +2302,7 @@ impl RuntimeWorkerBackend {
                     }
                 });
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
+            let mut initially_verified_checkout = None;
             let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
                 match if allow_worker_changes {
                     workspace_manager
@@ -2310,45 +2311,54 @@ impl RuntimeWorkerBackend {
                 } else {
                     workspace_manager.verify_checkout(&ensured.handle).await
                 } {
-                    Ok(checkout) => Some(TerminalRuntimeEnvelope {
-                        repository_binding: checkout.repository_binding.clone(),
-                        project_id: issue.project_id.clone(),
-                        project_slug: issue.project_slug.clone(),
-                        config_generation: checkout.repository_binding.config_generation.clone(),
-                        inventory_generation: checkout
-                            .repository_binding
-                            .inventory_generation
-                            .clone(),
-                        policy_generation: checkout.repository_binding.config_generation.clone(),
-                        checkout_generation: checkout.generation.clone(),
-                        checkout_path: ensured.handle.workspace_path().to_path_buf(),
-                        target_branch: checkout.target_branch.clone(),
-                        target_commit: checkout.target_commit.clone(),
-                        instruction: checkout.instruction.clone(),
-                        harness: route.harness_kind.clone(),
-                        model_profile: route
-                            .model_profile
-                            .clone()
-                            .unwrap_or_else(|| "default".to_owned()),
-                        model: route.model.clone().or_else(|| {
-                            if route.harness_kind == OPENHANDS_AGENT_SERVER_KIND {
-                                workflow
-                                    .extensions
-                                    .openhands
-                                    .conversation
-                                    .agent
-                                    .llm
-                                    .as_ref()
-                                    .and_then(|llm| llm.model.clone())
-                            } else {
-                                None
-                            }
-                        }),
-                        requested_execution_scope: "single_checkout".to_owned(),
-                        effective_containment: "trusted_host_process_cwd".to_owned(),
-                        conversation_binding: persisted_conversation_binding,
-                        cleanup_intent: "workspace_manager_owned".to_owned(),
-                    }),
+                    Ok(checkout) => {
+                        initially_verified_checkout = Some(checkout.clone());
+                        Some(TerminalRuntimeEnvelope {
+                            repository_binding: checkout.repository_binding.clone(),
+                            project_id: issue.project_id.clone(),
+                            project_slug: issue.project_slug.clone(),
+                            config_generation: checkout
+                                .repository_binding
+                                .config_generation
+                                .clone(),
+                            inventory_generation: checkout
+                                .repository_binding
+                                .inventory_generation
+                                .clone(),
+                            policy_generation: checkout
+                                .repository_binding
+                                .config_generation
+                                .clone(),
+                            checkout_generation: checkout.generation.clone(),
+                            checkout_path: ensured.handle.workspace_path().to_path_buf(),
+                            target_branch: checkout.target_branch.clone(),
+                            target_commit: checkout.target_commit.clone(),
+                            instruction: checkout.instruction.clone(),
+                            harness: route.harness_kind.clone(),
+                            model_profile: route
+                                .model_profile
+                                .clone()
+                                .unwrap_or_else(|| "default".to_owned()),
+                            model: route.model.clone().or_else(|| {
+                                if route.harness_kind == OPENHANDS_AGENT_SERVER_KIND {
+                                    workflow
+                                        .extensions
+                                        .openhands
+                                        .conversation
+                                        .agent
+                                        .llm
+                                        .as_ref()
+                                        .and_then(|llm| llm.model.clone())
+                                } else {
+                                    None
+                                }
+                            }),
+                            requested_execution_scope: "single_checkout".to_owned(),
+                            effective_containment: "trusted_host_process_cwd".to_owned(),
+                            conversation_binding: persisted_conversation_binding,
+                            cleanup_intent: "workspace_manager_owned".to_owned(),
+                        })
+                    }
                     Err(error) => {
                         report_launch_failure(
                             &mut launch_tx,
@@ -2430,7 +2440,11 @@ impl RuntimeWorkerBackend {
                 runner = runner.with_workpad_comment_source(source);
             }
             let repository_instructions = if ensured.handle.checkout_generation().is_some() {
-                let result = if allow_worker_changes {
+                let result = if let Some(checkout) = initially_verified_checkout.as_ref() {
+                    workspace_manager
+                        .read_checkout_instructions_from_manifest(&ensured.handle, checkout)
+                        .await
+                } else if allow_worker_changes {
                     workspace_manager
                         .read_checkout_instructions_for_retry(&ensured.handle)
                         .await
@@ -2638,15 +2652,10 @@ impl RuntimeWorkerBackend {
                         return;
                     }
                 };
-                let final_instructions = match if allow_worker_changes {
-                    workspace_manager
-                        .read_checkout_instructions_for_retry(&ensured.handle)
-                        .await
-                } else {
-                    workspace_manager
-                        .read_checkout_instructions(&ensured.handle)
-                        .await
-                } {
+                let final_instructions = match workspace_manager
+                    .read_checkout_instructions_from_manifest(&ensured.handle, &verified)
+                    .await
+                {
                     Ok(instructions) => instructions,
                     Err(error) => {
                         report_launch_failure(

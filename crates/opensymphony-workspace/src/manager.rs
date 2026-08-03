@@ -273,10 +273,11 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         checkout_timeout: Duration,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        if let Some(binding) = issue
-            .repository_binding
-            .as_ref()
-            .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
+        if !self.checkout_repositories.is_empty()
+            && let Some(binding) = issue
+                .repository_binding
+                .as_ref()
+                .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
         {
             let repository = self.checkout_repository_for_binding(binding)?;
             return self
@@ -298,10 +299,11 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         run_id: Option<&str>,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        if let Some(binding) = issue
-            .repository_binding
-            .as_ref()
-            .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
+        if !self.checkout_repositories.is_empty()
+            && let Some(binding) = issue
+                .repository_binding
+                .as_ref()
+                .and_then(crate::opensymphony_domain::RepositoryBindingOutcome::resolved_binding)
         {
             let repository = self.checkout_repository_for_binding(binding)?;
             return self
@@ -950,6 +952,15 @@ impl WorkspaceManager {
         let manifest = self
             .verify_checkout_with_worker_changes(workspace, allow_worker_changes)
             .await?;
+        self.read_checkout_instructions_from_manifest(workspace, &manifest)
+            .await
+    }
+
+    pub async fn read_checkout_instructions_from_manifest(
+        &self,
+        workspace: &WorkspaceHandle,
+        manifest: &CheckoutManifest,
+    ) -> Result<Option<String>, WorkspaceError> {
         if manifest.instruction.path.as_os_str().is_empty() {
             return Ok(None);
         }
@@ -977,6 +988,12 @@ impl WorkspaceManager {
         checkout_deadline: Option<Instant>,
     ) -> Result<Option<EnsureWorkspaceResult>, WorkspaceError> {
         let repository = self.checkout_repository_for_binding(binding)?;
+        let expected_workspace_key = checkout_workspace_key(
+            &issue.identifier,
+            &issue.issue_id,
+            binding.repository_id().as_str(),
+        )?;
+        let expected_generation_prefix = format!("{expected_workspace_key}--");
         let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
             WorkspaceError::ReadDirectory {
                 path: self.config.root.clone(),
@@ -993,7 +1010,10 @@ impl WorkspaceManager {
                 })?
         {
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
+            if !name
+                .to_string_lossy()
+                .starts_with(&expected_generation_prefix)
+            {
                 continue;
             }
             let file_type =

@@ -235,8 +235,8 @@ fn strict_recovery_configured(
         &BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>,
     >,
 ) -> bool {
+    let _ = repository_checkouts;
     strict_recovery_enabled(repository_routing)
-        || repository_checkouts.is_some_and(|checkouts| !checkouts.is_empty())
 }
 
 fn live_openhands_checks_blocked(
@@ -2929,7 +2929,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_recovery_requires_checkout_policies_for_legacy_single() {
+    fn strict_recovery_ignores_checkout_policies_for_legacy_single() {
         let routing = RepositoryRouting {
             mode: RepositoryRoutingMode::LegacySingle,
             inventory: BTreeMap::new(),
@@ -2955,11 +2955,11 @@ mod tests {
             },
         )]);
 
-        assert!(super::strict_recovery_configured(
+        assert!(!super::strict_recovery_configured(
             Some(&routing),
             Some(&checkouts)
         ));
-        assert!(super::live_openhands_checks_blocked(
+        assert!(!super::live_openhands_checks_blocked(
             Some(&routing),
             Some(&checkouts)
         ));

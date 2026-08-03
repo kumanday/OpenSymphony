@@ -1128,7 +1128,7 @@ fn resolve_central_config(
         };
         if (credential.kind == "ssh-agent" && !is_ssh_clone_transport(&repository.remote.clone))
             || (credential.kind == "environment"
-                && is_ssh_clone_transport(&repository.remote.clone))
+                && !is_https_clone_transport(&repository.remote.clone))
         {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.credential"),
@@ -1467,6 +1467,9 @@ fn reject_checkout_credential_env_reuse(
         ),
     ] {
         non_checkout_variables.insert(variable.to_owned(), field);
+    }
+    for variable in ["LLM_API_KEY", "LLM_BASE_URL"] {
+        non_checkout_variables.insert(variable.to_owned(), "openhands.implicit_llm_env");
     }
     if let Some(variable) = config.memory.as_ref().and_then(|memory| {
         memory
@@ -2231,6 +2234,10 @@ fn is_ssh_clone_transport(value: &str) -> bool {
         && !authority
             .chars()
             .any(|character| matches!(character, '/' | '\\'))
+}
+
+fn is_https_clone_transport(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| url.scheme().eq_ignore_ascii_case("https"))
 }
 
 fn is_credential_shaped_username(username: &str) -> bool {
@@ -3665,6 +3672,19 @@ scheduler:
         );
         let error = resolve_central_config(&root.path().join("config.yaml"), &ssh_with_environment)
             .expect_err("environment credentials should not be paired with SSH clones");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "repositories.core-repo.credential"
+        ));
+
+        let http_with_environment = ssh_with_environment.replace(
+            "git@github.com:kumanday/OpenSymphony.git",
+            "http://github.com/kumanday/OpenSymphony.git",
+        );
+        let error =
+            resolve_central_config(&root.path().join("config.yaml"), &http_with_environment)
+                .expect_err("environment credentials should not be paired with HTTP clones");
         assert!(matches!(
             error,
             CentralConfigError::InvalidReference { field }
