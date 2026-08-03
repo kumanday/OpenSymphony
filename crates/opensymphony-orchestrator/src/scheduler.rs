@@ -410,6 +410,8 @@ pub trait WorkspaceBackend {
         Ok(())
     }
 
+    fn revoke_issue_resources(&mut self, _issue_identifier: &str) {}
+
     async fn persist_retry_pending(
         &mut self,
         _workspace: &WorkspaceRecord,
@@ -1774,6 +1776,10 @@ where
                         .get(&issue_id)
                         .is_some_and(retry_exhausted_release)
                 {
+                    if let Some(execution) = self.executions.get(&issue_id) {
+                        self.workspace
+                            .revoke_issue_resources(execution.issue().identifier.as_str());
+                    }
                     self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
                         .await;
                     self.refresh_execution_issue(&issue_id, normalized)?;
@@ -3052,6 +3058,8 @@ where
         };
 
         execution.refresh_issue(issue)?;
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
         let abort_requested = abort_reason.is_some();
         let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()

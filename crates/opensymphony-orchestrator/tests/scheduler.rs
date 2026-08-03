@@ -448,6 +448,7 @@ struct FakeWorkspace {
     persisted_retry_pending: usize,
     persisted_retry_pending_without_workspace: usize,
     cleared_retry_pending: Vec<String>,
+    revoked_issue_resources: Vec<String>,
     clear_retry_pending_results: VecDeque<Result<(), FakeError>>,
     ensure_results: VecDeque<Result<(), FakeError>>,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
@@ -566,6 +567,11 @@ impl WorkspaceBackend for FakeWorkspace {
         self.clear_retry_pending_results
             .pop_front()
             .unwrap_or(Ok(()))
+    }
+
+    fn revoke_issue_resources(&mut self, issue_identifier: &str) {
+        self.revoked_issue_resources
+            .push(issue_identifier.to_owned());
     }
 
     async fn persist_interrupt_reason(
@@ -2272,6 +2278,10 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
         vec![("COE-542".to_string(), true)]
     );
     assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![1]);
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-542".to_string()]
+    );
     assert_eq!(
         scheduler.workspace().cleared_retry_exhaustion,
         vec!["COE-542".to_string()]

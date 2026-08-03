@@ -852,15 +852,21 @@ fn runtime_checkout_env_remove(
 }
 
 fn checkout_env_remove_variables(
-    mut variables: BTreeSet<String>,
-    local_server_env: &BTreeMap<String, String>,
+    variables: BTreeSet<String>,
+    _local_server_env: &BTreeMap<String, String>,
 ) -> BTreeSet<String> {
-    variables.retain(|variable| {
-        !local_server_env
-            .keys()
-            .any(|configured| environment_variable_names_equal(variable, configured))
-    });
+    // A local-server override must never reintroduce a checkout credential,
+    // including when its value was resolved from that same environment
+    // variable (for example `${GITHUB_TOKEN}`).
     variables
+}
+
+fn strict_openhands_cleanup_requires_conversation_store(
+    strict_checkout: bool,
+    manifest: &IssueConversationManifest,
+    store: Option<&OpenHandsConversationStorePaths>,
+) -> bool {
+    strict_checkout && !conversation_manifest_is_codex(manifest) && store.is_none()
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -1131,6 +1137,15 @@ impl RuntimeWorkspaceBackend {
                                     ));
                                 }
                             }
+                        } else if strict_openhands_cleanup_requires_conversation_store(
+                            handle.checkout_generation().is_some(),
+                            &manifest,
+                            self.openhands_conversation_store.as_ref(),
+                        ) {
+                            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                "retaining strict OpenHands workspace because its remote conversation store is unavailable"
+                                    .to_owned(),
+                            ));
                         } else {
                             tracing::warn!(
                                 issue = %handle.identifier(),
@@ -1171,6 +1186,12 @@ impl RuntimeWorkspaceBackend {
 
 impl WorkspaceBackend for RuntimeWorkspaceBackend {
     type Error = CliWorkspaceError;
+
+    fn revoke_issue_resources(&mut self, issue_identifier: &str) {
+        if let Some(scope_grants) = &self.scope_grants {
+            scope_grants.revoke_issue(issue_identifier);
+        }
+    }
 
     async fn ensure_workspace(
         &mut self,
@@ -8571,13 +8592,32 @@ mod tests {
     }
 
     #[test]
-    fn local_server_environment_keys_are_not_scrubbed_as_checkout_credentials() {
+    fn local_server_environment_keys_cannot_override_checkout_credential_scrubbing() {
         let env_remove = checkout_env_remove_variables(
             BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()]),
-            &BTreeMap::from([(String::from("NODE_ENV"), String::from("development"))]),
+            &BTreeMap::from([(
+                String::from("CHECKOUT_TOKEN"),
+                String::from("${CHECKOUT_TOKEN}"),
+            )]),
         );
 
-        assert_eq!(env_remove, BTreeSet::from(["CHECKOUT_TOKEN".to_owned()]));
+        assert_eq!(
+            env_remove,
+            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()])
+        );
+    }
+
+    #[test]
+    fn strict_remote_openhands_cleanup_requires_store() {
+        let mut manifest = sample_conversation_manifest("thread");
+        manifest.transport_target = Some("remote".to_owned());
+
+        assert!(strict_openhands_cleanup_requires_conversation_store(
+            true, &manifest, None
+        ));
+        assert!(!strict_openhands_cleanup_requires_conversation_store(
+            false, &manifest, None
+        ));
     }
 
     #[test]

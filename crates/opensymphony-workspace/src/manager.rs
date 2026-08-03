@@ -4133,9 +4133,21 @@ async fn tracked_instruction_paths(
         .stdout
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
-        .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
+        .map(path_from_git_bytes)
         .filter(|path| path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md")))
         .collect())
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).as_ref())
 }
 
 async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>
@@ -4479,8 +4491,8 @@ mod tests {
 
     use super::{
         WorkspaceError, build_shell_command, discover_agents, git_askpass_username,
-        remote_contains_credentials, shell_single_quote, ssh_agent_socket_path_is_usable,
-        tracked_instruction_tree,
+        path_from_git_bytes, remote_contains_credentials, shell_single_quote,
+        ssh_agent_socket_path_is_usable, tracked_instruction_tree,
     };
 
     #[cfg(unix)]
@@ -4614,6 +4626,22 @@ mod tests {
         assert_eq!(
             paths,
             vec![PathBuf::from("components/[core]/vendor/nested/AGENTS.md")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_instruction_paths_preserve_non_utf8_ancestors() {
+        let relative = path_from_git_bytes(&[b'c', 0xff, b'/', b'v', b'e', b'n', b'd', b'o', b'r']);
+        let tracked = path_from_git_bytes(&[
+            b'c', 0xff, b'/', b'v', b'e', b'n', b'd', b'o', b'r', b'/', b'A', b'G', b'E', b'N',
+            b'T', b'S', b'.', b'm', b'd',
+        ]);
+
+        assert!(tracked.starts_with(&relative));
+        assert_eq!(
+            tracked.file_name(),
+            Some(OsString::from("AGENTS.md").as_os_str())
         );
     }
 
