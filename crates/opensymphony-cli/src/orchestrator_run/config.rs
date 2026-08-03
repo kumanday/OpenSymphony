@@ -519,6 +519,11 @@ pub(super) async fn resolve_runtime_config(
                     })?;
             if looks_like_central_config(&raw) {
                 let central = resolve_central_config(path, &raw)?;
+                let repository_checkouts = matches!(
+                    central.repository_routing.mode,
+                    RepositoryRoutingMode::ProjectSet
+                )
+                .then_some(central.repository_checkouts);
                 (
                     central.runtime,
                     central.generation,
@@ -533,7 +538,7 @@ pub(super) async fn resolve_runtime_config(
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
                     Some(central.repository_routing),
-                    Some(central.repository_checkouts),
+                    repository_checkouts,
                 )
             } else {
                 (

@@ -115,6 +115,9 @@ routing:
 That repository must also appear in the sole selected Linear project's
 `repositories` association set; a mismatch fails before tracker polling so a
 legacy run cannot execute a project's tasks from an unrelated checkout.
+Central repository checkout policies are consumed only by `project_set`
+routing; legacy runs continue to use their configured `checkout_path` and do
+not require clone credentials or verified-generation acquisition.
 The repository inventory entry's `instructions.path` is resolved beneath its
 configured checkout and is the workflow file loaded for that legacy run;
 repository implementation guidance remains separate from central front matter.

@@ -120,6 +120,11 @@ treated as an empty list that could overwrite prior evidence.
 Condenser tool-matching recovery follows the same evidence rule: it preserves
 the old manifest before creating a replacement, and clears that evidence only
 after remote retirement succeeds.
+When a newly created conversation fails the verified-checkout workspace
+barrier before its primary manifest is written, its pending ownership record
+is cleared only after remote retirement succeeds or equivalent superseded
+evidence is durable; if both operations fail, the pending record remains for
+restart recovery and later cleanup.
 
 ## 6. Conversation model
 

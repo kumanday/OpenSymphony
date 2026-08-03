@@ -1647,11 +1647,13 @@ impl WorkspaceManager {
     ) -> Result<(), WorkspaceError> {
         let environment_credential = repository.credential_kind == "environment";
         let ssh_agent_credential = repository.credential_kind == "ssh-agent";
+        let environment_credential_value = environment_credential
+            .then_some(repository.credential_env.as_deref())
+            .flatten()
+            .and_then(std::env::var_os)
+            .map(|value| value.to_string_lossy().into_owned());
         let credential_available = if environment_credential {
-            repository
-                .credential_env
-                .as_deref()
-                .is_some_and(|variable| std::env::var_os(variable).is_some())
+            environment_credential_value.is_some()
         } else if ssh_agent_credential {
             ssh_agent_socket_is_usable()
         } else {
@@ -1670,8 +1672,8 @@ impl WorkspaceManager {
             });
         }
         let askpass_path = if environment_credential
-            && let Some(variable) = repository.credential_env.as_deref()
-            && std::env::var_os(variable).is_some()
+            && repository.credential_env.is_some()
+            && environment_credential_value.is_some()
         {
             let path = destination
                 .parent()
@@ -1728,10 +1730,7 @@ impl WorkspaceManager {
                 ),
             );
         }
-        if environment_credential
-            && let Some(variable) = repository.credential_env.as_deref()
-            && let Ok(value) = std::env::var(variable)
-        {
+        if let Some(value) = environment_credential_value.as_deref() {
             command.env("OPENSYMPHONY_CHECKOUT_CREDENTIAL", value);
         }
         command.env(
@@ -1836,10 +1835,14 @@ impl WorkspaceManager {
         if status.success() {
             return Ok(());
         }
+        let mut detail = redact_runtime_diagnostic(&String::from_utf8_lossy(&stderr));
+        if let Some(value) = environment_credential_value.as_deref() {
+            detail = detail.replace(value, "<redacted>");
+        }
         Err(WorkspaceError::CheckoutOperation {
             operation: "clone repository".to_owned(),
             path: destination.to_path_buf(),
-            detail: redact_runtime_diagnostic(&String::from_utf8_lossy(&stderr)),
+            detail,
         })
     }
 

@@ -2998,26 +2998,28 @@ impl IssueSessionRunner {
         if let Err(detail) =
             verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
         {
-            let (failure_detail, conversation_metadata) = Box::pin(self.handle_workspace_mismatch(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                issue,
-                workflow,
-                &launch_profile,
-                &conversation,
-                stream,
-                detail,
-            ))
-            .await;
-            let mut failure_detail = failure_detail;
-            if let Err(error) = workspace_manager
-                .write_json_artifact_atomically(
+            let (failure_detail, conversation_metadata, clear_pending_ownership) =
+                Box::pin(self.handle_workspace_mismatch(
+                    workspace_manager,
                     workspace,
-                    &pending_manifest_path,
-                    &Option::<IssueConversationManifest>::None,
-                )
-                .await
+                    run_manifest,
+                    issue,
+                    workflow,
+                    &launch_profile,
+                    &conversation,
+                    stream,
+                    detail,
+                ))
+                .await;
+            let mut failure_detail = failure_detail;
+            if clear_pending_ownership
+                && let Err(error) = workspace_manager
+                    .write_json_artifact_atomically(
+                        workspace,
+                        &pending_manifest_path,
+                        &Option::<IssueConversationManifest>::None,
+                    )
+                    .await
             {
                 failure_detail.push_str(&format!(
                     "; failed to clear pending conversation ownership: {error}"
@@ -3098,7 +3100,7 @@ impl IssueSessionRunner {
         conversation: &Conversation,
         mut stream: RuntimeEventStream,
         detail: String,
-    ) -> (String, ConversationMetadata) {
+    ) -> (String, ConversationMetadata, bool) {
         let mut failed_manifest = IssueConversationManifest::new(
             issue.id.clone(),
             issue.identifier.clone(),
@@ -3154,6 +3156,7 @@ impl IssueSessionRunner {
             );
         }
 
+        let clear_pending_ownership = preserve_error.is_none() || retire_error.is_none();
         let mut failure_detail = detail;
         if let Some(error) = preserve_error {
             failure_detail.push_str(&format!(
@@ -3171,7 +3174,11 @@ impl IssueSessionRunner {
             self.client.transport_diagnostics().ok().as_ref(),
             self.client.base_url(),
         );
-        (failure_detail, conversation_metadata)
+        (
+            failure_detail,
+            conversation_metadata,
+            clear_pending_ownership,
+        )
     }
 
     /// Explicitly rehydrate a conversation by creating a fresh one with the same
