@@ -64,6 +64,21 @@ fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &Normalize
         .is_some_and(|expected| expected != workspace.workspace_key.as_str())
 }
 
+fn project_identity_changed(previous: &NormalizedIssue, current: &NormalizedIssue) -> bool {
+    if let (Some(previous_id), Some(current_id)) = (
+        previous.project_id.as_deref(),
+        current.project_id.as_deref(),
+    ) {
+        return previous_id.trim() != current_id.trim();
+    }
+
+    matches!(
+        (previous.project_slug.as_deref(), current.project_slug.as_deref()),
+        (Some(previous_slug), Some(current_slug))
+            if !previous_slug.eq_ignore_ascii_case(current_slug)
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub poll_interval_ms: u64,
@@ -1621,7 +1636,8 @@ where
                         && (RepositoryBindingOutcome::binding_changed_opt(
                             execution.issue().repository_binding.as_ref(),
                             normalized.repository_binding.as_ref(),
-                        ) || workspace_key_changed_for_issue(execution, &normalized))
+                        ) || workspace_key_changed_for_issue(execution, &normalized)
+                            || project_identity_changed(execution.issue(), &normalized))
                 })
             {
                 self.supersede_binding(normalized.id.clone(), normalized, observed_at)
@@ -1707,10 +1723,11 @@ where
                             SchedulerStatus::Claimed
                                 | SchedulerStatus::Running
                                 | SchedulerStatus::RetryQueued
-                        ) && RepositoryBindingOutcome::binding_changed_opt(
+                        ) && (RepositoryBindingOutcome::binding_changed_opt(
                             existing.issue().repository_binding.as_ref(),
                             issue.repository_binding.as_ref(),
-                        ) {
+                        ) || project_identity_changed(existing.issue(), &issue))
+                        {
                             self.supersede_binding(issue_id.clone(), issue, observed_at)
                                 .await?;
                             continue;
@@ -4243,6 +4260,34 @@ fn current_epoch_millis() -> u64 {
 mod tests {
     use super::*;
 
+    fn issue_with_project(project_id: Option<&str>, project_slug: Option<&str>) -> NormalizedIssue {
+        NormalizedIssue {
+            id: IssueId::new("issue-project-drift").expect("issue id should be valid"),
+            identifier: IssueIdentifier::new("COE-549").expect("identifier should be valid"),
+            title: "project drift".to_owned(),
+            description: None,
+            priority: None,
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_owned(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: None,
+            pr_url: None,
+            url: None,
+            labels: Vec::new(),
+            project_id: project_id.map(str::to_owned),
+            project_slug: project_slug.map(str::to_owned),
+            project_name: None,
+            parent_id: None,
+            repository_binding: None,
+            blocked_by: Vec::new(),
+            sub_issues: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
     #[test]
     fn recovered_scheduler_worker_ids_expose_their_allocator_ordinal() {
         let recovered = WorkerId::new("scheduler-worker-7").expect("worker id should be valid");
@@ -4250,5 +4295,15 @@ mod tests {
 
         assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
         assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
+
+    #[test]
+    fn project_identity_drift_requires_reconciliation_supersession() {
+        let previous = issue_with_project(Some("project-a"), Some("project-a"));
+        let moved = issue_with_project(Some("project-b"), Some("project-b"));
+        assert!(project_identity_changed(&previous, &moved));
+
+        let same_project = issue_with_project(Some("project-a"), Some("renamed-project-a"));
+        assert!(!project_identity_changed(&previous, &same_project));
     }
 }

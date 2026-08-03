@@ -495,7 +495,9 @@ conversation before another turn can use the new grant. The grant is
 server-local, non-persisted, and replaced with the latest verified scope.
 Terminal, inactive, and binding-superseded worker lifecycles revoke the issue
 entry so an old worker environment cannot reuse it after the issue leaves
-execution. It must not become a process-wide authorization. This project scope applies to direct
+execution. If a retained issue later reopens, the next grant is marked for a
+one-time fresh conversation so the old conversation cannot retain the revoked
+bearer. It must not become a process-wide authorization. This project scope applies to direct
 `memory.show` capsule reads
 as well as search, context, brief, related, docs, and status tools, and worker
 project matching uses canonical project IDs rather than display labels.

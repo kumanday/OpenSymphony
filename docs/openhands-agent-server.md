@@ -104,7 +104,9 @@ grant before it can receive another turn. The old conversation evidence is
 retained until remote deletion succeeds. After daemon recovery, the
 supervised grant registry is reconstructed, so OpenHands forces this
 replacement path; ordinary in-process retries keep the existing conversation
-and refreshed grant.
+and refreshed grant. A retained issue that reopens after an inactive, terminal,
+or binding-superseded lifecycle receives the same one-time fresh-conversation
+treatment, even though its checkout and repository may still be reusable.
 
 If a recovered trigger-pending run receives `409 Conflict`, the adapter waits
 for the active turn to stop, refreshes the recovered event baseline, and retries

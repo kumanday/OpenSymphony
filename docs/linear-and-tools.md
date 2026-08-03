@@ -80,7 +80,9 @@ parallel vectors rather than collapsing them into one scalar selector:
 - state-only issue snapshots carry Linear's project ID and slug; active
   reconciliation uses that identity to recompute repository routing and
   releases an issue immediately when it moves outside the configured project
-  set
+  set; project identity drift also supersedes an active worker even when the
+  selected repository remains unchanged so its project-scoped grant and
+  conversation are not reused across projects
 - the scalar `tracker.project_id`/`tracker.project_slug` fields remain the
   compatibility view for the first configured project; they do not limit a
   central multi-project poll to that one project
