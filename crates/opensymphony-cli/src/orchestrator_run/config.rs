@@ -424,10 +424,6 @@ pub enum CentralConfigError {
     UnsupportedRoutingMode { mode: &'static str },
     #[error("legacy_single repository `{repository}` must define checkout_path")]
     MissingLegacyCheckout { repository: String },
-    #[error(
-        "project_set repository `{repository}` must define checkout_path for memory source registration"
-    )]
-    MissingProjectSetCheckout { repository: String },
     #[error("central config path is outside the selected instance roots")]
     InvalidRoot,
 }
@@ -1620,17 +1616,15 @@ fn resolve_memory_sources(
             continue;
         }
         let Some(checkout_path) = repository.checkout_path.as_deref() else {
-            return Err(
-                if repository_routing.mode == RepositoryRoutingMode::ProjectSet {
-                    CentralConfigError::MissingProjectSetCheckout {
-                        repository: repository_key.clone(),
-                    }
-                } else {
-                    CentralConfigError::MissingLegacyCheckout {
-                        repository: repository_key.clone(),
-                    }
-                },
-            );
+            if repository_routing.mode == RepositoryRoutingMode::ProjectSet {
+                // Project-set repositories are cloned into verified generation
+                // workspaces at dispatch time. A static checkout is optional,
+                // so it must not block the dynamic clone path.
+                continue;
+            }
+            return Err(CentralConfigError::MissingLegacyCheckout {
+                repository: repository_key.clone(),
+            });
         };
         let resolved = ResolvedMemorySource {
             repository_id: repository_id.clone(),
@@ -2923,7 +2917,7 @@ scheduler:
     }
 
     #[test]
-    fn project_set_memory_sources_require_checkout_paths() {
+    fn project_set_memory_sources_allow_missing_checkout_paths() {
         let root = tempfile::tempdir().expect("central config root should exist");
         std::fs::write(root.path().join("integration.md"), "integration\n")
             .expect("integration instructions");
@@ -2931,12 +2925,9 @@ scheduler:
             &format!("    checkout_path: {}/checkout\n", root.path().display()),
             "",
         );
-        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
-            .expect_err("active project-set source without checkout must fail");
-        assert!(matches!(
-            error,
-            CentralConfigError::MissingProjectSetCheckout { repository } if repository == "core-repo"
-        ));
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("project-set repositories may rely on verified generation checkouts");
+        assert!(resolved.memory_sources.is_empty());
     }
 
     #[test]

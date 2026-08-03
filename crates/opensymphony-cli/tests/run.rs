@@ -1023,6 +1023,10 @@ fn linear_issue_state_node(state: &str) -> Value {
         "id": "issue-492",
         "identifier": "COE-492",
         "updatedAt": "2026-06-21T00:01:00Z",
+        "project": {
+            "id": "project-test",
+            "slugId": "test-project"
+        },
         "state": {
             "id": format!("state-{}", state.to_ascii_lowercase().replace(' ', "-")),
             "name": state,

@@ -134,6 +134,10 @@ The current local supervisor assumptions validated against this pin are:
   query parameter when an API key is present
 - the server also accepts WebSocket header auth, with query-param auth taking
   precedence when both are present
+- `ConversationCreateRequest.agent.mcp_config` is sent on conversation creation
+  using the top-level `mcpServers` map, with each server carrying its `url` and
+  optional `headers`; the pinned REST surface has no MCP-config update
+  operation, so a changed worker grant requires a fresh conversation
 - `openhands-sdk==1.24.0` exposes
   `LLM.subscription_login(vendor, model, force_login, open_browser, auth_method,
   **llm_kwargs)` for OpenAI ChatGPT/Codex subscription login. Its OpenAI path

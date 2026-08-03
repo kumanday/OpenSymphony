@@ -1716,6 +1716,7 @@ where
                             &self.config,
                             issue.project_id.as_deref(),
                             issue.project_slug.as_deref(),
+                            snapshot.project_identity_known,
                         ) {
                             self.release_issue(
                                 issue_id.clone(),
@@ -3806,6 +3807,7 @@ fn tracker_issue_belongs_to_configured_project(
         config,
         issue.project_id.as_deref(),
         issue.project_slug.as_deref(),
+        true,
     )
 }
 
@@ -3813,6 +3815,7 @@ fn project_belongs_to_configured_project(
     config: &SchedulerConfig,
     project_id: Option<&str>,
     project_slug: Option<&str>,
+    project_identity_known: bool,
 ) -> bool {
     if config.tracker_project_id.is_none()
         && config.tracker_project_slug.is_none()
@@ -3824,7 +3827,7 @@ fn project_belongs_to_configured_project(
     // Older tracker adapters may not expose project identity on a state-only
     // response. Preserve that compatibility path; a live Linear response now
     // carries the identity so moved issues are still fenced immediately.
-    if project_id.is_none() && project_slug.is_none() {
+    if !project_identity_known && project_id.is_none() && project_slug.is_none() {
         return true;
     }
     if let Some(config_project_id) = config.tracker_project_id.as_deref()
@@ -4358,5 +4361,44 @@ mod tests {
         let removed = issue_with_project(None, None);
 
         assert!(project_identity_changed(&previous, &removed));
+    }
+
+    #[test]
+    fn known_projectless_snapshot_does_not_belong_to_configured_project() {
+        let config = SchedulerConfig {
+            poll_interval_ms: 1,
+            max_concurrent_agents: 1,
+            max_turns: 1,
+            max_concurrent_agents_by_state: BTreeMap::new(),
+            retry_policy: RetryPolicy::default(),
+            max_retry_attempts: None,
+            stall_timeout_ms: None,
+            active_states: vec!["In Progress".to_owned()],
+            terminal_states: vec!["Done".to_owned()],
+            tracker_project_id: Some("project-a".to_owned()),
+            tracker_project_slug: None,
+            tracker_project_ids: Vec::new(),
+            tracker_project_slugs: Vec::new(),
+            routing: RoutingConfig {
+                harness: "rust_native".to_owned(),
+                model: None,
+                model_profile: None,
+                harness_env: "HARNESS".to_owned(),
+                model_env: "MODEL".to_owned(),
+                model_profile_env: "MODEL_PROFILE".to_owned(),
+                harness_from_env: false,
+                model_from_env: false,
+                model_profile_from_env: false,
+                dry_run: false,
+            },
+            repository_routing: None,
+        };
+
+        assert!(!project_belongs_to_configured_project(
+            &config, None, None, true
+        ));
+        assert!(project_belongs_to_configured_project(
+            &config, None, None, false
+        ));
     }
 }
