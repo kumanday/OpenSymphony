@@ -19,9 +19,7 @@ use crate::opensymphony_openhands::{
     SupervisedServerConfig, SupervisorConfig, SupervisorError, TerminalExecutionStatus,
     TransportConfig,
 };
-use crate::opensymphony_workflow::{
-    DEFAULT_OPENHANDS_LLM_MODEL, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
-};
+use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition};
 use crate::opensymphony_workspace::{
     CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueManifest,
     TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle, WorkspaceManager,
@@ -1126,27 +1124,8 @@ async fn current_debug_runtime_envelope(
         .model_profile
         .clone()
         .unwrap_or_else(|| "default".to_owned());
-    desired.model = Some(effective_debug_model(workflow));
+    desired.model = workflow.config.routing.model.clone();
     Ok(desired)
-}
-
-fn effective_debug_model(workflow: &ResolvedWorkflow) -> String {
-    workflow
-        .config
-        .routing
-        .model
-        .clone()
-        .or_else(|| {
-            workflow
-                .extensions
-                .openhands
-                .conversation
-                .agent
-                .llm
-                .as_ref()
-                .and_then(|llm| llm.model.clone())
-        })
-        .unwrap_or_else(|| DEFAULT_OPENHANDS_LLM_MODEL.to_owned())
 }
 
 fn resolve_config_path(
@@ -2216,27 +2195,6 @@ mod tests {
                 detail: "connection refused".to_string(),
             }
         ));
-    }
-
-    #[test]
-    fn debug_runtime_uses_effective_default_openhands_model() {
-        let runtime = sample_debug_runtime(None);
-        let mut workflow = runtime.workflow.clone();
-        workflow.config.routing.model = None;
-        workflow
-            .extensions
-            .openhands
-            .conversation
-            .agent
-            .llm
-            .as_mut()
-            .expect("sample workflow should have an OpenHands LLM")
-            .model = None;
-
-        assert_eq!(
-            super::effective_debug_model(&workflow),
-            super::DEFAULT_OPENHANDS_LLM_MODEL
-        );
     }
 
     #[test]

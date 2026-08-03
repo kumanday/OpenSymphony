@@ -2001,7 +2001,9 @@ where
         if let Some(retry) = retry.as_ref() {
             replacement_execution = replacement_execution.restore_retry(retry.clone())?;
         }
-        let replacement_workspace = if retry.is_some() && has_resolved_replacement {
+        let replacement_workspace = if retain_workspace {
+            execution.workspace().cloned()
+        } else if retry.is_some() && has_resolved_replacement {
             match self
                 .workspace
                 .ensure_workspace(&replacement, observed_at)

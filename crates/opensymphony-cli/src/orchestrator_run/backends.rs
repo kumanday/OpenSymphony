@@ -581,6 +581,13 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
+fn parse_superseded_harness_manifests(
+    raw: &str,
+) -> Result<Option<Vec<IssueConversationManifest>>, String> {
+    serde_json::from_str(raw)
+        .map_err(|error| format!("superseded harness evidence is malformed: {error}"))
+}
+
 async fn persist_superseded_harness_manifest(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
@@ -593,10 +600,7 @@ async fn persist_superseded_harness_manifest(
         .map_err(|error| error.to_string())?;
     let mut manifests = raw
         .as_deref()
-        .map(|raw| {
-            serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(raw)
-                .map_err(|error| format!("superseded harness evidence is malformed: {error}"))
-        })
+        .map(parse_superseded_harness_manifests)
         .transpose()?
         .flatten()
         .unwrap_or_default();
@@ -625,11 +629,8 @@ async fn clear_superseded_harness_manifest(
     else {
         return Ok(());
     };
-    let Some(mut manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
-        .ok()
-        .flatten()
-    else {
-        return Err("superseded harness evidence is malformed".to_owned());
+    let Some(mut manifests) = parse_superseded_harness_manifests(&raw)? else {
+        return Ok(());
     };
     manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
     let replacement = (!manifests.is_empty()).then_some(&manifests);
@@ -652,13 +653,10 @@ async fn archive_superseded_harness_sessions(
         return Ok(());
     };
     let checkout = manager.verify_checkout_for_retry(workspace).await?;
-    let Some(manifests) = serde_json::from_str::<Option<Vec<IssueConversationManifest>>>(&raw)
-        .ok()
-        .flatten()
+    let Some(manifests) =
+        parse_superseded_harness_manifests(&raw).map_err(CliWorkspaceError::OpenHandsLifecycle)?
     else {
-        return Err(CliWorkspaceError::OpenHandsLifecycle(
-            "superseded OpenHands conversation evidence is malformed".to_owned(),
-        ));
+        return Ok(());
     };
     for manifest in &manifests {
         let Some(envelope) = manifest.runtime_envelope.as_ref() else {
@@ -5635,6 +5633,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn cleared_superseded_harness_evidence_is_an_empty_sentinel() {
+        assert_eq!(
+            parse_superseded_harness_manifests("null")
+                .expect("the cleared sentinel should be valid evidence"),
+            None
+        );
+        assert!(parse_superseded_harness_manifests("{not-json").is_err());
+    }
 
     fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
         Arc::new(AsyncMutex::new(HashMap::new()))
