@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -1948,7 +1948,13 @@ struct MemoryServerState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MemoryScopeGrantRegistry {
-    grants: Arc<RwLock<HashMap<String, MemoryScopeGrant>>>,
+    state: Arc<RwLock<MemoryScopeGrantRegistryState>>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryScopeGrantRegistryState {
+    grants: HashMap<String, MemoryScopeGrant>,
+    revoked_issues: HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1961,16 +1967,21 @@ pub(crate) struct MemoryScopeGrant {
 }
 
 impl MemoryScopeGrantRegistry {
-    pub(crate) fn issue_or_refresh(
+    pub(crate) fn issue_or_refresh_with_lifecycle(
         &self,
         project: &str,
         execution_repo: &str,
         authorized_repositories: BTreeSet<String>,
         issue: &str,
         checkout_generation: Option<String>,
-    ) -> String {
-        let mut grants = self.grants.write().expect("memory grant registry poisoned");
-        if let Some((token, grant)) = grants.iter_mut().find(|(_, grant)| grant.issue == issue) {
+    ) -> (String, bool) {
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let requires_fresh_conversation = state.revoked_issues.remove(issue);
+        if let Some((token, grant)) = state
+            .grants
+            .iter_mut()
+            .find(|(_, grant)| grant.issue == issue)
+        {
             *grant = MemoryScopeGrant {
                 project: project.to_owned(),
                 execution_repo: execution_repo.to_owned(),
@@ -1978,11 +1989,11 @@ impl MemoryScopeGrantRegistry {
                 issue: issue.to_owned(),
                 checkout_generation,
             };
-            return token.clone();
+            return (token.clone(), requires_fresh_conversation);
         }
 
         let token = format!("opensymphony-worker-{}", Uuid::new_v4());
-        grants.insert(
+        state.grants.insert(
             token.clone(),
             MemoryScopeGrant {
                 project: project.to_owned(),
@@ -1992,28 +2003,33 @@ impl MemoryScopeGrantRegistry {
                 checkout_generation,
             },
         );
-        token
+        (token, requires_fresh_conversation)
     }
 
     pub(crate) fn revoke_issue(&self, issue: &str) -> bool {
-        let mut grants = self.grants.write().expect("memory grant registry poisoned");
-        let tokens = grants
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let tokens = state
+            .grants
             .iter()
             .filter(|(_, grant)| grant.issue == issue)
             .map(|(token, _)| token.clone())
             .collect::<Vec<_>>();
         let revoked = !tokens.is_empty();
         for token in tokens {
-            grants.remove(&token);
+            state.grants.remove(&token);
+        }
+        if revoked {
+            state.revoked_issues.insert(issue.to_owned());
         }
         revoked
     }
 
     fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
         token.and_then(|token| {
-            self.grants
+            self.state
                 .read()
                 .expect("memory grant registry poisoned")
+                .grants
                 .get(token)
                 .cloned()
         })
@@ -12878,14 +12894,14 @@ Public memory concept.
     #[test]
     fn worker_memory_grant_refresh_preserves_bearer_for_conversation_reuse() {
         let registry = MemoryScopeGrantRegistry::default();
-        let token = registry.issue_or_refresh(
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
             "project-alpha",
             "repo-alpha",
             BTreeSet::from(["repo-alpha".to_owned()]),
             "COE-549",
             Some("generation-1".to_owned()),
         );
-        let refreshed = registry.issue_or_refresh(
+        let (refreshed, fresh_again) = registry.issue_or_refresh_with_lifecycle(
             "project-alpha",
             "repo-alpha",
             BTreeSet::from(["repo-alpha".to_owned()]),
@@ -12893,6 +12909,8 @@ Public memory concept.
             Some("generation-2".to_owned()),
         );
 
+        assert!(!fresh);
+        assert!(!fresh_again);
         assert_eq!(refreshed, token);
         assert_eq!(
             registry
@@ -12907,7 +12925,7 @@ Public memory concept.
     #[test]
     fn worker_memory_grant_can_be_revoked_at_issue_lifecycle_boundary() {
         let registry = MemoryScopeGrantRegistry::default();
-        let token = registry.issue_or_refresh(
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
             "project-alpha",
             "repo-alpha",
             BTreeSet::from(["repo-alpha".to_owned()]),
@@ -12915,9 +12933,54 @@ Public memory concept.
             Some("generation-1".to_owned()),
         );
 
+        assert!(!fresh);
         assert!(registry.revoke_issue("COE-549"));
         assert!(registry.get(Some(&token)).is_none());
         assert!(!registry.revoke_issue("COE-549"));
+    }
+
+    #[test]
+    fn worker_memory_grant_reopen_requires_a_fresh_conversation_after_revocation() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let arguments = || {
+            (
+                "project-alpha",
+                "repo-alpha",
+                BTreeSet::from(["repo-alpha".to_owned()]),
+                "COE-549",
+                Some("generation-1".to_owned()),
+            )
+        };
+
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(!fresh);
+        assert!(registry.get(Some(&token)).is_some());
+
+        assert!(registry.revoke_issue("COE-549"));
+        let (reopened_token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(fresh);
+        assert_ne!(reopened_token, token);
+
+        let (_, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(!fresh);
     }
 
     #[test]

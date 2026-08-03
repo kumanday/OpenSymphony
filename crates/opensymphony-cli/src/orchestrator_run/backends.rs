@@ -2282,6 +2282,7 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
+            let mut memory_grant_requires_fresh_conversation = false;
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
                 scoped.project = worker_memory_project(&issue, &memory.project);
@@ -2309,15 +2310,17 @@ impl RuntimeWorkerBackend {
                     .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
                 scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    let token = grants.issue_or_refresh(
-                        &scoped.project,
-                        &scoped.execution_repo,
-                        authorized_repositories,
-                        issue.identifier.as_str(),
-                        runtime_envelope
-                            .as_ref()
-                            .map(|envelope| envelope.checkout_generation.clone()),
-                    );
+                    let (token, requires_fresh_conversation) = grants
+                        .issue_or_refresh_with_lifecycle(
+                            &scoped.project,
+                            &scoped.execution_repo,
+                            authorized_repositories,
+                            issue.identifier.as_str(),
+                            runtime_envelope
+                                .as_ref()
+                                .map(|envelope| envelope.checkout_generation.clone()),
+                        );
+                    memory_grant_requires_fresh_conversation = requires_fresh_conversation;
                     scoped.token = Some(token.clone());
                 }
                 scoped.authorized_repositories_by_project.clear();
@@ -2334,7 +2337,9 @@ impl RuntimeWorkerBackend {
                     .with_memory(worker_memory_env.as_ref().map(|memory| {
                         memory_access_from_runtime(
                             memory,
-                            (recovered || memory_grant_registry_recovered)
+                            (recovered
+                                || memory_grant_registry_recovered
+                                || memory_grant_requires_fresh_conversation)
                                 && memory.scope_grants.is_some(),
                         )
                     })),
