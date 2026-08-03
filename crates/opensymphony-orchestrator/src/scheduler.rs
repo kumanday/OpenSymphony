@@ -1987,6 +1987,11 @@ where
             }
         }
 
+        // Binding or project supersession ends the old issue scope even when
+        // the retained checkout is idle and no live worker needed aborting.
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
+
         let retry = execution.retry().cloned();
         if !retain_workspace
             && let Some(workspace) = execution.workspace().cloned()

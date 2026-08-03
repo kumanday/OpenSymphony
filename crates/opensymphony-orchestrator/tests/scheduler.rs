@@ -2980,14 +2980,45 @@ async fn project_scope_drift_supersedes_the_run_without_removing_the_checkout() 
     scheduler.tick(ts(100)).await.expect("initial dispatch");
     scheduler.tracker_mut().active[0].project_id = Some("project-two".to_string());
     scheduler.tracker_mut().active[0].project_slug = Some("project-two".to_string());
+
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("worker finished before project drift".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("finished worker should queue a continuation retry");
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-project-scope").expect("valid issue id"))
+            .expect("execution should remain tracked")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+
     scheduler
         .tick(ts(3_600_100))
         .await
-        .expect("project-only drift should supersede the old run");
+        .expect("project-only drift should supersede the idle retry");
 
     assert_eq!(scheduler.worker().launches.len(), 2);
-    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert!(scheduler.worker().aborted.is_empty());
     assert!(scheduler.workspace().removed.is_empty());
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-548-PROJECT-SCOPE".to_string()]
+    );
 
     scheduler
         .tick(ts(3_600_200))
