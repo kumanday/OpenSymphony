@@ -1115,6 +1115,21 @@ fn resolve_central_config(
         }
     }
     reject_checkout_credential_env_reuse(&config)?;
+    for (repository_id, repository) in &config.repositories {
+        let Some(credential) = config.credentials.get(&repository.credential) else {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.credential"),
+            });
+        };
+        if (credential.kind == "ssh-agent" && !is_ssh_clone_transport(&repository.remote.clone))
+            || (credential.kind == "environment"
+                && is_ssh_clone_transport(&repository.remote.clone))
+        {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.credential"),
+            });
+        }
+    }
     for (project_id, project) in &config.linear_projects {
         required_literal(project_id, "linear_projects.id")?;
         required_literal(
@@ -2194,6 +2209,23 @@ fn validate_remote_clone(value: &str) -> Result<(), CentralConfigError> {
         return Err(CentralConfigError::CredentialBearingRemote);
     }
     Ok(())
+}
+
+fn is_ssh_clone_transport(value: &str) -> bool {
+    if let Ok(url) = Url::parse(value) {
+        return matches!(
+            url.scheme().to_ascii_lowercase().as_str(),
+            "ssh" | "git+ssh"
+        );
+    }
+    let Some((authority, path)) = value.split_once(':') else {
+        return false;
+    };
+    !authority.is_empty()
+        && !path.starts_with('/')
+        && !authority
+            .chars()
+            .any(|character| matches!(character, '/' | '\\'))
 }
 
 fn is_credential_shaped_username(username: &str) -> bool {
@@ -3605,6 +3637,34 @@ scheduler:
             resolve_central_config(&root.path().join("config.yaml"), &source)
                 .expect("ordinary SSH usernames should not be treated as credentials");
         }
+    }
+
+    #[test]
+    fn central_config_rejects_repository_credential_transport_mismatches() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let https_with_ssh_agent = central_fixture(root.path()).replace(
+            "git@github.com:kumanday/OpenSymphony.git",
+            "https://github.com/kumanday/OpenSymphony.git",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &https_with_ssh_agent)
+            .expect_err("SSH credentials should not be paired with HTTPS clones");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "repositories.core-repo.credential"
+        ));
+
+        let ssh_with_environment = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: environment\n    variable: GITHUB_TOKEN",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &ssh_with_environment)
+            .expect_err("environment credentials should not be paired with SSH clones");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "repositories.core-repo.credential"
+        ));
     }
 
     #[test]

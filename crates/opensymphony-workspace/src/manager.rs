@@ -4159,6 +4159,7 @@ async fn discover_agents_with_credentials(
     root: &Path,
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<Vec<PathBuf>, WorkspaceError> {
+    const MAX_INSTRUCTION_CANDIDATES: usize = 10_000;
     const MAX_VISITED_DIRECTORIES: usize = 4_096;
     const MAX_VISITED_ENTRIES: usize = 100_000;
     let mut pending = vec![root.to_path_buf()];
@@ -4245,7 +4246,7 @@ async fn discover_agents_with_credentials(
                 && let Ok(relative) = path.strip_prefix(root)
             {
                 instruction_candidates += 1;
-                if instruction_candidates > 10_000 {
+                if instruction_candidates > MAX_INSTRUCTION_CANDIDATES {
                     return Err(checkout_verification(
                         root,
                         "instruction discovery exceeded the candidate limit",
@@ -4275,6 +4276,8 @@ async fn tracked_instruction_paths(
     root: &Path,
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<Vec<PathBuf>, WorkspaceError> {
+    const MAX_TRACKED_INSTRUCTION_PATHS: usize = 10_000;
+    const MAX_TRACKED_INSTRUCTION_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -4286,23 +4289,70 @@ async fn tracked_instruction_paths(
     command.env_remove("GIT_OBJECT_DIRECTORY");
     command.env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
     command.env("GIT_NO_REPLACE_OBJECTS", "1");
-    let output = command
-        .output()
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| checkout_verification(root, "tracked instruction probe failed"))?;
+    let mut paths = Vec::new();
+    let mut record = Vec::new();
+    let mut buffer = vec![0_u8; 8 * 1024];
+    let mut output_bytes = 0;
+    loop {
+        let read = stdout
+            .read(&mut buffer)
+            .await
+            .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
+        if read == 0 {
+            break;
+        }
+        output_bytes += read;
+        if output_bytes > MAX_TRACKED_INSTRUCTION_OUTPUT_BYTES {
+            return Err(checkout_verification(
+                root,
+                "tracked instruction probe exceeded the output limit",
+            ));
+        }
+        for byte in &buffer[..read] {
+            if *byte == 0 {
+                if record.is_empty() {
+                    continue;
+                }
+                if paths.len() >= MAX_TRACKED_INSTRUCTION_PATHS {
+                    return Err(checkout_verification(
+                        root,
+                        "tracked instruction probe exceeded the path limit",
+                    ));
+                }
+                paths.push(path_from_git_bytes(&record));
+                record.clear();
+            } else {
+                record.push(*byte);
+            }
+        }
+    }
+    if !record.is_empty() {
+        return Err(checkout_verification(
+            root,
+            "tracked instruction probe returned malformed output",
+        ));
+    }
+    let status = child
+        .wait()
         .await
         .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
-    if !output.status.success() {
+    if !status.success() {
         return Err(checkout_verification(
             root,
             "tracked instruction probe exited unsuccessfully",
         ));
     }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .map(path_from_git_bytes)
-        .filter(|path| path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md")))
-        .collect())
+    Ok(paths)
 }
 
 #[cfg(unix)]

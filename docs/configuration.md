@@ -59,6 +59,9 @@ path, and review profile into the checkout policy. Credential values are used
 only while staging the clone; they are not written to remotes, manifests,
 prompts, logs, or process arguments. The resulting config and inventory
 generations are copied into the run envelope and must match on recovery.
+The checkout credential must match the clone transport: `ssh-agent` is valid
+for SSH clone URLs, while `environment` credentials are rejected for SSH
+clones.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before
