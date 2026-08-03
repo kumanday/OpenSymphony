@@ -1994,16 +1994,6 @@ fn maybe_start_local_supervisor(
         .env
         .clone();
     supervisor_config.env_remove = runtime.checkout_credential_envs.clone();
-    supervisor_config.env_remove.retain(|variable| {
-        !runtime
-            .workflow
-            .extensions
-            .openhands
-            .local_server
-            .env
-            .keys()
-            .any(|configured| environment_variable_names_equal(variable, configured))
-    });
     supervisor_config.startup_timeout = Duration::from_millis(
         runtime
             .workflow
@@ -2853,15 +2843,6 @@ fn build_rehydrate_client(
     let mut config = SupervisedServerConfig::new(tooling);
     config.extra_env = workflow.extensions.openhands.local_server.env.clone();
     config.env_remove = checkout_credential_envs.clone();
-    config.env_remove.retain(|variable| {
-        !workflow
-            .extensions
-            .openhands
-            .local_server
-            .env
-            .keys()
-            .any(|configured| environment_variable_names_equal(variable, configured))
-    });
     config.startup_timeout = Duration::from_millis(
         workflow
             .extensions
