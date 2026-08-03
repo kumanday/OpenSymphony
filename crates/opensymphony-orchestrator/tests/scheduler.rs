@@ -2887,6 +2887,114 @@ async fn bounded_dispatch_detail_rejects_issues_outside_configured_project() {
 }
 
 #[tokio::test]
+async fn conflicting_scalar_and_vector_project_slugs_fail_closed() {
+    let mut issue = tracker_issue(
+        "lin-project-slug-conflict",
+        "COE-548-SLUG-CONFLICT",
+        "Todo",
+        0,
+    );
+    issue.project_slug = Some("configured-project".to_string());
+    issue.blocked_by = vec![TrackerIssueBlocker {
+        id: "lin-blocker".to_string(),
+        identifier: "COE-548-BLOCKER".to_string(),
+        title: "Blocking issue".to_string(),
+        state: TrackerIssueState {
+            id: "in-progress".to_string(),
+            name: "In Progress".to_string(),
+            tracker_type: "started".to_string(),
+            kind: TrackerIssueStateKind::Started,
+        },
+    }];
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.tracker_project_slug = Some("configured-project".to_string());
+    config.tracker_project_slugs = vec!["other-project".to_string()];
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("conflicting project scope should be ignored");
+
+    assert!(scheduler.tracker().detail_requests.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn project_scope_drift_supersedes_the_run_without_removing_the_checkout() {
+    let mut issue = tracker_issue(
+        "lin-project-scope",
+        "COE-548-PROJECT-SCOPE",
+        "In Progress",
+        0,
+    );
+    issue.project_id = Some("project-id".to_string());
+    issue.project_slug = Some("project-id".to_string());
+    issue.labels = vec!["repo:one".to_string()];
+    issue.sub_issues.clear();
+    let tracker = FakeTracker {
+        active: vec![issue],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut routing = repository_routing();
+    let repository_id = routing
+        .inventory
+        .get("one")
+        .expect("repository one should exist")
+        .identity
+        .id
+        .clone();
+    routing.project_repositories.insert(
+        "project-two".to_string(),
+        [repository_id].into_iter().collect(),
+    );
+    routing.active_projects.insert("project-two".to_string());
+    let mut config = scheduler_config();
+    config.tracker_project_id = Some("project-id".to_string());
+    config.tracker_project_slug = Some("project-id".to_string());
+    config.tracker_project_ids = vec!["project-id".to_string(), "project-two".to_string()];
+    config.tracker_project_slugs = vec!["project-id".to_string(), "project-two".to_string()];
+    config.repository_routing = Some(routing);
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler.tick(ts(100)).await.expect("initial dispatch");
+    scheduler.tracker_mut().active[0].project_id = Some("project-two".to_string());
+    scheduler.tracker_mut().active[0].project_slug = Some("project-two".to_string());
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("project-only drift should supersede the old run");
+
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert!(scheduler.workspace().removed.is_empty());
+
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("replacement should keep using the retained checkout");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert!(scheduler.workspace().removed.is_empty());
+    assert!(
+        scheduler
+            .execution(&IssueId::new("lin-project-scope").expect("issue id"))
+            .expect("replacement execution should remain tracked")
+            .workspace()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn tracker_inactive_failed_execution_reopens_after_reactivation() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-271", "COE-271", "In Progress", 0)],

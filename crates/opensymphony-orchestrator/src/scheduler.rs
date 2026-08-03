@@ -1317,6 +1317,7 @@ where
                                 issue_id.clone(),
                                 normalized.clone(),
                                 observed_at,
+                                false,
                             )
                             .await?;
                         }
@@ -1628,21 +1629,28 @@ where
                     }
                 }
             }
-            if self
-                .executions
-                .get(&normalized.id)
-                .is_some_and(|execution| {
-                    execution.workspace().is_some()
-                        && (RepositoryBindingOutcome::binding_changed_opt(
-                            execution.issue().repository_binding.as_ref(),
-                            normalized.repository_binding.as_ref(),
-                        ) || workspace_key_changed_for_issue(execution, &normalized)
-                            || project_identity_changed(execution.issue(), &normalized))
-                })
-            {
-                self.supersede_binding(normalized.id.clone(), normalized, observed_at)
+            if let Some(execution) = self.executions.get(&normalized.id) {
+                let repository_binding_changed = RepositoryBindingOutcome::binding_changed_opt(
+                    execution.issue().repository_binding.as_ref(),
+                    normalized.repository_binding.as_ref(),
+                );
+                let workspace_key_changed = workspace_key_changed_for_issue(execution, &normalized);
+                let retain_workspace = execution.workspace().is_some()
+                    && project_identity_changed(execution.issue(), &normalized)
+                    && !repository_binding_changed
+                    && !workspace_key_changed;
+                if execution.workspace().is_some()
+                    && (repository_binding_changed || workspace_key_changed || retain_workspace)
+                {
+                    self.supersede_binding(
+                        normalized.id.clone(),
+                        normalized,
+                        observed_at,
+                        retain_workspace,
+                    )
                     .await?;
-                continue;
+                    continue;
+                }
             }
             if self
                 .interrupt_human_review_polling_for_merging(&normalized, observed_at)
@@ -1718,18 +1726,27 @@ where
                             .await?;
                             continue;
                         }
+                        let repository_binding_changed =
+                            RepositoryBindingOutcome::binding_changed_opt(
+                                existing.issue().repository_binding.as_ref(),
+                                issue.repository_binding.as_ref(),
+                            );
+                        let retain_workspace = project_identity_changed(existing.issue(), &issue)
+                            && !repository_binding_changed;
                         if matches!(
                             existing.status(),
                             SchedulerStatus::Claimed
                                 | SchedulerStatus::Running
                                 | SchedulerStatus::RetryQueued
-                        ) && (RepositoryBindingOutcome::binding_changed_opt(
-                            existing.issue().repository_binding.as_ref(),
-                            issue.repository_binding.as_ref(),
-                        ) || project_identity_changed(existing.issue(), &issue))
+                        ) && (repository_binding_changed || retain_workspace)
                         {
-                            self.supersede_binding(issue_id.clone(), issue, observed_at)
-                                .await?;
+                            self.supersede_binding(
+                                issue_id.clone(),
+                                issue,
+                                observed_at,
+                                retain_workspace,
+                            )
+                            .await?;
                             continue;
                         }
                         if self
@@ -1928,6 +1945,7 @@ where
         issue_id: IssueId,
         replacement: NormalizedIssue,
         observed_at: TimestampMs,
+        retain_workspace: bool,
     ) -> Result<(), SchedulerError> {
         let Some(mut execution) = self.remove_execution(&issue_id) else {
             self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
@@ -1964,7 +1982,8 @@ where
         }
 
         let retry = execution.retry().cloned();
-        if let Some(workspace) = execution.workspace().cloned()
+        if !retain_workspace
+            && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.remove_workspace(&workspace).await
         {
             self.insert_execution(issue_id, execution);
@@ -3807,16 +3826,27 @@ fn project_belongs_to_configured_project(
     }) {
         return true;
     }
-    config
-        .tracker_project_slug
-        .as_deref()
-        .is_some_and(|config_project_slug| {
-            project_slug.is_some_and(|issue_project_slug| {
-                issue_project_slug
-                    .trim()
-                    .eq_ignore_ascii_case(config_project_slug.trim())
-            })
-        })
+    let singular_slug_matches =
+        config
+            .tracker_project_slug
+            .as_deref()
+            .is_some_and(|config_project_slug| {
+                let singular_matches_first_vector_entry = config
+                    .tracker_project_slugs
+                    .first()
+                    .is_none_or(|first_project_slug| {
+                        first_project_slug
+                            .trim()
+                            .eq_ignore_ascii_case(config_project_slug.trim())
+                    });
+                singular_matches_first_vector_entry
+                    && project_slug.is_some_and(|issue_project_slug| {
+                        issue_project_slug
+                            .trim()
+                            .eq_ignore_ascii_case(config_project_slug.trim())
+                    })
+            });
+    singular_slug_matches
         || project_slug.is_some_and(|issue_project_slug| {
             config.tracker_project_slugs.iter().any(|project_slug| {
                 issue_project_slug
