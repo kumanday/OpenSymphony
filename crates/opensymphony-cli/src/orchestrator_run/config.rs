@@ -1534,7 +1534,7 @@ fn collect_central_env_references(
                     continue;
                 };
                 let child_path = format!("{path}.{key}");
-                if key.ends_with("_env")
+                if normalize_secret_field_name(key).ends_with("_env")
                     && let Some(variable) = value.as_str()
                 {
                     references.insert(variable.to_owned(), "openhands.front_matter");
@@ -4106,6 +4106,28 @@ scheduler:
             .expect_err("hyphenated environment selectors must use environment names");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
         assert!(!error.to_string().contains("literal-secret"));
+    }
+
+    #[test]
+    fn central_config_rejects_checkout_credential_reuse_by_camel_case_openhands_selector() {
+        let root = tempfile::tempdir().expect("temporary config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: environment\n    variable: GITHUB_TOKEN",
+        ) + "\nopenhands:\n  front_matter:\n    conversation:\n      agent:\n        tools:\n          - name: github\n            params:\n              accessTokenEnv: GITHUB_TOKEN\n";
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("camelCase OpenHands selectors must not reuse checkout credentials");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "openhands.front_matter"
+        ));
     }
 
     #[test]
