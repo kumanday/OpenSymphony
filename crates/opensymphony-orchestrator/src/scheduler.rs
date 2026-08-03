@@ -3342,6 +3342,8 @@ where
         reason: ReleaseReason,
         outcome: Option<WorkerOutcomeRecord>,
     ) -> Result<IssueExecution, SchedulerError> {
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
         let cleanup_terminal = matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted

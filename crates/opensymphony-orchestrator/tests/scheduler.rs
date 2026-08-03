@@ -2281,7 +2281,7 @@ async fn retry_exhausted_cleanup_policy_survives_terminal_transition() {
     assert_eq!(scheduler.workspace().persisted_retry_exhaustions, vec![1]);
     assert_eq!(
         scheduler.workspace().revoked_issue_resources,
-        vec!["COE-542".to_string()]
+        vec!["COE-542".to_string(), "COE-542".to_string()]
     );
     assert_eq!(
         scheduler.workspace().cleared_retry_exhaustion,
@@ -5185,6 +5185,10 @@ async fn detached_outcome_does_not_schedule_retry() {
     assert!(execution.retry().is_none());
     // No new launches should have occurred
     assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-300".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -5237,6 +5241,10 @@ async fn cancel_failed_outcome_does_not_schedule_retry() {
     assert!(execution.retry().is_none());
     // No new launches should have occurred
     assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-301".to_string()]
+    );
 }
 
 #[tokio::test]

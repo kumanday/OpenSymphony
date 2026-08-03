@@ -2724,7 +2724,7 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let stream = match client
+        let mut stream = match client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
         {
@@ -2747,6 +2747,19 @@ impl IssueSessionRunner {
                 )));
             }
         };
+
+        if let Err(reason) =
+            verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
+        {
+            let _ = stream.close().await;
+            return Ok(ReuseSession::Reset {
+                reason: format!(
+                    "existing conversation {} workspace is incompatible: {reason}",
+                    manifest_conversation_id
+                ),
+                manifest: Box::new(manifest),
+            });
+        }
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;

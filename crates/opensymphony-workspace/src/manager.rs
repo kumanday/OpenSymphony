@@ -1860,7 +1860,8 @@ impl WorkspaceManager {
     ) -> Result<GitFacts, WorkspaceError> {
         let inside = self
             .git(checkout, &["rev-parse", "--is-inside-work-tree"])
-            .await?;
+            .await
+            .map_err(|_| checkout_verification(checkout, "not a Git worktree"))?;
         if inside != "true" {
             return Err(checkout_verification(checkout, "not a Git worktree"));
         }
@@ -4278,7 +4279,7 @@ async fn tracked_instruction_paths(
     command
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "--cached", "-z", "--"]);
+        .args(["ls-files", "--cached", "-z", "--", ":(glob)**/AGENTS.md"]);
     for variable in checkout_credential_envs {
         command.env_remove(variable);
     }

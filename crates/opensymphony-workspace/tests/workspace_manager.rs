@@ -497,13 +497,25 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         &["config", "--unset", "core.worktree"],
     );
 
+    std::fs::remove_dir_all(first.handle.workspace_path().join(".git"))
+        .expect("broken checkout Git metadata should be removable");
+    let repaired_missing_git = manager
+        .ensure(&issue)
+        .await
+        .expect("missing Git metadata should quarantine and republish");
+    assert!(repaired_missing_git.created);
+    assert_ne!(
+        repaired_missing_git.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+
     std::fs::write(source.join("README.md"), "advanced upstream\n")
         .expect("upstream update should be written");
     git(&source, &["add", "README.md"]);
     git(&source, &["commit", "-m", "advance upstream"]);
     git(&source, &["push", "origin", "main"]);
     manager
-        .verify_checkout(&first.handle)
+        .verify_checkout(&repaired_missing_git.handle)
         .await
         .expect("recorded pinned target should remain valid after origin advances");
 
@@ -532,7 +544,7 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     ));
 
     git(
-        first.handle.workspace_path(),
+        repaired_missing_git.handle.workspace_path(),
         &[
             "remote",
             "set-url",
