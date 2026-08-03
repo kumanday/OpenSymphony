@@ -2882,29 +2882,6 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
-        if let Err(detail) =
-            verify_conversation_workspace(&conversation, workspace.workspace_path()).await
-        {
-            return self
-                .persist_failure_without_stream(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    observed_run,
-                    IssueSessionPromptKind::Full,
-                    None,
-                    NormalizedOutcome {
-                        kind: WorkerOutcomeKind::Failed,
-                        summary: "OpenHands conversation workspace did not match verified checkout"
-                            .to_owned(),
-                        error: Some(detail),
-                    },
-                )
-                .await
-                .map(Box::new)
-                .map(Step::EarlyResult);
-        }
-
         let stream = match self
             .client
             .attach_runtime_stream(
