@@ -1350,11 +1350,7 @@ fn resolve_central_config(
     let repository_checkouts = build_repository_checkouts(&config)?;
     let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
-    let repository_instruction_path = legacy_repository_instruction_path.or_else(|| {
-        integration_instructions
-            .as_ref()
-            .map(|instructions| instructions.path.clone())
-    });
+    let repository_instruction_path = legacy_repository_instruction_path;
     Ok(ResolvedCentralConfig {
         instance_id,
         state_root,
@@ -3011,6 +3007,10 @@ scheduler:
                 .canonicalize()
                 .expect("central root should canonicalize")
                 .join("integration.md")
+        );
+        assert!(
+            resolved.repository_instruction_path.is_none(),
+            "project-set integration instructions must remain parent-only"
         );
     }
 

@@ -4065,7 +4065,10 @@ fn remote_contains_credentials(remote: &str) -> bool {
         if url.password().is_some() {
             return true;
         }
-        if !url.username().is_empty() && !url.scheme().eq_ignore_ascii_case("ssh") {
+        if !url.username().is_empty()
+            && (is_credential_shaped_username(url.username())
+                || !url.scheme().eq_ignore_ascii_case("ssh"))
+        {
             return true;
         }
     }
@@ -4082,7 +4085,31 @@ fn remote_contains_credentials(remote: &str) -> bool {
     host.is_empty()
         || username.is_empty()
         || username.contains(':')
-        || username.eq_ignore_ascii_case("token")
+        || is_credential_shaped_username(username)
+}
+
+fn is_credential_shaped_username(username: &str) -> bool {
+    let username = username.trim().to_ascii_lowercase();
+    [
+        "bearer ",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "oauth",
+        "pat-",
+        "pat_",
+        "token",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+    ]
+    .iter()
+    .any(|prefix| username.starts_with(prefix))
 }
 
 fn git_askpass_username(provider: &str) -> &str {
@@ -4862,9 +4889,15 @@ mod tests {
         assert!(!remote_contains_credentials(
             "ssh://deploy@example.com/org/repo.git"
         ));
+        assert!(remote_contains_credentials(
+            "ssh://ghp_secret@example.com/org/repo.git"
+        ));
         assert!(!remote_contains_credentials("git@example.com:org/repo.git"));
         assert!(!remote_contains_credentials(
             "deploy@example.com:org/repo.git"
+        ));
+        assert!(remote_contains_credentials(
+            "ghp_secret@example.com:org/repo.git"
         ));
         assert!(remote_contains_credentials(
             "ssh://deploy:password@example.com/org/repo.git"

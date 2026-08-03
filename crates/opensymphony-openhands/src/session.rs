@@ -2882,6 +2882,28 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        if let Err(detail) =
+            verify_conversation_workspace(&conversation, workspace.workspace_path()).await
+        {
+            return self
+                .persist_failure_without_stream(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    IssueSessionPromptKind::Full,
+                    None,
+                    NormalizedOutcome {
+                        kind: WorkerOutcomeKind::Failed,
+                        summary: "OpenHands conversation workspace did not match verified checkout"
+                            .to_owned(),
+                        error: Some(detail),
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult);
+        }
 
         let stream = match self
             .client
@@ -2919,6 +2941,29 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        if let Err(detail) =
+            verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
+        {
+            return self
+                .persist_failure_without_stream(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    IssueSessionPromptKind::Full,
+                    None,
+                    NormalizedOutcome {
+                        kind: WorkerOutcomeKind::Failed,
+                        summary:
+                            "OpenHands runtime stream workspace did not match verified checkout"
+                                .to_owned(),
+                        error: Some(detail),
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult);
+        }
 
         let attached_at = Utc::now();
         let mut manifest = IssueConversationManifest::new(
@@ -3744,6 +3789,27 @@ impl IssueSessionRunner {
             run_status,
         })
     }
+}
+
+async fn verify_conversation_workspace(
+    conversation: &Conversation,
+    expected_workspace: &Path,
+) -> Result<(), String> {
+    let expected = tokio::fs::canonicalize(expected_workspace)
+        .await
+        .map_err(|error| format!("failed to canonicalize verified checkout: {error}"))?;
+    let actual_path = Path::new(&conversation.workspace.working_dir);
+    let actual = tokio::fs::canonicalize(actual_path)
+        .await
+        .map_err(|error| format!("failed to canonicalize OpenHands workspace: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "OpenHands workspace `{}` does not match verified checkout `{}`",
+            actual.display(),
+            expected.display()
+        ));
+    }
+    Ok(())
 }
 
 fn redacted_openhands_error(error: &OpenHandsError, request: &ConversationCreateRequest) -> String {
@@ -5483,5 +5549,54 @@ mod tests {
 
         assert!(!detail.contains("worker-secret"));
         assert!(detail.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn conversation_workspace_must_match_verified_checkout() {
+        let root = tempfile::tempdir().expect("temporary workspace root should exist");
+        let checkout = root.path().join("checkout");
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&checkout).expect("checkout should exist");
+        std::fs::create_dir_all(&other).expect("other workspace should exist");
+        let mut conversation = Conversation {
+            conversation_id: Uuid::new_v4(),
+            workspace: WorkspaceConfig {
+                working_dir: checkout.display().to_string(),
+                kind: "LocalWorkspace".to_owned(),
+            },
+            persistence_dir: root.path().join("state").display().to_string(),
+            max_iterations: 1,
+            stuck_detection: true,
+            execution_status: "idle".to_owned(),
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_owned(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_owned(),
+                llm: LlmConfig {
+                    model: "test".to_owned(),
+                    api_key: None,
+                    base_url: None,
+                    usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
+                },
+                condenser: None,
+                tools: None,
+                mcp_config: None,
+                include_default_tools: None,
+            },
+            stats: None,
+        };
+
+        verify_conversation_workspace(&conversation, &checkout)
+            .await
+            .expect("matching canonical workspace should be accepted");
+        conversation.workspace.working_dir = other.display().to_string();
+        let error = verify_conversation_workspace(&conversation, &checkout)
+            .await
+            .expect_err("different canonical workspace should be rejected");
+        assert!(error.contains("does not match verified checkout"));
     }
 }
