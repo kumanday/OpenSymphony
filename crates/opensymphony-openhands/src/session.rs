@@ -2874,7 +2874,7 @@ impl IssueSessionRunner {
                         NormalizedOutcome {
                             kind: WorkerOutcomeKind::Failed,
                             summary: "failed to create OpenHands conversation".to_string(),
-                            error: Some(error.to_string()),
+                            error: Some(redacted_openhands_error(&error, &request)),
                         },
                     )
                     .await
@@ -3744,6 +3744,36 @@ impl IssueSessionRunner {
             run_status,
         })
     }
+}
+
+fn redacted_openhands_error(error: &OpenHandsError, request: &ConversationCreateRequest) -> String {
+    let mut detail = error.to_string();
+    let Some(servers) = request
+        .agent
+        .mcp_config
+        .as_ref()
+        .and_then(|config| config.get("mcpServers"))
+        .and_then(Value::as_object)
+    else {
+        return detail;
+    };
+
+    for server in servers.values() {
+        let Some(headers) = server.get("headers").and_then(Value::as_object) else {
+            continue;
+        };
+        for value in headers.values().filter_map(Value::as_str) {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            detail = detail.replace(value, "<redacted>");
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                detail = detail.replace(token, "<redacted>");
+            }
+        }
+    }
+    detail
 }
 
 impl HarnessAdapter for IssueSessionRunner {
@@ -5429,5 +5459,29 @@ mod tests {
         );
 
         assert_eq!(timeout, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn create_error_diagnostic_redacts_worker_grants() {
+        let mut request =
+            ConversationCreateRequest::doctor_probe("/tmp/checkout", "/tmp/state", None, None);
+        request.agent.mcp_config = Some(BTreeMap::from([(
+            "mcpServers".to_owned(),
+            serde_json::json!({
+                "opensymphony-memory": {
+                    "headers": { "Authorization": "Bearer worker-secret" }
+                }
+            }),
+        )]));
+        let error = OpenHandsError::HttpStatus {
+            operation: "create_conversation",
+            status_code: 422,
+            body: r#"{"headers":{"Authorization":"Bearer worker-secret"}}"#.to_owned(),
+        };
+
+        let detail = redacted_openhands_error(&error, &request);
+
+        assert!(!detail.contains("worker-secret"));
+        assert!(detail.contains("<redacted>"));
     }
 }

@@ -4095,8 +4095,7 @@ async fn tracked_instruction_tree(
     command
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "--cached", "--"])
-        .arg(format!(":(glob){}/**/AGENTS.md", relative.display()));
+        .args(["ls-files", "--cached", "-z", "--"]);
     for variable in checkout_credential_envs {
         command.env_remove(variable);
     }
@@ -4113,7 +4112,11 @@ async fn tracked_instruction_tree(
             "tracked instruction probe exited unsuccessfully",
         ));
     }
-    Ok(!output.stdout.is_empty())
+    Ok(output.stdout.split(|byte| *byte == 0).any(|entry| {
+        let path_string = String::from_utf8_lossy(entry);
+        let path = Path::new(path_string.as_ref());
+        path.starts_with(relative) && path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md"))
+    }))
 }
 
 async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>
@@ -4548,6 +4551,51 @@ mod tests {
             .await
             .expect("instruction discovery should succeed");
         assert_eq!(paths, vec![PathBuf::from("vendor/AGENTS.md")]);
+    }
+
+    #[tokio::test]
+    async fn discover_agents_keeps_tracked_instructions_with_pathspec_metacharacters() {
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let tracked = root
+            .path()
+            .join("components")
+            .join("[core]")
+            .join("vendor")
+            .join("nested")
+            .join("AGENTS.md");
+        tokio::fs::create_dir_all(tracked.parent().expect("tracked parent should exist"))
+            .await
+            .expect("tracked parent should exist");
+        tokio::fs::write(&tracked, "tracked generated-tree instructions")
+            .await
+            .expect("tracked instructions should exist");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init should launch");
+        assert!(status.success(), "git init should succeed");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args([
+                "add",
+                "-f",
+                "--",
+                ":(literal)components/[core]/vendor/nested/AGENTS.md",
+            ])
+            .status()
+            .expect("git add should launch");
+        assert!(status.success(), "git add should succeed");
+
+        let paths = discover_agents(root.path())
+            .await
+            .expect("instruction discovery should succeed");
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("components/[core]/vendor/nested/AGENTS.md")]
+        );
     }
 
     #[tokio::test]

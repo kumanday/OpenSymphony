@@ -581,6 +581,13 @@ fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool 
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
+fn superseded_codex_manifest_is_archiveable(manifest: &IssueConversationManifest) -> bool {
+    conversation_manifest_is_codex(manifest)
+        && manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+            envelope.conversation_binding.as_deref() == Some(manifest.conversation_id.as_str())
+        })
+}
+
 fn parse_superseded_harness_manifests(
     raw: &str,
 ) -> Result<Option<Vec<IssueConversationManifest>>, String> {
@@ -3203,6 +3210,7 @@ async fn try_run_codex_stdio_issue(
                 })
             });
     if conversation_envelope_untrusted && let Some(incompatible) = existing_manifest.take() {
+        let archiveable_superseded_codex = superseded_codex_manifest_is_archiveable(&incompatible);
         persist_superseded_harness_manifest(workspace_manager, workspace, &incompatible)
             .await
             .map_err(|error| {
@@ -3217,7 +3225,14 @@ async fn try_run_codex_stdio_issue(
             conversation_id = %incompatible.conversation_id,
             "deferring retirement of Codex thread with an untrusted runtime envelope until replacement is durable"
         );
-        superseded_manifest = Some(incompatible);
+        if archiveable_superseded_codex {
+            superseded_manifest = Some(incompatible);
+        } else {
+            tracing::warn!(
+                conversation_id = %incompatible.conversation_id,
+                "preserving superseded Codex evidence because its runtime envelope is not bound to its own conversation"
+            );
+        }
     }
     if let Some(manifest) = existing_manifest.as_mut() {
         ensure_codex_thread_active(
@@ -5936,6 +5951,16 @@ mod tests {
         };
 
         assert!(conversation_manifest_is_codex(&manifest));
+    }
+
+    #[test]
+    fn superseded_codex_manifest_without_self_binding_is_not_archiveable() {
+        let manifest = IssueConversationManifest {
+            transport_target: Some(CODEX_APP_SERVER_KIND.to_string()),
+            ..sample_conversation_manifest("thread-untrusted")
+        };
+
+        assert!(!superseded_codex_manifest_is_archiveable(&manifest));
     }
 
     #[test]
