@@ -1588,6 +1588,10 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
         scheduler.worker().launches[0].route.harness_kind,
         "codex_app_server"
     );
+    assert!(
+        scheduler.worker().launches[0].memory_grant_registry_recovered,
+        "reattached workers must rotate process-local memory grants"
+    );
 
     scheduler.tracker_mut().states.insert(
         "lin-492".to_string(),

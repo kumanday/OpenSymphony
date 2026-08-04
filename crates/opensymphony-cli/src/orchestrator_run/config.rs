@@ -24,7 +24,7 @@ use crate::opensymphony_workflow::{
 use crate::opensymphony_workspace::{
     CheckoutRepository, SSH_AUTH_SOCK_ENV, environment_variable_names_equal,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs;
@@ -192,7 +192,7 @@ struct CentralCredentialFile {
     reference: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CentralReviewProfileFile {
     provider: String,
@@ -215,7 +215,7 @@ struct CentralWorkspaceFile {
     cleanup_after_parent_finalization: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CentralSchedulerFile {
     max_concurrent_tasks: u64,
@@ -233,7 +233,7 @@ struct CentralSchedulerFile {
     stall_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CentralRetryFile {
     #[serde(default)]
@@ -1556,7 +1556,13 @@ fn build_repository_checkouts(
     config: &CentralConfigFile,
 ) -> Result<BTreeMap<String, CheckoutRepository>, CentralConfigError> {
     let mut checkouts = BTreeMap::new();
-    for repository in config.repositories.values() {
+    let policy_generation =
+        generation_hash(&serde_json::to_vec(&config.scheduler).map_err(|_| {
+            CentralConfigError::InvalidReference {
+                field: "scheduler".to_owned(),
+            }
+        })?);
+    for (repository_id, repository) in &config.repositories {
         let identity = CanonicalRepositoryId::from_remote(
             &repository.remote.provider,
             repository.remote.provider_id.as_deref(),
@@ -1569,6 +1575,18 @@ fn build_repository_checkouts(
             .credentials
             .get(&repository.credential)
             .and_then(|credential| credential.variable.clone());
+        let review_profile = config
+            .review_profiles
+            .get(&repository.review_profile)
+            .ok_or_else(|| CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.review_profile"),
+            })?;
+        let review_policy_generation =
+            generation_hash(&serde_json::to_vec(review_profile).map_err(|_| {
+                CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}", repository.review_profile),
+                }
+            })?);
         let checkout = CheckoutRepository {
             provider: repository.remote.provider.clone(),
             provider_id: repository.remote.provider_id.clone(),
@@ -1586,7 +1604,10 @@ fn build_repository_checkouts(
                 .and_then(|credential| credential.reference.clone()),
             credential_env,
             instructions_path: PathBuf::from(&repository.instructions.path),
+            policy_generation: policy_generation.clone(),
             review_profile: repository.review_profile.clone(),
+            review_provider: review_profile.provider.clone(),
+            review_policy_generation,
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())
@@ -3356,6 +3377,89 @@ scheduler:
             ),
             crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_)
         ));
+    }
+
+    #[test]
+    fn central_config_tracks_scheduler_and_review_policy_generations_separately() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let base_source = central_fixture(root.path());
+        let base = resolve_central_config(&root.path().join("base.yaml"), &base_source)
+            .expect("base config should resolve");
+        let base_checkout = base
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("base checkout should exist");
+        assert_eq!(base_checkout.review_profile, "github-standard");
+        assert_eq!(base_checkout.review_provider, "github");
+        assert_ne!(
+            base_checkout.policy_generation,
+            base.repository_routing.config_generation
+        );
+
+        let unrelated_source = base_source.replace("id: test-instance", "id: renamed-instance");
+        let unrelated =
+            resolve_central_config(&root.path().join("unrelated.yaml"), &unrelated_source)
+                .expect("unrelated config edit should resolve");
+        let unrelated_checkout = unrelated
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("unrelated checkout should exist");
+        assert_ne!(
+            base.repository_routing.config_generation,
+            unrelated.repository_routing.config_generation
+        );
+        assert_eq!(
+            base_checkout.policy_generation,
+            unrelated_checkout.policy_generation
+        );
+        assert_eq!(
+            base_checkout.review_policy_generation,
+            unrelated_checkout.review_policy_generation
+        );
+
+        let scheduler_source =
+            base_source.replace("max_concurrent_tasks: 2", "max_concurrent_tasks: 3");
+        let scheduler =
+            resolve_central_config(&root.path().join("scheduler.yaml"), &scheduler_source)
+                .expect("scheduler policy edit should resolve");
+        let scheduler_checkout = scheduler
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("scheduler checkout should exist");
+        assert_ne!(
+            base_checkout.policy_generation,
+            scheduler_checkout.policy_generation
+        );
+        assert_eq!(
+            base_checkout.review_policy_generation,
+            scheduler_checkout.review_policy_generation
+        );
+
+        let review_source = base_source.replace(
+            "review_profiles:\n  github-standard:\n    provider: github",
+            "review_profiles:\n  github-standard:\n    provider: gitlab",
+        );
+        let review = resolve_central_config(&root.path().join("review.yaml"), &review_source)
+            .expect("review policy edit should resolve");
+        let review_checkout = review
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("review checkout should exist");
+        assert_eq!(
+            base_checkout.policy_generation,
+            review_checkout.policy_generation
+        );
+        assert_ne!(
+            base_checkout.review_policy_generation,
+            review_checkout.review_policy_generation
+        );
+        assert_eq!(review_checkout.review_provider, "gitlab");
     }
 
     #[test]

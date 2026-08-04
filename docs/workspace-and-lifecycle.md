@@ -73,8 +73,10 @@ staging-intent marker created before a clone; unrelated files and directories
 under `.opensymphony-staging` are preserved.
 
 The checkout manifest records the generation, binding, target commit,
-instruction path/hash/source commit, and verification timestamps. Runtime
-manifests copy this provenance into a terminal envelope. Harness adapters must
+instruction path/hash/source commit, scheduler-policy generation, resolved
+review profile/provider and review-policy generation, and verification
+timestamps. Runtime manifests copy this provenance into a terminal envelope.
+Harness adapters must
 launch with the verified checkout as `cwd`; the current trusted-host
 containment receipt describes process working-directory containment and does
 not claim sandbox isolation. During discovery, a directory whose name merely
@@ -92,7 +94,10 @@ large vendored tree with unrelated tracked files does not become an unbounded
 instruction-discovery traversal. The NUL-delimited Git probe streams its output
 and fails closed after 10,000 paths or 4 MiB. If that tracked-instruction probe
 cannot run or exits unsuccessfully, discovery fails closed instead of treating
-the failure as an empty instruction result.
+the failure as an empty instruction result. Instruction contents are hashed as
+streams and fail closed above 1 MiB per file or 4 MiB across the selected and
+natively discovered instruction set; prompt loading applies the same per-file
+limit before retaining content in memory.
 
 ## 4. Workspace directory layout
 

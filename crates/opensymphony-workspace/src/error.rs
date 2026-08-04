@@ -121,4 +121,10 @@ pub enum WorkspaceError {
     InstructionPathEscape { path: PathBuf },
     #[error("repository instruction file is missing in checkout: {path}")]
     MissingInstruction { path: PathBuf },
+    #[error("repository instruction bytes at {path} exceed the {scope} limit of {limit} bytes")]
+    InstructionSizeLimit {
+        path: PathBuf,
+        scope: &'static str,
+        limit: u64,
+    },
 }

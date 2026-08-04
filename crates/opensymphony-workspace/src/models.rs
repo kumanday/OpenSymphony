@@ -24,7 +24,13 @@ pub struct CheckoutRepository {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
     pub instructions_path: PathBuf,
+    #[serde(default)]
+    pub policy_generation: String,
     pub review_profile: String,
+    #[serde(default)]
+    pub review_provider: String,
+    #[serde(default)]
+    pub review_policy_generation: String,
 }
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";
@@ -77,6 +83,12 @@ pub struct TerminalRuntimeEnvelope {
     pub config_generation: String,
     pub inventory_generation: String,
     pub policy_generation: String,
+    #[serde(default)]
+    pub review_profile: String,
+    #[serde(default)]
+    pub review_provider: String,
+    #[serde(default)]
+    pub review_policy_generation: String,
     pub checkout_generation: String,
     pub checkout_path: PathBuf,
     pub target_branch: String,
@@ -103,6 +115,14 @@ pub struct CheckoutManifest {
     pub sanitized_workspace_key: String,
     pub workspace_path: PathBuf,
     pub repository_binding: RepositoryBinding,
+    #[serde(default)]
+    pub policy_generation: String,
+    #[serde(default)]
+    pub review_profile: String,
+    #[serde(default)]
+    pub review_provider: String,
+    #[serde(default)]
+    pub review_policy_generation: String,
     pub remote_fingerprint: String,
     pub target_branch: String,
     pub target_commit: String,

@@ -2610,7 +2610,6 @@ fn refresh_rehydration_runtime_envelope(
         refreshed.repository_binding.inventory_generation = routing.inventory_generation.clone();
         refreshed.config_generation = routing.config_generation.clone();
         refreshed.inventory_generation = routing.inventory_generation.clone();
-        refreshed.policy_generation = routing.config_generation.clone();
     }
     refreshed.harness = workflow.config.routing.harness.clone();
     refreshed.model_profile = workflow
@@ -2957,7 +2956,10 @@ mod tests {
                 credential_reference: None,
                 credential_env: None,
                 instructions_path: PathBuf::from("AGENTS.md"),
+                policy_generation: "scheduler-policy".to_owned(),
                 review_profile: "default".to_owned(),
+                review_provider: "git".to_owned(),
+                review_policy_generation: "review-policy".to_owned(),
             },
         )]);
 
@@ -3052,7 +3054,7 @@ mod tests {
         assert_eq!(refreshed.repository_binding.alias, "repo-z");
         assert_eq!(refreshed.config_generation, "new-config");
         assert_eq!(refreshed.inventory_generation, "new-inventory");
-        assert_eq!(refreshed.policy_generation, "new-config");
+        assert_eq!(refreshed.policy_generation, "old-config");
         assert_ne!(refreshed, persisted);
 
         routing.inventory.remove("repo-z");

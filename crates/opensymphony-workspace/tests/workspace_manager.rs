@@ -323,7 +323,10 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         credential_reference: None,
         credential_env: Some("HOME".to_owned()),
         instructions_path: "AGENTS.md".into(),
+        policy_generation: "scheduler-policy-1".to_owned(),
         review_profile: "local".to_owned(),
+        review_provider: "local".to_owned(),
+        review_policy_generation: "review-policy-1".to_owned(),
     };
     let missing_policy_manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
@@ -431,6 +434,10 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     let manifest_record: CheckoutManifest =
         serde_json::from_str(&manifest).expect("checkout manifest should decode");
     assert_eq!(manifest_record.run_id, "run-terminal-1");
+    assert_eq!(manifest_record.policy_generation, "scheduler-policy-1");
+    assert_eq!(manifest_record.review_profile, "local");
+    assert_eq!(manifest_record.review_provider, "local");
+    assert_eq!(manifest_record.review_policy_generation, "review-policy-1");
     assert_eq!(
         manifest_record.workspace_path,
         first.handle.workspace_path()

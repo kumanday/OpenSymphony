@@ -2344,7 +2344,7 @@ where
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),
-            memory_grant_registry_recovered: false,
+            memory_grant_registry_recovered: self.recovered_memory_issue_ids.contains(issue_id),
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -2371,6 +2371,7 @@ where
                 return Ok(());
             }
         };
+        self.recovered_memory_issue_ids.remove(issue_id);
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),

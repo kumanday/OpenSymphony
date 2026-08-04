@@ -421,7 +421,9 @@ fn write_merging_supersede_project_files(
     .expect("workflow should be written");
     std::fs::write(
         project_root.join("config.yaml"),
-        format!("control_plane:\n  bind: {bind_addr}\nlinear:\n  enabled: false\n"),
+        format!(
+            "control_plane:\n  bind: {bind_addr}\nlinear:\n  enabled: false\nmemory:\n  auto_capture: false\n  serve: false\n"
+        ),
     )
     .expect("config should be written");
 }
@@ -657,18 +659,25 @@ async fn wait_for_openhands_interrupt(openhands: &FakeOpenHandsServer) -> Result
 async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(45);
+    let mut last_snapshot = None;
     while Instant::now() < deadline {
         if let Ok(response) = client.get(url).send().await
             && response.status().is_success()
             && let Ok(snapshot) = response.json::<Value>().await
-            && merging_supersede_event_visible(&snapshot)
         {
-            return Ok(snapshot);
+            if merging_supersede_event_visible(&snapshot) {
+                return Ok(snapshot);
+            }
+            last_snapshot = Some(snapshot);
         }
         sleep(Duration::from_millis(250)).await;
     }
     Err(format!(
-        "timed out waiting for Merging supersede event at {url}"
+        "timed out waiting for Merging supersede event at {url}; last snapshot: {}",
+        last_snapshot
+            .as_ref()
+            .map(Value::to_string)
+            .unwrap_or_else(|| "<none>".to_owned())
     ))
 }
 

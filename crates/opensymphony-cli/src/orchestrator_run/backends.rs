@@ -2331,10 +2331,10 @@ impl RuntimeWorkerBackend {
                                 .repository_binding
                                 .inventory_generation
                                 .clone(),
-                            policy_generation: checkout
-                                .repository_binding
-                                .config_generation
-                                .clone(),
+                            policy_generation: checkout.policy_generation.clone(),
+                            review_profile: checkout.review_profile.clone(),
+                            review_provider: checkout.review_provider.clone(),
+                            review_policy_generation: checkout.review_policy_generation.clone(),
                             checkout_generation: checkout.generation.clone(),
                             checkout_path: ensured.handle.workspace_path().to_path_buf(),
                             target_branch: checkout.target_branch.clone(),

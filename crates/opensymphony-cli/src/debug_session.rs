@@ -1063,6 +1063,9 @@ async fn verify_strict_recovery_envelope(
         || run.config_generation != desired.config_generation
         || run.inventory_generation != desired.inventory_generation
         || run.policy_generation != desired.policy_generation
+        || run.review_profile != desired.review_profile
+        || run.review_provider != desired.review_provider
+        || run.review_policy_generation != desired.review_policy_generation
     {
         return Err(DebugCommandError::StrictRecovery {
             detail: "runtime envelope does not match the current repository, harness, or model configuration"
@@ -1121,7 +1124,6 @@ async fn current_debug_runtime_envelope(
     desired.repository_binding.inventory_generation = routing.inventory_generation.clone();
     desired.config_generation = routing.config_generation.clone();
     desired.inventory_generation = routing.inventory_generation.clone();
-    desired.policy_generation = routing.config_generation.clone();
     desired.harness = workflow.config.routing.harness.clone();
     desired.model_profile = workflow
         .config

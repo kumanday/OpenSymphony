@@ -45,6 +45,9 @@ use super::{
 };
 use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
 
+const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_TOTAL_INSTRUCTION_BYTES: u64 = 4 * 1024 * 1024;
+
 pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
     legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,
@@ -653,6 +656,10 @@ impl WorkspaceManager {
             sanitized_workspace_key: workspace.workspace_key().to_owned(),
             workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: binding.clone(),
+            policy_generation: repository.policy_generation.clone(),
+            review_profile: repository.review_profile.clone(),
+            review_provider: repository.review_provider.clone(),
+            review_policy_generation: repository.review_policy_generation.clone(),
             remote_fingerprint: binding
                 .repository
                 .safe_remote_fingerprint
@@ -739,6 +746,10 @@ impl WorkspaceManager {
             .verify_checkout_with_worker_changes_timeout(workspace, true, deadline)
             .await?;
         if manifest.repository_binding != expected.repository_binding
+            || manifest.policy_generation != expected.policy_generation
+            || manifest.review_profile != expected.review_profile
+            || manifest.review_provider != expected.review_provider
+            || manifest.review_policy_generation != expected.review_policy_generation
             || manifest.generation != expected.checkout_generation
             || workspace.workspace_path() != expected.checkout_path
             || manifest.target_branch != expected.target_branch
@@ -764,6 +775,10 @@ impl WorkspaceManager {
             .verify_checkout_with_worker_changes(workspace, allow_worker_changes)
             .await?;
         if manifest.repository_binding != expected.repository_binding
+            || manifest.policy_generation != expected.policy_generation
+            || manifest.review_profile != expected.review_profile
+            || manifest.review_provider != expected.review_provider
+            || manifest.review_policy_generation != expected.review_policy_generation
             || manifest.generation != expected.checkout_generation
             || workspace.workspace_path() != expected.checkout_path
             || manifest.target_branch != expected.target_branch
@@ -974,12 +989,8 @@ impl WorkspaceManager {
         let path =
             resolve_path_within_root(workspace.workspace_path(), &manifest.instruction.path)?;
         let path = self.validate_workspace_owned_path(workspace, &path).await?;
-        let bytes = fs::read(&path)
-            .await
-            .map_err(|source| WorkspaceError::ReadManagedFile {
-                path: path.clone(),
-                source,
-            })?;
+        let mut total_bytes = 0;
+        let (_, bytes) = read_bounded_instruction_file(&path, &mut total_bytes, true).await?;
         let content = if is_workflow_instruction_path(&manifest.instruction.path) {
             workflow_body(&bytes)
         } else {
@@ -1201,6 +1212,10 @@ impl WorkspaceManager {
                         sanitized_workspace_key: handle.workspace_key().to_owned(),
                         workspace_path: handle.workspace_path().to_path_buf(),
                         repository_binding: receipt_binding,
+                        policy_generation: repository.policy_generation.clone(),
+                        review_profile: repository.review_profile.clone(),
+                        review_provider: repository.review_provider.clone(),
+                        review_policy_generation: repository.review_policy_generation.clone(),
                         remote_fingerprint: binding
                             .repository
                             .safe_remote_fingerprint
@@ -2348,7 +2363,8 @@ impl WorkspaceManager {
         }
         let agents =
             discover_agents_with_credentials(checkout, &self.checkout_credential_envs).await?;
-        let native_discovery_hashes = self.hash_discovered_instructions(checkout, &agents).await?;
+        let (native_discovery_hashes, mut total_bytes) =
+            self.hash_discovered_instructions(checkout, &agents).await?;
         let Some((relative, path, source)) = selected else {
             return Ok(InstructionProvenance {
                 path: PathBuf::new(),
@@ -2359,19 +2375,21 @@ impl WorkspaceManager {
                 native_discovery_hashes,
             });
         };
-        let mut content =
-            fs::read(&path)
-                .await
-                .map_err(|source| WorkspaceError::ReadManagedFile {
-                    path: path.clone(),
-                    source,
-                })?;
-        if is_workflow_instruction_path(&relative) {
-            content = workflow_body(&content);
-        }
+        let content_hash = if !is_workflow_instruction_path(&relative)
+            && let Some(hash) = native_discovery_hashes.get(&relative)
+        {
+            hash.clone()
+        } else {
+            let (_, mut content) =
+                read_bounded_instruction_file(&path, &mut total_bytes, true).await?;
+            if is_workflow_instruction_path(&relative) {
+                content = workflow_body(&content);
+            }
+            hash_bytes(&content)
+        };
         Ok(InstructionProvenance {
             path: relative,
-            content_hash: hash_bytes(&content),
+            content_hash,
             source_commit: source_commit.to_owned(),
             source: source.to_owned(),
             native_discovery_paths: agents,
@@ -2383,22 +2401,17 @@ impl WorkspaceManager {
         &self,
         checkout: &Path,
         paths: &[PathBuf],
-    ) -> Result<BTreeMap<PathBuf, String>, WorkspaceError> {
+    ) -> Result<(BTreeMap<PathBuf, String>, u64), WorkspaceError> {
         let mut hashes = BTreeMap::new();
+        let mut total_bytes = 0;
         for relative in paths {
             self.reject_symlinked_path_components(checkout, relative)
                 .await?;
             let path = resolve_path_within_root(checkout, relative)?;
-            let content =
-                fs::read(&path)
-                    .await
-                    .map_err(|source| WorkspaceError::ReadManagedFile {
-                        path: path.clone(),
-                        source,
-                    })?;
-            hashes.insert(relative.clone(), hash_bytes(&content));
+            let (hash, _) = read_bounded_instruction_file(&path, &mut total_bytes, false).await?;
+            hashes.insert(relative.clone(), hash);
         }
-        Ok(hashes)
+        Ok((hashes, total_bytes))
     }
 
     async fn update_checkout_run_id(
@@ -4238,6 +4251,7 @@ fn is_proven_checkout_invalid(error: &WorkspaceError) -> bool {
         WorkspaceError::CheckoutVerification { .. }
             | WorkspaceError::InstructionPathEscape { .. }
             | WorkspaceError::MissingInstruction { .. }
+            | WorkspaceError::InstructionSizeLimit { .. }
             | WorkspaceError::PathEscape { .. }
     )
 }
@@ -4246,6 +4260,88 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+async fn read_bounded_instruction_file(
+    path: &Path,
+    total_bytes: &mut u64,
+    retain_contents: bool,
+) -> Result<(String, Vec<u8>), WorkspaceError> {
+    let metadata = fs::metadata(path)
+        .await
+        .map_err(|source| WorkspaceError::ReadManagedFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if metadata.len() > MAX_INSTRUCTION_FILE_BYTES {
+        return Err(WorkspaceError::InstructionSizeLimit {
+            path: path.to_path_buf(),
+            scope: "per-file",
+            limit: MAX_INSTRUCTION_FILE_BYTES,
+        });
+    }
+    if total_bytes
+        .checked_add(metadata.len())
+        .is_none_or(|bytes| bytes > MAX_TOTAL_INSTRUCTION_BYTES)
+    {
+        return Err(WorkspaceError::InstructionSizeLimit {
+            path: path.to_path_buf(),
+            scope: "aggregate",
+            limit: MAX_TOTAL_INSTRUCTION_BYTES,
+        });
+    }
+
+    let mut file =
+        fs::File::open(path)
+            .await
+            .map_err(|source| WorkspaceError::ReadManagedFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    let mut hasher = Sha256::new();
+    let mut contents = if retain_contents {
+        Vec::with_capacity(metadata.len() as usize)
+    } else {
+        Vec::new()
+    };
+    let mut file_bytes = 0_u64;
+    let mut buffer = vec![0_u8; 8192];
+    loop {
+        let read =
+            file.read(&mut buffer)
+                .await
+                .map_err(|source| WorkspaceError::ReadManagedFile {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        if read == 0 {
+            break;
+        }
+        file_bytes = file_bytes.saturating_add(read as u64);
+        if file_bytes > MAX_INSTRUCTION_FILE_BYTES {
+            return Err(WorkspaceError::InstructionSizeLimit {
+                path: path.to_path_buf(),
+                scope: "per-file",
+                limit: MAX_INSTRUCTION_FILE_BYTES,
+            });
+        }
+        if total_bytes
+            .checked_add(file_bytes)
+            .is_none_or(|bytes| bytes > MAX_TOTAL_INSTRUCTION_BYTES)
+        {
+            return Err(WorkspaceError::InstructionSizeLimit {
+                path: path.to_path_buf(),
+                scope: "aggregate",
+                limit: MAX_TOTAL_INSTRUCTION_BYTES,
+            });
+        }
+        hasher.update(&buffer[..read]);
+        if retain_contents {
+            contents.extend_from_slice(&buffer[..read]);
+        }
+    }
+    *total_bytes += file_bytes;
+    Ok((format!("sha256:{:x}", hasher.finalize()), contents))
 }
 
 fn workflow_body(bytes: &[u8]) -> Vec<u8> {
@@ -4830,12 +4926,54 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        StagingIntentMarker, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
-        build_shell_command, discover_agents, git_askpass_username, path_from_git_bytes,
+        MAX_INSTRUCTION_FILE_BYTES, MAX_TOTAL_INSTRUCTION_BYTES, StagingIntentMarker,
+        WorkspaceError, WorkspaceManager, WorkspaceManagerConfig, build_shell_command,
+        discover_agents, git_askpass_username, path_from_git_bytes, read_bounded_instruction_file,
         remote_contains_credentials, sanitize_git_environment, shell_single_quote,
         ssh_agent_socket_path_is_usable, tracked_instruction_tree,
     };
     use crate::opensymphony_workspace::{CleanupConfig, HookConfig};
+
+    #[tokio::test]
+    async fn bounded_instruction_reader_enforces_file_and_aggregate_limits() {
+        let root = tempfile::tempdir().expect("instruction root should exist");
+        let oversized = root.path().join("oversized-AGENTS.md");
+        tokio::fs::write(
+            &oversized,
+            vec![b'x'; MAX_INSTRUCTION_FILE_BYTES as usize + 1],
+        )
+        .await
+        .expect("oversized instruction should be written");
+        let mut total_bytes = 0;
+        assert!(matches!(
+            read_bounded_instruction_file(&oversized, &mut total_bytes, true).await,
+            Err(WorkspaceError::InstructionSizeLimit {
+                scope: "per-file",
+                ..
+            })
+        ));
+
+        let small = root.path().join("AGENTS.md");
+        tokio::fs::write(&small, b"abc")
+            .await
+            .expect("small instruction should be written");
+        let mut total_bytes = MAX_TOTAL_INSTRUCTION_BYTES - 2;
+        assert!(matches!(
+            read_bounded_instruction_file(&small, &mut total_bytes, false).await,
+            Err(WorkspaceError::InstructionSizeLimit {
+                scope: "aggregate",
+                ..
+            })
+        ));
+
+        let mut total_bytes = 0;
+        let (hash, contents) = read_bounded_instruction_file(&small, &mut total_bytes, false)
+            .await
+            .expect("small instruction should stream successfully");
+        assert_eq!(hash, super::hash_bytes(b"abc"));
+        assert!(contents.is_empty());
+        assert_eq!(total_bytes, 3);
+    }
 
     #[tokio::test]
     async fn abandoned_staging_intent_rejects_mismatched_published_target() {
