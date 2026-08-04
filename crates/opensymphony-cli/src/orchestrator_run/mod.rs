@@ -31,6 +31,7 @@ use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker, TimestampMs
 use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_gateway_schema::event_journal::{EventActor, EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
+use crate::opensymphony_memory::MemoryVisibility;
 use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
 use crate::opensymphony_orchestrator::{
     IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
@@ -1066,6 +1067,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
         project_set: runtime.project_set_id.clone(),
+        visibility: server.visibility(),
+        run_id: None,
+        attempt: None,
+        target_commit: None,
+        checkout_head: None,
         execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
         authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
         authorized_repositories_by_project: runtime
@@ -1279,6 +1285,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             result = async {
                 ticker.tick().await;
                 let observed_at = now_timestamp();
+                let capture_bindings_before_tick = if runtime.memory.auto_capture {
+                    super::memory::load_all_terminal_capture_bindings(
+                        &runtime.workflow.config.workspace.root,
+                    )
+                } else {
+                    Ok(BTreeMap::new())
+                };
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
@@ -1288,9 +1301,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, result)
+                (observed_at, capture_bindings_before_tick, result)
             } => {
-                let (observed_at, result) = result;
+                let (observed_at, capture_bindings_before_tick, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1319,19 +1332,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &recent_events,
                         )).await;
                         if !auto_capture_candidates.is_empty() {
-                            let auto_capture_result = super::memory::auto_capture_terminal(
-                                &runtime.target_repo,
-                                &runtime.workflow_path,
-                                Some(&runtime.workflow),
-                                &auto_capture_candidates,
-                                runtime.openhands_conversation_store.as_ref(),
-                                runtime.memory.auto_archive,
-                                gateway_memory_config.as_ref(),
-                                memory_server
-                                    .as_ref()
-                                    .and_then(|server| server.writer_gate()),
-                            )
-                            .await;
+                            let auto_capture_result = match capture_bindings_before_tick {
+                                Ok(capture_bindings) => {
+                                    super::memory::auto_capture_terminal(
+                                        &runtime.target_repo,
+                                        &runtime.workflow_path,
+                                        Some(&runtime.workflow),
+                                        &auto_capture_candidates,
+                                        Some(&capture_bindings),
+                                        runtime.openhands_conversation_store.as_ref(),
+                                        runtime.memory.auto_archive,
+                                        gateway_memory_config.as_ref(),
+                                        memory_server
+                                            .as_ref()
+                                            .and_then(|server| server.writer_gate()),
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(error),
+                            };
                             mark_auto_capture_completed(
                                 &mut auto_capture_completed_issues,
                                 &auto_capture_candidates,
@@ -1499,6 +1518,11 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) token: Option<String>,
     pub(super) project: String,
     pub(super) project_set: Option<String>,
+    pub(super) visibility: MemoryVisibility,
+    pub(super) run_id: Option<String>,
+    pub(super) attempt: Option<u32>,
+    pub(super) target_commit: Option<String>,
+    pub(super) checkout_head: Option<String>,
     pub(super) execution_repo: String,
     pub(super) authorized_repositories: BTreeSet<String>,
     pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,

@@ -1000,6 +1000,17 @@ fn indexed_issue_matches_scope(
     issue: &IndexedIssue,
     scope: &MemoryScopeFilter,
 ) -> bool {
+    if let Some(max_visibility) = scope.max_visibility
+        && max_visibility == MemoryVisibility::Public
+        && issue.visibility != MemoryVisibility::Public
+    {
+        return false;
+    }
+    if let Some(authorized_repositories) = &scope.authorized_repositories
+        && !indexed_issue_matches_authorized_repositories(issue, authorized_repositories)
+    {
+        return false;
+    }
     if let Some(issue_key) = scope.issue.as_ref().map(|issue| normalize_issue_key(issue))
         && issue.issue_key != issue_key
     {
@@ -1055,6 +1066,31 @@ fn indexed_issue_matches_scope(
         return false;
     }
     true
+}
+
+fn indexed_issue_matches_authorized_repositories(
+    issue: &IndexedIssue,
+    authorized_repositories: &BTreeSet<String>,
+) -> bool {
+    if authorized_repositories.is_empty() {
+        return false;
+    }
+    let mut repositories = issue
+        .source_refs
+        .iter()
+        .filter_map(|source| source.repo_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    repositories.extend(
+        issue
+            .scope_refs
+            .iter()
+            .filter(|scope| scope.kind == KnowledgeScopeKind::Repository)
+            .map(|scope| scope.id.as_str()),
+    );
+    !repositories.is_empty()
+        && repositories
+            .iter()
+            .any(|repository| authorized_repositories.contains(*repository))
 }
 
 fn indexed_issue_matches_project(

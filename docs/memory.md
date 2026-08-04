@@ -467,14 +467,27 @@ token-gated deployments can restrict ad hoc query execution. Admin tools are
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
+Worker-grant capability checks follow that server access decision: a local
+read-only `code.ast.query` does not require an administrative grant capability,
+while a configured admin token still gates the request at the server boundary.
 On a supervised server with a configured workspace root, unauthenticated
 unscoped reads are still rejected as worker requests; an operator using the
 configured read or admin bearer may perform ordinary read calls without a
-worker grant. Worker calls remain bound to their server-issued project,
-repository, issue, and optional checkout-generation grant. Strict project-set
-grants resolve live code against that verified generation; generation-less
-legacy grants keep using the registered repository source and legacy workspace
-overlay path.
+worker grant. Worker calls remain bound to a server-issued project-set,
+project, work-item, canonical-repository, visibility, and capability grant.
+Explicit filters can only narrow those claims. `all_accessible` is therefore
+bounded by the grant, and an authorized sibling repository must be named
+explicitly. Ordinary worker grants have no administrative capability. Persisted
+sibling memory and target-branch code use the registered canonical source;
+AST requests may name that source using the `repository` alias as well as the
+legacy `repo` field; live overlays resolve only the execution repository's
+verified checkout.
+The overlay must match the worker's issue, run, attempt, checkout generation,
+and target commit. A worker may advance that checkout during its run; strict
+discovery verifies that the current `HEAD` descends from the target commit
+instead of freezing the overlay to the startup `HEAD`. Each result reports the
+canonical repository, the revision that actually produced its source path or
+symbol, freshness, and persisted-versus-live provenance.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include code-intelligence artifacts alongside selected memory. For requested
 Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
@@ -488,23 +501,29 @@ memory keeps the legacy `CodeIntelIndex` and `CodeIntelArtifact` surface as an
 adapter around that provider contract instead of requiring code-intelligence
 providers to import memory internals.
 
-Worker-scoped memory access uses a stable per-issue bearer grant bound to the
-worker's project, execution repository, authorized repository set, issue, and
-checkout generation. In-process retries refresh that registry entry in place so
-the default reusable OpenHands conversation retains its MCP bearer while its
-verified checkout scope changes. Durable daemon recovery reconstructs the
-registry, so a queued retry or recovered worker gets a one-time fresh
-conversation before another turn can use the new grant. The grant is
-server-local, non-persisted, and replaced with the latest verified scope.
-Terminal, inactive, and binding-superseded worker lifecycles revoke the issue
-entry only after the harness confirms it has stopped, so a retained live worker
-keeps its bearer while stop acknowledgement is retried. If a retained issue
-later reopens, the next grant is marked for a
-one-time fresh conversation so the old conversation cannot retain the revoked
-bearer. It must not become a process-wide authorization. This project scope applies to direct
-`memory.show` capsule reads
-as well as search, context, brief, related, docs, and status tools, and worker
-project matching uses canonical project IDs rather than display labels.
+Worker-scoped memory access uses a server-local, non-persisted bearer grant
+bound to the worker's project-set, project, work item, execution repository,
+authorized repository set, visibility, run/attempt, and checkout generation.
+An unchanged claim set may reuse the conversation bearer; a changed run,
+attempt, binding, target commit, or generation rotates the bearer and requires a
+fresh conversation. The startup checkout `HEAD` is retained as capture
+provenance, not as a live-overlay equality requirement. Durable daemon recovery reconstructs
+the claims from the terminal runtime envelope and forces a fresh conversation
+when the in-memory registry was replaced. Terminal, inactive, and
+binding-superseded lifecycles issue the stop/cancel fence before revoking the
+issue grant. Raw bearer tokens are never persisted in manifests or diagnostics.
+This grant applies to direct `memory.show` capsule reads as well as search,
+context, brief, related, docs, status, and code-intelligence tools. If the
+central service stops, the control-plane status is explicitly degraded and
+scoped worker reads remain blocked; they do not silently fall back to an
+unrelated repository-local store. Leaf capture reads the immutable runtime
+envelope for repository ownership and commits, and documentation sync uses
+that explicit owner. Terminal capture snapshots those durable envelopes before
+the scheduler performs terminal workspace cleanup, so removal or retention
+policy cannot erase the repository/run provenance needed for capture.
+Retained legacy run envelopes that lack usable run/attempt provenance are
+skipped as non-bindable entries during the pre-cleanup scan rather than
+preventing unrelated terminal captures from completing.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.

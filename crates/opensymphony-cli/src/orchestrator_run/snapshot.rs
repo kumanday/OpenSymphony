@@ -83,7 +83,7 @@ pub(super) fn current_memory_server_status(
         status_line: if reachable {
             "listening".to_string()
         } else {
-            "stopped".to_string()
+            "degraded: memory server stopped; scoped worker reads are blocked".to_string()
         },
     }
 }

@@ -64,8 +64,8 @@ use crate::{
     },
     opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
-        CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
-        checkout_workspace_key, workspace_path_for_root,
+        CleanupConfig, HookConfig, IssueManifest, RunManifest, WorkspaceManager,
+        WorkspaceManagerConfig, checkout_workspace_key, workspace_path_for_root,
     },
 };
 
@@ -510,12 +510,175 @@ impl AutoMemoryReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalCaptureBinding {
+    pub(crate) repository_id: String,
+    pub(crate) run_id: String,
+    pub(crate) attempt: u32,
+    pub(crate) target_branch: String,
+    pub(crate) target_commit: String,
+    pub(crate) checkout_head: String,
+    pub(crate) instruction_hash: String,
+}
+
+/// Read durable run envelopes before terminal capture so repository ownership
+/// comes from the execution record rather than project association inference.
+#[cfg(test)]
+pub(crate) fn load_terminal_capture_bindings(
+    workspace_root: &Path,
+    identifiers: &[String],
+) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
+    let requested = identifiers
+        .iter()
+        .map(|identifier| identifier.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    load_terminal_capture_bindings_inner(workspace_root, Some(&requested))
+}
+
+/// Read every durable run envelope before terminal cleanup can remove its workspace.
+pub(crate) fn load_all_terminal_capture_bindings(
+    workspace_root: &Path,
+) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
+    load_terminal_capture_bindings_inner(workspace_root, None)
+}
+
+fn load_terminal_capture_bindings_inner(
+    workspace_root: &Path,
+    requested: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
+    let root = workspace_root
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: workspace_root.to_path_buf(),
+            source,
+        })?;
+    let mut bindings = BTreeMap::new();
+    for entry in fs::read_dir(&root).map_err(|source| MemoryError::ReadFile {
+        path: root.clone(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: root.clone(),
+            source,
+        })?;
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        let run_path = candidate.join(".opensymphony/run.json");
+        let Ok(raw) = fs::read_to_string(&run_path) else {
+            continue;
+        };
+        let Ok(run) = serde_json::from_str::<RunManifest>(&raw) else {
+            continue;
+        };
+        let key = run.identifier.to_ascii_lowercase();
+        if requested.is_some_and(|requested| !requested.contains(&key)) {
+            continue;
+        }
+        let Some(envelope) = run.runtime_envelope.as_ref() else {
+            continue;
+        };
+        // Retained manifests written before run/attempt provenance existed
+        // deserialize these fields as empty/zero. They are not usable capture
+        // bindings, but an unrelated legacy workspace must not abort capture
+        // for the terminal candidates being processed by this poll.
+        if envelope.run_id.trim().is_empty() || envelope.attempt == 0 {
+            continue;
+        }
+        if envelope.run_id != run.run_id || envelope.attempt != run.attempt {
+            return Err(MemoryError::InvalidInput(format!(
+                "runtime envelope for `{}` does not match its durable run manifest",
+                run.identifier
+            )));
+        }
+        let workspace_path =
+            candidate
+                .canonicalize()
+                .map_err(|source| MemoryError::ResolvePath {
+                    path: candidate.clone(),
+                    source,
+                })?;
+        let manifest_workspace_path =
+            run.workspace_path
+                .canonicalize()
+                .map_err(|source| MemoryError::ResolvePath {
+                    path: run.workspace_path.clone(),
+                    source,
+                })?;
+        let envelope_workspace_path =
+            envelope
+                .checkout_path
+                .canonicalize()
+                .map_err(|source| MemoryError::ResolvePath {
+                    path: envelope.checkout_path.clone(),
+                    source,
+                })?;
+        if !workspace_path.starts_with(&root)
+            || manifest_workspace_path != workspace_path
+            || envelope_workspace_path != workspace_path
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "runtime envelope for `{}` is outside its configured workspace",
+                run.identifier
+            )));
+        }
+        let checkout_head = fs::read_to_string(candidate.join(".opensymphony/checkout.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|checkout| {
+                checkout
+                    .get("head")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        let binding = TerminalCaptureBinding {
+            repository_id: envelope.repository_binding.repository.id.to_string(),
+            run_id: run.run_id.clone(),
+            attempt: run.attempt,
+            target_branch: envelope.target_branch.clone(),
+            target_commit: envelope.target_commit.clone(),
+            checkout_head,
+            instruction_hash: envelope.instruction.content_hash.clone(),
+        };
+        if let Some(previous) = bindings.insert(key.clone(), binding.clone())
+            && previous != binding
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "multiple immutable runtime envelopes were found for `{}`",
+                run.identifier
+            )));
+        }
+    }
+    Ok(bindings)
+}
+
+fn apply_terminal_capture_bindings(
+    source: &mut SourceFile,
+    bindings: &BTreeMap<String, TerminalCaptureBinding>,
+) {
+    for issue in &mut source.issues {
+        let Some(binding) = bindings.get(&issue.identifier.to_ascii_lowercase()) else {
+            continue;
+        };
+        issue.repository_id = Some(binding.repository_id.clone());
+        issue.execution_run_id = Some(binding.run_id.clone());
+        issue.execution_attempt = Some(binding.attempt);
+        issue.target_branch = Some(binding.target_branch.clone());
+        issue.target_commit = Some(binding.target_commit.clone());
+        issue.checkout_head = Some(binding.checkout_head.clone());
+        issue.instruction_hash = Some(binding.instruction_hash.clone());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn auto_capture_terminal(
     repo_root: &Path,
     workflow_path: &Path,
     resolved_workflow: Option<&ResolvedWorkflow>,
     identifiers: &[String],
+    capture_bindings: Option<&BTreeMap<String, TerminalCaptureBinding>>,
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     auto_archive: bool,
     memory_config: Option<&MemoryConfig>,
@@ -539,7 +702,10 @@ pub(crate) async fn auto_capture_terminal(
         Some(workflow) => linear_client_from_resolved_workflow(workflow)?,
         None => linear_client_from_workflow(repo_root, Some(workflow_path))?,
     };
-    let source = load_linear_source_from_client(&client, &identifiers).await?;
+    let mut source = load_linear_source_from_client(&client, &identifiers).await?;
+    if let Some(bindings) = capture_bindings {
+        apply_terminal_capture_bindings(&mut source, bindings);
+    }
     let repository_groups = auto_capture_repository_groups(&config, &source, &identifiers)?;
     if repository_groups.len() > 1 {
         let mut aggregate = AutoMemoryReport {
@@ -554,6 +720,7 @@ pub(crate) async fn auto_capture_terminal(
                 workflow_path,
                 resolved_workflow,
                 &group,
+                capture_bindings,
                 conversation_store,
                 auto_archive,
                 Some(&config),
@@ -811,6 +978,14 @@ fn resolve_auto_capture_repository_config(
         return Ok(config.clone());
     };
     let Some(repository) = config.repository_sources.get(&repository_id) else {
+        if source.issues.iter().any(|issue| {
+            issue_ids.contains(&issue.identifier.to_ascii_lowercase())
+                && issue.repository_id.as_deref() == Some(repository_id.as_str())
+        }) {
+            return Err(MemoryError::InvalidInput(format!(
+                "terminal runtime envelope selected unknown repository source `{repository_id}`"
+            )));
+        }
         return Ok(config.clone());
     };
     let mut routed = MemoryConfig::load(&repository.root, None)?;
@@ -831,6 +1006,9 @@ fn auto_capture_candidate_repositories(
     config: &MemoryConfig,
     issue: &IssueEvidence,
 ) -> BTreeSet<String> {
+    if let Some(repository_id) = issue.repository_id.as_ref() {
+        return BTreeSet::from([repository_id.clone()]);
+    }
     [issue.project_id.as_ref(), issue.project_slug.as_ref()]
         .into_iter()
         .flatten()
@@ -1957,16 +2135,24 @@ struct MemoryScopeGrantRegistryState {
     revoked_issues: HashSet<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MemoryScopeGrant {
     pub(crate) project: String,
+    pub(crate) project_set: Option<String>,
     pub(crate) execution_repo: String,
     pub(crate) authorized_repositories: BTreeSet<String>,
     pub(crate) issue: String,
+    pub(crate) run_id: Option<String>,
+    pub(crate) attempt: Option<u32>,
     pub(crate) checkout_generation: Option<String>,
+    pub(crate) target_commit: Option<String>,
+    pub(crate) checkout_head: Option<String>,
+    pub(crate) visibility: MemoryVisibility,
+    pub(crate) capabilities: BTreeSet<String>,
 }
 
 impl MemoryScopeGrantRegistry {
+    #[cfg(test)]
     pub(crate) fn issue_or_refresh_with_lifecycle(
         &self,
         project: &str,
@@ -1975,35 +2161,39 @@ impl MemoryScopeGrantRegistry {
         issue: &str,
         checkout_generation: Option<String>,
     ) -> (String, bool) {
+        self.issue_or_refresh_with_claims(MemoryScopeGrant {
+            project: project.to_owned(),
+            execution_repo: execution_repo.to_owned(),
+            authorized_repositories,
+            issue: issue.to_owned(),
+            checkout_generation,
+            ..MemoryScopeGrant::default()
+        })
+    }
+
+    pub(crate) fn issue_or_refresh_with_claims(&self, grant: MemoryScopeGrant) -> (String, bool) {
         let mut state = self.state.write().expect("memory grant registry poisoned");
-        let requires_fresh_conversation = state.revoked_issues.contains(issue);
-        if let Some((token, grant)) = state
+        let requires_fresh_conversation = state.revoked_issues.contains(&grant.issue);
+        let mut rotated = false;
+        if let Some(token) = state
             .grants
-            .iter_mut()
-            .find(|(_, grant)| grant.issue == issue)
+            .iter()
+            .find(|(_, existing)| existing.issue == grant.issue)
+            .map(|(token, _)| token.clone())
         {
-            *grant = MemoryScopeGrant {
-                project: project.to_owned(),
-                execution_repo: execution_repo.to_owned(),
-                authorized_repositories,
-                issue: issue.to_owned(),
-                checkout_generation,
-            };
-            return (token.clone(), requires_fresh_conversation);
+            if state.grants.get(&token) == Some(&grant) {
+                return (token, requires_fresh_conversation);
+            }
+            // A new run, attempt, checkout generation, or repository claim
+            // must not inherit the old conversation bearer. The caller will
+            // force a fresh conversation when this path returns `true`.
+            state.grants.remove(&token);
+            rotated = true;
         }
 
         let token = format!("opensymphony-worker-{}", Uuid::new_v4());
-        state.grants.insert(
-            token.clone(),
-            MemoryScopeGrant {
-                project: project.to_owned(),
-                execution_repo: execution_repo.to_owned(),
-                authorized_repositories,
-                issue: issue.to_owned(),
-                checkout_generation,
-            },
-        );
-        (token, requires_fresh_conversation)
+        state.grants.insert(token.clone(), grant);
+        (token, rotated || requires_fresh_conversation)
     }
 
     pub(crate) fn acknowledge_fresh_conversation(&self, issue: &str) {
@@ -2094,6 +2284,7 @@ async fn run_serve(
 
 pub(crate) struct MemoryServerHandle {
     endpoint: String,
+    visibility: MemoryVisibility,
     task: Option<JoinHandle<Result<(), String>>>,
     shutdown: watch::Sender<bool>,
     writer_gate: MemoryWriterGate,
@@ -2109,6 +2300,10 @@ impl Drop for MemoryServerHandle {
 impl MemoryServerHandle {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub(crate) fn visibility(&self) -> MemoryVisibility {
+        self.visibility
     }
 
     pub(crate) fn writer_gate(&self) -> Option<MemoryWriterGate> {
@@ -2282,6 +2477,7 @@ async fn start_memory_server_with_auth(
     })?;
     let writer_gate = Arc::new(Mutex::new(Some(coordination_lock)));
     let scope_grants = MemoryScopeGrantRegistry::default();
+    let visibility = config.visibility;
     let state = MemoryServerState {
         config,
         auth,
@@ -2312,6 +2508,7 @@ async fn start_memory_server_with_auth(
     });
     Ok(MemoryServerHandle {
         endpoint: format!("http://{local_addr}/mcp"),
+        visibility,
         task: Some(task),
         shutdown,
         writer_gate,
@@ -3176,7 +3373,7 @@ async fn memory_server_mcp(
         &headers,
         &state.auth,
         required_access,
-        scoped_grant.is_some(),
+        scoped_grant.as_ref(),
     ) {
         return response;
     }
@@ -3516,14 +3713,14 @@ fn authorize_memory_request(
     auth: &MemoryServerAuth,
     required_access: MemoryServerAccess,
 ) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
-    authorize_memory_request_with_scoped_grant(headers, auth, required_access, false)
+    authorize_memory_request_with_scoped_grant(headers, auth, required_access, None)
 }
 
 fn authorize_memory_request_with_scoped_grant(
     headers: &axum::http::HeaderMap,
     auth: &MemoryServerAuth,
     required_access: MemoryServerAccess,
-    scoped_grant: bool,
+    scoped_grant: Option<&MemoryScopeGrant>,
 ) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -3543,7 +3740,7 @@ fn authorize_memory_request_with_scoped_grant(
     let bearer = bearer_token(headers);
     let authorized = match required_access {
         MemoryServerAccess::Read => {
-            if scoped_grant {
+            if scoped_grant.is_some() {
                 return Ok(());
             }
             let read_token = non_empty_str(auth.read_token.as_deref());
@@ -3680,6 +3877,16 @@ async fn call_memory_tool_with_workspace(
                 || bool_arg(&arguments, "include_code_intel")))
     {
         let mut scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
+        if let Some(grant) = worker_grant
+            && scope.repo.is_none()
+            && (AST_MCP_TOOL_NAMES.contains(&name)
+                || name == "memory.ingest_code_intel"
+                || (name == "memory.context"
+                    && (bool_arg(&arguments, "includeCodeIntel")
+                        || bool_arg(&arguments, "include_code_intel"))))
+        {
+            scope.repo = Some(grant.execution_repo.clone());
+        }
         if workspace_root.is_none()
             && scope.repo.is_none()
             && (scope.project.is_some() || scope.project_set.is_some())
@@ -3941,27 +4148,32 @@ fn validate_worker_memory_scope(
     arguments: &Value,
     grant: &MemoryScopeGrant,
 ) -> Result<(), MemoryError> {
-    if bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible") {
-        return Err(MemoryError::InvalidInput(
-            "worker memory grants cannot request all accessible records".to_owned(),
-        ));
-    }
+    let all_accessible =
+        bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible");
     let requested_project = optional_string_arg(arguments, "project");
+    let requested_project_set = optional_string_arg(arguments, "projectSet")
+        .or_else(|| optional_string_arg(arguments, "project_set"));
     let requested_repo = repository_scope_argument(arguments)?;
-    let project_required = matches!(
-        tool_name,
-        "memory.brief"
-            | "memory.context"
-            | "memory.search"
-            | "memory.related"
-            | "memory.show"
-            | "memory.docs"
-            | "memory.status"
-    );
-    if project_required && requested_project.as_deref() != Some(grant.project.as_str()) {
+    let requested_work_item = optional_string_arg(arguments, "issue")
+        .or_else(|| optional_string_arg(arguments, "workItem"))
+        .or_else(|| optional_string_arg(arguments, "work_item"))
+        .or_else(|| {
+            arguments
+                .get("currentIssue")
+                .and_then(|current| optional_string_arg(current, "identifier"))
+        });
+    if requested_work_item
+        .as_deref()
+        .is_some_and(|work_item| work_item != grant.issue)
+    {
         return Err(MemoryError::InvalidInput(format!(
-            "worker memory grant permits project `{}`; requested scope is not permitted",
-            grant.project
+            "worker memory grant is bound to work item `{}`; requested work item is not permitted",
+            grant.issue
+        )));
+    }
+    if is_memory_writer_tool(tool_name) && !grant.capabilities.contains(tool_name) {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant has no administrative capability for `{tool_name}`"
         )));
     }
     if requested_project
@@ -3973,12 +4185,52 @@ fn validate_worker_memory_scope(
             grant.project
         )));
     }
+    if requested_project_set
+        .as_deref()
+        .is_some_and(|project_set| grant.project_set.as_deref() != Some(project_set))
+    {
+        return Err(MemoryError::InvalidInput(
+            "requested project-set is outside the worker grant".to_owned(),
+        ));
+    }
+    if grant.project_set.is_none() && requested_project_set.is_some() {
+        return Err(MemoryError::InvalidInput(
+            "worker memory grant does not include a project-set claim".to_owned(),
+        ));
+    }
+    if let Some(requested_visibility) = optional_string_arg(arguments, "visibility") {
+        let requested_visibility = match requested_visibility.to_ascii_lowercase().as_str() {
+            "public" => MemoryVisibility::Public,
+            "private" => MemoryVisibility::Private,
+            value => {
+                return Err(MemoryError::InvalidInput(format!(
+                    "invalid visibility `{value}`; expected public or private"
+                )));
+            }
+        };
+        if grant.visibility == MemoryVisibility::Public
+            && requested_visibility == MemoryVisibility::Private
+        {
+            return Err(MemoryError::InvalidInput(
+                "worker memory grant is limited to public visibility".to_owned(),
+            ));
+        }
+    }
     let Some(requested_repo) = requested_repo else {
+        if all_accessible && !tool_name.starts_with("code.") {
+            return Ok(());
+        }
         return Err(MemoryError::InvalidInput(
             "worker memory grant requires an explicit repository filter".to_owned(),
         ));
     };
-    if tool_name.starts_with("code.") && requested_repo != grant.execution_repo {
+    if tool_name.starts_with("code.")
+        && requested_repo != grant.execution_repo
+        && tool_name == "code.graph.context"
+        && optional_string_arg(arguments, "runId")
+            .or_else(|| optional_string_arg(arguments, "run"))
+            .is_some()
+    {
         return Err(MemoryError::InvalidInput(format!(
             "worker live code access is limited to execution repository `{}`",
             grant.execution_repo
@@ -4000,7 +4252,15 @@ fn validate_worker_memory_scope(
                     .and_then(|current| optional_string_arg(current, "identifier"))
             })
         };
-        if requested_issue
+        if tool_name == "code.graph.context" {
+            if let Some(requested_run) = requested_issue
+                && grant.run_id.as_deref() != Some(requested_run.as_str())
+            {
+                return Err(MemoryError::InvalidInput(
+                    "worker live code graph access is bound to the current run".to_owned(),
+                ));
+            }
+        } else if requested_issue
             .as_deref()
             .is_some_and(|issue| issue != grant.issue)
         {
@@ -4009,14 +4269,6 @@ fn validate_worker_memory_scope(
                 grant.issue
             )));
         }
-    }
-    if arguments
-        .get("projectSet")
-        .is_some_and(|value| !value.is_null())
-    {
-        return Err(MemoryError::InvalidInput(format!(
-            "worker memory grant does not permit project-set scope for `{tool_name}`"
-        )));
     }
     Ok(())
 }
@@ -4027,11 +4279,11 @@ async fn call_code_graph_context_tool(
     workspace_root: Option<PathBuf>,
     worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
-    let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
-    let strict_checkout = checkout_generation
-        .as_deref()
-        .is_some_and(|generation| !generation.trim().is_empty());
-    let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant)?;
+    let worker_grant = worker_grant.cloned();
+    let checkout_generation = worker_grant
+        .as_ref()
+        .and_then(|grant| grant.checkout_generation.clone());
+    let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant.as_ref())?;
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = repository_scope_argument(&arguments)?
             .or_else(|| config.default_repository_id.clone())
@@ -4044,6 +4296,12 @@ async fn call_code_graph_context_tool(
                     .to_string()
             });
         scope.repo = Some(repo_id.clone());
+        let strict_checkout = checkout_generation.as_deref().is_some_and(|generation| {
+            !generation.trim().is_empty()
+                && worker_grant
+                    .as_ref()
+                    .is_none_or(|grant| grant.execution_repo == repo_id)
+        });
         if !config.repository_sources.is_empty() {
             resolve_code_intel_repo_for_scope(&config, &scope)?;
         }
@@ -4066,7 +4324,7 @@ async fn call_code_graph_context_tool(
                             .to_string(),
                     ));
                 }
-                resolve_code_graph_overlay(
+                resolve_code_graph_overlay_with_grant(
                     &overlay_config,
                     workspace_root.as_deref(),
                     &repo_id,
@@ -4074,6 +4332,7 @@ async fn call_code_graph_context_tool(
                     &context_query,
                     strict_checkout,
                     checkout_generation.as_deref(),
+                    worker_grant.as_ref(),
                 )
             })
             .transpose()?;
@@ -4083,6 +4342,7 @@ async fn call_code_graph_context_tool(
     .await
 }
 
+#[cfg(test)]
 fn resolve_code_graph_overlay(
     config: &MemoryConfig,
     workspace_root: Option<&Path>,
@@ -4091,6 +4351,29 @@ fn resolve_code_graph_overlay(
     context_query: &CodeGraphContextQuery,
     strict_checkout: bool,
     checkout_generation: Option<&str>,
+) -> Result<CodeWorkspaceOverlay, MemoryError> {
+    resolve_code_graph_overlay_with_grant(
+        config,
+        workspace_root,
+        repo_id,
+        run_id,
+        context_query,
+        strict_checkout,
+        checkout_generation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_code_graph_overlay_with_grant(
+    config: &MemoryConfig,
+    workspace_root: Option<&Path>,
+    repo_id: &str,
+    run_id: &str,
+    context_query: &CodeGraphContextQuery,
+    strict_checkout: bool,
+    checkout_generation: Option<&str>,
+    worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<CodeWorkspaceOverlay, MemoryError> {
     let workspace_root = workspace_root.ok_or_else(|| {
         MemoryError::InvalidInput(
@@ -4105,11 +4388,16 @@ fn resolve_code_graph_overlay(
                 source,
             })?;
     let workspace_candidate = if strict_checkout {
-        find_verified_checkout_for_code_intel(
+        find_verified_checkout_for_code_intel_with_claims(
             &workspace_root,
             Some(repo_id),
-            Some(run_id),
+            worker_grant
+                .map(|grant| grant.issue.as_str())
+                .or(Some(run_id)),
             checkout_generation,
+            worker_grant.and_then(|grant| grant.run_id.as_deref()),
+            worker_grant.and_then(|grant| grant.target_commit.as_deref()),
+            worker_grant.and_then(|grant| grant.checkout_head.as_deref()),
         )?
     } else {
         workspace_path_for_root(&workspace_root, run_id)
@@ -4188,13 +4476,49 @@ fn resolve_code_graph_overlay(
     } else {
         manifest.sanitized_workspace_key == workspace_name
     };
-    if (manifest.identifier != run_id && manifest.issue_id != run_id)
+    let ownership_issue = worker_grant
+        .map(|grant| grant.issue.as_str())
+        .unwrap_or(run_id);
+    if (manifest.identifier != ownership_issue && manifest.issue_id != ownership_issue)
         || !workspace_ownership_matches
         || manifest_workspace_path != workspace_path
     {
         return Err(MemoryError::InvalidInput(
             "run workspace ownership manifest does not match the requested run".to_string(),
         ));
+    }
+    if let Some(grant) = worker_grant {
+        let run_manifest_path = workspace_path.join(".opensymphony/run.json");
+        let run_manifest_raw =
+            fs::read_to_string(&run_manifest_path).map_err(|source| MemoryError::ReadFile {
+                path: run_manifest_path.clone(),
+                source,
+            })?;
+        let run_manifest: RunManifest =
+            serde_json::from_str(&run_manifest_raw).map_err(|source| {
+                MemoryError::InvalidInput(format!("invalid durable run manifest: {source}"))
+            })?;
+        if grant.run_id.as_deref() != Some(run_manifest.run_id.as_str())
+            || grant.attempt != Some(run_manifest.attempt)
+        {
+            return Err(MemoryError::InvalidInput(
+                "durable run manifest does not match the worker grant".to_owned(),
+            ));
+        }
+        let Some(envelope) = run_manifest.runtime_envelope.as_ref() else {
+            return Err(MemoryError::InvalidInput(
+                "durable run manifest has no runtime envelope for a strict overlay".to_owned(),
+            ));
+        };
+        if envelope.run_id != run_manifest.run_id
+            || envelope.attempt != run_manifest.attempt
+            || envelope.repository_binding.repository.id.to_string() != repo_id
+            || grant.target_commit.as_deref() != Some(envelope.target_commit.as_str())
+        {
+            return Err(MemoryError::InvalidInput(
+                "durable runtime envelope does not match the worker overlay claim".to_owned(),
+            ));
+        }
     }
     let branch = code_index_branch_for_config(config)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
@@ -6227,12 +6551,14 @@ fn resolve_code_intel_config(
     workspace_root: Option<&Path>,
     issue: Option<&str>,
     checkout_generation: Option<&str>,
+    strict_checkout: bool,
 ) -> Result<MemoryConfig, MemoryError> {
     let repo = scope.repo.as_deref().and_then(non_empty);
-    let repo_root = if let (Some(workspace_root), Some(checkout_generation)) = (
-        workspace_root,
-        checkout_generation.filter(|generation| !generation.trim().is_empty()),
-    ) {
+    let repo_root = if strict_checkout
+        && let (Some(workspace_root), Some(checkout_generation)) = (
+            workspace_root,
+            checkout_generation.filter(|generation| !generation.trim().is_empty()),
+        ) {
         let issue = issue.ok_or_else(|| {
             MemoryError::InvalidInput(
                 "strict code-intelligence requests require `repo` and `issue` scope arguments"
@@ -6273,6 +6599,8 @@ async fn resolve_code_intel_config_async(
     let workspace_root = workspace_root.map(Path::to_path_buf);
     let issue = issue.map(str::to_owned);
     let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    let strict_checkout = worker_grant
+        .is_none_or(|grant| scope.repo.as_deref() == Some(grant.execution_repo.as_str()));
     tokio::task::spawn_blocking(move || {
         resolve_code_intel_config(
             &config,
@@ -6280,6 +6608,7 @@ async fn resolve_code_intel_config_async(
             workspace_root.as_deref(),
             issue.as_deref(),
             checkout_generation.as_deref(),
+            strict_checkout,
         )
     })
     .await
@@ -6295,6 +6624,26 @@ fn find_verified_checkout_for_code_intel(
     repository_id: Option<&str>,
     issue: Option<&str>,
     checkout_generation: Option<&str>,
+) -> Result<PathBuf, MemoryError> {
+    find_verified_checkout_for_code_intel_with_claims(
+        workspace_root,
+        repository_id,
+        issue,
+        checkout_generation,
+        None,
+        None,
+        None,
+    )
+}
+
+fn find_verified_checkout_for_code_intel_with_claims(
+    workspace_root: &Path,
+    repository_id: Option<&str>,
+    issue: Option<&str>,
+    checkout_generation: Option<&str>,
+    run_id: Option<&str>,
+    target_commit: Option<&str>,
+    _checkout_head: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let canonical_root =
         workspace_root
@@ -6368,6 +6717,16 @@ fn find_verified_checkout_for_code_intel(
         if checkout_generation.is_some_and(|generation| found_generation != generation) {
             continue;
         }
+        if run_id
+            .is_some_and(|run_id| checkout.get("run_id").and_then(Value::as_str) != Some(run_id))
+        {
+            continue;
+        }
+        if target_commit.is_some_and(|target_commit| {
+            checkout.get("target_commit").and_then(Value::as_str) != Some(target_commit)
+        }) {
+            continue;
+        }
         if let Some(issue) = issue
             && checkout.get("issue_id").and_then(Value::as_str) != Some(issue)
             && checkout.get("identifier").and_then(Value::as_str) != Some(issue)
@@ -6387,6 +6746,28 @@ fn find_verified_checkout_for_code_intel(
             || !canonical_manifest_path.starts_with(&canonical_root)
         {
             continue;
+        }
+        if let Some(target_commit) = target_commit {
+            let actual_head = process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&canonical_candidate)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|head| head.trim().to_owned());
+            let Some(actual_head) = actual_head else {
+                continue;
+            };
+            let is_ancestor = process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", target_commit, &actual_head])
+                .current_dir(&canonical_candidate)
+                .status()
+                .ok()
+                .is_some_and(|status| status.success());
+            if !is_ancestor {
+                continue;
+            }
         }
         matches.push(canonical_candidate);
     }
@@ -6443,6 +6824,11 @@ fn repository_matches_memory_scope(
     repository_id: &str,
     scope: &MemoryScopeFilter,
 ) -> bool {
+    if let Some(authorized_repositories) = &scope.authorized_repositories
+        && !authorized_repositories.contains(repository_id)
+    {
+        return false;
+    }
     if scope.all_accessible
         && scope.repo.is_none()
         && scope.project.is_none()
@@ -6593,6 +6979,8 @@ where
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
         project_id_only: false,
+        authorized_repositories: None,
+        max_visibility: None,
     }
 }
 
@@ -6688,7 +7076,37 @@ fn worker_scope_filter_from_mcp(
     worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<MemoryScopeFilter, MemoryError> {
     let mut scope = scope_filter_from_mcp(config, arguments, include_issue)?;
-    scope.project_id_only = worker_grant.is_some();
+    if let Some(repository_id) = repository_scope_argument(arguments)? {
+        // AST clients advertise the canonical repository under `repository`,
+        // while older memory tools use `repo`. Resolve both aliases before
+        // worker fallback can bind the request to the execution repository.
+        scope.repo = Some(repository_id);
+        normalize_memory_scope_repository(config, &mut scope);
+    }
+    if let Some(grant) = worker_grant {
+        // The bearer supplies the upper bound. Explicit query arguments may
+        // only narrow it, including when `all_accessible` is requested.
+        if scope.project_set.is_none() {
+            scope.project_set = grant.project_set.clone();
+        }
+        if scope.project.is_none() {
+            scope.project = Some(grant.project.clone());
+        }
+        scope.project_id_only = true;
+        scope.authorized_repositories = Some(grant.authorized_repositories.clone());
+        let requested_visibility = optional_string_arg(arguments, "visibility")
+            .map(
+                |visibility| match visibility.to_ascii_lowercase().as_str() {
+                    "public" => Ok(MemoryVisibility::Public),
+                    "private" => Ok(MemoryVisibility::Private),
+                    value => Err(MemoryError::InvalidInput(format!(
+                        "invalid visibility `{value}`; expected public or private"
+                    ))),
+                },
+            )
+            .transpose()?;
+        scope.max_visibility = Some(requested_visibility.unwrap_or(grant.visibility));
+    }
     Ok(scope)
 }
 
@@ -6718,7 +7136,7 @@ where
         issue: include_issue
             .then(|| optional_string_arg(arguments, "issue"))
             .flatten(),
-        repo: optional_string_arg(arguments, "repo").or_else(|| {
+        repo: repository_scope_argument(arguments)?.or_else(|| {
             (!all_accessible)
                 .then(|| read_env("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
                 .flatten()
@@ -6726,6 +7144,8 @@ where
         area: optional_string_arg(arguments, "area"),
         all_accessible,
         project_id_only: false,
+        authorized_repositories: None,
+        max_visibility: None,
     };
     if !scope.all_accessible
         && scope.project_set.is_none()
@@ -8169,13 +8589,13 @@ mod tests {
         RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
         brief_scope_filter, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
         call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
-        find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, refresh_memory_index_from_okf_and_reimport_pending,
-        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
-        resolve_code_intel_repo, run_init, sha256_file_hex, trim_auto_memory_status_log,
-        validate_worker_memory_scope,
+        find_verified_checkout_for_code_intel, find_verified_checkout_for_code_intel_with_claims,
+        load_memory_config, memory_server_health, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_config, resolve_code_intel_repo, run_init,
+        sha256_file_hex, trim_auto_memory_status_log, validate_worker_memory_scope,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -8187,7 +8607,9 @@ mod tests {
         persist_code_intel_documents, plan_capture, register_memory_source,
         registered_memory_sources, write_capture_plan,
     };
-    use crate::opensymphony_workspace::{IssueManifest, checkout_workspace_key};
+    use crate::opensymphony_workspace::{
+        IssueManifest, RunManifest, RunStatus, checkout_workspace_key,
+    };
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::Utc;
     use duckdb::{Connection, params};
@@ -12807,7 +13229,7 @@ Public memory concept.
             ..Default::default()
         };
 
-        let resolved = resolve_code_intel_config(&config, &scope, None, None, None)
+        let resolved = resolve_code_intel_config(&config, &scope, None, None, None, false)
             .expect("explicit repository path should resolve");
         assert_eq!(
             resolved.repo_root,
@@ -12844,6 +13266,7 @@ Public memory concept.
             authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
             issue: "COE-549".to_owned(),
             checkout_generation: None,
+            ..MemoryScopeGrant::default()
         };
 
         let outline = call_memory_tool_with_workspace(
@@ -12919,6 +13342,7 @@ Public memory concept.
             authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
             issue: "COE-549".to_owned(),
             checkout_generation: Some("generation-1".to_owned()),
+            ..MemoryScopeGrant::default()
         };
 
         let outline = call_memory_tool_with_workspace(
@@ -12970,6 +13394,53 @@ Public memory concept.
     }
 
     #[test]
+    fn worker_scope_filter_honors_repository_alias_before_execution_fallback() {
+        let catalog = TempDir::new().expect("catalog");
+        let execution_repo = TempDir::new().expect("execution repository");
+        let sibling_repo = TempDir::new().expect("sibling repository");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-alpha".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-alpha".to_string(),
+                root: execution_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-beta".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-beta".to_string(),
+                root: sibling_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: None,
+            },
+        );
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_string(),
+            execution_repo: "repo-alpha".to_string(),
+            authorized_repositories: BTreeSet::from([
+                "repo-alpha".to_string(),
+                "repo-beta".to_string(),
+            ]),
+            issue: "COE-551".to_string(),
+            ..MemoryScopeGrant::default()
+        };
+
+        let scope = super::worker_scope_filter_from_mcp(
+            &config,
+            &json!({ "repository": "repo-beta", "issue": "COE-551" }),
+            true,
+            Some(&grant),
+        )
+        .expect("repository alias should select the requested sibling");
+        assert_eq!(scope.repo.as_deref(), Some("repo-beta"));
+    }
+
+    #[test]
     fn worker_memory_grant_rejects_foreign_and_unscoped_requests() {
         let grant = MemoryScopeGrant {
             project: "project-alpha".to_owned(),
@@ -12977,6 +13448,7 @@ Public memory concept.
             authorized_repositories: BTreeSet::from(["repo-alpha".to_owned()]),
             issue: "COE-549".to_owned(),
             checkout_generation: Some("generation-1".to_owned()),
+            ..MemoryScopeGrant::default()
         };
         validate_worker_memory_scope(
             "memory.search",
@@ -12984,6 +13456,36 @@ Public memory concept.
             &grant,
         )
         .expect("exact worker scope should be accepted");
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"project": "project-alpha", "repo": "repo-alpha", "visibility": "public"}),
+            &grant,
+        )
+        .expect("public visibility should narrow a private worker grant");
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-alpha", "repo": "repo-alpha", "issue": "COE-550"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-alpha", "repo": "repo-alpha", "visibility": "unknown"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.capture",
+                &json!({"project": "project-alpha", "repo": "repo-alpha"}),
+                &grant,
+            )
+            .is_err()
+        );
         assert!(
             validate_worker_memory_scope(
                 "memory.search",
@@ -13000,14 +13502,12 @@ Public memory concept.
             )
             .is_err()
         );
-        assert!(
-            validate_worker_memory_scope(
-                "memory.related",
-                &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
-                &grant,
-            )
-            .is_err()
-        );
+        validate_worker_memory_scope(
+            "memory.related",
+            &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
+            &grant,
+        )
+        .expect("all-accessible reads stay bounded by the grant");
         let project_grant = MemoryScopeGrant {
             authorized_repositories: BTreeSet::from([
                 "repo-alpha".to_owned(),
@@ -13015,6 +13515,12 @@ Public memory concept.
             ]),
             ..grant.clone()
         };
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"allAccessible": true}),
+            &project_grant,
+        )
+        .expect("all-accessible reads may span the authorized repository set");
         validate_worker_memory_scope(
             "memory.search",
             &json!({"project": "project-alpha", "repo": "repo-beta"}),
@@ -13035,14 +13541,26 @@ Public memory concept.
             )
             .is_err()
         );
-        assert!(
-            validate_worker_memory_scope("memory.brief", &json!({"repo": "repo-alpha"}), &grant,)
-                .is_err()
-        );
+        validate_worker_memory_scope("memory.brief", &json!({"repo": "repo-alpha"}), &grant)
+            .expect("omitted project filters inherit the worker project claim");
+        validate_worker_memory_scope(
+            "code.ast.context",
+            &json!({"repo": "repo-beta", "issue": "COE-549"}),
+            &project_grant,
+        )
+        .expect("authorized sibling code may use its persisted target snapshot");
+        validate_worker_memory_scope("code.ast.query", &json!({"repo": "repo-alpha"}), &grant)
+            .expect("read-only AST queries do not require an admin capability");
+        validate_worker_memory_scope(
+            "code.graph.context",
+            &json!({"repo": "repo-beta", "query": "answer"}),
+            &project_grant,
+        )
+        .expect("authorized sibling graph reads may use persisted code");
         assert!(
             validate_worker_memory_scope(
-                "code.ast.context",
-                &json!({"repo": "repo-beta", "issue": "COE-549"}),
+                "code.graph.context",
+                &json!({"repo": "repo-beta", "runId": "run-foreign"}),
                 &project_grant,
             )
             .is_err()
@@ -13066,7 +13584,7 @@ Public memory concept.
     }
 
     #[test]
-    fn worker_memory_grant_refresh_preserves_bearer_for_conversation_reuse() {
+    fn worker_memory_grant_refresh_rotates_bearer_for_claim_changes() {
         let registry = MemoryScopeGrantRegistry::default();
         let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
             "project-alpha",
@@ -13084,11 +13602,12 @@ Public memory concept.
         );
 
         assert!(!fresh);
-        assert!(!fresh_again);
-        assert_eq!(refreshed, token);
+        assert!(fresh_again);
+        assert_ne!(refreshed, token);
+        assert!(registry.get(Some(&token)).is_none());
         assert_eq!(
             registry
-                .get(Some(&token))
+                .get(Some(&refreshed))
                 .expect("refreshed worker grant should remain valid")
                 .checkout_generation
                 .as_deref(),
@@ -13217,6 +13736,88 @@ Public memory concept.
             Some("generation"),
         )
         .expect("canonical repository should resolve through the issue checkout");
+        assert_eq!(
+            resolved,
+            checkout
+                .canonicalize()
+                .expect("checkout should canonicalize")
+        );
+    }
+
+    #[test]
+    fn strict_checkout_accepts_a_run_owned_descendant_head() {
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "repo-551";
+        let workspace_key = checkout_workspace_key("COE-551", "issue-551", repository_id)
+            .expect("fixture workspace key should be valid");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation"));
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        std::fs::write(checkout.join("README.md"), "baseline\n").expect("baseline file");
+        init_test_git_repo(&checkout, "develop");
+        let target_commit = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&checkout)
+            .output()
+            .expect("target commit")
+            .stdout;
+        let target_commit = String::from_utf8(target_commit)
+            .expect("target commit should be UTF-8")
+            .trim()
+            .to_owned();
+        std::fs::write(checkout.join("README.md"), "worker commit\n").expect("worker change");
+        for args in [&["add", "."][..], &["commit", "-m", "worker commit"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .expect("worker commit command")
+                    .success()
+            );
+        }
+        let actual_head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&checkout)
+            .output()
+            .expect("actual head")
+            .stdout;
+        let actual_head = String::from_utf8(actual_head)
+            .expect("actual head should be UTF-8")
+            .trim()
+            .to_owned();
+        assert_ne!(actual_head, target_commit);
+
+        std::fs::create_dir_all(checkout.join(".opensymphony")).expect("metadata directory");
+        std::fs::write(
+            checkout.join(".opensymphony/checkout.json"),
+            serde_json::to_vec(&json!({
+                "generation": "generation",
+                "issue_id": "issue-551",
+                "identifier": "COE-551",
+                "sanitized_workspace_key": workspace_key,
+                "workspace_path": checkout,
+                "run_id": "run-551",
+                "target_commit": target_commit,
+                "head": target_commit,
+                "quarantined": false,
+                "repository_binding": { "repository": { "id": repository_id } }
+            }))
+            .expect("checkout manifest JSON"),
+        )
+        .expect("checkout manifest");
+
+        let resolved = find_verified_checkout_for_code_intel_with_claims(
+            workspace_root.path(),
+            Some(repository_id),
+            Some("COE-551"),
+            Some("generation"),
+            Some("run-551"),
+            Some(&target_commit),
+            Some(&target_commit),
+        )
+        .expect("run-owned descendant head should remain a verified checkout");
         assert_eq!(
             resolved,
             checkout
@@ -13414,6 +14015,184 @@ Public memory concept.
         assert_eq!(
             groups.get(&Some("repo-b".to_string())),
             Some(&vec!["COE-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn auto_capture_prefers_immutable_runtime_repository_owner() {
+        let catalog = TempDir::new().expect("catalog");
+        let repository_a = TempDir::new().expect("repository a");
+        let repository_b = TempDir::new().expect("repository b");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("config");
+        for (repository_id, root) in [
+            ("repo-a", repository_a.path()),
+            ("repo-b", repository_b.path()),
+        ] {
+            config.repository_sources.insert(
+                repository_id.to_string(),
+                MemoryRepositorySource {
+                    repository_id: repository_id.to_string(),
+                    root: root.to_path_buf(),
+                    commit_sha: None,
+                    project_scope_ids: BTreeSet::from(["shared-project".to_string()]),
+                    target_branch: None,
+                },
+            );
+        }
+        let source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-551".to_string(),
+                project_id: Some("shared-project".to_string()),
+                repository_id: Some("repo-b".to_string()),
+                execution_run_id: Some("run-551".to_string()),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let groups =
+            super::auto_capture_repository_groups(&config, &source, &["COE-551".to_string()])
+                .expect("explicit runtime owner should disambiguate capture");
+        assert_eq!(
+            groups.get(&Some("repo-b".to_string())),
+            Some(&vec!["COE-551".to_string()])
+        );
+        let routed = super::resolve_auto_capture_repository_config(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-551".to_string()],
+                ..IssueSelection::default()
+            },
+        )
+        .expect("runtime owner should route docs and capture");
+        assert_eq!(routed.default_repository_id.as_deref(), Some("repo-b"));
+        assert_eq!(routed.repo_root, repository_b.path());
+    }
+
+    #[test]
+    fn terminal_capture_bindings_follow_durable_runtime_envelope() {
+        let workspace_root = TempDir::new().expect("workspace root");
+        let workspace = workspace_root.path().join("COE-551");
+        std::fs::create_dir_all(workspace.join(".opensymphony")).expect("metadata directory");
+        let runtime_envelope = serde_json::from_value::<
+            crate::opensymphony_workspace::TerminalRuntimeEnvelope,
+        >(json!({
+            "repository_binding": {
+                "alias": "repo-b",
+                "repository": {
+                    "id": "repo-b",
+                    "safe_remote_fingerprint": "sha256:repo-b"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory"
+            },
+            "run_id": "run-551",
+            "attempt": 2,
+            "config_generation": "config",
+            "inventory_generation": "inventory",
+            "policy_generation": "policy",
+            "checkout_generation": "generation-2",
+            "checkout_path": workspace,
+            "target_branch": "develop",
+            "target_commit": "commit-551",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit-551",
+                "source": "repository"
+            },
+            "harness": "codex_app_server",
+            "model_profile": "default",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("runtime envelope");
+        let now = Utc::now();
+        let run = RunManifest {
+            run_id: "run-551".to_string(),
+            issue_id: "issue-551".to_string(),
+            identifier: "COE-551".to_string(),
+            sanitized_workspace_key: "COE-551".to_string(),
+            workspace_path: workspace.clone(),
+            repository_binding: None,
+            runtime_envelope: Some(runtime_envelope),
+            attempt: 2,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Succeeded,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        std::fs::write(
+            workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&run).expect("run manifest JSON"),
+        )
+        .expect("run manifest");
+        std::fs::write(
+            workspace.join(".opensymphony/checkout.json"),
+            r#"{"head":"head-551"}"#,
+        )
+        .expect("checkout manifest");
+
+        let legacy_workspace = workspace_root.path().join("legacy");
+        std::fs::create_dir_all(legacy_workspace.join(".opensymphony")).expect("legacy workspace");
+        let mut legacy_run = serde_json::to_value(&run).expect("legacy run manifest value");
+        legacy_run["identifier"] = json!("COE-legacy");
+        legacy_run["issue_id"] = json!("issue-legacy");
+        legacy_run["workspace_path"] = json!(legacy_workspace);
+        let runtime_envelope = legacy_run["runtime_envelope"]
+            .as_object_mut()
+            .expect("legacy runtime envelope");
+        runtime_envelope.remove("run_id");
+        runtime_envelope.remove("attempt");
+        std::fs::write(
+            legacy_workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&legacy_run).expect("legacy run manifest JSON"),
+        )
+        .expect("legacy run manifest");
+
+        let bindings =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-551".to_string()])
+                .expect("durable capture binding");
+        assert_eq!(bindings["coe-551"].repository_id, "repo-b");
+        assert_eq!(bindings["coe-551"].run_id, "run-551");
+        assert_eq!(bindings["coe-551"].attempt, 2);
+        assert_eq!(bindings["coe-551"].target_commit, "commit-551");
+        assert_eq!(bindings["coe-551"].checkout_head, "head-551");
+        assert_eq!(bindings["coe-551"].instruction_hash, "sha256:instructions");
+
+        let all_bindings = super::load_all_terminal_capture_bindings(workspace_root.path())
+            .expect("all durable capture bindings");
+        assert_eq!(all_bindings, bindings);
+
+        let outside = workspace_root.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside path");
+        let mut invalid_run: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join(".opensymphony/run.json")).expect("run manifest"),
+        )
+        .expect("run manifest JSON");
+        invalid_run["workspace_path"] = json!(outside);
+        invalid_run["runtime_envelope"]["checkout_path"] = json!(outside);
+        std::fs::write(
+            workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&invalid_run).expect("invalid run manifest JSON"),
+        )
+        .expect("invalid run manifest");
+        let error =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-551".to_string()])
+                .expect_err("capture binding must match the scanned workspace path");
+        assert!(
+            error
+                .to_string()
+                .contains("outside its configured workspace")
         );
     }
 
