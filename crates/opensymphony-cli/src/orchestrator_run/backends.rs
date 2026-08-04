@@ -2103,13 +2103,19 @@ impl RuntimeWorkerBackend {
         self
     }
 
+    fn take_tracked_task(&mut self, worker_id: &str) -> Option<ActiveWorkerTask> {
+        self.worker_issue_ids.remove(worker_id);
+        self.tasks.remove(worker_id)
+    }
+
     fn abort_tracked_task(&mut self, worker_id: &str) {
-        if let Some(task) = self.tasks.remove(worker_id) {
+        if let Some(task) = self.take_tracked_task(worker_id) {
             task.handle.abort();
         }
     }
 
     fn abort_all_tracked_tasks(&mut self) {
+        self.worker_issue_ids.clear();
         let active_count = self.tasks.len();
         if active_count == 0 {
             return;
@@ -2900,13 +2906,13 @@ impl RuntimeWorkerBackend {
                 Ok(WorkerLaunch { conversation })
             }
             Ok(Ok(LaunchReport::Failed(detail))) => {
-                if let Some(task) = self.tasks.remove(worker_id) {
+                if let Some(task) = self.take_tracked_task(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchFailed(detail))
             }
             Ok(Err(_)) => {
-                if let Some(task) = self.tasks.remove(worker_id) {
+                if let Some(task) = self.take_tracked_task(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchChannelClosed)
@@ -3132,7 +3138,7 @@ async fn run_codex_stdio_issue_with_mode(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
-    repository_instructions: Option<&str>,
+    terminal_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -3153,7 +3159,7 @@ async fn run_codex_stdio_issue_with_mode(
         issue,
         run,
         workflow,
-        repository_instructions,
+        terminal_prompt,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
@@ -3235,7 +3241,7 @@ async fn try_run_codex_stdio_issue(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
-    repository_instructions: Option<&str>,
+    terminal_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -3413,13 +3419,14 @@ async fn try_run_codex_stdio_issue(
         ));
     }
     let first_run_prompt = if existing_manifest.is_none() {
-        Some(
-            workflow
+        Some(match terminal_prompt {
+            Some(prompt) => prompt.to_owned(),
+            None => workflow
                 .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
                 .map_err(|source| {
                     format!("failed to render workflow prompt for Codex route: {source}")
                 })?,
-        )
+        })
     } else {
         None
     };
@@ -3793,11 +3800,9 @@ async fn try_run_codex_stdio_issue(
     }
     let prompt = match (prompt_kind, first_run_prompt) {
         (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
-        (IssueSessionPromptKind::Full, None) if repository_instructions.is_some() => {
-            repository_instructions
-                .expect("terminal prompt checked above")
-                .to_owned()
-        }
+        (IssueSessionPromptKind::Full, None) if terminal_prompt.is_some() => terminal_prompt
+            .expect("terminal prompt checked above")
+            .to_owned(),
         (IssueSessionPromptKind::Full, None) => workflow
             .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
             .map_err(|source| {
@@ -5534,7 +5539,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let mut updates = Vec::new();
         while let Ok(update) = self.updates_rx.try_recv() {
             if let WorkerUpdate::Finished { worker_id, .. } = &update
-                && let Some(task) = self.tasks.remove(worker_id.as_str())
+                && let Some(task) = self.take_tracked_task(worker_id.as_str())
             {
                 let _ = task.handle.await;
             }
@@ -5547,7 +5552,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .filter_map(|(worker_id, task)| task.handle.is_finished().then_some(worker_id.clone()))
             .collect::<Vec<_>>();
         for worker_id in finished {
-            let Some(task) = self.tasks.remove(worker_id.as_str()) else {
+            let Some(task) = self.take_tracked_task(worker_id.as_str()) else {
                 continue;
             };
             if let Err(error) = task.handle.await {
@@ -7614,6 +7619,79 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn codex_stdio_fresh_thread_uses_composed_terminal_prompt() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-composed-terminal-prompt", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-composed-terminal-prompt").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-composed-prompt.log");
+        let fake_codex = tempdir.path().join("fake-codex-composed-prompt");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            Some("COMPOSED TERMINAL PROMPT WITH CHECKOUT FACTS AND PINNED INSTRUCTIONS"),
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &empty_codex_schema_cache(),
+            &empty_codex_interrupt_registry(),
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            false,
+            false,
+            None,
+            "",
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(_)
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(
+            log.contains("COMPOSED TERMINAL PROMPT WITH CHECKOUT FACTS AND PINNED INSTRUCTIONS"),
+            "fresh Codex turns must receive the already-composed terminal prompt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn codex_stdio_worker_recovery_restarts_prepared_run_without_turn_id() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -8571,6 +8649,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(saw_finished, "dry-run worker should finish");
+        assert!(backend.tasks.is_empty());
+        assert!(backend.worker_issue_ids.is_empty());
 
         let ensured = workspace_manager
             .ensure(&issue_descriptor(&issue))
@@ -8588,6 +8668,59 @@ mod tests {
                 .as_deref()
                 .is_some_and(|detail| detail.contains("routing dry-run ended"))
         );
+    }
+
+    #[tokio::test]
+    async fn poll_updates_removes_issue_lookup_for_finished_task_without_update() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+        let workspace = sample_workspace(&workspace_root);
+        let worker_id = "worker-finished-without-update";
+        let run = RunAttempt::new(
+            WorkerId::new(worker_id).expect("worker id should be valid"),
+            IssueId::new("issue-finished-without-update").expect("issue id should be valid"),
+            IssueIdentifier::new("COE-287").expect("issue identifier should be valid"),
+            workspace.path,
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        backend
+            .worker_issue_ids
+            .insert(worker_id.to_string(), run.issue_identifier.to_string());
+        backend.tasks.insert(
+            worker_id.to_string(),
+            ActiveWorkerTask {
+                handle: tokio::spawn(async {}),
+                run,
+            },
+        );
+
+        for _ in 0..10 {
+            backend
+                .poll_updates()
+                .await
+                .expect("finished task cleanup should succeed");
+            if backend.tasks.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(backend.tasks.is_empty());
+        assert!(backend.worker_issue_ids.is_empty());
     }
 
     #[tokio::test]
