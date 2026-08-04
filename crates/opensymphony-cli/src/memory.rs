@@ -3361,7 +3361,15 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
                     "additionalProperties": false,
                     "properties": {
                         "repo": { "type": "string", "description": "Canonical repository scope or explicit repository path" },
+                        "repository": { "type": "string", "description": "Canonical repository scope" },
+                        "project": { "type": "string", "description": "Project scope used to select one repository" },
+                        "projectSet": { "type": "string", "description": "Project-set scope used to select one repository" },
+                        "milestone": { "type": "string", "description": "Milestone scope" },
                         "issue": { "type": "string", "description": "Issue identifier owning the verified checkout" },
+                        "currentIssue": { "type": "object", "properties": { "identifier": { "type": "string" } } },
+                        "area": { "type": "string", "description": "Memory area scope" },
+                        "allAccessible": { "type": "boolean", "description": "Ignore default project and repository scopes" },
+                        "all_accessible": { "type": "boolean", "description": "Legacy alias for allAccessible" },
                         "paths": { "type": "array", "items": { "type": "string" } },
                         "path": { "type": "string" },
                         "symbol": { "type": "string" },
@@ -8746,6 +8754,27 @@ mod tests {
         assert!(names.contains(&"code.ast.query".to_string()));
         assert!(names.contains(&"code.ast.context".to_string()));
         assert!(names.contains(&"code.ast.diagnostics".to_string()));
+        let ast_tool = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .find(|tool| tool["name"] == "code.ast.context")
+            .expect("AST context tool");
+        for field in [
+            "repo",
+            "repository",
+            "project",
+            "projectSet",
+            "milestone",
+            "issue",
+            "currentIssue",
+            "area",
+            "allAccessible",
+            "all_accessible",
+        ] {
+            assert!(
+                ast_tool["inputSchema"]["properties"].get(field).is_some(),
+                "AST schema should advertise accepted scope field {field}"
+            );
+        }
     }
 
     #[test]
