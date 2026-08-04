@@ -10,12 +10,13 @@ use serde::Serialize;
 
 pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
 pub use model::{
-    AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, DEFAULT_WORKSPACE_ROOT, Environment,
-    HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
-    OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
-    OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
-    OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
-    OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
+    AgentConfig, AgentFrontMatter, DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_PROMPT_TEMPLATE,
+    DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+    DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+    OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+    OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+    OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
+    OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
     OpenHandsConversationToolFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
     OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
     OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
@@ -145,6 +146,47 @@ mod tests {
             workflow.prompt_template,
             "\n# Assignment\n\nTicket: {{ issue.identifier }}\n"
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_tracker_project_id_and_slug_vectors() {
+        for (field, values) in [
+            ("project_ids", "[project-a, project-a]"),
+            ("project_slugs", "[sample-project, SAMPLE-PROJECT]"),
+        ] {
+            let source = format!(
+                "---\ntracker:\n  kind: linear\n  project_slug: sample-project\n  {field}: {values}\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nPrompt\n"
+            );
+            let workflow =
+                WorkflowDefinition::parse(&source).expect("duplicate-vector workflow parses");
+            let error = workflow
+                .resolve(
+                    Path::new("/repo"),
+                    &env([("LINEAR_API_KEY", "linear-token")]),
+                )
+                .expect_err("duplicate tracker project identities must be rejected");
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField { field: actual, .. } if actual == format!("tracker.{field}")
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_legacy_and_vector_tracker_project_ids() {
+        let source = "---\ntracker:\n  kind: linear\n  project_id: project-a\n  project_slug: sample-project\n  project_ids: [project-b]\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nPrompt\n";
+        let workflow =
+            WorkflowDefinition::parse(source).expect("conflicting project workflow parses");
+        let error = workflow
+            .resolve(
+                Path::new("/repo"),
+                &env([("LINEAR_API_KEY", "linear-token")]),
+            )
+            .expect_err("conflicting singular and vector project IDs must be rejected");
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField { field, .. } if field == "tracker.project_id"
+        ));
     }
 
     #[test]

@@ -88,6 +88,44 @@ Each conversation request sets `workspace.working_dir` to the deterministic
 issue workspace path. This preserves issue isolation without requiring a
 separate server per issue.
 
+For a repository-bound terminal task, that path is the published, verified
+checkout generation, not the orchestrator repository or a staging directory.
+The launch envelope records the checkout generation, target commit, instruction
+provenance, harness/model profile, requested single-checkout scope, and the
+truthful trusted-host process-`cwd` containment receipt. A compatible persisted
+conversation may be reused only when its envelope matches; a mismatch is
+rejected before attach.
+
+When the local memory server issues a process-scoped worker grant, the grant
+is also part of conversation compatibility. The agent-server create contract
+does not provide a conversation MCP-config update operation, so a persisted
+conversation with an old grant is superseded and recreated with the current
+grant before it can receive another turn. The old conversation evidence is
+retained until remote deletion succeeds. After daemon recovery, the
+supervised grant registry is reconstructed, so OpenHands forces this
+replacement path; ordinary in-process retries keep the existing conversation
+and refreshed grant. A retained issue that reopens after an inactive, terminal,
+or binding-superseded lifecycle receives the same one-time fresh-conversation
+treatment, even though its checkout and repository may still be reusable.
+
+If a recovered trigger-pending run receives `409 Conflict`, the adapter waits
+for the active turn to stop, refreshes the recovered event baseline, and retries
+`POST /run` on the same conversation;
+the conflict alone does not prove that the recovered prompt was accepted.
+Untrusted conversation envelopes are preserved as evidence but are never used
+to retire a remote conversation. Codex evidence uses the workspace metadata
+directory, while OpenHands evidence uses its configured persistence directory.
+Malformed superseded-conversation evidence is a lifecycle error and is never
+treated as an empty list that could overwrite prior evidence.
+Condenser tool-matching recovery follows the same evidence rule: it preserves
+the old manifest before creating a replacement, and clears that evidence only
+after remote retirement succeeds.
+When a newly created conversation fails the verified-checkout workspace
+barrier before its primary manifest is written, its pending ownership record
+is cleared only after remote retirement succeeds or equivalent superseded
+evidence is durable; if both operations fail, the pending record remains for
+restart recovery and later cleanup.
+
 ## 6. Conversation model
 
 Each issue gets a stable conversation manifest under:

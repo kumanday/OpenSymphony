@@ -1039,6 +1039,8 @@ pub struct MemoryScopeFilter {
     pub area: Option<String>,
     #[serde(default)]
     pub all_accessible: bool,
+    #[serde(skip)]
+    pub project_id_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3315,6 +3317,156 @@ Reviews are triggered when you open a pull request for review.
         assert_eq!(context.matches("## Documentation impact").count(), 1);
         assert!(context.contains("- docs/memory.md"));
         assert!(context.contains("- docs/openhands-runtime.md"));
+    }
+
+    #[test]
+    fn indexed_memory_scope_matches_project_and_repository() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let issue = IndexedIssue {
+            issue_key: "COE-123".to_string(),
+            concept_id: "issue-coe-123".to_string(),
+            concept_type: "issue-capsule".to_string(),
+            title: "Scoped memory".to_string(),
+            description: None,
+            state: Some("Done".to_string()),
+            milestone: None,
+            labels: Vec::new(),
+            tags: Vec::new(),
+            areas: Vec::new(),
+            area_source_ids: BTreeMap::new(),
+            capsule_path: repo.path().join("COE-123.md"),
+            visibility: MemoryVisibility::Private,
+            source_hash: "hash".to_string(),
+            warning_count: 0,
+            docs_sync_status: "synced".to_string(),
+            completion_time: None,
+            captured_at: "2026-08-01T00:00:00Z".to_string(),
+            changed_files: vec![PathBuf::from("repo-one/src/lib.rs")],
+            scope_refs: vec![
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: "project-1".to_string(),
+                    label: Some("Project One".to_string()),
+                },
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: "repository-1".to_string(),
+                    label: Some("Repo One".to_string()),
+                },
+            ],
+            source_scope_refs: BTreeMap::new(),
+            source_refs: Vec::new(),
+            links: Vec::new(),
+            citations: Vec::new(),
+            freshness: MemoryFreshness::Current,
+            warnings: Vec::new(),
+            body: "Scoped body".to_string(),
+        };
+        let scope = MemoryScopeFilter {
+            project: Some("project one".to_string()),
+            repo: Some("repository-1".to_string()),
+            ..MemoryScopeFilter::default()
+        };
+
+        assert!(indexed_issue_matches_scope(&config, &issue, &scope));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("project one".to_string()),
+                project_id_only: true,
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("project-1".to_string()),
+                project_id_only: true,
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: vec![KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: "project-1".to_string(),
+                    label: Some("Project One".to_string()),
+                }],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("repo-one".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: vec![KnowledgeScope {
+                    kind: KnowledgeScopeKind::Project,
+                    id: "project-1".to_string(),
+                    label: Some("Project One".to_string()),
+                }],
+                changed_files: Vec::new(),
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                project: Some("project-1".to_string()),
+                repo: Some("repository-1".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                changed_files: vec![PathBuf::from("src/lib.rs")],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("repository-1".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: Vec::new(),
+                changed_files: vec![PathBuf::from("src/lib.rs")],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                repo: Some("github:github.com:repository:42".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &IndexedIssue {
+                scope_refs: vec![KnowledgeScope {
+                    kind: KnowledgeScopeKind::Repository,
+                    id: "repository-1".to_string(),
+                    label: Some("Repo One".to_string()),
+                }],
+                ..issue.clone()
+            },
+            &MemoryScopeFilter {
+                project: Some("project-1".to_string()),
+                repo: Some("repository-1".to_string()),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                project: Some("other-project".to_string()),
+                ..scope
+            }
+        ));
     }
 
     #[test]

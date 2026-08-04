@@ -1,13 +1,14 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
 };
 
+use crate::opensymphony_cli::{BlockedEnvironment, memory::MemoryScopeGrantRegistry};
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
@@ -17,9 +18,9 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
-    IssueState, IssueStateCategory, NormalizedIssue, RetryEntry, RetryReason, RuntimeStreamState,
-    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceKey,
+    IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
+    RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -29,6 +30,7 @@ use crate::opensymphony_openhands::{
     OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
+    pending_conversation_manifest_path, superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
     RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
@@ -38,8 +40,9 @@ use crate::opensymphony_orchestrator::{
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
-    RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
-    WorkspaceManagerConfig,
+    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
+    WorkspaceManager, WorkspaceManagerConfig, checkout_credential_environment_variables,
+    compose_terminal_prompt, environment_variable_names_equal,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -75,6 +78,10 @@ pub(super) enum CliWorkspaceError {
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
+    #[error("OpenHands lifecycle recovery failed: {0}")]
+    OpenHandsLifecycle(String),
+    #[error("conversation lifecycle recovery failed: {0}")]
+    ConversationLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
 }
@@ -134,6 +141,9 @@ pub(super) struct ManagedLocalPreparation {
 
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
+    openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
+    openhands_persistence_dir_relative: PathBuf,
+    scope_grants: Option<MemoryScopeGrantRegistry>,
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
@@ -146,9 +156,12 @@ pub(super) struct RuntimeWorkerBackend {
     client: OpenHandsClient,
     workflow: Arc<ResolvedWorkflow>,
     workspace_manager: Arc<WorkspaceManager>,
+    openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     runner_config: IssueSessionRunnerConfig,
+    memory_env: Option<RuntimeMemoryEnv>,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     worker_env: BTreeMap<String, String>,
+    checkout_credential_envs: BTreeSet<String>,
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     codex_interrupts: CodexInterruptRegistry,
@@ -156,6 +169,7 @@ pub(super) struct RuntimeWorkerBackend {
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
     tasks: HashMap<String, ActiveWorkerTask>,
+    worker_issue_ids: HashMap<String, String>,
 }
 
 type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
@@ -201,10 +215,18 @@ struct LinearWorkpadCommentSource {
 #[derive(Clone, Debug, Default)]
 struct OverlayEnvironment {
     overrides: BTreeMap<String, String>,
+    blocked: BTreeSet<String>,
 }
 
 impl Environment for OverlayEnvironment {
     fn get(&self, name: &str) -> Option<String> {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
+            return None;
+        }
         self.overrides
             .get(name)
             .cloned()
@@ -271,6 +293,9 @@ pub(super) fn build_linear_client(
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
+    config.project_ids = tracker.project_ids.clone();
+    config.project_slugs = tracker.project_slugs.clone();
+    config.project_id_slug_fallbacks = tracker.project_id_slug_fallbacks.clone();
     config.project_id = tracker.project_id.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();
@@ -301,7 +326,11 @@ pub(super) async fn prepare_active_conversation_store(
     let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() else {
         return Ok(ManagedLocalPreparation::default());
     };
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let transport_environment = BlockedEnvironment::new(
+        ProcessEnvironment,
+        runtime_checkout_credential_envs(runtime),
+    );
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &transport_environment)?;
     let supervised = transport.managed_local_server_base_url()?.is_some()
         && runtime.workflow.extensions.openhands.local_server.enabled;
     if !supervised {
@@ -388,6 +417,17 @@ async fn migrate_legacy_workspace_conversations(
         if conversation_manifest_is_codex(&manifest) {
             continue;
         }
+        if workspace.checkout_generation().is_some()
+            && !strict_conversation_manifest_is_bound(workspace_manager, &workspace, &manifest)
+                .await?
+        {
+            tracing::warn!(
+                issue = %issue_manifest.identifier,
+                conversation_id = %manifest.conversation_id,
+                "skipping strict conversation migration with an untrusted runtime envelope"
+            );
+            continue;
+        }
 
         match conversation_store.move_conversation_to(
             manifest.conversation_id.as_str(),
@@ -427,10 +467,18 @@ async fn prepare_active_conversation_store_for_issues(
     let mut report = ActiveConversationStorePreparation::default();
 
     for issue in active_issues {
-        let Some(workspace) = workspace_manager
-            .find_workspace_by_issue_reference(issue.identifier.as_str())
+        let workspace = match workspace_manager
+            .find_verified_workspace_by_issue_reference(issue.identifier.as_str())
             .await?
-        else {
+        {
+            Some(workspace) => Some(workspace),
+            None => {
+                workspace_manager
+                    .find_workspace_by_issue_reference(issue.identifier.as_str())
+                    .await?
+            }
+        };
+        let Some(workspace) = workspace else {
             report.skipped_without_workspace += 1;
             continue;
         };
@@ -457,6 +505,17 @@ async fn prepare_active_conversation_store_for_issues(
             }
         };
         if conversation_manifest_is_codex(&manifest) {
+            continue;
+        }
+        if workspace.checkout_generation().is_some()
+            && !strict_conversation_manifest_is_bound(workspace_manager, &workspace, &manifest)
+                .await?
+        {
+            tracing::warn!(
+                issue = %issue.identifier,
+                conversation_id = %manifest.conversation_id,
+                "skipping strict conversation migration with an untrusted runtime envelope"
+            );
             continue;
         }
 
@@ -490,9 +549,197 @@ async fn prepare_active_conversation_store_for_issues(
     Ok(report)
 }
 
+async fn strict_conversation_manifest_is_bound(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+) -> Result<bool, RunCommandError> {
+    let Some(run_manifest) = workspace_manager.load_run_manifest(workspace).await? else {
+        return Ok(false);
+    };
+    let Some(run_envelope) = run_manifest.runtime_envelope.as_ref() else {
+        return Ok(false);
+    };
+    let Some(conversation_envelope) = manifest.runtime_envelope.as_ref() else {
+        return Ok(false);
+    };
+    if conversation_envelope != run_envelope
+        || conversation_envelope.conversation_binding.as_deref()
+            != Some(manifest.conversation_id.as_str())
+    {
+        return Ok(false);
+    }
+    workspace_manager
+        .verify_runtime_envelope_for_retry(workspace, conversation_envelope)
+        .await
+        .map(|_| true)
+        .map_err(RunCommandError::from)
+}
+
 fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool {
     manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND)
         || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
+}
+
+fn superseded_codex_manifest_is_archiveable(manifest: &IssueConversationManifest) -> bool {
+    conversation_manifest_is_codex(manifest)
+        && manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+            envelope.conversation_binding.as_deref() == Some(manifest.conversation_id.as_str())
+        })
+}
+
+fn parse_superseded_harness_manifests(
+    raw: &str,
+) -> Result<Option<Vec<IssueConversationManifest>>, String> {
+    serde_json::from_str(raw)
+        .map_err(|error| format!("superseded harness evidence is malformed: {error}"))
+}
+
+async fn persist_superseded_harness_manifest(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+) -> Result<(), String> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let raw = manager
+        .read_text_artifact(workspace, &path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut manifests = raw
+        .as_deref()
+        .map(parse_superseded_harness_manifests)
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    if manifests
+        .iter()
+        .all(|existing| existing.conversation_id != manifest.conversation_id)
+    {
+        manifests.push(manifest.clone());
+    }
+    manager
+        .write_json_artifact_atomically(workspace, &path, &Some(&manifests))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn clear_superseded_harness_manifest(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    conversation_id: &ConversationId,
+) -> Result<(), String> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let Some(raw) = manager
+        .read_text_artifact(workspace, &path)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let Some(mut manifests) = parse_superseded_harness_manifests(&raw)? else {
+        return Ok(());
+    };
+    manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
+    let replacement = (!manifests.is_empty()).then_some(&manifests);
+    manager
+        .write_json_artifact_atomically(workspace, &path, &replacement)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn archive_superseded_harness_sessions(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    store: Option<&OpenHandsConversationStorePaths>,
+    persistence_dir_relative: &Path,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), CliWorkspaceError> {
+    let path = superseded_conversation_manifests_path(workspace);
+    let Some(raw) = manager.read_text_artifact(workspace, &path).await? else {
+        return Ok(());
+    };
+    let checkout = manager.verify_checkout_for_retry(workspace).await?;
+    let Some(manifests) =
+        parse_superseded_harness_manifests(&raw).map_err(CliWorkspaceError::OpenHandsLifecycle)?
+    else {
+        return Ok(());
+    };
+    for manifest in &manifests {
+        let Some(envelope) = manifest.runtime_envelope.as_ref() else {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded OpenHands conversation evidence has no runtime envelope".to_owned(),
+            ));
+        };
+        if envelope.conversation_binding.as_deref() != Some(manifest.conversation_id.as_str()) {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded harness evidence is not bound to its own conversation".to_owned(),
+            ));
+        }
+        let expected_persistence_dir = if conversation_manifest_is_codex(manifest) {
+            workspace.metadata_dir()
+        } else {
+            workspace.workspace_path().join(persistence_dir_relative)
+        };
+        if manifest.issue_id.as_str() != workspace.issue_id()
+            || manifest.identifier.as_str() != workspace.identifier()
+            || manifest.persistence_dir != expected_persistence_dir
+            || envelope.checkout_generation != checkout.generation
+            || envelope.checkout_path != workspace.workspace_path()
+            || envelope.repository_binding != checkout.repository_binding
+            || manifest.conversation_id.as_str().trim().is_empty()
+        {
+            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                "superseded OpenHands conversation evidence is not owned by this verified checkout"
+                    .to_owned(),
+            ));
+        }
+        if conversation_manifest_is_codex(manifest) {
+            archive_superseded_codex_thread(
+                workspace,
+                manifest,
+                codex_bin,
+                checkout_credential_envs,
+            )
+            .await
+            .map_err(CliWorkspaceError::CodexLifecycle)?;
+        } else {
+            let store = store.ok_or_else(|| {
+                CliWorkspaceError::OpenHandsLifecycle(
+                    "OpenHands conversation store is unavailable while archiving superseded evidence"
+                        .to_owned(),
+                )
+            })?;
+            match store.move_conversation_to(
+                manifest.conversation_id.as_str(),
+                ConversationStoreKind::Archived,
+            ) {
+                Ok(ConversationMoveOutcome::Moved { from, .. }) => tracing::info!(
+                    issue = %workspace.identifier(),
+                    conversation_id = %manifest.conversation_id,
+                    from = %from,
+                    "moved superseded OpenHands conversation into the archived store"
+                ),
+                Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
+                Ok(ConversationMoveOutcome::Missing) => tracing::warn!(
+                    issue = %workspace.identifier(),
+                    conversation_id = %manifest.conversation_id,
+                    "superseded OpenHands conversation was already absent before terminal cleanup"
+                ),
+                Err(error) => {
+                    return Err(CliWorkspaceError::OpenHandsLifecycle(error.to_string()));
+                }
+            }
+        }
+    }
+    manager
+        .write_json_artifact_atomically(
+            workspace,
+            &path,
+            &Option::<Vec<IssueConversationManifest>>::None,
+        )
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -531,10 +778,13 @@ pub(super) fn build_workspace_manager_config_with_retention(
 pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
     prepared_tooling: Option<LocalServerTooling>,
-    memory_env: Option<&RuntimeMemoryEnv>,
     worker_env: &BTreeMap<String, String>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let transport_environment = BlockedEnvironment::new(
+        ProcessEnvironment,
+        runtime_checkout_credential_envs(runtime),
+    );
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &transport_environment)?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
     let supervisor_base_url = transport.managed_local_server_base_url()?;
     let supervised = supervisor_base_url.is_some() && local_server.enabled;
@@ -573,15 +823,13 @@ pub(super) async fn build_runtime_transport(
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
     config.extra_env.extend(worker_env.clone());
+    config.env_remove = runtime_checkout_env_remove(runtime, &local_server.env);
     if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
         conversation_store.ensure_active_and_archived()?;
         config.extra_env.insert(
             OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
             conversation_store.active.display().to_string(),
         );
-    }
-    if let Some(memory_env) = memory_env {
-        inject_memory_env(&mut config.extra_env, memory_env);
     }
     config.startup_timeout = Duration::from_millis(local_server.startup_timeout_ms);
     config.probe.path = local_server.readiness_probe_path.clone();
@@ -591,6 +839,39 @@ pub(super) async fn build_runtime_transport(
     let status = supervisor.start()?;
     let transport = TransportConfig::new(status.base_url).with_auth(transport.auth().clone());
     Ok((transport, Some(supervisor)))
+}
+
+fn runtime_checkout_credential_envs(runtime: &RunRuntimeConfig) -> BTreeSet<String> {
+    runtime
+        .repository_checkouts
+        .as_ref()
+        .map(checkout_credential_environment_variables)
+        .unwrap_or_default()
+}
+
+fn runtime_checkout_env_remove(
+    runtime: &RunRuntimeConfig,
+    local_server_env: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    checkout_env_remove_variables(runtime_checkout_credential_envs(runtime), local_server_env)
+}
+
+fn checkout_env_remove_variables(
+    variables: BTreeSet<String>,
+    _local_server_env: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    // A local-server override must never reintroduce a checkout credential,
+    // including when its value was resolved from that same environment
+    // variable (for example `${GITHUB_TOKEN}`).
+    variables
+}
+
+fn strict_openhands_cleanup_requires_conversation_store(
+    strict_checkout: bool,
+    manifest: &IssueConversationManifest,
+    store: Option<&OpenHandsConversationStorePaths>,
+) -> bool {
+    strict_checkout && !conversation_manifest_is_codex(manifest) && store.is_none()
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -655,6 +936,14 @@ impl RuntimeWorkspaceBackend {
     ) -> Self {
         Self {
             manager,
+            openhands_conversation_store: None,
+            openhands_persistence_dir_relative: workflow
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative
+                .clone(),
+            scope_grants: None,
             active_states: workflow
                 .config
                 .tracker
@@ -674,6 +963,22 @@ impl RuntimeWorkspaceBackend {
             retain_failed,
             retry_state_root,
         }
+    }
+
+    pub(super) fn with_openhands_conversation_store(
+        mut self,
+        store: Option<OpenHandsConversationStorePaths>,
+    ) -> Self {
+        self.openhands_conversation_store = store;
+        self
+    }
+
+    pub(super) fn with_scope_grants(
+        mut self,
+        scope_grants: Option<MemoryScopeGrantRegistry>,
+    ) -> Self {
+        self.scope_grants = scope_grants;
+        self
     }
 }
 
@@ -696,6 +1001,19 @@ impl RuntimeWorkspaceBackend {
             else {
                 return Ok(());
             };
+            if let Some(scope_grants) = &self.scope_grants {
+                scope_grants.revoke_issue(handle.identifier());
+            }
+            let removes_workspace = force_remove
+                || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
+                    == crate::opensymphony_workspace::CleanupDecision::Remove;
+            let mut cleanup_run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let _ = recovered_conversation_manifest(
+                &self.manager,
+                &handle,
+                cleanup_run_manifest.as_mut(),
+            )
+            .await?;
             let manifest_path = handle.conversation_manifest_path();
             if let Some(raw_manifest) = self
                 .manager
@@ -704,24 +1022,143 @@ impl RuntimeWorkspaceBackend {
             {
                 match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
-                        if let Err(error) = archive_terminal_codex_thread(
-                            &self.manager,
-                            &handle,
-                            &mut manifest,
-                            &self.codex_bin,
-                        )
-                        .await
-                        {
+                        let envelope_compatible = if handle.checkout_generation().is_some() {
+                            self.manager
+                                .load_run_manifest(&handle)
+                                .await?
+                                .and_then(|run| run.runtime_envelope)
+                                .is_some_and(|expected| {
+                                    manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                                        actual == &expected
+                                            && actual.conversation_binding.as_deref()
+                                                == Some(
+                                                    manifest.conversation_id.to_string().as_str(),
+                                                )
+                                    })
+                                })
+                        } else {
+                            true
+                        };
+                        if envelope_compatible {
+                            archive_superseded_harness_sessions(
+                                &self.manager,
+                                &handle,
+                                self.openhands_conversation_store.as_ref(),
+                                &self.openhands_persistence_dir_relative,
+                                &self.codex_bin,
+                                self.manager.checkout_credential_envs(),
+                            )
+                            .await?;
+                            if let Err(error) = archive_terminal_codex_thread(
+                                &self.manager,
+                                &handle,
+                                &mut manifest,
+                                &self.codex_bin,
+                                self.manager.checkout_credential_envs(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    issue = %handle.identifier(),
+                                    thread_id = %manifest.conversation_id,
+                                    %error,
+                                    "preserving terminal Codex workspace for archive retry"
+                                );
+                                return Err(CliWorkspaceError::CodexLifecycle(error));
+                            }
+                        } else {
                             tracing::warn!(
                                 issue = %handle.identifier(),
                                 thread_id = %manifest.conversation_id,
-                                %error,
-                                "preserving terminal Codex workspace for archive retry"
+                                "skipping terminal Codex archive for an untrusted runtime envelope"
                             );
-                            return Err(CliWorkspaceError::CodexLifecycle(error));
+                            return Err(CliWorkspaceError::CodexLifecycle(
+                                "terminal Codex conversation binding is not compatible with the checkout run envelope"
+                                    .to_owned(),
+                            ));
                         }
                     }
-                    Ok(_) => {}
+                    Ok(manifest) => {
+                        archive_superseded_harness_sessions(
+                            &self.manager,
+                            &handle,
+                            self.openhands_conversation_store.as_ref(),
+                            &self.openhands_persistence_dir_relative,
+                            &self.codex_bin,
+                            self.manager.checkout_credential_envs(),
+                        )
+                        .await?;
+                        if !removes_workspace {
+                            self.manager
+                                .cleanup(&handle, IssueLifecycleState::Terminal)
+                                .await?;
+                            self.terminal_cleanup_paths.insert(workspace.path.clone());
+                            return Ok(());
+                        }
+                        let envelope_compatible = if handle.checkout_generation().is_some() {
+                            strict_conversation_manifest_is_bound(&self.manager, &handle, &manifest)
+                                .await
+                                .map_err(|error| {
+                                    CliWorkspaceError::OpenHandsLifecycle(error.to_string())
+                                })?
+                        } else {
+                            true
+                        };
+                        if !envelope_compatible {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                conversation_id = %manifest.conversation_id,
+                                "skipping terminal OpenHands archive for an untrusted runtime envelope"
+                            );
+                            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                "terminal OpenHands conversation binding is not compatible with the checkout run envelope"
+                                    .to_owned(),
+                            ));
+                        }
+                        if let Some(store) = self.openhands_conversation_store.as_ref() {
+                            match store.move_conversation_to(
+                                manifest.conversation_id.as_str(),
+                                ConversationStoreKind::Archived,
+                            ) {
+                                Ok(ConversationMoveOutcome::Moved { from, .. }) => {
+                                    tracing::info!(
+                                        issue = %handle.identifier(),
+                                        conversation_id = %manifest.conversation_id,
+                                        from = %from,
+                                        "moved terminal OpenHands conversation into the archived store before workspace removal"
+                                    );
+                                }
+                                Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {}
+                                Ok(ConversationMoveOutcome::Missing) => {
+                                    tracing::warn!(
+                                        issue = %handle.identifier(),
+                                        conversation_id = %manifest.conversation_id,
+                                        "terminal OpenHands conversation was already absent before workspace removal"
+                                    );
+                                }
+                                Err(error) => {
+                                    return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                        error.to_string(),
+                                    ));
+                                }
+                            }
+                        } else if strict_openhands_cleanup_requires_conversation_store(
+                            handle.checkout_generation().is_some(),
+                            &manifest,
+                            self.openhands_conversation_store.as_ref(),
+                        ) {
+                            return Err(CliWorkspaceError::OpenHandsLifecycle(
+                                "retaining strict OpenHands workspace because its remote conversation store is unavailable"
+                                    .to_owned(),
+                            ));
+                        } else {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                conversation_id = %manifest.conversation_id,
+                                "removing terminal workspace without an OpenHands conversation store"
+                            );
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(
                             issue = %handle.identifier(),
@@ -729,6 +1166,11 @@ impl RuntimeWorkspaceBackend {
                             %error,
                             "continuing terminal cleanup with invalid conversation manifest"
                         );
+                        if handle.checkout_generation().is_some() {
+                            return Err(CliWorkspaceError::ConversationLifecycle(format!(
+                                "strict terminal conversation manifest is malformed: {error}"
+                            )));
+                        }
                     }
                 }
             }
@@ -750,12 +1192,21 @@ impl RuntimeWorkspaceBackend {
 impl WorkspaceBackend for RuntimeWorkspaceBackend {
     type Error = CliWorkspaceError;
 
+    fn revoke_issue_resources(&mut self, issue_identifier: &str) {
+        if let Some(scope_grants) = &self.scope_grants {
+            scope_grants.revoke_issue(issue_identifier);
+        }
+    }
+
     async fn ensure_workspace(
         &mut self,
         issue: &NormalizedIssue,
         _observed_at: TimestampMs,
     ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
-        let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
+        let ensured = self
+            .manager
+            .ensure_with_checkout_timeout(&issue_descriptor(issue), DEFAULT_WORKER_LAUNCH_TIMEOUT)
+            .await?;
         self.terminal_cleanup_paths
             .remove(ensured.handle.workspace_path());
         Ok(crate::opensymphony_domain::WorkspaceRecord {
@@ -774,7 +1225,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         let mut recoveries = Vec::new();
         for (handle, manifest) in self.manager.list_all_workspaces().await? {
-            let run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let mut run_manifest = self.manager.load_run_manifest(&handle).await?;
             let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
                 matches!(
                     run.status,
@@ -782,13 +1233,20 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 )
             });
             let conversation_manifest =
-                recovered_conversation_manifest(&self.manager, &handle).await?;
+                recovered_conversation_manifest(&self.manager, &handle, run_manifest.as_mut())
+                    .await?;
             let harness_kind = conversation_manifest
                 .as_ref()
                 .map(recovered_harness_kind_from_manifest);
             let recovered_run = run_manifest
                 .as_ref()
-                .filter(|run| recoverable_run_manifest(run, conversation_manifest.as_ref()))
+                .filter(|run| {
+                    recoverable_run_manifest(
+                        run,
+                        conversation_manifest.as_ref(),
+                        handle.checkout_generation().is_some(),
+                    )
+                })
                 .and_then(|_| {
                     recovered_run_from_manifests(
                         run_manifest.as_ref(),
@@ -1254,23 +1712,151 @@ fn retry_reason_from_manifest(value: &str) -> Option<RetryReason> {
 async fn recovered_conversation_manifest(
     manager: &WorkspaceManager,
     handle: &WorkspaceHandle,
+    run_manifest: Option<&mut RunManifest>,
 ) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
-    let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? else {
+    if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
+        match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+            Ok(manifest) => {
+                if let Some(run_manifest) = run_manifest {
+                    let pending_path = pending_conversation_manifest_path(handle);
+                    if let Some(raw_pending) =
+                        manager.read_text_artifact(handle, &pending_path).await?
+                        && let Ok(Some(pending_manifest)) =
+                            serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+                        && pending_manifest_matches_run_identity(
+                            &run_manifest.issue_id,
+                            &run_manifest.identifier,
+                            run_manifest.runtime_envelope.as_ref(),
+                            &pending_manifest,
+                        )
+                    {
+                        if pending_manifest.conversation_id == manifest.conversation_id {
+                            run_manifest.runtime_envelope = pending_manifest.runtime_envelope;
+                            manager.write_run_manifest(handle, run_manifest).await?;
+                            tracing::info!(
+                                manifest = %manifest_path.display(),
+                                conversation_id = %manifest.conversation_id,
+                                "reconciled pending conversation binding into the run manifest"
+                            );
+                        } else {
+                            run_manifest.runtime_envelope =
+                                pending_manifest.runtime_envelope.clone();
+                            manager.write_run_manifest(handle, run_manifest).await?;
+                            manager
+                                .write_json_artifact(handle, &manifest_path, &pending_manifest)
+                                .await?;
+                            tracing::info!(
+                                manifest = %manifest_path.display(),
+                                conversation_id = %pending_manifest.conversation_id,
+                                "promoted pending replacement conversation manifest during recovery"
+                            );
+                            return Ok(Some(pending_manifest));
+                        }
+                    }
+                }
+                return Ok(Some(manifest));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    manifest = %manifest_path.display(),
+                    %error,
+                    "conversation manifest is malformed; attempting pending recovery copy"
+                );
+            }
+        }
+    }
+
+    let Some(run_manifest) = run_manifest else {
         return Ok(None);
     };
-    let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            tracing::warn!(
-                manifest = %manifest_path.display(),
-                %error,
-                "skipping recovered scheduler harness kind for invalid conversation manifest"
-            );
-            return Ok(None);
-        }
+    if run_manifest.runtime_envelope.is_none() {
+        return Ok(None);
+    }
+
+    let pending_path = pending_conversation_manifest_path(handle);
+    let Some(raw_pending) = manager.read_text_artifact(handle, &pending_path).await? else {
+        return Ok(None);
     };
+    let Some(manifest) = serde_json::from_str::<Option<IssueConversationManifest>>(&raw_pending)
+        .ok()
+        .flatten()
+    else {
+        tracing::warn!(
+            manifest = %pending_path.display(),
+            "skipping invalid pending OpenHands conversation manifest"
+        );
+        return Ok(None);
+    };
+    let exact_envelope_match =
+        manifest.runtime_envelope.as_ref() == run_manifest.runtime_envelope.as_ref();
+    let pending_binding_transition =
+        runtime_envelope_matches_pending_binding(run_manifest.runtime_envelope.as_ref(), &manifest);
+    if !exact_envelope_match && !pending_binding_transition
+        || manifest
+            .runtime_envelope
+            .as_ref()
+            .and_then(|envelope| envelope.conversation_binding.as_deref())
+            != Some(manifest.conversation_id.as_str())
+    {
+        tracing::warn!(
+            manifest = %pending_path.display(),
+            "skipping pending OpenHands conversation with an incompatible runtime envelope"
+        );
+        return Ok(None);
+    }
+
+    if pending_binding_transition {
+        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        manager.write_run_manifest(handle, run_manifest).await?;
+        tracing::info!(
+            manifest = %manifest_path.display(),
+            conversation_id = %manifest.conversation_id,
+            "reconciled pending conversation binding into the run manifest"
+        );
+    }
+
+    manager
+        .write_json_artifact(handle, &manifest_path, &manifest)
+        .await?;
+    tracing::info!(
+        manifest = %manifest_path.display(),
+        conversation_id = %manifest.conversation_id,
+        "promoted pending OpenHands conversation manifest during recovery"
+    );
     Ok(Some(manifest))
+}
+
+fn runtime_envelope_matches_pending_binding(
+    run_envelope: Option<&TerminalRuntimeEnvelope>,
+    pending_manifest: &IssueConversationManifest,
+) -> bool {
+    let (Some(run_envelope), Some(pending_envelope)) =
+        (run_envelope, pending_manifest.runtime_envelope.as_ref())
+    else {
+        return false;
+    };
+    if pending_envelope.conversation_binding.as_deref()
+        != Some(pending_manifest.conversation_id.as_str())
+    {
+        return false;
+    }
+    let mut run_without_binding = run_envelope.clone();
+    let mut pending_without_binding = pending_envelope.clone();
+    run_without_binding.conversation_binding = None;
+    pending_without_binding.conversation_binding = None;
+    run_without_binding == pending_without_binding
+}
+
+fn pending_manifest_matches_run_identity(
+    run_issue_id: &str,
+    run_identifier: &str,
+    run_envelope: Option<&TerminalRuntimeEnvelope>,
+    pending_manifest: &IssueConversationManifest,
+) -> bool {
+    pending_manifest.issue_id.as_str() == run_issue_id
+        && pending_manifest.identifier.as_str() == run_identifier
+        && runtime_envelope_matches_pending_binding(run_envelope, pending_manifest)
 }
 
 fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
@@ -1295,15 +1881,83 @@ fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) ->
     OPENHANDS_AGENT_SERVER_KIND.to_string()
 }
 
+fn fresh_conversation_initialization_pending(
+    run_manifest: &RunManifest,
+    conversation_manifest: &IssueConversationManifest,
+) -> bool {
+    run_manifest.status == RunStatus::Prepared
+        && conversation_manifest.fresh_conversation
+        && !conversation_manifest.workflow_prompt_seeded
+        && conversation_manifest.last_prompt_kind.is_none()
+        && conversation_manifest.active_run_id.is_none()
+        && conversation_manifest.prepared_run_id.is_none()
+        && conversation_manifest.trigger_pending_run_id.is_none()
+        && conversation_manifest.runtime_envelope == run_manifest.runtime_envelope
+        && conversation_manifest
+            .runtime_envelope
+            .as_ref()
+            .and_then(|envelope| envelope.conversation_binding.as_deref())
+            == Some(conversation_manifest.conversation_id.as_str())
+}
+
+fn prompt_recorded_before_send_preparation(
+    run_manifest: &RunManifest,
+    conversation_manifest: &IssueConversationManifest,
+) -> bool {
+    run_manifest.status == RunStatus::Prepared
+        && conversation_manifest.issue_id.as_str() == run_manifest.issue_id
+        && conversation_manifest.last_prompt_kind.is_some()
+        && conversation_manifest.last_prompt_path.is_some()
+        && conversation_manifest
+            .last_prompt_at
+            .is_some_and(|prompt_at| prompt_at >= run_manifest.created_at)
+        && conversation_manifest.prepared_run_id.is_none()
+        && conversation_manifest.active_run_id.is_none()
+        && conversation_manifest.trigger_pending_run_id.is_none()
+}
+
 fn recoverable_run_manifest(
     run_manifest: &RunManifest,
     conversation_manifest: Option<&IssueConversationManifest>,
+    strict_checkout: bool,
 ) -> bool {
+    let envelope_compatible = match run_manifest.runtime_envelope.as_ref() {
+        Some(expected) => conversation_manifest
+            .and_then(|manifest| manifest.runtime_envelope.as_ref())
+            .is_some_and(|actual| actual == expected),
+        None => !strict_checkout,
+    };
+    if !envelope_compatible {
+        return false;
+    }
+    let conversation_binding_compatible = conversation_manifest.is_none_or(|manifest| {
+        manifest.runtime_envelope.as_ref().is_some_and(|envelope| {
+            envelope.conversation_binding.as_deref() == Some(manifest.conversation_id.as_str())
+        }) || (!strict_checkout && manifest.runtime_envelope.is_none())
+    });
+    if !conversation_binding_compatible {
+        return false;
+    }
+    if conversation_manifest
+        .is_some_and(|manifest| fresh_conversation_initialization_pending(run_manifest, manifest))
+    {
+        return true;
+    }
     run_manifest.status == RunStatus::Running
         || (run_manifest.status == RunStatus::Prepared
             && conversation_manifest.is_some_and(|manifest| {
                 if manifest.issue_id.as_str() != run_manifest.issue_id {
                     return false;
+                }
+
+                // record_prompt persists the rendered prompt before start_turn
+                // writes prepared_run_id. This is an unambiguously unsent
+                // window: retry the prompt instead of treating the prepared
+                // run as unrecoverable. The timestamp guard prevents an old
+                // prompt from making an unrelated newly prepared run look
+                // sendable.
+                if prompt_recorded_before_send_preparation(run_manifest, manifest) {
+                    return true;
                 }
 
                 // The prepared marker is written before send_message. A
@@ -1314,7 +1968,11 @@ fn recoverable_run_manifest(
                 // whether a prompt was accepted before scheduler retry logic
                 // considers sending another turn.
                 if manifest.prepared_run_id.as_deref() == Some(run_manifest.run_id.as_str()) {
-                    return true;
+                    // A strict prepared-only marker is ambiguous: the prompt
+                    // may already have been accepted, but the active marker
+                    // was not persisted. Refuse attach rather than risk
+                    // sending the same prompt twice.
+                    return !strict_checkout;
                 }
 
                 manifest.prepared_run_id.is_none()
@@ -1411,10 +2069,16 @@ impl RuntimeWorkerBackend {
             client,
             workflow: workflow.clone(),
             workspace_manager,
-            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
-                .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
+            openhands_conversation_store: None,
+            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow).with_memory(
+                memory_env
+                    .as_ref()
+                    .map(|memory| memory_access_from_runtime(memory, false)),
+            ),
+            memory_env,
             workpad_comment_source,
             worker_env,
+            checkout_credential_envs: BTreeSet::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
@@ -1422,16 +2086,36 @@ impl RuntimeWorkerBackend {
             updates_tx,
             updates_rx,
             tasks: HashMap::new(),
+            worker_issue_ids: HashMap::new(),
         }
     }
 
+    pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
+        self.checkout_credential_envs = variables;
+        self
+    }
+
+    pub(super) fn with_openhands_conversation_store(
+        mut self,
+        store: Option<OpenHandsConversationStorePaths>,
+    ) -> Self {
+        self.openhands_conversation_store = store;
+        self
+    }
+
+    fn take_tracked_task(&mut self, worker_id: &str) -> Option<ActiveWorkerTask> {
+        self.worker_issue_ids.remove(worker_id);
+        self.tasks.remove(worker_id)
+    }
+
     fn abort_tracked_task(&mut self, worker_id: &str) {
-        if let Some(task) = self.tasks.remove(worker_id) {
+        if let Some(task) = self.take_tracked_task(worker_id) {
             task.handle.abort();
         }
     }
 
     fn abort_all_tracked_tasks(&mut self) {
+        self.worker_issue_ids.clear();
         let active_count = self.tasks.len();
         if active_count == 0 {
             return;
@@ -1448,6 +2132,7 @@ impl RuntimeWorkerBackend {
 
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let issue = request.issue.clone();
+        let memory_grant_registry_recovered = request.memory_grant_registry_recovered;
         let mut runner_config = self.runner_config.clone();
         let mut worker_env = self.worker_env.clone();
         if let Some(memory) = runner_config.memory.as_mut() {
@@ -1474,20 +2159,20 @@ impl RuntimeWorkerBackend {
                 worker_env.remove("OPENSYMPHONY_MEMORY_PROJECT");
             }
         }
-        let mut runner = IssueSessionRunner::with_environment(
-            self.client.clone(),
-            runner_config,
-            OverlayEnvironment {
-                overrides: worker_env.clone(),
-            },
-        );
-        if let Some(source) = self.workpad_comment_source.clone() {
-            runner = runner.with_workpad_comment_source(source);
-        }
+        let checkout_credential_envs = self.checkout_credential_envs.clone();
+        let client = self.client.clone();
+        let memory_env = self.memory_env.clone();
+        let workpad_comment_source = self.workpad_comment_source.clone();
         let workspace_manager = self.workspace_manager.clone();
+        let openhands_conversation_store = self.openhands_conversation_store.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
         let worker_id = request.run.worker_id.clone();
+        let issue_identifier = issue.identifier.to_string();
+        self.worker_issue_ids
+            .retain(|_, existing| existing != &issue_identifier);
+        self.worker_issue_ids
+            .insert(worker_id.to_string(), issue_identifier);
         let observer_worker_id = worker_id.clone();
         let finished_worker_id = worker_id.clone();
         let (launch_tx, launch_rx) = oneshot::channel();
@@ -1505,7 +2190,16 @@ impl RuntimeWorkerBackend {
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
-            let ensured = match workspace_manager.ensure(&issue_descriptor(&issue)).await {
+            let run_id = format!("run-{launch_worker_id}");
+            let mut workspace_issue = issue_descriptor(&issue);
+            if recovered && let Some(binding) = run.repository_binding.clone() {
+                workspace_issue.repository_binding =
+                    Some(RepositoryBindingOutcome::Resolved(binding));
+            }
+            let ensured = match workspace_manager
+                .ensure_with_run_id(&workspace_issue, Some(&run_id))
+                .await
+            {
                 Ok(ensured) => ensured,
                 Err(error) => {
                     report_launch_failure(
@@ -1515,14 +2209,338 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
+            let scheduler_workspace_path = match fs::canonicalize(&run.workspace_path).await {
+                Ok(path) => path,
+                Err(error) => {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to resolve scheduler-bound workspace: {error}"),
+                    );
+                    return;
+                }
+            };
+            let ensured_workspace_path =
+                match fs::canonicalize(ensured.handle.workspace_path()).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to resolve ensured workspace: {error}"),
+                        );
+                        return;
+                    }
+                };
+            if ensured_workspace_path != scheduler_workspace_path {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!(
+                        "workspace generation changed during worker launch: scheduler bound {}, ensured {}",
+                        run.workspace_path.display(),
+                        ensured.handle.workspace_path().display()
+                    ),
+                );
+                return;
+            }
+            let mut prior_run_manifest =
+                match workspace_manager.load_run_manifest(&ensured.handle).await {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to read prior checkout run state: {error}"),
+                        );
+                        return;
+                    }
+                };
+            let allow_worker_changes = match workspace_manager
+                .checkout_allows_worker_changes(&ensured.handle)
+                .await
+            {
+                Ok(allow_worker_changes) => allow_worker_changes,
+                Err(error) => {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to inspect retained checkout state: {error}"),
+                    );
+                    return;
+                }
+            };
+            let recovered_conversation = recovered_conversation_manifest(
+                &workspace_manager,
+                &ensured.handle,
+                prior_run_manifest.as_mut(),
+            )
+            .await
+            .map_err(|error| {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!("failed to recover conversation binding: {error}"),
+                );
+                error
+            });
+            let recovered_conversation = match recovered_conversation {
+                Ok(manifest) => manifest,
+                Err(_) => return,
+            };
+            let target_is_codex = route.harness_kind == CODEX_APP_SERVER_KIND;
+            let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
+                conversation_manifest_is_codex(manifest) != target_is_codex
+            });
+            let superseded_harness_manifest = switching_harness.then(|| {
+                recovered_conversation
+                    .as_ref()
+                    .expect("switching harness requires a prior conversation manifest")
+                    .clone()
+            });
+            let persisted_conversation_binding = recovered_conversation
+                .as_ref()
+                .filter(|_| !switching_harness)
+                .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                .and_then(|envelope| envelope.conversation_binding.clone())
+                .or_else(|| {
+                    if switching_harness {
+                        None
+                    } else {
+                        prior_run_manifest
+                            .as_ref()
+                            .and_then(|manifest| manifest.runtime_envelope.as_ref())
+                            .and_then(|envelope| envelope.conversation_binding.clone())
+                    }
+                });
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
-            let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt)
+            let mut initially_verified_checkout = None;
+            let runtime_envelope = if ensured.handle.checkout_generation().is_some() {
+                match if allow_worker_changes {
+                    workspace_manager
+                        .verify_checkout_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager.verify_checkout(&ensured.handle).await
+                } {
+                    Ok(checkout) => {
+                        initially_verified_checkout = Some(checkout.clone());
+                        Some(TerminalRuntimeEnvelope {
+                            repository_binding: checkout.repository_binding.clone(),
+                            project_id: issue.project_id.clone(),
+                            project_slug: issue.project_slug.clone(),
+                            config_generation: checkout
+                                .repository_binding
+                                .config_generation
+                                .clone(),
+                            inventory_generation: checkout
+                                .repository_binding
+                                .inventory_generation
+                                .clone(),
+                            policy_generation: checkout.policy_generation.clone(),
+                            review_profile: checkout.review_profile.clone(),
+                            review_provider: checkout.review_provider.clone(),
+                            review_policy_generation: checkout.review_policy_generation.clone(),
+                            checkout_generation: checkout.generation.clone(),
+                            checkout_path: ensured.handle.workspace_path().to_path_buf(),
+                            target_branch: checkout.target_branch.clone(),
+                            target_commit: checkout.target_commit.clone(),
+                            instruction: checkout.instruction.clone(),
+                            harness: route.harness_kind.clone(),
+                            model_profile: route
+                                .model_profile
+                                .clone()
+                                .unwrap_or_else(|| "default".to_owned()),
+                            model: route.model.clone().or_else(|| {
+                                if route.harness_kind == OPENHANDS_AGENT_SERVER_KIND {
+                                    workflow
+                                        .extensions
+                                        .openhands
+                                        .conversation
+                                        .agent
+                                        .llm
+                                        .as_ref()
+                                        .and_then(|llm| llm.model.clone())
+                                } else {
+                                    None
+                                }
+                            }),
+                            requested_execution_scope: "single_checkout".to_owned(),
+                            effective_containment: "trusted_host_process_cwd".to_owned(),
+                            conversation_binding: persisted_conversation_binding,
+                            cleanup_intent: "workspace_manager_owned".to_owned(),
+                        })
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("verified checkout is not attachable: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let mut memory_grant_requires_fresh_conversation = false;
+            let worker_memory_env = memory_env.as_ref().map(|memory| {
+                let mut scoped = memory.clone();
+                scoped.project = worker_memory_project(&issue, &memory.project);
+                // Worker requests carry an issue-specific project and repository grant.
+                // Do not inherit the central project-set scope alongside that grant: the
+                // memory server treats project-set plus a different explicit project as a
+                // conflicting scope and rejects otherwise authorized reads.
+                scoped.project_set = None;
+                scoped.execution_repo = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.repository_binding.repository.id.to_string())
+                    .unwrap_or_else(|| memory.execution_repo.clone());
+                let authorized_repositories = scoped
+                    .authorized_repositories_by_project
+                    .get(&scoped.project)
+                    .cloned()
+                    .or_else(|| {
+                        scoped
+                            .authorized_repositories_by_project
+                            .iter()
+                            .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
+                            .map(|(_, repositories)| repositories.clone())
+                    })
+                    .filter(|repositories| !repositories.is_empty())
+                    .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
+                scoped.authorized_repositories = authorized_repositories.clone();
+                if let Some(grants) = &scoped.scope_grants {
+                    let (token, requires_fresh_conversation) = grants
+                        .issue_or_refresh_with_lifecycle(
+                            &scoped.project,
+                            &scoped.execution_repo,
+                            authorized_repositories,
+                            issue.identifier.as_str(),
+                            runtime_envelope
+                                .as_ref()
+                                .map(|envelope| envelope.checkout_generation.clone()),
+                        );
+                    memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                    scoped.token = Some(token.clone());
+                }
+                scoped.authorized_repositories_by_project.clear();
+                scoped
+            });
+            let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
+                || (memory_grant_registry_recovered
+                    && worker_memory_env
+                        .as_ref()
+                        .is_some_and(|memory| memory.scope_grants.is_some()));
+            let mut worker_environment = worker_env.clone();
+            if let Some(memory) = &worker_memory_env {
+                inject_memory_env(&mut worker_environment, memory);
+            }
+            let mut runner = IssueSessionRunner::with_environment(
+                client.clone(),
+                runner_config
+                    .clone()
+                    .with_memory(worker_memory_env.as_ref().map(|memory| {
+                        memory_access_from_runtime(
+                            memory,
+                            (recovered
+                                || memory_grant_registry_recovered
+                                || memory_grant_requires_fresh_conversation)
+                                && memory.scope_grants.is_some(),
+                        )
+                    })),
+                OverlayEnvironment {
+                    overrides: worker_environment.clone(),
+                    blocked: checkout_credential_envs.clone(),
+                },
+            );
+            if let Some(source) = workpad_comment_source.clone() {
+                runner = runner.with_workpad_comment_source(source);
+            }
+            let repository_instructions = if ensured.handle.checkout_generation().is_some() {
+                let result = if let Some(checkout) = initially_verified_checkout.as_ref() {
+                    workspace_manager
+                        .read_checkout_instructions_from_manifest(&ensured.handle, checkout)
+                        .await
+                } else if allow_worker_changes {
+                    workspace_manager
+                        .read_checkout_instructions_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager
+                        .read_checkout_instructions(&ensured.handle)
+                        .await
+                };
+                match result {
+                    Ok(instructions) => {
+                        runner = runner.with_repository_instructions(instructions.clone());
+                        instructions
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to load verified checkout instructions: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
+                let central_procedure = match workflow
+                    .render_prompt(&issue, run.attempt.map(|attempt| attempt.get()))
+                {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to render workflow prompt: {error}"),
+                        );
+                        return;
+                    }
+                };
+                let mut checkout_facts = format!(
+                    "Path: {}\nGeneration: {}\nBranch: {}\nCommit: {}",
+                    checkout.checkout_path.display(),
+                    checkout.checkout_generation,
+                    checkout.target_branch,
+                    checkout.target_commit
+                );
+                if let Some(memory) = worker_memory_env.as_ref() {
+                    checkout_facts.push_str(&memory_scope_prompt(memory));
+                }
+                Some(compose_terminal_prompt(
+                    &central_procedure,
+                    &format!(
+                        "Issue: {}\nTitle: {}\nAttempt: {}\nDescription:\n{}",
+                        issue.identifier,
+                        issue.title,
+                        attempt,
+                        issue
+                            .description
+                            .as_deref()
+                            .filter(|description| !description.trim().is_empty())
+                            .unwrap_or("No tracker description provided."),
+                    ),
+                    &checkout_facts,
+                    repository_instructions.as_deref(),
+                    &format!(
+                        "harness={} cwd={} containment={}",
+                        checkout.harness,
+                        checkout.checkout_path.display(),
+                        checkout.effective_containment
+                    ),
+                ))
+            } else {
+                None
+            };
+            runner = runner.with_terminal_prompt(terminal_prompt.clone());
+            let run_descriptor = RunDescriptor::new(run_id, attempt)
                 .with_normal_retry_count(run.normal_retry_count)
-                .with_repository_binding(run.repository_binding.clone());
+                .with_repository_binding(run.repository_binding.clone())
+                .with_runtime_envelope(runtime_envelope.clone());
+            let mut initialize_fresh_conversation = false;
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
-                    Ok(Some(run_manifest)) => {
-                        let conversation_manifest = if run_manifest.status == RunStatus::Prepared {
+                    Ok(Some(mut run_manifest)) => {
+                        let conversation_manifest = if matches!(
+                            run_manifest.status,
+                            RunStatus::Prepared | RunStatus::Running
+                        ) {
                             if route.harness_kind == CODEX_APP_SERVER_KIND {
                                 match load_codex_conversation_manifest(
                                     &workspace_manager,
@@ -1541,6 +2559,7 @@ impl RuntimeWorkerBackend {
                                 match recovered_conversation_manifest(
                                     &workspace_manager,
                                     &ensured.handle,
+                                    Some(&mut run_manifest),
                                 )
                                 .await
                                 {
@@ -1559,7 +2578,22 @@ impl RuntimeWorkerBackend {
                         } else {
                             None
                         };
-                        if recoverable_run_manifest(&run_manifest, conversation_manifest.as_ref()) {
+                        initialize_fresh_conversation =
+                            conversation_manifest.as_ref().is_some_and(|manifest| {
+                                route.harness_kind != CODEX_APP_SERVER_KIND
+                                    && fresh_conversation_initialization_pending(
+                                        &run_manifest,
+                                        manifest,
+                                    )
+                            });
+                        initialize_fresh_conversation |= route.harness_kind
+                            != CODEX_APP_SERVER_KIND
+                            && memory_grant_requires_fresh_conversation;
+                        if recoverable_run_manifest(
+                            &run_manifest,
+                            conversation_manifest.as_ref(),
+                            ensured.handle.checkout_generation().is_some(),
+                        ) {
                             run_manifest
                         } else {
                             report_launch_failure(
@@ -1603,6 +2637,66 @@ impl RuntimeWorkerBackend {
                 }
             };
 
+            if recovered
+                && runtime_envelope.as_ref().is_some_and(|expected| {
+                    run_manifest.runtime_envelope.as_ref() != Some(expected)
+                })
+            {
+                report_launch_failure(
+                    &mut launch_tx,
+                    "recovered strict run is missing a compatible runtime envelope".to_owned(),
+                );
+                return;
+            }
+
+            if let Some(expected) = runtime_envelope.as_ref() {
+                let verified = match if allow_worker_changes {
+                    workspace_manager
+                        .verify_checkout_for_retry(&ensured.handle)
+                        .await
+                } else {
+                    workspace_manager.verify_checkout(&ensured.handle).await
+                } {
+                    Ok(checkout) => checkout,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("verified checkout changed before harness attach: {error}"),
+                        );
+                        return;
+                    }
+                };
+                let final_instructions = match workspace_manager
+                    .read_checkout_instructions_from_manifest(&ensured.handle, &verified)
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!(
+                                "verified checkout instructions changed before harness attach: {error}"
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if verified.repository_binding != expected.repository_binding
+                    || verified.target_branch != expected.target_branch
+                    || verified.target_commit != expected.target_commit
+                    || ensured.handle.workspace_path() != expected.checkout_path
+                    || verified.generation != expected.checkout_generation
+                    || verified.instruction != expected.instruction
+                    || repository_instructions != final_instructions
+                {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        "verified checkout envelope changed before harness attach".to_owned(),
+                    );
+                    return;
+                }
+            }
+
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
                     let _ = sender.send(LaunchReport::Conversation(Box::new(
@@ -1638,7 +2732,26 @@ impl RuntimeWorkerBackend {
                 return;
             }
 
+            if let Some(previous) = superseded_harness_manifest.as_ref()
+                && let Err(error) = persist_superseded_harness_manifest(
+                    &workspace_manager,
+                    &ensured.handle,
+                    previous,
+                )
+                .await
+            {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!("failed to persist superseded harness binding: {error}"),
+                );
+                return;
+            }
+
             if route.harness_kind == "codex_app_server" {
+                let fresh_conversation_grants = worker_memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.clone())
+                    .filter(|_| memory_grant_requires_fresh_conversation);
                 let outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
@@ -1647,15 +2760,35 @@ impl RuntimeWorkerBackend {
                     &issue,
                     &run,
                     &workflow,
+                    terminal_prompt.as_deref(),
                     &codex_bin,
                     &codex_schema_validators,
                     &codex_interrupts,
                     &updates_tx,
                     &mut launch_tx,
-                    &worker_env,
+                    &worker_environment,
+                    &checkout_credential_envs,
                     recovered,
+                    memory_grant_requires_fresh_conversation,
+                    fresh_conversation_grants,
+                    issue.identifier.as_str(),
                 )
                 .await;
+                if let Some(previous) = superseded_harness_manifest.as_ref()
+                    && let Err(error) = retire_replaced_harness_session_if_durable(
+                        &workspace_manager,
+                        &ensured.handle,
+                        previous,
+                        target_is_codex,
+                        runtime_envelope.as_ref(),
+                        openhands_conversation_store.as_ref(),
+                        &codex_bin,
+                        &checkout_credential_envs,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "failed to retire replaced harness session after replacement");
+                }
                 let _ = updates_tx.send(WorkerUpdate::Finished {
                     worker_id: finished_worker_id.clone(),
                     outcome,
@@ -1668,7 +2801,7 @@ impl RuntimeWorkerBackend {
                 launch_tx,
                 updates_tx: updates_tx.clone(),
             };
-            let result = if recovered {
+            let result = if recovered && !initialize_fresh_conversation {
                 runner
                     .recover_with_observer(
                         &workspace_manager,
@@ -1693,6 +2826,16 @@ impl RuntimeWorkerBackend {
                     .await
             };
 
+            let launch_succeeded = observer.launch_tx.is_none();
+            if launch_succeeded
+                && memory_grant_requires_fresh_conversation
+                && let Some(grants) = worker_memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.as_ref())
+            {
+                grants.acknowledge_fresh_conversation(issue.identifier.as_str());
+            }
+
             if observer.launch_tx.is_some() {
                 report_launch_failure(
                     &mut observer.launch_tx,
@@ -1711,6 +2854,21 @@ impl RuntimeWorkerBackend {
                     Some(error.to_string()),
                 ),
             };
+            if let Some(previous) = superseded_harness_manifest.as_ref()
+                && let Err(error) = retire_replaced_harness_session_if_durable(
+                    &workspace_manager,
+                    &ensured.handle,
+                    previous,
+                    target_is_codex,
+                    runtime_envelope.as_ref(),
+                    openhands_conversation_store.as_ref(),
+                    &codex_bin,
+                    &checkout_credential_envs,
+                )
+                .await
+            {
+                tracing::warn!(%error, "failed to retire replaced harness session after replacement");
+            }
             let _ = updates_tx.send(WorkerUpdate::Finished {
                 worker_id: finished_worker_id.clone(),
                 outcome,
@@ -1748,13 +2906,13 @@ impl RuntimeWorkerBackend {
                 Ok(WorkerLaunch { conversation })
             }
             Ok(Ok(LaunchReport::Failed(detail))) => {
-                if let Some(task) = self.tasks.remove(worker_id) {
+                if let Some(task) = self.take_tracked_task(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchFailed(detail))
             }
             Ok(Err(_)) => {
-                if let Some(task) = self.tasks.remove(worker_id) {
+                if let Some(task) = self.take_tracked_task(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchChannelClosed)
@@ -1872,24 +3030,55 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
             project_set.clone(),
         );
     }
-    if let Some(execution_repo) = &memory.execution_repo {
-        env.insert(
-            "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
-            execution_repo.clone(),
-        );
-    }
+    env.insert(
+        "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+        memory.execution_repo.clone(),
+    );
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
 }
 
-fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
+fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
+    memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+}
+
+fn worker_memory_project(issue: &NormalizedIssue, fallback: &str) -> String {
+    issue
+        .project_id
+        .clone()
+        .or_else(|| issue.project_slug.clone())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
+    format!(
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related. For code.ast.* calls, pass repo={repo} and the current issue identifier as issue; do not use process-global scope."
+    )
+}
+
+fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) -> Option<String> {
+    Some(memory_scope_prompt_values(
+        environment.get("OPENSYMPHONY_MEMORY_PROJECT")?,
+        environment.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")?,
+    ))
+}
+
+fn memory_access_from_runtime(
+    memory: &RuntimeMemoryEnv,
+    requires_fresh_conversation: bool,
+) -> MemoryWorkerAccess {
     MemoryWorkerAccess {
         endpoint: memory.endpoint.clone(),
         token: memory.token.clone(),
         project: Some(memory.project.clone()),
+        execution_repo: Some(memory.execution_repo.clone()),
+        authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
+        // A recovered supervised memory server has a newly reconstructed grant
+        // registry, so its bearer differs from the one stored in a reusable
+        // OpenHands conversation. In-process retries keep their conversation.
+        requires_fresh_conversation,
         project_set: memory.project_set.clone(),
-        execution_repo: memory.execution_repo.clone(),
     }
 }
 
@@ -1924,13 +3113,18 @@ async fn run_codex_stdio_issue(
         issue,
         run,
         workflow,
+        None,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
         updates_tx,
         launch_tx,
         worker_env,
+        &BTreeSet::new(),
         false,
+        false,
+        None,
+        "",
     )
     .await
 }
@@ -1944,13 +3138,18 @@ async fn run_codex_stdio_issue_with_mode(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    terminal_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
+    force_fresh_conversation: bool,
+    fresh_conversation_grants: Option<MemoryScopeGrantRegistry>,
+    fresh_conversation_issue: &str,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
         route,
@@ -1960,13 +3159,18 @@ async fn run_codex_stdio_issue_with_mode(
         issue,
         run,
         workflow,
+        terminal_prompt,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
         updates_tx,
         launch_tx,
         worker_env,
+        checkout_credential_envs,
         recovered,
+        force_fresh_conversation,
+        fresh_conversation_grants,
+        fresh_conversation_issue,
     )
     .await
     {
@@ -2037,27 +3241,39 @@ async fn try_run_codex_stdio_issue(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    terminal_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     worker_env: &BTreeMap<String, String>,
+    checkout_credential_envs: &BTreeSet<String>,
     recovered: bool,
+    force_fresh_conversation: bool,
+    fresh_conversation_grants: Option<MemoryScopeGrantRegistry>,
+    fresh_conversation_issue: &str,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
-    let schema_validator =
-        cached_installed_codex_schema_validator(codex_schema_validators, codex_bin).await?;
+    let schema_validator = cached_installed_codex_schema_validator(
+        codex_schema_validators,
+        codex_bin,
+        checkout_credential_envs,
+    )
+    .await?;
     let (program, args) = adapter.launch().to_command();
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(args)
         .current_dir(workspace.workspace_path())
         .envs(worker_env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    scrub_checkout_credentials(&mut command, checkout_credential_envs);
+    let mut child = command
         .spawn()
         .map_err(|source| {
             format!(
@@ -2104,17 +3320,78 @@ async fn try_run_codex_stdio_issue(
         load_codex_conversation_manifest(workspace_manager, workspace, issue)
             .await
             .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    if let Some(manifest) = existing_manifest.as_mut() {
-        ensure_codex_thread_active(workspace_manager, workspace, manifest, codex_bin)
+    let mut superseded_manifest = None;
+    if force_fresh_conversation && let Some(incompatible) = existing_manifest.take() {
+        let archiveable_superseded_codex = superseded_codex_manifest_is_archiveable(&incompatible);
+        persist_superseded_harness_manifest(workspace_manager, workspace, &incompatible)
             .await
             .map_err(|error| {
                 codex_lifecycle_error(
                     issue,
-                    Some(manifest.conversation_id.as_str()),
-                    "archive recovery",
+                    Some(incompatible.conversation_id.as_str()),
+                    "superseded manifest persistence",
                     error,
                 )
             })?;
+        if archiveable_superseded_codex {
+            superseded_manifest = Some(incompatible);
+        }
+    }
+    let conversation_envelope_untrusted =
+        run_manifest
+            .runtime_envelope
+            .as_ref()
+            .is_some_and(|expected| {
+                existing_manifest.as_ref().is_some_and(|manifest| {
+                    manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+                        envelope != expected
+                            || envelope.conversation_binding.as_deref()
+                                != Some(manifest.conversation_id.to_string().as_str())
+                    })
+                })
+            });
+    if conversation_envelope_untrusted && let Some(incompatible) = existing_manifest.take() {
+        let archiveable_superseded_codex = superseded_codex_manifest_is_archiveable(&incompatible);
+        persist_superseded_harness_manifest(workspace_manager, workspace, &incompatible)
+            .await
+            .map_err(|error| {
+                codex_lifecycle_error(
+                    issue,
+                    Some(incompatible.conversation_id.as_str()),
+                    "superseded manifest persistence",
+                    error,
+                )
+            })?;
+        tracing::warn!(
+            conversation_id = %incompatible.conversation_id,
+            "deferring retirement of Codex thread with an untrusted runtime envelope until replacement is durable"
+        );
+        if archiveable_superseded_codex {
+            superseded_manifest = Some(incompatible);
+        } else {
+            tracing::warn!(
+                conversation_id = %incompatible.conversation_id,
+                "preserving superseded Codex evidence because its runtime envelope is not bound to its own conversation"
+            );
+        }
+    }
+    if let Some(manifest) = existing_manifest.as_mut() {
+        ensure_codex_thread_active(
+            workspace_manager,
+            workspace,
+            manifest,
+            codex_bin,
+            checkout_credential_envs,
+        )
+        .await
+        .map_err(|error| {
+            codex_lifecycle_error(
+                issue,
+                Some(manifest.conversation_id.as_str()),
+                "archive recovery",
+                error,
+            )
+        })?;
     }
     if recovered
         && run_manifest.status == RunStatus::Prepared
@@ -2133,7 +3410,7 @@ async fn try_run_codex_stdio_issue(
             .await
             .map_err(|error| format!("failed to persist recovered Codex run state: {error}"))?;
     }
-    if recovered && existing_manifest.is_none() {
+    if recovered && existing_manifest.is_none() && !force_fresh_conversation {
         return Err(codex_lifecycle_error(
             issue,
             None,
@@ -2142,17 +3419,19 @@ async fn try_run_codex_stdio_issue(
         ));
     }
     let first_run_prompt = if existing_manifest.is_none() {
-        Some(
-            workflow
+        Some(match terminal_prompt {
+            Some(prompt) => prompt.to_owned(),
+            None => workflow
                 .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
                 .map_err(|source| {
                     format!("failed to render workflow prompt for Codex route: {source}")
                 })?,
-        )
+        })
     } else {
         None
     };
     let mut resume_terminal = None;
+    let mut recovered_active_turn = false;
     let (conversation_id, mut manifest, prompt_kind, fresh_conversation) = match existing_manifest {
         Some(mut manifest) => {
             let conversation_id = manifest.conversation_id.to_string();
@@ -2228,24 +3507,24 @@ async fn try_run_codex_stdio_issue(
                 .filter(|turn_id| !turn_id.trim().is_empty())
                 .or_else(|| read_state.pending_turn_id.take())
                 .or_else(|| codex_active_turn_id_from_resume_response(&resume_response));
-            if recovered
-                && let Some(turn_id) = resume_turn_id.as_deref()
-                && manifest.last_turn_id.as_deref() != Some(turn_id)
-            {
-                persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
-                    .await
-                    .map_err(|error| {
-                        codex_lifecycle_error(
-                            issue,
-                            Some(&conversation_id),
-                            "recovered turn id persistence",
-                            error,
-                        )
-                    })?;
-            }
             resume_terminal = resume_turn_id.as_deref().and_then(|turn_id| {
                 codex_terminal_outcome_from_resume_response(&resume_response, turn_id)
             });
+            if recovered && let Some(turn_id) = resume_turn_id.as_deref() {
+                recovered_active_turn = true;
+                if manifest.last_turn_id.as_deref() != Some(turn_id) {
+                    persist_codex_turn_id(workspace_manager, workspace, &mut manifest, turn_id)
+                        .await
+                        .map_err(|error| {
+                            codex_lifecycle_error(
+                                issue,
+                                Some(&conversation_id),
+                                "recovered turn id persistence",
+                                error,
+                            )
+                        })?;
+                }
+            }
             let prompt_kind = if manifest.workflow_prompt_seeded {
                 IssueSessionPromptKind::Continuation
             } else {
@@ -2298,6 +3577,7 @@ async fn try_run_codex_stdio_issue(
                 issue,
                 &conversation_id,
                 route,
+                run_manifest.runtime_envelope.clone(),
             )
             .await
             {
@@ -2349,6 +3629,102 @@ async fn try_run_codex_stdio_issue(
                     ));
                 }
             };
+            if manifest.runtime_envelope.is_some() {
+                run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+                workspace_manager
+                    .write_run_manifest(workspace, run_manifest)
+                    .await
+                    .map_err(|error| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "runtime envelope persistence",
+                            error,
+                        )
+                    })?;
+            }
+            workspace_manager
+                .write_json_artifact_atomically(
+                    workspace,
+                    &pending_conversation_manifest_path(workspace),
+                    &Option::<IssueConversationManifest>::None,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "pending runtime envelope cleanup",
+                        error,
+                    )
+                })?;
+            if let Some(superseded) = superseded_manifest.take() {
+                let archive = adapter
+                    .archive_issue_thread_request(
+                        &mut session,
+                        superseded.conversation_id.to_string(),
+                    )
+                    .map_err(|source| {
+                        codex_lifecycle_error(
+                            issue,
+                            Some(&conversation_id),
+                            "superseded thread/archive request",
+                            source.to_string(),
+                        )
+                    })?;
+                write_codex_request(
+                    &mut stdin,
+                    &schema_validator,
+                    &archive.request,
+                    "superseded thread/archive",
+                    &stderr_tail,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "superseded thread/archive request",
+                        error,
+                    )
+                })?;
+                read_response_line(
+                    &mut reader,
+                    archive.request.id,
+                    updates_tx,
+                    &run.worker_id.to_string(),
+                    issue,
+                    run,
+                    &mut read_state,
+                )
+                .await
+                .map_err(|error| {
+                    codex_lifecycle_error(
+                        issue,
+                        Some(&conversation_id),
+                        "superseded thread/archive response",
+                        with_codex_stderr(error, &stderr_tail),
+                    )
+                })?;
+                tracing::info!(
+                    previous_conversation_id = %superseded.conversation_id,
+                    replacement_conversation_id = %conversation_id,
+                    "archived superseded Codex conversation after replacement binding became durable"
+                );
+                if let Err(error) = clear_superseded_harness_manifest(
+                    workspace_manager,
+                    workspace,
+                    &superseded.conversation_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        conversation_id = %superseded.conversation_id,
+                        %error,
+                        "failed to clear archived superseded Codex evidence"
+                    );
+                }
+            }
             (
                 conversation_id,
                 manifest,
@@ -2357,7 +3733,7 @@ async fn try_run_codex_stdio_issue(
             )
         }
     };
-    if recovered {
+    if recovered_active_turn {
         let turn_id = manifest
             .last_turn_id
             .clone()
@@ -2390,6 +3766,9 @@ async fn try_run_codex_stdio_issue(
             let _ = sender.send(LaunchReport::Conversation(Box::new(
                 codex_conversation_metadata(conversation_id.clone(), route),
             )));
+            if let Some(grants) = fresh_conversation_grants.as_ref() {
+                grants.acknowledge_fresh_conversation(fresh_conversation_issue);
+            }
         }
         let terminal = read_until_codex_terminal(
             &mut reader,
@@ -2421,12 +3800,21 @@ async fn try_run_codex_stdio_issue(
     }
     let prompt = match (prompt_kind, first_run_prompt) {
         (IssueSessionPromptKind::Full, Some(prompt)) => prompt,
+        (IssueSessionPromptKind::Full, None) if terminal_prompt.is_some() => terminal_prompt
+            .expect("terminal prompt checked above")
+            .to_owned(),
         (IssueSessionPromptKind::Full, None) => workflow
             .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
             .map_err(|source| {
                 format!("failed to render workflow prompt for Codex route: {source}")
             })?,
-        (IssueSessionPromptKind::Continuation, _) => build_continuation_guidance(issue, run),
+        (IssueSessionPromptKind::Continuation, _) => {
+            let mut prompt = build_continuation_guidance(issue, run);
+            if let Some(scope) = memory_scope_prompt_from_environment(worker_env) {
+                prompt.push_str(&scope);
+            }
+            prompt
+        }
     };
     let turn_start = adapter
         .start_issue_turn_request(
@@ -2508,7 +3896,7 @@ async fn try_run_codex_stdio_issue(
                 with_codex_stderr(error, &stderr_tail),
             )
         })?;
-    if !recovered {
+    if !recovered_active_turn {
         persist_codex_run_started(
             workspace_manager,
             workspace,
@@ -2543,6 +3931,9 @@ async fn try_run_codex_stdio_issue(
         let _ = sender.send(LaunchReport::Conversation(Box::new(
             codex_conversation_metadata(conversation_id.clone(), route),
         )));
+        if let Some(grants) = fresh_conversation_grants.as_ref() {
+            grants.acknowledge_fresh_conversation(fresh_conversation_issue);
+        }
     }
 
     let terminal = read_until_codex_terminal(
@@ -2568,19 +3959,27 @@ async fn try_run_codex_stdio_issue(
     ))
 }
 
+fn scrub_checkout_credentials(command: &mut Command, checkout_credential_envs: &BTreeSet<String>) {
+    for variable in checkout_credential_envs {
+        command.env_remove(variable);
+    }
+}
+
 async fn cached_installed_codex_schema_validator(
     cache: &CodexSchemaValidatorCache,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let key = codex_schema_cache_key(codex_bin).await;
-    if let Some(validator) = cache.lock().await.get(&key).cloned() {
+    let mut validators = cache.lock().await;
+    if let Some(validator) = validators.get(&key).cloned() {
         return Ok(validator);
     }
 
-    let validator = load_installed_codex_schema_validator(codex_bin).await?;
-    let mut validators = cache.lock().await;
-    let validator = validators.entry(key).or_insert(validator);
-    Ok(validator.clone())
+    let validator =
+        load_installed_codex_schema_validator(codex_bin, checkout_credential_envs).await?;
+    validators.insert(key, validator.clone());
+    Ok(validator)
 }
 
 async fn codex_schema_cache_key(codex_bin: &str) -> String {
@@ -2636,6 +4035,7 @@ fn resolve_executable_path(program: &str) -> Option<PathBuf> {
 
 async fn load_installed_codex_schema_validator(
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let schema_dir = tempfile::tempdir()
         .map_err(|source| format!("failed to create Codex schema tempdir: {source}"))?;
@@ -2645,6 +4045,7 @@ async fn load_installed_codex_schema_validator(
     let output = timeout(CODEX_SCHEMA_GENERATION_TIMEOUT, async {
         let mut command = Command::new(&program);
         command.args(&args).kill_on_drop(true);
+        scrub_checkout_credentials(&mut command, checkout_credential_envs);
         command.output().await
     })
     .await
@@ -2700,21 +4101,29 @@ struct CodexLifecycleSession {
 }
 
 impl CodexLifecycleSession {
-    async fn start(codex_bin: &str, cwd: &Path) -> Result<Self, String> {
+    async fn start(
+        codex_bin: &str,
+        cwd: &Path,
+        checkout_credential_envs: &BTreeSet<String>,
+    ) -> Result<Self, String> {
         let adapter = CodexAppServerAdapter::local_stdio(
             codex_bin,
             "opensymphony",
             env!("CARGO_PKG_VERSION"),
         );
-        let validator = load_installed_codex_schema_validator(codex_bin).await?;
+        let validator =
+            load_installed_codex_schema_validator(codex_bin, checkout_credential_envs).await?;
         let (program, args) = adapter.launch().to_command();
-        let mut child = Command::new(&program)
+        let mut command = Command::new(&program);
+        command
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        scrub_checkout_credentials(&mut command, checkout_credential_envs);
+        let mut child = command
             .spawn()
             .map_err(|source| format!("failed to launch Codex lifecycle app-server: {source}"))?;
         let mut stdin = child.stdin.take().ok_or("Codex lifecycle stdin missing")?;
@@ -2765,6 +4174,7 @@ impl CodexLifecycleSession {
 async fn send_codex_lifecycle_request<F>(
     codex_bin: &str,
     cwd: &Path,
+    checkout_credential_envs: &BTreeSet<String>,
     operation: &str,
     build: F,
 ) -> Result<serde_json::Value, String>
@@ -2774,7 +4184,8 @@ where
         &mut CodexJsonRpcSession,
     ) -> Result<crate::opensymphony_codex::CodexHarnessRequest, serde_json::Error>,
 {
-    let mut session = CodexLifecycleSession::start(codex_bin, cwd).await?;
+    let mut session =
+        CodexLifecycleSession::start(codex_bin, cwd, checkout_credential_envs).await?;
     let response = session.request(operation, build).await;
     session.stop().await;
     response
@@ -2829,8 +4240,14 @@ async fn inspect_codex_archive_state(
     codex_bin: &str,
     workspace: &WorkspaceHandle,
     thread_id: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<CodexArchiveState, String> {
-    let mut session = CodexLifecycleSession::start(codex_bin, workspace.workspace_path()).await?;
+    let mut session = CodexLifecycleSession::start(
+        codex_bin,
+        workspace.workspace_path(),
+        checkout_credential_envs,
+    )
+    .await?;
     let result: Result<CodexArchiveState, String> = async {
         for archived in [true, false] {
             let mut cursor = None;
@@ -2893,9 +4310,12 @@ async fn ensure_codex_thread_active(
     workspace: &WorkspaceHandle,
     manifest: &mut IssueConversationManifest,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), String> {
     let thread_id = manifest.conversation_id.to_string();
-    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
         CodexArchiveState::Active if manifest.codex_archive_state.as_deref() == Some("active") => {
             Ok(())
         }
@@ -2907,6 +4327,7 @@ async fn ensure_codex_thread_active(
             send_codex_lifecycle_request(
                 codex_bin,
                 workspace.workspace_path(),
+                checkout_credential_envs,
                 "thread/unarchive",
                 |adapter, session| {
                     adapter.unarchive_issue_thread_request(session, thread_id.clone())
@@ -2926,9 +4347,12 @@ async fn archive_terminal_codex_thread(
     workspace: &WorkspaceHandle,
     manifest: &mut IssueConversationManifest,
     codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), String> {
     let thread_id = manifest.conversation_id.to_string();
-    match inspect_codex_archive_state(codex_bin, workspace, &thread_id).await? {
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
         CodexArchiveState::Archived => {
             if manifest.codex_archive_state.as_deref() == Some("archived") {
                 Ok(())
@@ -2941,6 +4365,7 @@ async fn archive_terminal_codex_thread(
             send_codex_lifecycle_request(
                 codex_bin,
                 workspace.workspace_path(),
+                checkout_credential_envs,
                 "thread/archive",
                 |adapter, session| adapter.archive_issue_thread_request(session, thread_id.clone()),
             )
@@ -2949,6 +4374,32 @@ async fn archive_terminal_codex_thread(
         }
         CodexArchiveState::Missing => Err(format!(
             "canonical Codex thread {thread_id} is missing; preserving workspace for repair"
+        )),
+    }
+}
+
+async fn archive_superseded_codex_thread(
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    let thread_id = manifest.conversation_id.to_string();
+    match inspect_codex_archive_state(codex_bin, workspace, &thread_id, checkout_credential_envs)
+        .await?
+    {
+        CodexArchiveState::Archived => Ok(()),
+        CodexArchiveState::Active => send_codex_lifecycle_request(
+            codex_bin,
+            workspace.workspace_path(),
+            checkout_credential_envs,
+            "thread/archive",
+            |adapter, session| adapter.archive_issue_thread_request(session, thread_id.clone()),
+        )
+        .await
+        .map(|_| ()),
+        CodexArchiveState::Missing => Err(format!(
+            "canonical superseded Codex thread {thread_id} is missing; preserving workspace for repair"
         )),
     }
 }
@@ -3642,11 +5093,12 @@ async fn write_codex_conversation_manifest(
     issue: &NormalizedIssue,
     thread_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    runtime_envelope: Option<TerminalRuntimeEnvelope>,
 ) -> Result<IssueConversationManifest, String> {
     let now = chrono::Utc::now();
     let conversation_id = ConversationId::new(thread_id.to_string())
         .map_err(|error| format!("invalid Codex thread id for conversation manifest: {error}"))?;
-    let manifest = IssueConversationManifest {
+    let mut manifest = IssueConversationManifest {
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         conversation_id,
@@ -3666,6 +5118,7 @@ async fn write_codex_conversation_manifest(
         workflow_prompt_seeded: false,
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
+        runtime_envelope,
         codex_archive_state: Some("active".to_string()),
         last_turn_id: None,
         active_run_id: None,
@@ -3684,6 +5137,17 @@ async fn write_codex_conversation_manifest(
         cache_read_tokens: 0,
         last_token_accumulation_at: None,
     };
+    if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    workspace_manager
+        .write_json_artifact_atomically(
+            workspace,
+            &pending_conversation_manifest_path(workspace),
+            &Some(&manifest),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     workspace_manager
         .write_json_artifact(
             workspace,
@@ -3717,12 +5181,12 @@ async fn load_codex_conversation_manifest(
         .map_err(|error| format!("invalid conversation manifest {}: {error}", path.display()))?;
     let thread_id = manifest.conversation_id.as_str();
     if !conversation_manifest_is_codex(&manifest) {
-        return Err(codex_lifecycle_error(
-            issue,
-            Some(thread_id),
-            "manifest validation",
-            "manifest belongs to a different harness",
-        ));
+        tracing::info!(
+            issue = %issue.identifier,
+            conversation_id = %thread_id,
+            "superseding conversation manifest from a different harness"
+        );
+        return Ok(None);
     }
     if manifest.issue_id != issue.id
         || manifest.identifier != issue.identifier
@@ -3741,6 +5205,95 @@ async fn load_codex_conversation_manifest(
         ));
     }
     Ok(Some(manifest))
+}
+
+async fn retire_superseded_harness_session(
+    workspace: &WorkspaceHandle,
+    manifest: &IssueConversationManifest,
+    target_is_codex: bool,
+    openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    if target_is_codex {
+        let store = openhands_conversation_store.ok_or_else(|| {
+            "OpenHands conversation store is unavailable while switching to Codex".to_owned()
+        })?;
+        match store
+            .move_conversation_to(
+                manifest.conversation_id.as_str(),
+                ConversationStoreKind::Archived,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            ConversationMoveOutcome::Moved { .. }
+            | ConversationMoveOutcome::AlreadyInTarget { .. } => Ok(()),
+            ConversationMoveOutcome::Missing => Err(format!(
+                "previous OpenHands conversation {} is not present in its active or archived store",
+                manifest.conversation_id
+            )),
+        }
+    } else {
+        archive_superseded_codex_thread(workspace, manifest, codex_bin, checkout_credential_envs)
+            .await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retire_replaced_harness_session_if_durable(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    previous: &IssueConversationManifest,
+    target_is_codex: bool,
+    expected_envelope: Option<&TerminalRuntimeEnvelope>,
+    openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
+    codex_bin: &str,
+    checkout_credential_envs: &BTreeSet<String>,
+) -> Result<(), String> {
+    let Some(expected_envelope) = expected_envelope else {
+        return Ok(());
+    };
+    let Some(raw) = workspace_manager
+        .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let Ok(replacement) = serde_json::from_str::<IssueConversationManifest>(&raw) else {
+        return Ok(());
+    };
+    let Some(replacement_envelope) = replacement.runtime_envelope.as_ref() else {
+        return Ok(());
+    };
+    if conversation_manifest_is_codex(&replacement) != target_is_codex
+        || !runtime_envelopes_match_except_binding(expected_envelope, replacement_envelope)
+        || replacement_envelope.conversation_binding.as_deref()
+            != Some(replacement.conversation_id.as_str())
+    {
+        return Ok(());
+    }
+    retire_superseded_harness_session(
+        workspace,
+        previous,
+        target_is_codex,
+        openhands_conversation_store,
+        codex_bin,
+        checkout_credential_envs,
+    )
+    .await?;
+    clear_superseded_harness_manifest(workspace_manager, workspace, &previous.conversation_id).await
+}
+
+fn runtime_envelopes_match_except_binding(
+    expected: &TerminalRuntimeEnvelope,
+    actual: &TerminalRuntimeEnvelope,
+) -> bool {
+    let mut expected = expected.clone();
+    expected.conversation_binding = None;
+    let mut actual = actual.clone();
+    actual.conversation_binding = None;
+    expected == actual
 }
 
 async fn update_codex_conversation_manifest(
@@ -3986,7 +5539,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let mut updates = Vec::new();
         while let Ok(update) = self.updates_rx.try_recv() {
             if let WorkerUpdate::Finished { worker_id, .. } = &update
-                && let Some(task) = self.tasks.remove(worker_id.as_str())
+                && let Some(task) = self.take_tracked_task(worker_id.as_str())
             {
                 let _ = task.handle.await;
             }
@@ -3999,7 +5552,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .filter_map(|(worker_id, task)| task.handle.is_finished().then_some(worker_id.clone()))
             .collect::<Vec<_>>();
         for worker_id in finished {
-            let Some(task) = self.tasks.remove(worker_id.as_str()) else {
+            let Some(task) = self.take_tracked_task(worker_id.as_str()) else {
                 continue;
             };
             if let Err(error) = task.handle.await {
@@ -4023,8 +5576,29 @@ impl WorkerBackend for RuntimeWorkerBackend {
     async fn abort_worker(
         &mut self,
         worker_id: &crate::opensymphony_domain::WorkerId,
-        _reason: WorkerAbortReason,
+        reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
+        let issue_identifier = self
+            .worker_issue_ids
+            .remove(worker_id.as_str())
+            .or_else(|| {
+                self.tasks
+                    .get(worker_id.as_str())
+                    .map(|task| task.run.issue_identifier.to_string())
+            });
+        if matches!(
+            reason,
+            WorkerAbortReason::TrackerInactive
+                | WorkerAbortReason::TrackerTerminal
+                | WorkerAbortReason::BindingSuperseded
+        ) && let Some(issue_identifier) = issue_identifier
+            && let Some(scope_grants) = self
+                .memory_env
+                .as_ref()
+                .and_then(|memory| memory.scope_grants.as_ref())
+        {
+            scope_grants.revoke_issue(&issue_identifier);
+        }
         self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }
@@ -4048,6 +5622,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             self.runner_config.clone(),
             OverlayEnvironment {
                 overrides: self.worker_env.clone(),
+                blocked: self.checkout_credential_envs.clone(),
             },
         );
         if let Some(source) = self.workpad_comment_source.clone() {
@@ -4220,6 +5795,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn cleared_superseded_harness_evidence_is_an_empty_sentinel() {
+        assert_eq!(
+            parse_superseded_harness_manifests("null")
+                .expect("the cleared sentinel should be valid evidence"),
+            None
+        );
+        assert!(parse_superseded_harness_manifests("{not-json").is_err());
+    }
+
     fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
         Arc::new(AsyncMutex::new(HashMap::new()))
     }
@@ -4300,6 +5885,7 @@ mod tests {
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -4514,6 +6100,16 @@ mod tests {
     }
 
     #[test]
+    fn superseded_codex_manifest_without_self_binding_is_not_archiveable() {
+        let manifest = IssueConversationManifest {
+            transport_target: Some(CODEX_APP_SERVER_KIND.to_string()),
+            ..sample_conversation_manifest("thread-untrusted")
+        };
+
+        assert!(!superseded_codex_manifest_is_archiveable(&manifest));
+    }
+
+    #[test]
     fn recovered_harness_kind_defaults_to_openhands_without_transport_target() {
         let manifest = sample_conversation_manifest("legacy-openhands");
 
@@ -4521,6 +6117,304 @@ mod tests {
             recovered_harness_kind_from_manifest(&manifest),
             OPENHANDS_AGENT_SERVER_KIND
         );
+    }
+
+    #[test]
+    fn strict_recovery_requires_bound_run_and_conversation_envelopes() {
+        let now = chrono::Utc::now();
+        let run_manifest = RunManifest {
+            run_id: "run-strict-envelope".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479"),
+            repository_binding: None,
+            runtime_envelope: None,
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("legacy-openhands");
+        conversation_manifest.prepared_run_id = Some(run_manifest.run_id.clone());
+
+        assert!(!recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            false,
+        ));
+    }
+
+    #[test]
+    fn strict_recovery_accepts_fresh_conversation_binding_before_first_prompt() {
+        let now = chrono::Utc::now();
+        let runtime_envelope: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "main",
+                "repository": {
+                    "id": "github:repository:repo",
+                    "safe_remote_fingerprint": "sha256:fingerprint"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory"
+            },
+            "config_generation": "config",
+            "inventory_generation": "inventory",
+            "policy_generation": "config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-479--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit",
+                "source": "root",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "conversation_binding": "conv-pending",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("sample runtime envelope should decode");
+        let run_manifest = RunManifest {
+            run_id: "run-strict-pending".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
+            repository_binding: None,
+            runtime_envelope: Some(runtime_envelope.clone()),
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("conv-pending");
+        conversation_manifest.workflow_prompt_seeded = false;
+        conversation_manifest.runtime_envelope = Some(runtime_envelope);
+
+        assert!(fresh_conversation_initialization_pending(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+
+        conversation_manifest.last_prompt_kind = Some(IssueSessionPromptKind::Full);
+        assert!(!fresh_conversation_initialization_pending(
+            &run_manifest,
+            &conversation_manifest
+        ));
+    }
+
+    #[test]
+    fn strict_recovery_accepts_prompt_recorded_before_send_preparation() {
+        let now = chrono::Utc::now();
+        let mut runtime_envelope: TerminalRuntimeEnvelope =
+            serde_json::from_value(serde_json::json!({
+                "repository_binding": {
+                    "alias": "main",
+                    "repository": {
+                        "id": "github:repository:repo",
+                        "safe_remote_fingerprint": "sha256:fingerprint"
+                    },
+                    "config_generation": "config",
+                    "inventory_generation": "inventory"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory",
+                "policy_generation": "config",
+                "checkout_generation": "generation-1",
+                "checkout_path": "/workspace/COE-479--generation-1",
+                "target_branch": "develop",
+                "target_commit": "commit",
+                "instruction": {
+                    "path": "AGENTS.md",
+                    "content_hash": "sha256:instructions",
+                    "source_commit": "commit",
+                    "source": "root",
+                    "native_discovery_paths": [],
+                    "native_discovery_hashes": {}
+                },
+                "harness": "openhands_agent_server",
+                "model_profile": "default",
+                "requested_execution_scope": "single_checkout",
+                "effective_containment": "trusted_host_process_cwd",
+                "conversation_binding": "conv-unsent-prompt",
+                "cleanup_intent": "workspace_manager_owned"
+            }))
+            .expect("sample runtime envelope should decode");
+        runtime_envelope.conversation_binding = Some("conv-unsent-prompt".to_owned());
+        let run_manifest = RunManifest {
+            run_id: "run-unsent-prompt".to_owned(),
+            issue_id: "issue-contract".to_owned(),
+            identifier: "COE-479".to_owned(),
+            sanitized_workspace_key: "COE-479".to_owned(),
+            workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
+            repository_binding: None,
+            runtime_envelope: Some(runtime_envelope.clone()),
+            attempt: 1,
+            normal_retry_count: 0,
+            pending_retry: false,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            interrupt_reason: None,
+            status: RunStatus::Prepared,
+            created_at: now,
+            updated_at: now,
+            status_detail: None,
+            hooks: Vec::new(),
+        };
+        let mut conversation_manifest = sample_conversation_manifest("conv-unsent-prompt");
+        conversation_manifest.workflow_prompt_seeded = true;
+        conversation_manifest.runtime_envelope = Some(runtime_envelope);
+        conversation_manifest.last_prompt_kind = Some(IssueSessionPromptKind::Continuation);
+        conversation_manifest.last_prompt_at = Some(now);
+        conversation_manifest.last_prompt_path =
+            Some(PathBuf::from(".opensymphony/prompts/continuation.md"));
+
+        assert!(prompt_recorded_before_send_preparation(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+
+        conversation_manifest.last_prompt_at = Some(now - chrono::Duration::seconds(1));
+        assert!(!prompt_recorded_before_send_preparation(
+            &run_manifest,
+            &conversation_manifest
+        ));
+        assert!(!recoverable_run_manifest(
+            &run_manifest,
+            Some(&conversation_manifest),
+            true,
+        ));
+    }
+
+    #[test]
+    fn pending_binding_transition_reconciles_a_run_written_before_the_binding() {
+        let envelope: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "main",
+                "repository": {
+                    "id": "github:repository:repo",
+                    "safe_remote_fingerprint": "sha256:fingerprint"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory"
+            },
+            "config_generation": "config",
+            "inventory_generation": "inventory",
+            "policy_generation": "config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-479--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit",
+                "source": "root",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("sample runtime envelope should decode");
+        let mut pending_envelope = envelope.clone();
+        pending_envelope.conversation_binding = Some("conv-pending".to_owned());
+        let mut pending_manifest = sample_conversation_manifest("conv-pending");
+        pending_manifest.runtime_envelope = Some(pending_envelope);
+
+        assert!(runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
+        ));
+
+        assert!(runtime_envelope_matches_pending_binding(
+            Some(&envelope),
+            &pending_manifest,
+        ));
+        assert!(pending_manifest_matches_run_identity(
+            "issue-contract",
+            "COE-479",
+            Some(&envelope),
+            &pending_manifest,
+        ));
+
+        pending_manifest
+            .runtime_envelope
+            .as_mut()
+            .expect("pending envelope")
+            .project_id = Some("project-after-drift".to_owned());
+        assert!(!runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
+        ));
+
+        pending_manifest
+            .runtime_envelope
+            .as_mut()
+            .expect("pending envelope")
+            .target_commit = "different-commit".to_owned();
+        assert!(!runtime_envelopes_match_except_binding(
+            &envelope,
+            pending_manifest
+                .runtime_envelope
+                .as_ref()
+                .expect("pending envelope should be present")
+        ));
+        assert!(!runtime_envelope_matches_pending_binding(
+            Some(&envelope),
+            &pending_manifest,
+        ));
     }
 
     #[test]
@@ -5356,6 +7250,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_failed_cleanup_retires_openhands_before_removal() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let conversation_id = "11111111-1111-4111-8111-111111111111";
+        let store = OpenHandsConversationStorePaths::for_tool_dir(
+            tempdir.path().join("openhands-tool"),
+            tempdir.path(),
+        )
+        .expect("conversation store should resolve");
+        store
+            .ensure_active_and_archived()
+            .expect("conversation stores should exist");
+        fs::create_dir_all(store.active.join(conversation_id))
+            .expect("active OpenHands conversation should exist");
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &sample_conversation_manifest(conversation_id),
+            )
+            .await
+            .expect("OpenHands conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow)
+            .with_openhands_conversation_store(Some(store.clone()));
+
+        backend
+            .cleanup_failed_workspace(&workspace)
+            .await
+            .expect("failed cleanup should retire OpenHands before removal");
+
+        assert!(!ensured.handle.workspace_path().exists());
+        assert!(!store.active.join(conversation_id).exists());
+        assert!(
+            store
+                .archived
+                .join(conversation_id.replace('-', ""))
+                .is_dir()
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_workspace_cleanup_runs_manager_cleanup_for_invalid_manifest() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -5423,6 +7377,66 @@ mod tests {
                 .trim(),
             "before_remove"
         );
+    }
+
+    #[tokio::test]
+    async fn retained_terminal_cleanup_keeps_openhands_conversation_active() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let tool_dir = tempdir.path().join("openhands-tool");
+        fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: false,
+                },
+                ..build_workspace_manager_config(&workflow)
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let conversation_id = "11111111-1111-4111-8111-111111111111";
+        let store = OpenHandsConversationStorePaths::for_tool_dir(&tool_dir, tempdir.path())
+            .expect("conversation store should resolve");
+        store
+            .ensure_active_and_archived()
+            .expect("conversation stores should exist");
+        fs::create_dir_all(store.active.join(conversation_id))
+            .expect("active OpenHands conversation should exist");
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &sample_conversation_manifest(conversation_id),
+            )
+            .await
+            .expect("OpenHands conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow)
+            .with_openhands_conversation_store(Some(store.clone()));
+
+        backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect("retained terminal cleanup should succeed");
+
+        assert!(ensured.handle.workspace_path().is_dir());
+        assert!(store.active.join(conversation_id).is_dir());
+        assert!(ensured.handle.conversation_manifest_path().is_file());
     }
 
     #[cfg(unix)]
@@ -5605,6 +7619,271 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn codex_stdio_fresh_thread_uses_composed_terminal_prompt() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-composed-terminal-prompt", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-composed-terminal-prompt").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-composed-prompt.log");
+        let fake_codex = tempdir.path().join("fake-codex-composed-prompt");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            Some("COMPOSED TERMINAL PROMPT WITH CHECKOUT FACTS AND PINNED INSTRUCTIONS"),
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &empty_codex_schema_cache(),
+            &empty_codex_interrupt_registry(),
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            false,
+            false,
+            None,
+            "",
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(_)
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(
+            log.contains("COMPOSED TERMINAL PROMPT WITH CHECKOUT FACTS AND PINNED INSTRUCTIONS"),
+            "fresh Codex turns must receive the already-composed terminal prompt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_recovery_restarts_prepared_run_without_turn_id() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-prepared-codex-without-turn", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.active_run_id = Some(run_manifest.run_id.clone());
+        conversation_manifest.last_turn_id = None;
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-prepared-recovery")
+                .expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-prepared-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-prepared-recovery");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            None,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            true,
+            false,
+            None,
+            "",
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_recovery_submits_prepared_prompt_when_only_historical_turn_exists()
+    {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-completed-codex-without-turn", 1),
+            )
+            .await
+            .expect("prepared run should be persisted");
+        let mut conversation_manifest = sample_conversation_manifest("fake-thread");
+        conversation_manifest.issue_id = issue.id.clone();
+        conversation_manifest.identifier = issue.identifier.clone();
+        conversation_manifest.persistence_dir = ensured.handle.metadata_dir();
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        conversation_manifest.runtime_contract_version =
+            Some(CODEX_APP_SERVER_CONTRACT.to_string());
+        conversation_manifest.active_run_id = Some(run_manifest.run_id.clone());
+        conversation_manifest.last_turn_id = None;
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-completed-recovery")
+                .expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let log_path = tempdir.path().join("fake-codex-completed-recovery.log");
+        let fake_codex = tempdir.path().join("fake-codex-historical-turn-recovery");
+        write_fake_codex_completed_recovery_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+        let codex_interrupts = empty_codex_interrupt_registry();
+
+        let outcome = run_codex_stdio_issue_with_mode(
+            &codex_test_route(false),
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            None,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &codex_interrupts,
+            &updates_tx,
+            &mut launch_tx,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            true,
+            false,
+            None,
+            "",
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        assert!(matches!(
+            launch_rx.await.expect("launch report should be sent"),
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(r#""method":"thread/resume""#));
+        assert!(log.contains(r#""method":"turn/start""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn codex_stdio_worker_recovery_reconciles_without_starting_a_new_turn() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspaces");
@@ -5674,6 +7953,7 @@ mod tests {
             &issue,
             &run,
             &workflow,
+            None,
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
@@ -5682,7 +7962,11 @@ mod tests {
             &updates_tx,
             &mut launch_tx,
             &BTreeMap::new(),
+            &BTreeSet::new(),
             true,
+            false,
+            None,
+            "",
         )
         .await;
 
@@ -6252,10 +8536,10 @@ mod tests {
             .to_str()
             .expect("fake codex schema path should be utf-8");
 
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("first schema load should compile");
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("second schema load should use cache");
 
@@ -6287,12 +8571,12 @@ mod tests {
             .to_str()
             .expect("fake codex schema path should be utf-8");
 
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("first schema load should compile");
         fs::remove_file(&fake_codex).expect("fake codex symlink should be removable");
         symlink(&second_codex, &fake_codex).expect("second fake codex symlink should be created");
-        cached_installed_codex_schema_validator(&cache, codex_bin)
+        cached_installed_codex_schema_validator(&cache, codex_bin, &BTreeSet::new())
             .await
             .expect("changed binary should force a second schema load");
 
@@ -6339,6 +8623,7 @@ mod tests {
                 workspace,
                 run,
                 route: codex_test_route(true),
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect("dry-run worker should launch");
@@ -6364,6 +8649,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(saw_finished, "dry-run worker should finish");
+        assert!(backend.tasks.is_empty());
+        assert!(backend.worker_issue_ids.is_empty());
 
         let ensured = workspace_manager
             .ensure(&issue_descriptor(&issue))
@@ -6381,6 +8668,59 @@ mod tests {
                 .as_deref()
                 .is_some_and(|detail| detail.contains("routing dry-run ended"))
         );
+    }
+
+    #[tokio::test]
+    async fn poll_updates_removes_issue_lookup_for_finished_task_without_update() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+        let workspace = sample_workspace(&workspace_root);
+        let worker_id = "worker-finished-without-update";
+        let run = RunAttempt::new(
+            WorkerId::new(worker_id).expect("worker id should be valid"),
+            IssueId::new("issue-finished-without-update").expect("issue id should be valid"),
+            IssueIdentifier::new("COE-287").expect("issue identifier should be valid"),
+            workspace.path,
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        backend
+            .worker_issue_ids
+            .insert(worker_id.to_string(), run.issue_identifier.to_string());
+        backend.tasks.insert(
+            worker_id.to_string(),
+            ActiveWorkerTask {
+                handle: tokio::spawn(async {}),
+                run,
+            },
+        );
+
+        for _ in 0..10 {
+            backend
+                .poll_updates()
+                .await
+                .expect("finished task cleanup should succeed");
+            if backend.tasks.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(backend.tasks.is_empty());
+        assert!(backend.worker_issue_ids.is_empty());
     }
 
     #[tokio::test]
@@ -6442,6 +8782,7 @@ mod tests {
                 workspace,
                 run,
                 route: codex_test_route(true),
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect("recovered dry-run worker should launch");
@@ -6498,9 +8839,60 @@ mod tests {
                 "LINEAR_API_KEY".to_string(),
                 "Bearer minted".to_string(),
             )]),
+            blocked: BTreeSet::new(),
         };
 
         assert_eq!(env.get("LINEAR_API_KEY").as_deref(), Some("Bearer minted"));
+    }
+
+    #[test]
+    fn overlay_environment_blocks_checkout_credentials_from_runtime_lookup() {
+        let env = OverlayEnvironment {
+            overrides: BTreeMap::from([("CHECKOUT_TOKEN".to_string(), "secret".to_string())]),
+            blocked: BTreeSet::from(["CHECKOUT_TOKEN".to_string()]),
+        };
+
+        assert_eq!(env.get("CHECKOUT_TOKEN"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_environment_blocks_checkout_credentials_case_insensitively_on_windows() {
+        let env = OverlayEnvironment {
+            overrides: BTreeMap::from([("CHECKOUT_TOKEN".to_string(), "secret".to_string())]),
+            blocked: BTreeSet::from(["checkout_token".to_string()]),
+        };
+
+        assert_eq!(env.get("CHECKOUT_TOKEN"), None);
+    }
+
+    #[test]
+    fn local_server_environment_keys_cannot_override_checkout_credential_scrubbing() {
+        let env_remove = checkout_env_remove_variables(
+            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()]),
+            &BTreeMap::from([(
+                String::from("CHECKOUT_TOKEN"),
+                String::from("${CHECKOUT_TOKEN}"),
+            )]),
+        );
+
+        assert_eq!(
+            env_remove,
+            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()])
+        );
+    }
+
+    #[test]
+    fn strict_remote_openhands_cleanup_requires_store() {
+        let mut manifest = sample_conversation_manifest("thread");
+        manifest.transport_target = Some("remote".to_owned());
+
+        assert!(strict_openhands_cleanup_requires_conversation_store(
+            true, &manifest, None
+        ));
+        assert!(!strict_openhands_cleanup_requires_conversation_store(
+            false, &manifest, None
+        ));
     }
 
     #[test]
@@ -6509,8 +8901,11 @@ mod tests {
             endpoint: "http://127.0.0.1:8765/mcp".to_string(),
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
+            execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            authorized_repositories: BTreeSet::from(["repo-alpha".to_string()]),
+            authorized_repositories_by_project: BTreeMap::new(),
+            scope_grants: None,
             project_set: None,
-            execution_repo: Some("/tmp/project-alpha/services/api".to_string()),
         };
         let mut env = BTreeMap::new();
 
@@ -6537,6 +8932,26 @@ mod tests {
             env.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")
                 .map(String::as_str),
             Some("/tmp/project-alpha/services/api")
+        );
+        assert_eq!(env.get("OPENSYMPHONY_MEMORY_PROJECT_SET"), None);
+        let prompt = memory_scope_prompt(&memory);
+        assert!(prompt.contains("project=project-alpha"));
+        assert!(prompt.contains("repo=/tmp/project-alpha/services/api"));
+        let continuation_scope = memory_scope_prompt_from_environment(&env)
+            .expect("worker environment should provide continuation scope");
+        assert!(continuation_scope.contains("project=project-alpha"));
+        assert!(continuation_scope.contains("repo=/tmp/project-alpha/services/api"));
+    }
+
+    #[test]
+    fn worker_memory_scope_prefers_canonical_project_id_over_slug() {
+        let mut issue = sample_issue();
+        issue.project_id = Some("canonical-project-id".to_owned());
+        issue.project_slug = Some("human-readable-slug".to_owned());
+
+        assert_eq!(
+            worker_memory_project(&issue, "workflow-project"),
+            "canonical-project-id"
         );
     }
 
@@ -6600,6 +9015,7 @@ mod tests {
                     dry_run: false,
                     user_override: false,
                 },
+                memory_grant_registry_recovered: false,
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");
@@ -7279,6 +9695,7 @@ Run the scheduler.
             openhands_conversation_store: None,
             retry_max_attempts: None,
             repository_routing: None,
+            repository_checkouts: None,
             state_root: None,
             memory_catalog_root: None,
             memory_sources: std::collections::BTreeMap::new(),
@@ -7292,7 +9709,7 @@ Run the scheduler.
             },
         };
 
-        let error = match build_runtime_transport(&runtime, None, None, &BTreeMap::new()).await {
+        let error = match build_runtime_transport(&runtime, None, &BTreeMap::new()).await {
             Ok(_) => panic!("external targets should reject launcher overrides"),
             Err(error) => error,
         };
@@ -7698,6 +10115,55 @@ done
     }
 
     #[cfg(unix)]
+    fn write_fake_codex_completed_recovery_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/list"'*)
+      if printf '%s' "$line" | grep -q '"archived":true'; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[],"nextCursor":null}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[{{"id":"fake-thread"}}],"nextCursor":null}}}}\n' "$id"
+      fi
+      ;;
+    *'"method":"thread/unarchive"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread","turns":[{{"id":"turn-1","status":"completed"}}]}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-2","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turn":{{"id":"turn-2","status":"completed"}}}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA,
+            ),
+        );
+    }
+
+    #[cfg(unix)]
     fn write_fake_codex_resume_error_child(path: &Path, log_path: &Path) {
         write_executable(
             path,
@@ -8017,6 +10483,7 @@ exit 64
             workflow_prompt_seeded: true,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,

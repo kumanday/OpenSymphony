@@ -18,6 +18,7 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
+use crate::opensymphony_workspace::{checkout_workspace_key, sanitize_workspace_key};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -38,6 +39,46 @@ const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
 
+fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
+    let Some(workspace) = execution.workspace() else {
+        return false;
+    };
+    // Repository binding drift is handled separately. This guard keeps legacy
+    // recovered workspaces with the same identifier compatible while still
+    // fencing a verified checkout when the tracker identifier changes.
+    if execution.issue().identifier == issue.identifier {
+        return false;
+    }
+
+    let expected_key = match issue.repository_binding.as_ref() {
+        Some(RepositoryBindingOutcome::Resolved(binding)) => checkout_workspace_key(
+            issue.identifier.as_str(),
+            issue.id.as_str(),
+            binding.repository_id().as_str(),
+        ),
+        _ => sanitize_workspace_key(issue.identifier.as_str()),
+    };
+
+    expected_key
+        .ok()
+        .is_some_and(|expected| expected != workspace.workspace_key.as_str())
+}
+
+fn project_identity_changed(previous: &NormalizedIssue, current: &NormalizedIssue) -> bool {
+    match (
+        previous.project_id.as_deref(),
+        current.project_id.as_deref(),
+    ) {
+        (Some(previous_id), Some(current_id)) => previous_id.trim() != current_id.trim(),
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => matches!(
+            (previous.project_slug.as_deref(), current.project_slug.as_deref()),
+            (Some(previous_slug), Some(current_slug))
+                if !previous_slug.eq_ignore_ascii_case(current_slug)
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub poll_interval_ms: u64,
@@ -51,6 +92,9 @@ pub struct SchedulerConfig {
     pub terminal_states: Vec<String>,
     pub tracker_project_id: Option<String>,
     pub tracker_project_slug: Option<String>,
+    pub tracker_project_ids: Vec<String>,
+    pub tracker_project_id_slug_fallbacks: Vec<bool>,
+    pub tracker_project_slugs: Vec<String>,
     pub routing: RoutingConfig,
     pub repository_routing: Option<RepositoryRouting>,
 }
@@ -103,6 +147,13 @@ impl SchedulerConfig {
             terminal_states: workflow.config.tracker.terminal_states.clone(),
             tracker_project_id: workflow.config.tracker.project_id.clone(),
             tracker_project_slug: Some(workflow.config.tracker.project_slug.clone()),
+            tracker_project_ids: workflow.config.tracker.project_ids.clone(),
+            tracker_project_id_slug_fallbacks: workflow
+                .config
+                .tracker
+                .project_id_slug_fallbacks
+                .clone(),
+            tracker_project_slugs: workflow.config.tracker.project_slugs.clone(),
             routing: workflow.config.routing.clone(),
             repository_routing: None,
         })
@@ -158,6 +209,10 @@ pub struct WorkerStartRequest {
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
     pub route: HarnessRouteDecision,
+    /// The issue was restored from durable process-recovery state. A scoped
+    /// memory grant is process-local, so a reused conversation must be
+    /// replaced once before the next worker prompt installs the new bearer.
+    pub memory_grant_registry_recovered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +416,8 @@ pub trait WorkspaceBackend {
         Ok(())
     }
 
+    fn revoke_issue_resources(&mut self, _issue_identifier: &str) {}
+
     async fn persist_retry_pending(
         &mut self,
         _workspace: &WorkspaceRecord,
@@ -464,6 +521,7 @@ pub struct Scheduler<T, W, M> {
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     pending_retry_recovery: Option<Vec<RetryPendingRecord>>,
+    recovered_memory_issue_ids: HashSet<IssueId>,
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
@@ -501,6 +559,7 @@ where
             pending_recovery: None,
             pending_retry_exhaustion: None,
             pending_retry_recovery: None,
+            recovered_memory_issue_ids: HashSet::new(),
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
@@ -1051,6 +1110,8 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        self.recovered_memory_issue_ids
+            .extend(records.iter().map(|record| record.issue.id.clone()));
         for record in &mut records {
             let issue_id = record.issue.id.clone();
             if let Some(pending) = pending_retry_by_issue.remove(&issue_id) {
@@ -1198,7 +1259,7 @@ where
                             .cloned()
                             .map(RepositoryBindingOutcome::Resolved)
                     });
-                let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+                let binding_changed = RepositoryBindingOutcome::binding_changed_opt(
                     normalized.repository_binding.as_ref(),
                     recovered_binding.as_ref(),
                 );
@@ -1264,6 +1325,7 @@ where
                                 issue_id.clone(),
                                 normalized.clone(),
                                 observed_at,
+                                false,
                             )
                             .await?;
                         }
@@ -1575,24 +1637,28 @@ where
                     }
                 }
             }
-            if self
-                .executions
-                .get(&normalized.id)
-                .is_some_and(|execution| {
-                    matches!(
-                        execution.status(),
-                        SchedulerStatus::Claimed
-                            | SchedulerStatus::Running
-                            | SchedulerStatus::RetryQueued
-                    ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
-                        execution.issue().repository_binding.as_ref(),
-                        normalized.repository_binding.as_ref(),
+            if let Some(execution) = self.executions.get(&normalized.id) {
+                let repository_binding_changed = RepositoryBindingOutcome::binding_changed_opt(
+                    execution.issue().repository_binding.as_ref(),
+                    normalized.repository_binding.as_ref(),
+                );
+                let workspace_key_changed = workspace_key_changed_for_issue(execution, &normalized);
+                let retain_workspace = execution.workspace().is_some()
+                    && project_identity_changed(execution.issue(), &normalized)
+                    && !repository_binding_changed
+                    && !workspace_key_changed;
+                if execution.workspace().is_some()
+                    && (repository_binding_changed || workspace_key_changed || retain_workspace)
+                {
+                    self.supersede_binding(
+                        normalized.id.clone(),
+                        normalized,
+                        observed_at,
+                        retain_workspace,
                     )
-                })
-            {
-                self.supersede_binding(normalized.id.clone(), normalized, observed_at)
                     .await?;
-                continue;
+                    continue;
+                }
             }
             if self
                 .interrupt_human_review_polling_for_merging(&normalized, observed_at)
@@ -1636,6 +1702,10 @@ where
                         let mut issue = existing.issue().clone();
                         issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
                         issue.labels = snapshot.labels.clone();
+                        if snapshot.project_identity_known {
+                            issue.project_id = snapshot.project_id.clone();
+                            issue.project_slug = snapshot.project_slug.clone();
+                        }
                         if snapshot.is_parent {
                             self.parent_issue_ids.insert(issue_id.clone());
                         } else {
@@ -1648,17 +1718,44 @@ where
                             issue.project_slug.as_deref(),
                             snapshot.is_parent,
                         );
+                        if !project_belongs_to_configured_project(
+                            &self.config,
+                            issue.project_id.as_deref(),
+                            issue.project_slug.as_deref(),
+                            snapshot.project_identity_known,
+                        ) {
+                            self.release_issue(
+                                issue_id.clone(),
+                                issue,
+                                observed_at,
+                                ReleaseReason::TrackerInactive,
+                                false,
+                                Some(WorkerAbortReason::TrackerInactive),
+                            )
+                            .await?;
+                            continue;
+                        }
+                        let repository_binding_changed =
+                            RepositoryBindingOutcome::binding_changed_opt(
+                                existing.issue().repository_binding.as_ref(),
+                                issue.repository_binding.as_ref(),
+                            );
+                        let retain_workspace = project_identity_changed(existing.issue(), &issue)
+                            && !repository_binding_changed;
                         if matches!(
                             existing.status(),
                             SchedulerStatus::Claimed
                                 | SchedulerStatus::Running
                                 | SchedulerStatus::RetryQueued
-                        ) && RepositoryBindingOutcome::canonical_identity_changed_opt(
-                            existing.issue().repository_binding.as_ref(),
-                            issue.repository_binding.as_ref(),
-                        ) {
-                            self.supersede_binding(issue_id.clone(), issue, observed_at)
-                                .await?;
+                        ) && (repository_binding_changed || retain_workspace)
+                        {
+                            self.supersede_binding(
+                                issue_id.clone(),
+                                issue,
+                                observed_at,
+                                retain_workspace,
+                            )
+                            .await?;
                             continue;
                         }
                         if self
@@ -1686,6 +1783,10 @@ where
                         .get(&issue_id)
                         .is_some_and(retry_exhausted_release)
                 {
+                    if let Some(execution) = self.executions.get(&issue_id) {
+                        self.workspace
+                            .revoke_issue_resources(execution.issue().identifier.as_str());
+                    }
                     self.cleanup_retry_exhausted_workspace_if_ready(&issue_id)
                         .await;
                     self.refresh_execution_issue(&issue_id, normalized)?;
@@ -1857,6 +1958,7 @@ where
         issue_id: IssueId,
         replacement: NormalizedIssue,
         observed_at: TimestampMs,
+        retain_workspace: bool,
     ) -> Result<(), SchedulerError> {
         let Some(mut execution) = self.remove_execution(&issue_id) else {
             self.insert_execution(issue_id, IssueExecution::new(replacement, observed_at));
@@ -1892,8 +1994,14 @@ where
             }
         }
 
+        // Binding or project supersession ends the old issue scope even when
+        // the retained checkout is idle and no live worker needed aborting.
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
+
         let retry = execution.retry().cloned();
-        if let Some(workspace) = execution.workspace().cloned()
+        if !retain_workspace
+            && let Some(workspace) = execution.workspace().cloned()
             && let Err(error) = self.workspace.remove_workspace(&workspace).await
         {
             self.insert_execution(issue_id, execution);
@@ -1911,7 +2019,9 @@ where
         if let Some(retry) = retry.as_ref() {
             replacement_execution = replacement_execution.restore_retry(retry.clone())?;
         }
-        let replacement_workspace = if retry.is_some() && has_resolved_replacement {
+        let replacement_workspace = if retain_workspace {
+            execution.workspace().cloned()
+        } else if retry.is_some() && has_resolved_replacement {
             match self
                 .workspace
                 .ensure_workspace(&replacement, observed_at)
@@ -2192,7 +2302,7 @@ where
             .repository_binding
             .clone()
             .map(RepositoryBindingOutcome::Resolved);
-        let binding_changed = RepositoryBindingOutcome::canonical_identity_changed_opt(
+        let binding_changed = RepositoryBindingOutcome::binding_changed_opt(
             current_execution.issue().repository_binding.as_ref(),
             recovered_binding.as_ref(),
         );
@@ -2240,6 +2350,7 @@ where
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),
+            memory_grant_registry_recovered: self.recovered_memory_issue_ids.contains(issue_id),
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -2266,6 +2377,7 @@ where
                 return Ok(());
             }
         };
+        self.recovered_memory_issue_ids.remove(issue_id);
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
@@ -2645,6 +2757,9 @@ where
                 workspace,
                 run: claimed_run.clone(),
                 route,
+                memory_grant_registry_recovered: self
+                    .recovered_memory_issue_ids
+                    .contains(&issue_id),
             };
 
             *planned_running_by_state.entry(state_key).or_default() += 1;
@@ -2667,6 +2782,7 @@ where
         {
             match result {
                 Ok(launch) => {
+                    self.recovered_memory_issue_ids.remove(&issue_id);
                     execution = execution.start_running(
                         observed_at,
                         effective_stall_timeout(self.config.stall_timeout_ms),
@@ -2979,6 +3095,8 @@ where
             self.insert_execution(issue_id, execution);
             return Ok(());
         }
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
         let was_retry_exhausted = retry_exhausted_release(&execution);
         let retain_failed = was_retry_exhausted && self.workspace.retain_failed_workspaces();
         if execution.status() == SchedulerStatus::Released
@@ -3231,6 +3349,8 @@ where
         reason: ReleaseReason,
         outcome: Option<WorkerOutcomeRecord>,
     ) -> Result<IssueExecution, SchedulerError> {
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
         let cleanup_terminal = matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
@@ -3441,6 +3561,10 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
+        self.recovered_memory_issue_ids
+            .extend(recoveries.iter().map(|record| record.issue.id.clone()));
+        self.recovered_memory_issue_ids
+            .extend(retry_pending.iter().map(|record| record.issue.id.clone()));
         self.pending_recovery = Some(recoveries);
         self.pending_retry_exhaustion = Some(retry_exhaustion);
         self.pending_retry_recovery = Some(retry_pending);
@@ -3688,29 +3812,82 @@ fn tracker_issue_belongs_to_configured_project(
     issue: &TrackerIssue,
     config: &SchedulerConfig,
 ) -> bool {
-    if config.tracker_project_id.is_none() && config.tracker_project_slug.is_none() {
-        return true;
-    }
-    if let Some(project_id) = config.tracker_project_id.as_deref()
-        && issue
-            .project_id
-            .as_deref()
-            .is_some_and(|issue_project_id| issue_project_id.trim() == project_id.trim())
+    project_belongs_to_configured_project(
+        config,
+        issue.project_id.as_deref(),
+        issue.project_slug.as_deref(),
+        true,
+    )
+}
+
+fn project_belongs_to_configured_project(
+    config: &SchedulerConfig,
+    project_id: Option<&str>,
+    project_slug: Option<&str>,
+    project_identity_known: bool,
+) -> bool {
+    if config.tracker_project_id.is_none()
+        && config.tracker_project_slug.is_none()
+        && config.tracker_project_ids.is_empty()
+        && config.tracker_project_slugs.is_empty()
     {
         return true;
     }
-    config
-        .tracker_project_slug
-        .as_deref()
-        .is_some_and(|project_slug| {
-            issue
-                .project_slug
-                .as_deref()
-                .is_some_and(|issue_project_slug| {
-                    issue_project_slug
-                        .trim()
-                        .eq_ignore_ascii_case(project_slug.trim())
-                })
+    // Older tracker adapters may not expose project identity on a state-only
+    // response. Preserve that compatibility path; a live Linear response now
+    // carries the identity so moved issues are still fenced immediately.
+    if !project_identity_known && project_id.is_none() && project_slug.is_none() {
+        return true;
+    }
+    if let Some(config_project_id) = config.tracker_project_id.as_deref()
+        && project_id
+            .is_some_and(|issue_project_id| issue_project_id.trim() == config_project_id.trim())
+    {
+        return true;
+    }
+    if project_id.is_some_and(|issue_project_id| {
+        config
+            .tracker_project_ids
+            .iter()
+            .enumerate()
+            .any(|(index, project_id)| {
+                !config
+                    .tracker_project_id_slug_fallbacks
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+                    && issue_project_id.trim() == project_id.trim()
+            })
+    }) {
+        return true;
+    }
+    let singular_slug_matches =
+        config
+            .tracker_project_slug
+            .as_deref()
+            .is_some_and(|config_project_slug| {
+                let singular_matches_first_vector_entry = config
+                    .tracker_project_slugs
+                    .first()
+                    .is_none_or(|first_project_slug| {
+                        first_project_slug
+                            .trim()
+                            .eq_ignore_ascii_case(config_project_slug.trim())
+                    });
+                singular_matches_first_vector_entry
+                    && project_slug.is_some_and(|issue_project_slug| {
+                        issue_project_slug
+                            .trim()
+                            .eq_ignore_ascii_case(config_project_slug.trim())
+                    })
+            });
+    singular_slug_matches
+        || project_slug.is_some_and(|issue_project_slug| {
+            config.tracker_project_slugs.iter().any(|project_slug| {
+                issue_project_slug
+                    .trim()
+                    .eq_ignore_ascii_case(project_slug.trim())
+            })
         })
 }
 
@@ -3789,15 +3966,15 @@ fn minimal_issue_from_state_snapshot(
         pr_url: None,
         url: None,
         labels: snapshot.labels.clone(),
-        project_id: None,
-        project_slug: None,
+        project_id: snapshot.project_id.clone(),
+        project_slug: snapshot.project_slug.clone(),
         project_name: None,
         parent_id: None,
         repository_binding: resolve_repository_binding(
             config,
             &snapshot.labels,
-            None,
-            None,
+            snapshot.project_id.as_deref(),
+            snapshot.project_slug.as_deref(),
             snapshot.is_parent,
         ),
         blocked_by: Vec::new(),
@@ -4148,6 +4325,34 @@ fn current_epoch_millis() -> u64 {
 mod tests {
     use super::*;
 
+    fn issue_with_project(project_id: Option<&str>, project_slug: Option<&str>) -> NormalizedIssue {
+        NormalizedIssue {
+            id: IssueId::new("issue-project-drift").expect("issue id should be valid"),
+            identifier: IssueIdentifier::new("COE-549").expect("identifier should be valid"),
+            title: "project drift".to_owned(),
+            description: None,
+            priority: None,
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_owned(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: None,
+            pr_url: None,
+            url: None,
+            labels: Vec::new(),
+            project_id: project_id.map(str::to_owned),
+            project_slug: project_slug.map(str::to_owned),
+            project_name: None,
+            parent_id: None,
+            repository_binding: None,
+            blocked_by: Vec::new(),
+            sub_issues: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
     #[test]
     fn recovered_scheduler_worker_ids_expose_their_allocator_ordinal() {
         let recovered = WorkerId::new("scheduler-worker-7").expect("worker id should be valid");
@@ -4155,5 +4360,80 @@ mod tests {
 
         assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
         assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
+
+    #[test]
+    fn project_identity_drift_requires_reconciliation_supersession() {
+        let previous = issue_with_project(Some("project-a"), Some("project-a"));
+        let moved = issue_with_project(Some("project-b"), Some("project-b"));
+        assert!(project_identity_changed(&previous, &moved));
+
+        let same_project = issue_with_project(Some("project-a"), Some("renamed-project-a"));
+        assert!(!project_identity_changed(&previous, &same_project));
+    }
+
+    #[test]
+    fn project_identity_can_be_cleared_when_tracker_removes_project() {
+        let previous = issue_with_project(Some("project-a"), Some("project-a"));
+        let removed = issue_with_project(None, None);
+
+        assert!(project_identity_changed(&previous, &removed));
+    }
+
+    #[test]
+    fn known_projectless_snapshot_does_not_belong_to_configured_project() {
+        let config = SchedulerConfig {
+            poll_interval_ms: 1,
+            max_concurrent_agents: 1,
+            max_turns: 1,
+            max_concurrent_agents_by_state: BTreeMap::new(),
+            retry_policy: RetryPolicy::default(),
+            max_retry_attempts: None,
+            stall_timeout_ms: None,
+            active_states: vec!["In Progress".to_owned()],
+            terminal_states: vec!["Done".to_owned()],
+            tracker_project_id: Some("project-a".to_owned()),
+            tracker_project_slug: None,
+            tracker_project_ids: Vec::new(),
+            tracker_project_id_slug_fallbacks: Vec::new(),
+            tracker_project_slugs: Vec::new(),
+            routing: RoutingConfig {
+                harness: "rust_native".to_owned(),
+                model: None,
+                model_profile: None,
+                harness_env: "HARNESS".to_owned(),
+                model_env: "MODEL".to_owned(),
+                model_profile_env: "MODEL_PROFILE".to_owned(),
+                harness_from_env: false,
+                model_from_env: false,
+                model_profile_from_env: false,
+                dry_run: false,
+            },
+            repository_routing: None,
+        };
+
+        assert!(!project_belongs_to_configured_project(
+            &config, None, None, true
+        ));
+        assert!(project_belongs_to_configured_project(
+            &config, None, None, false
+        ));
+        let full_detail = tracker_issue_from_normalized(&issue_with_project(None, None));
+        assert!(!tracker_issue_belongs_to_configured_project(
+            &full_detail,
+            &config
+        ));
+
+        let mut fallback_config = config;
+        fallback_config.tracker_project_id = None;
+        fallback_config.tracker_project_ids = vec!["legacy-project-slug".to_owned()];
+        fallback_config.tracker_project_id_slug_fallbacks = vec![true];
+        fallback_config.tracker_project_slugs = vec!["configured-project".to_owned()];
+        assert!(!project_belongs_to_configured_project(
+            &fallback_config,
+            Some("legacy-project-slug"),
+            Some("unconfigured-project"),
+            true,
+        ));
     }
 }

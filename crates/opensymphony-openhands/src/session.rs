@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -21,7 +23,8 @@ use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
 use crate::opensymphony_workspace::{
-    RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
+    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
+    WorkspaceManager, compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -84,6 +87,8 @@ pub struct IssueSessionRunnerConfig {
     pub total_runtime_cap_ms: Option<Duration>,
     pub finished_drain_timeout: Duration,
     pub memory: Option<MemoryWorkerAccess>,
+    pub repository_instructions: Option<String>,
+    pub terminal_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +98,29 @@ pub struct MemoryWorkerAccess {
     pub project: Option<String>,
     pub project_set: Option<String>,
     pub execution_repo: Option<String>,
+    pub authorized_repositories: Vec<String>,
+    /// The token is issued by this process's memory server. A recovered
+    /// supervised server may require a replacement conversation because its
+    /// reconstructed grant registry cannot update the bearer stored by the
+    /// existing server-side MCP configuration.
+    pub requires_fresh_conversation: bool,
+}
+
+impl MemoryWorkerAccess {
+    pub fn mcp_config(&self) -> Option<BTreeMap<String, Value>> {
+        let mut server = serde_json::Map::new();
+        server.insert("url".to_owned(), json!(self.endpoint));
+        if let Some(token) = &self.token {
+            server.insert(
+                "headers".to_owned(),
+                json!({ "Authorization": format!("Bearer {token}") }),
+            );
+        }
+        Some(BTreeMap::from([(
+            "mcpServers".to_owned(),
+            json!({ "opensymphony-memory": Value::Object(server) }),
+        )]))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +347,8 @@ impl Default for IssueSessionRunnerConfig {
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
+            repository_instructions: None,
+            terminal_prompt: None,
         }
     }
 }
@@ -343,11 +373,23 @@ impl IssueSessionRunnerConfig {
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
             memory: None,
+            repository_instructions: None,
+            terminal_prompt: None,
         }
     }
 
     pub fn with_memory(mut self, memory: Option<MemoryWorkerAccess>) -> Self {
         self.memory = memory;
+        self
+    }
+
+    pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
+        self.repository_instructions = instructions;
+        self
+    }
+
+    pub fn with_terminal_prompt(mut self, prompt: Option<String>) -> Self {
+        self.terminal_prompt = prompt;
         self
     }
 }
@@ -552,6 +594,7 @@ impl ConversationLaunchProfile {
                     )
                 }),
                 tools: self.agent_tools.clone(),
+                mcp_config: None,
                 include_default_tools: self.agent_include_default_tools.clone(),
             },
         })
@@ -747,6 +790,8 @@ pub struct IssueConversationManifest {
     pub reset_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_contract_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
@@ -829,6 +874,7 @@ impl IssueConversationManifest {
             workflow_prompt_seeded: false,
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -1015,6 +1061,17 @@ pub enum IssueSessionError {
     UnexpectedEarlyResult(String),
     #[error("rehydration failed: {0}")]
     RehydrationFailed(String),
+    #[error("conversation retirement failed: {0}")]
+    ConversationRetirementFailed(String),
+    #[error("superseded conversation evidence is invalid: {0}")]
+    SupersededConversationEvidence(String),
+}
+
+fn decode_superseded_conversation_manifests(
+    raw: &str,
+) -> Result<Option<Vec<IssueConversationManifest>>, IssueSessionError> {
+    serde_json::from_str(raw)
+        .map_err(|error| IssueSessionError::SupersededConversationEvidence(error.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -1162,7 +1219,10 @@ enum Step<T> {
 
 enum ReuseSession {
     Active(Box<ActiveSession>),
-    Reset(String),
+    Reset {
+        reason: String,
+        manifest: Box<IssueConversationManifest>,
+    },
 }
 
 struct PreparedTurn {
@@ -1212,6 +1272,16 @@ impl IssueSessionRunner {
         workpad_comment_source: Arc<dyn WorkpadCommentSource>,
     ) -> Self {
         self.workpad_comment_source = Some(workpad_comment_source);
+        self
+    }
+
+    pub fn with_repository_instructions(mut self, instructions: Option<String>) -> Self {
+        self.config.repository_instructions = instructions;
+        self
+    }
+
+    pub fn with_terminal_prompt(mut self, prompt: Option<String>) -> Self {
+        self.config.terminal_prompt = prompt;
         self
     }
 
@@ -1413,7 +1483,7 @@ impl IssueSessionRunner {
             .await?
         {
             ReuseSession::Active(session) => *session,
-            ReuseSession::Reset(reason) => {
+            ReuseSession::Reset { reason, .. } => {
                 return Err(IssueSessionError::RehydrationFailed(reason));
             }
         };
@@ -1428,35 +1498,46 @@ impl IssueSessionRunner {
         let mut pre_trigger_baseline_event_ids =
             trigger_pending.then(|| all_event_ids(active_session.stream.event_cache().items()));
         if trigger_pending {
-            loop {
-                match recovery_client.run_conversation(conversation_id).await {
-                    Ok(_) => break,
-                    Err(OpenHandsError::HttpStatus {
-                        status_code: 409, ..
-                    }) => {
-                        if let Err(error) = active_session.stream.reconcile_events().await {
-                            debug!(
-                                %error,
-                                conversation_id = %active_session.manifest.conversation_id,
-                                "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
-                            );
-                        }
-                        if let Err(error) = self
-                            .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
-                            .await
-                        {
-                            return Err(IssueSessionError::RehydrationFailed(format!(
-                                "previous OpenHands turn did not finish before recovered run retry: {error}"
-                            )));
-                        }
-                        pre_trigger_baseline_event_ids =
-                            Some(all_event_ids(active_session.stream.event_cache().items()));
+            match recovery_client.run_conversation(conversation_id).await {
+                Ok(_) => {}
+                Err(OpenHandsError::HttpStatus {
+                    status_code: 409, ..
+                }) => {
+                    if let Err(error) = active_session.stream.reconcile_events().await {
+                        debug!(
+                            %error,
+                            conversation_id = %active_session.manifest.conversation_id,
+                            "pre-wait reconcile failed after recovered run retry conflict, proceeding anyway"
+                        );
                     }
-                    Err(error) => {
+                    if let Err(error) = self
+                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .await
+                    {
                         return Err(IssueSessionError::RehydrationFailed(format!(
-                            "failed to trigger recovered OpenHands run: {error}"
+                            "previous OpenHands turn did not finish before recovered run retry: {error}"
                         )));
                     }
+                    // The wait may consume terminal events from the previous
+                    // turn. Refresh the baseline before retrying /run so those
+                    // historical events cannot finalize the recovered turn.
+                    pre_trigger_baseline_event_ids =
+                        Some(all_event_ids(active_session.stream.event_cache().items()));
+                    // A recovered 409 only proves that some turn was active;
+                    // it does not prove that this run's queued prompt was
+                    // accepted. Once that turn finishes, retry /run on the
+                    // same conversation so the recovered prompt is actually
+                    // executed.
+                    if let Err(error) = recovery_client.run_conversation(conversation_id).await {
+                        return Err(IssueSessionError::RehydrationFailed(format!(
+                            "failed to retry recovered OpenHands run after conflict: {error}"
+                        )));
+                    }
+                }
+                Err(error) => {
+                    return Err(IssueSessionError::RehydrationFailed(format!(
+                        "failed to trigger recovered OpenHands run: {error}"
+                    )));
                 }
             }
             active_session.manifest.trigger_pending_run_id = None;
@@ -1632,8 +1713,22 @@ impl IssueSessionRunner {
                 );
 
                 let _ = active_session.stream.close().await;
-
-                match self
+                if let Err(preserve_error) = self
+                    .preserve_superseded_conversation_manifest(
+                        workspace_manager,
+                        workspace,
+                        &active_session.manifest,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %preserve_error,
+                        conversation_id = %active_session.manifest.conversation_id,
+                        "condenser tool-matching recovery could not preserve the old conversation before replacement"
+                    );
+                    break (active_session, outcome);
+                }
+                let replacement = self
                     .create_fresh_session(
                         workspace_manager,
                         workspace,
@@ -1643,9 +1738,40 @@ impl IssueSessionRunner {
                         workflow,
                         Some("condenser tool-matching error auto-recovery".to_string()),
                     )
-                    .await
-                {
+                    .await;
+                match replacement {
                     Ok(Step::Continue(fresh_session)) => {
+                        let retired = match self
+                            .retire_conversation(
+                                &active_session.manifest,
+                                "condenser tool-matching recovery",
+                            )
+                            .await
+                        {
+                            Ok(()) => true,
+                            Err(retirement_error) => {
+                                tracing::warn!(
+                                    %retirement_error,
+                                    "condenser tool-matching recovery could not retire the old conversation after replacement"
+                                );
+                                false
+                            }
+                        };
+                        if retired
+                            && let Err(clear_error) = self
+                                .clear_superseded_conversation_manifest(
+                                    workspace_manager,
+                                    workspace,
+                                    &active_session.manifest.conversation_id,
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                %clear_error,
+                                conversation_id = %active_session.manifest.conversation_id,
+                                "condenser tool-matching recovery could not clear retired conversation evidence"
+                            );
+                        }
                         tracing::info!(
                             old_conversation_id = %active_session.manifest.conversation_id,
                             new_conversation_id = %fresh_session.manifest.conversation_id,
@@ -1798,13 +1924,75 @@ impl IssueSessionRunner {
                     .await?;
 
                 match loaded.manifest {
+                    Some(manifest)
+                        if run_manifest.runtime_envelope.is_some()
+                            && manifest.runtime_envelope.as_ref().is_none_or(|envelope| {
+                                envelope.conversation_binding.as_deref()
+                                    != Some(manifest.conversation_id.as_str())
+                            }) => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
+                            tracing::warn!(
+                                conversation_id = %manifest.conversation_id,
+                                "skipping retirement of conversation with mismatched runtime envelope binding"
+                            );
+                            let replacement = self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some("conversation runtime envelope binding changed; superseding conversation".into()),
+                            )
+                            .await?;
+                            Ok(replacement)
+                        }
+                    Some(manifest)
+                        if run_manifest.runtime_envelope.as_ref().is_some_and(|expected| {
+                            manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                                actual != expected
+                            })
+                        }) => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
+                            tracing::warn!(
+                                conversation_id = %manifest.conversation_id,
+                                "skipping retirement of conversation with an untrusted runtime envelope"
+                            );
+                            let replacement = self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some("terminal runtime envelope changed; superseding conversation".into()),
+                            )
+                            .await?;
+                            Ok(replacement)
+                        }
                     Some(manifest) => match self
                         .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
                         .await?
                     {
                         ReuseSession::Active(session) => Ok(Step::Continue(*session)),
-                        ReuseSession::Reset(reason) => {
-                            self.create_fresh_session(
+                        ReuseSession::Reset { reason, manifest } => {
+                            self.preserve_superseded_conversation_manifest(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                            )
+                            .await?;
+                            let replacement = self.create_fresh_session(
                                 workspace_manager,
                                 workspace,
                                 run_manifest,
@@ -1813,7 +2001,15 @@ impl IssueSessionRunner {
                                 workflow,
                                 Some(reason),
                             )
-                            .await
+                            .await?;
+                            self.retire_replaced_conversation(
+                                workspace_manager,
+                                workspace,
+                                &manifest,
+                                &replacement,
+                            )
+                            .await;
+                            Ok(replacement)
                         }
                     },
                     None => {
@@ -1834,13 +2030,41 @@ impl IssueSessionRunner {
                 let loaded = self
                     .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
                     .await?;
+                let safe_to_retire = loaded.manifest.as_ref().is_none_or(|manifest| {
+                    run_manifest.runtime_envelope.as_ref().is_none_or(|expected| {
+                        manifest.runtime_envelope.as_ref().is_some_and(|actual| {
+                            actual == expected
+                                && actual.conversation_binding.as_deref()
+                                    == Some(manifest.conversation_id.as_str())
+                        })
+                    })
+                });
                 let reset_reason = loaded.manifest.as_ref().map_or(loaded.reset_reason, |_| {
                     Some(
                         "workflow reuse policy `fresh_each_run` requested a new conversation for this run"
                             .to_string(),
                     )
                 });
-                self.create_fresh_session(
+                if let Some(manifest) = loaded.manifest.as_ref() {
+                    self.preserve_superseded_conversation_manifest(
+                        workspace_manager,
+                        workspace,
+                        manifest,
+                    )
+                    .await?;
+                    if !safe_to_retire {
+                        tracing::warn!(
+                            conversation_id = %manifest.conversation_id,
+                            "skipping retirement of fresh_each_run conversation with an untrusted runtime envelope"
+                        );
+                    } else {
+                        tracing::debug!(
+                            conversation_id = %manifest.conversation_id,
+                            "deferring fresh_each_run conversation retirement until replacement is durable"
+                        );
+                    }
+                }
+                let replacement = self.create_fresh_session(
                     workspace_manager,
                     workspace,
                     run_manifest,
@@ -1849,7 +2073,19 @@ impl IssueSessionRunner {
                     workflow,
                     reset_reason,
                 )
-                .await
+                .await?;
+                if safe_to_retire
+                    && let Some(manifest) = loaded.manifest.as_ref()
+                {
+                    self.retire_replaced_conversation(
+                        workspace_manager,
+                        workspace,
+                        manifest,
+                        &replacement,
+                    )
+                    .await;
+                }
+                Ok(replacement)
             }
             IssueSessionReusePolicy::Unsupported(policy) => self
                 .persist_failure_without_stream(
@@ -2270,6 +2506,56 @@ impl IssueSessionRunner {
         })
     }
 
+    async fn preserve_superseded_conversation_manifest(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        manifest: &IssueConversationManifest,
+    ) -> Result<(), IssueSessionError> {
+        let path = superseded_conversation_manifests_path(workspace);
+        let mut manifests = workspace_manager
+            .read_text_artifact(workspace, &path)
+            .await?
+            .map(|raw| decode_superseded_conversation_manifests(&raw))
+            .transpose()?
+            .flatten()
+            .unwrap_or_default();
+        if manifests
+            .iter()
+            .all(|existing| existing.conversation_id != manifest.conversation_id)
+        {
+            manifests.push(manifest.clone());
+        }
+        workspace_manager
+            .write_json_artifact_atomically(workspace, &path, &Some(&manifests))
+            .await?;
+        Ok(())
+    }
+
+    async fn clear_superseded_conversation_manifest(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        conversation_id: &ConversationId,
+    ) -> Result<(), IssueSessionError> {
+        let path = superseded_conversation_manifests_path(workspace);
+        let Some(raw) = workspace_manager
+            .read_text_artifact(workspace, &path)
+            .await?
+        else {
+            return Ok(());
+        };
+        let Some(mut manifests) = decode_superseded_conversation_manifests(&raw)? else {
+            return Ok(());
+        };
+        manifests.retain(|manifest| &manifest.conversation_id != conversation_id);
+        let replacement = (!manifests.is_empty()).then_some(&manifests);
+        workspace_manager
+            .write_json_artifact_atomically(workspace, &path, &replacement)
+            .await?;
+        Ok(())
+    }
+
     async fn try_reuse_session(
         &self,
         workspace_manager: &WorkspaceManager,
@@ -2280,7 +2566,12 @@ impl IssueSessionRunner {
     ) -> Result<ReuseSession, IssueSessionError> {
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
-            Err(error) => return Ok(ReuseSession::Reset(error)),
+            Err(error) => {
+                return Ok(ReuseSession::Reset {
+                    reason: error,
+                    manifest: Box::new(manifest),
+                });
+            }
         };
 
         // Check if condenser config has changed and requires reset
@@ -2298,9 +2589,10 @@ impl IssueSessionRunner {
             .and_then(|p| p.condenser.as_ref());
 
         if workflow_condenser.is_some() && manifest_condenser.is_none() {
-            return Ok(ReuseSession::Reset(
-                "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
-            ));
+            return Ok(ReuseSession::Reset {
+                reason: "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
+                manifest: Box::new(manifest),
+            });
         }
 
         // Defensive check: if previous run ended with error status and had activity,
@@ -2310,9 +2602,22 @@ impl IssueSessionRunner {
         if manifest.last_execution_status.as_deref() == Some("error")
             && manifest.last_event_id.is_some()
         {
-            return Ok(ReuseSession::Reset(
-                "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
-            ));
+            return Ok(ReuseSession::Reset {
+                reason: "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
+                manifest: Box::new(manifest),
+            });
+        }
+
+        if self
+            .config
+            .memory
+            .as_ref()
+            .is_some_and(|memory| memory.requires_fresh_conversation)
+        {
+            return Ok(ReuseSession::Reset {
+                reason: "existing conversation has a process-scoped memory grant that cannot be refreshed in place; creating a new conversation".to_string(),
+                manifest: Box::new(manifest),
+            });
         }
 
         // Simplified conversation resumption: just try to attach directly.
@@ -2329,6 +2634,83 @@ impl IssueSessionRunner {
         .await
     }
 
+    async fn retire_conversation(
+        &self,
+        manifest: &IssueConversationManifest,
+        reason: &str,
+    ) -> Result<(), IssueSessionError> {
+        let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
+            Ok(conversation_id) => conversation_id,
+            Err(error) => {
+                tracing::warn!(
+                    conversation_id = %manifest.conversation_id,
+                    %reason,
+                    %error,
+                    "superseding conversation has no parseable ID; continuing without remote retirement"
+                );
+                return Ok(());
+            }
+        };
+        match self.client.delete_conversation(conversation_id).await {
+            Ok(())
+            | Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {}
+            Err(error) => {
+                return Err(IssueSessionError::ConversationRetirementFailed(format!(
+                    "failed to retire conversation {} for {reason}: {error}",
+                    manifest.conversation_id
+                )));
+            }
+        }
+        tracing::info!(
+            conversation_id = %manifest.conversation_id,
+            %reason,
+            "retired superseded OpenHands conversation"
+        );
+        Ok(())
+    }
+
+    async fn retire_replaced_conversation(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        manifest: &IssueConversationManifest,
+        replacement: &Step<ActiveSession>,
+    ) {
+        if !matches!(replacement, Step::Continue(_)) {
+            return;
+        }
+        if let Err(error) = self
+            .retire_conversation(
+                manifest,
+                "superseded conversation after replacement became durable",
+            )
+            .await
+        {
+            tracing::warn!(
+                conversation_id = %manifest.conversation_id,
+                %error,
+                "failed to retire superseded conversation after durable replacement"
+            );
+            return;
+        }
+        if let Err(error) = self
+            .clear_superseded_conversation_manifest(
+                workspace_manager,
+                workspace,
+                &manifest.conversation_id,
+            )
+            .await
+        {
+            tracing::warn!(
+                conversation_id = %manifest.conversation_id,
+                %error,
+                "failed to clear retired superseded conversation evidence"
+            );
+        }
+    }
+
     async fn try_attach_and_resume(
         &self,
         client: &OpenHandsClient,
@@ -2342,18 +2724,42 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let stream = match client
+        let mut stream = match client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
         {
             Ok(stream) => stream,
+            Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {
+                return Ok(ReuseSession::Reset {
+                    reason: format!(
+                        "existing conversation {} is no longer available",
+                        manifest_conversation_id
+                    ),
+                    manifest: Box::new(manifest),
+                });
+            }
             Err(error) => {
-                return Ok(ReuseSession::Reset(format!(
+                return Err(IssueSessionError::RehydrationFailed(format!(
                     "failed to attach existing conversation {}: {error}",
                     manifest_conversation_id
                 )));
             }
         };
+
+        if let Err(reason) =
+            verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
+        {
+            let _ = stream.close().await;
+            return Ok(ReuseSession::Reset {
+                reason: format!(
+                    "existing conversation {} workspace is incompatible: {reason}",
+                    manifest_conversation_id
+                ),
+                manifest: Box::new(manifest),
+            });
+        }
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
@@ -2396,7 +2802,30 @@ impl IssueSessionRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn create_fresh_session(
+    fn create_fresh_session<'a>(
+        &'a self,
+        workspace_manager: &'a WorkspaceManager,
+        workspace: &'a WorkspaceHandle,
+        run_manifest: &'a mut RunManifest,
+        observed_run: &'a RunAttempt,
+        issue: &'a NormalizedIssue,
+        workflow: &'a ResolvedWorkflow,
+        reset_reason: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Step<ActiveSession>, IssueSessionError>> + Send + 'a>>
+    {
+        Box::pin(self.create_fresh_session_inner(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            issue,
+            workflow,
+            reset_reason,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_fresh_session_inner(
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
@@ -2456,11 +2885,16 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        let mut request = request;
+        if let Some(memory) = self.config.memory.as_ref() {
+            request.agent.mcp_config = memory.mcp_config();
+        }
+        let persisted_request = request.without_mcp_credentials();
         workspace_manager
             .write_json_artifact(
                 workspace,
                 &create_conversation_request_path(workspace),
-                &request,
+                &persisted_request,
             )
             .await?;
 
@@ -2478,7 +2912,7 @@ impl IssueSessionRunner {
                         NormalizedOutcome {
                             kind: WorkerOutcomeKind::Failed,
                             summary: "failed to create OpenHands conversation".to_string(),
-                            error: Some(error.to_string()),
+                            error: Some(redacted_openhands_error(&error, &request)),
                         },
                     )
                     .await
@@ -2486,6 +2920,44 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        let created_at = Utc::now();
+        let mut manifest = IssueConversationManifest::new(
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ConversationId::new(conversation.conversation_id.to_string())
+                .expect("UUID-backed conversation ID should not be empty"),
+            self.config.reuse_policy.as_str(),
+            configured_persistence_dir(workflow, workspace),
+            created_at,
+            reset_reason,
+            launch_profile.clone(),
+            self.environment.as_ref(),
+        );
+        manifest.llm_config_fingerprint =
+            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
+        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+        }
+        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        let pending_manifest_path = pending_conversation_manifest_path(workspace);
+        if let Err(error) = workspace_manager
+            .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
+            .await
+        {
+            let retirement = self
+                .retire_conversation(&manifest, "failed to persist fresh conversation ownership")
+                .await
+                .err();
+            let mut detail = format!("failed to persist fresh conversation ownership: {error}");
+            if let Some(retirement) = retirement {
+                detail.push_str(&format!("; failed to retire conversation: {retirement}"));
+            }
+            return Err(IssueSessionError::RehydrationFailed(detail));
+        }
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await?;
 
         let stream = match self
             .client
@@ -2523,22 +2995,60 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        if let Err(detail) =
+            verify_conversation_workspace(stream.conversation(), workspace.workspace_path()).await
+        {
+            let (failure_detail, conversation_metadata, clear_pending_ownership) =
+                Box::pin(self.handle_workspace_mismatch(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    issue,
+                    workflow,
+                    &launch_profile,
+                    &conversation,
+                    stream,
+                    detail,
+                ))
+                .await;
+            let mut failure_detail = failure_detail;
+            if clear_pending_ownership
+                && let Err(error) = workspace_manager
+                    .write_json_artifact_atomically(
+                        workspace,
+                        &pending_manifest_path,
+                        &Option::<IssueConversationManifest>::None,
+                    )
+                    .await
+            {
+                failure_detail.push_str(&format!(
+                    "; failed to clear pending conversation ownership: {error}"
+                ));
+            }
+            return self
+                .persist_failure_without_stream(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    IssueSessionPromptKind::Full,
+                    Some(conversation_metadata),
+                    NormalizedOutcome {
+                        kind: WorkerOutcomeKind::Failed,
+                        summary:
+                            "OpenHands runtime stream workspace did not match verified checkout"
+                                .to_owned(),
+                        error: Some(failure_detail),
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult);
+        }
 
         let attached_at = Utc::now();
-        let mut manifest = IssueConversationManifest::new(
-            issue.id.clone(),
-            issue.identifier.clone(),
-            ConversationId::new(conversation.conversation_id.to_string())
-                .expect("UUID-backed conversation ID should not be empty"),
-            self.config.reuse_policy.as_str(),
-            configured_persistence_dir(workflow, workspace),
-            attached_at,
-            reset_reason,
-            launch_profile,
-            self.environment.as_ref(),
-        );
-        manifest.llm_config_fingerprint =
-            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
+        manifest.last_attached_at = attached_at;
+        manifest.updated_at = attached_at;
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -2548,6 +3058,15 @@ impl IssueSessionRunner {
                 workspace,
                 &workspace.conversation_manifest_path(),
                 &manifest,
+            )
+            .await?;
+        // The pending copy makes the run/conversation binding recoverable if
+        // the process exits after run.json but before conversation.json.
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &pending_manifest_path,
+                &Option::<IssueConversationManifest>::None,
             )
             .await?;
         workspace_manager
@@ -2567,6 +3086,99 @@ impl IssueSessionRunner {
         // Read existing token counts from conversation state on load
         session.accumulate_tokens();
         Ok(Step::Continue(session))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_workspace_mismatch(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &RunManifest,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        launch_profile: &ConversationLaunchProfile,
+        conversation: &Conversation,
+        mut stream: RuntimeEventStream,
+        detail: String,
+    ) -> (String, ConversationMetadata, bool) {
+        let mut failed_manifest = IssueConversationManifest::new(
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ConversationId::new(conversation.conversation_id.to_string())
+                .expect("UUID-backed conversation ID should not be empty"),
+            self.config.reuse_policy.as_str(),
+            configured_persistence_dir(workflow, workspace),
+            Utc::now(),
+            Some("verified checkout/runtime workspace mismatch".to_owned()),
+            launch_profile.clone(),
+            self.environment.as_ref(),
+        );
+        failed_manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+        if let Some(envelope) = failed_manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
+        }
+        failed_manifest.apply_transport_diagnostics(
+            self.client.transport_diagnostics().ok().as_ref(),
+            self.client.base_url(),
+        );
+        failed_manifest.apply_runtime_snapshot(&stream);
+
+        let _ = stream.close().await;
+        let preserve_error = self
+            .preserve_superseded_conversation_manifest(
+                workspace_manager,
+                workspace,
+                &failed_manifest,
+            )
+            .await
+            .err();
+        let retire_error = self
+            .retire_conversation(
+                &failed_manifest,
+                "verified checkout/runtime workspace mismatch",
+            )
+            .await
+            .err();
+        if preserve_error.is_none()
+            && retire_error.is_none()
+            && let Err(error) = self
+                .clear_superseded_conversation_manifest(
+                    workspace_manager,
+                    workspace,
+                    &failed_manifest.conversation_id,
+                )
+                .await
+        {
+            tracing::warn!(
+                conversation_id = %failed_manifest.conversation_id,
+                %error,
+                "failed to clear retired workspace-mismatch conversation evidence"
+            );
+        }
+
+        let clear_pending_ownership = preserve_error.is_none() || retire_error.is_none();
+        let mut failure_detail = detail;
+        if let Some(error) = preserve_error {
+            failure_detail.push_str(&format!(
+                "; failed to preserve conversation evidence: {error}"
+            ));
+        }
+        if let Some(error) = retire_error {
+            failure_detail.push_str(&format!("; failed to retire conversation: {error}"));
+        }
+
+        let conversation_metadata = build_summary_metadata(
+            conversation,
+            true,
+            RuntimeStreamState::Failed,
+            self.client.transport_diagnostics().ok().as_ref(),
+            self.client.base_url(),
+        );
+        (
+            failure_detail,
+            conversation_metadata,
+            clear_pending_ownership,
+        )
     }
 
     /// Explicitly rehydrate a conversation by creating a fresh one with the same
@@ -2611,18 +3223,10 @@ impl IssueSessionRunner {
             None
         };
 
-        // Delete the old conversation
-        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str())
-            && let Err(error) = self.client.delete_conversation(conversation_id).await
-        {
-            tracing::warn!(
-                conversation_id = %old_conversation_id,
-                %error,
-                "failed to delete old conversation during rehydration"
-            );
-        }
-
         // Create a fresh session with the current configuration
+        self.preserve_superseded_conversation_manifest(workspace_manager, workspace, old_manifest)
+            .await?;
+
         let step = self
             .create_fresh_session(
                 workspace_manager,
@@ -2647,6 +3251,43 @@ impl IssueSessionRunner {
                 ));
             }
         };
+
+        let retired = if parse_uuid(old_conversation_id.as_str()).is_ok() {
+            match self
+                .retire_conversation(
+                    old_manifest,
+                    "superseded conversation after replacement became durable during rehydration",
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        conversation_id = %old_conversation_id,
+                        %error,
+                        "failed to delete old conversation after replacement became durable during rehydration; preserving superseded evidence"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if retired
+            && let Err(error) = self
+                .clear_superseded_conversation_manifest(
+                    workspace_manager,
+                    workspace,
+                    &old_manifest.conversation_id,
+                )
+                .await
+        {
+            tracing::warn!(
+                conversation_id = %old_conversation_id,
+                %error,
+                "failed to clear retired superseded conversation evidence after rehydration"
+            );
+        }
 
         // Copy token counts from old manifest to preserve metrics across rehydration
         session.manifest.input_tokens = old_manifest.input_tokens;
@@ -2761,10 +3402,32 @@ impl IssueSessionRunner {
         prompt_kind: IssueSessionPromptKind,
     ) -> Result<String, String> {
         match prompt_kind {
-            IssueSessionPromptKind::Full => workflow
-                .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
-                .map_err(|error| error.to_string()),
-            IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
+            IssueSessionPromptKind::Full => {
+                if let Some(prompt) = self.config.terminal_prompt.as_deref() {
+                    return Ok(prompt.to_owned());
+                }
+                workflow
+                    .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+                    .map(|prompt| {
+                        self.config.repository_instructions.as_deref().map_or(
+                            prompt.clone(),
+                            |instructions| {
+                                compose_terminal_prompt(
+                                    &prompt,
+                                    &format!("Issue: {}\nTitle: {}", issue.identifier, issue.title),
+                                    "Verified checkout facts are persisted in the run envelope.",
+                                    Some(instructions),
+                                    "trusted_host_process_cwd",
+                                )
+                            },
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            }
+            IssueSessionPromptKind::Continuation => Ok(append_memory_scope_guidance(
+                build_continuation_guidance(issue, run),
+                self.config.memory.as_ref(),
+            )),
         }
     }
 
@@ -3278,6 +3941,57 @@ impl IssueSessionRunner {
     }
 }
 
+async fn verify_conversation_workspace(
+    conversation: &Conversation,
+    expected_workspace: &Path,
+) -> Result<(), String> {
+    let expected = tokio::fs::canonicalize(expected_workspace)
+        .await
+        .map_err(|error| format!("failed to canonicalize verified checkout: {error}"))?;
+    let actual_path = Path::new(&conversation.workspace.working_dir);
+    let actual = tokio::fs::canonicalize(actual_path)
+        .await
+        .map_err(|error| format!("failed to canonicalize OpenHands workspace: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "OpenHands workspace `{}` does not match verified checkout `{}`",
+            actual.display(),
+            expected.display()
+        ));
+    }
+    Ok(())
+}
+
+fn redacted_openhands_error(error: &OpenHandsError, request: &ConversationCreateRequest) -> String {
+    let mut detail = error.to_string();
+    let Some(servers) = request
+        .agent
+        .mcp_config
+        .as_ref()
+        .and_then(|config| config.get("mcpServers"))
+        .and_then(Value::as_object)
+    else {
+        return detail;
+    };
+
+    for server in servers.values() {
+        let Some(headers) = server.get("headers").and_then(Value::as_object) else {
+            continue;
+        };
+        for value in headers.values().filter_map(Value::as_str) {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            detail = detail.replace(value, "<redacted>");
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                detail = detail.replace(token, "<redacted>");
+            }
+        }
+    }
+    detail
+}
+
 impl HarnessAdapter for IssueSessionRunner {
     fn harness_kind(&self) -> &'static str {
         "openhands_agent_server"
@@ -3320,6 +4034,23 @@ pub fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) ->
         "Continue working on issue {}: {}.\nThe original workflow prompt is already present in this conversation, so do not resend or restate it.\nResume from the current workspace and conversation context, inspect the latest progress, and continue from where the previous worker left off.\nCurrent issue state: {}\n{}\n",
         issue.identifier, issue.title, issue.state.name, attempt,
     )
+}
+
+fn append_memory_scope_guidance(
+    mut guidance: String,
+    memory: Option<&MemoryWorkerAccess>,
+) -> String {
+    let Some(memory) = memory else {
+        return guidance;
+    };
+    let (Some(project), Some(repo)) = (memory.project.as_deref(), memory.execution_repo.as_deref())
+    else {
+        return guidance;
+    };
+    guidance.push_str(&format!(
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope."
+    ));
+    guidance
 }
 
 async fn write_memory_context_artifact(
@@ -3519,7 +4250,7 @@ fn conversation_snapshot(stream: &RuntimeEventStream) -> Conversation {
     if let Some(status) = stream.state_mirror().execution_status() {
         conversation.execution_status = status.to_string();
     }
-    conversation
+    conversation.without_mcp_credentials()
 }
 
 fn build_summary_metadata(
@@ -3925,6 +4656,16 @@ fn create_conversation_request_path(workspace: &WorkspaceHandle) -> PathBuf {
         .join("create-conversation-request.json")
 }
 
+pub fn pending_conversation_manifest_path(workspace: &WorkspaceHandle) -> PathBuf {
+    workspace.openhands_dir().join("pending-conversation.json")
+}
+
+pub fn superseded_conversation_manifests_path(workspace: &WorkspaceHandle) -> PathBuf {
+    workspace
+        .openhands_dir()
+        .join("superseded-conversations.json")
+}
+
 fn last_conversation_state_path(workspace: &WorkspaceHandle) -> PathBuf {
     workspace
         .openhands_dir()
@@ -4070,6 +4811,16 @@ mod tests {
     }
 
     #[test]
+    fn malformed_superseded_conversation_evidence_is_not_treated_as_empty() {
+        let error = decode_superseded_conversation_manifests("{not-json")
+            .expect_err("malformed superseded evidence must fail closed");
+        assert!(matches!(
+            error,
+            IssueSessionError::SupersededConversationEvidence(_)
+        ));
+    }
+
+    #[test]
     fn openai_subscription_model_normalization_allows_future_openai_codex_models() {
         assert_eq!(
             must(normalize_openai_subscription_model("gpt-5.9-codex")),
@@ -4145,6 +4896,8 @@ mod tests {
             project: Some("project-alpha".to_string()),
             project_set: Some("set-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
+            authorized_repositories: vec!["repo-alpha".to_string()],
+            requires_fresh_conversation: false,
         };
 
         let issue = NormalizedIssue {
@@ -4210,6 +4963,49 @@ mod tests {
         assert_eq!(request["params"]["arguments"]["projectSet"], "set-alpha");
         assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
         task.abort();
+    }
+
+    #[test]
+    fn continuation_guidance_carries_worker_memory_scope() {
+        let guidance = append_memory_scope_guidance(
+            "continue from the existing conversation".to_owned(),
+            Some(&MemoryWorkerAccess {
+                endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
+                token: None,
+                project: Some("project-alpha".to_owned()),
+                project_set: None,
+                execution_repo: Some("repo-alpha".to_owned()),
+                authorized_repositories: vec!["repo-alpha".to_owned()],
+                requires_fresh_conversation: false,
+            }),
+        );
+
+        assert!(guidance.contains("project=project-alpha"));
+        assert!(guidance.contains("repo=repo-alpha"));
+        assert!(guidance.contains("memory.context"));
+    }
+
+    #[test]
+    fn memory_worker_access_builds_a_scoped_mcp_server_config() {
+        let access = MemoryWorkerAccess {
+            endpoint: "http://127.0.0.1:8765/mcp".to_owned(),
+            token: Some("worker-secret".to_owned()),
+            project: Some("project-alpha".to_owned()),
+            project_set: None,
+            execution_repo: Some("repo-alpha".to_owned()),
+            authorized_repositories: vec!["repo-alpha".to_owned(), "repo-beta".to_owned()],
+            requires_fresh_conversation: false,
+        };
+
+        let config = access.mcp_config().expect("memory MCP config should exist");
+        assert_eq!(
+            config["mcpServers"]["opensymphony-memory"]["url"],
+            "http://127.0.0.1:8765/mcp"
+        );
+        assert_eq!(
+            config["mcpServers"]["opensymphony-memory"]["headers"]["Authorization"],
+            "Bearer worker-secret"
+        );
     }
 
     async fn memory_test_mcp(
@@ -4478,6 +5274,8 @@ mod tests {
                 total_runtime_cap_ms: None,
                 finished_drain_timeout: Duration::from_millis(25),
                 memory: None,
+                repository_instructions: None,
+                terminal_prompt: None,
             },
         );
 
@@ -4504,6 +5302,7 @@ mod tests {
             workflow_prompt_seeded: false,
             reset_reason: None,
             runtime_contract_version: None,
+            runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -4876,5 +5675,78 @@ mod tests {
         );
 
         assert_eq!(timeout, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn create_error_diagnostic_redacts_worker_grants() {
+        let mut request =
+            ConversationCreateRequest::doctor_probe("/tmp/checkout", "/tmp/state", None, None);
+        request.agent.mcp_config = Some(BTreeMap::from([(
+            "mcpServers".to_owned(),
+            serde_json::json!({
+                "opensymphony-memory": {
+                    "headers": { "Authorization": "Bearer worker-secret" }
+                }
+            }),
+        )]));
+        let error = OpenHandsError::HttpStatus {
+            operation: "create_conversation",
+            status_code: 422,
+            body: r#"{"headers":{"Authorization":"Bearer worker-secret"}}"#.to_owned(),
+        };
+
+        let detail = redacted_openhands_error(&error, &request);
+
+        assert!(!detail.contains("worker-secret"));
+        assert!(detail.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn conversation_workspace_must_match_verified_checkout() {
+        let root = tempfile::tempdir().expect("temporary workspace root should exist");
+        let checkout = root.path().join("checkout");
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&checkout).expect("checkout should exist");
+        std::fs::create_dir_all(&other).expect("other workspace should exist");
+        let mut conversation = Conversation {
+            conversation_id: Uuid::new_v4(),
+            workspace: WorkspaceConfig {
+                working_dir: checkout.display().to_string(),
+                kind: "LocalWorkspace".to_owned(),
+            },
+            persistence_dir: root.path().join("state").display().to_string(),
+            max_iterations: 1,
+            stuck_detection: true,
+            execution_status: "idle".to_owned(),
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_owned(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_owned(),
+                llm: LlmConfig {
+                    model: "test".to_owned(),
+                    api_key: None,
+                    base_url: None,
+                    usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
+                },
+                condenser: None,
+                tools: None,
+                mcp_config: None,
+                include_default_tools: None,
+            },
+            stats: None,
+        };
+
+        verify_conversation_workspace(&conversation, &checkout)
+            .await
+            .expect("matching canonical workspace should be accepted");
+        conversation.workspace.working_dir = other.display().to_string();
+        let error = verify_conversation_workspace(&conversation, &checkout)
+            .await
+            .expect_err("different canonical workspace should be rejected");
+        assert!(error.contains("does not match verified checkout"));
     }
 }

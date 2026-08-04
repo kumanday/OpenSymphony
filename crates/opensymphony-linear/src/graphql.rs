@@ -327,6 +327,62 @@ query IssueStatesByIds(
       id
       identifier
       updatedAt
+      project {
+        id
+        slugId
+      }
+      state {
+        id
+        name
+        type
+      }
+      labels(first: $labelFirst, after: $labelAfter) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      children(includeArchived: true, first: 1) {
+        nodes {
+          id
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_STATES_BY_IDS_UNSCOPED_QUERY: &str = r#"
+query IssueStatesByIdsUnscoped(
+  $issueIds: [ID!]
+  $first: Int!
+  $after: String
+  $labelFirst: Int!
+  $labelAfter: String
+) {
+  issues(
+    filter: {
+      id: { in: $issueIds }
+    }
+    includeArchived: true
+    first: $first
+    after: $after
+  ) {
+    nodes {
+      id
+      identifier
+      updatedAt
+      project {
+        id
+        slugId
+      }
       state {
         id
         name
@@ -739,6 +795,16 @@ pub(super) struct IssueStatesByIdsVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueStatesByIdsUnscopedVariables {
+    pub issue_ids: Vec<String>,
+    pub first: usize,
+    pub after: Option<String>,
+    pub label_first: usize,
+    pub label_after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ProjectIssuesVariables {
     pub project_slug: String,
     pub include_archived: bool,
@@ -1002,11 +1068,20 @@ pub(super) struct LinearIssueStateNode {
     pub id: String,
     pub identifier: String,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub project: Option<LinearIssueStateProjectNode>,
     pub state: LinearWorkflowState,
     #[serde(default)]
     pub labels: LinearLabelConnection,
     #[serde(default)]
     pub children: LinearIssueStateChildrenConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearIssueStateProjectNode {
+    pub id: String,
+    pub slug_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

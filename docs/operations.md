@@ -563,7 +563,12 @@ pass `--token` to require bearer-token access for read tools. Admin tools
 `memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`)
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token`. When only the
 admin token is configured, it also gates read tools; do not inject that token
-into ordinary worker environments. When `code_intel.enabled` is true,
+into ordinary worker or shared managed-server environments. A configured
+read token is likewise injected only as the per-conversation worker grant, not
+into the shared managed-server environment. Authenticated operator calls using
+the configured read or admin bearer may still perform ordinary read calls on a
+supervised server; only unauthenticated unscoped reads are rejected as worker
+requests. When `code_intel.enabled` is true,
 `tools/list` exposes the read-only `code.graph.context` indexed discovery tool;
 when `code_intel.ast.enabled` is true, it also exposes `code.ast.*` inspection
 tools. The graph tool is bounded and can use the
@@ -674,15 +679,49 @@ ownership from an unclean exit can be reclaimed while a live owner still
 blocks migration/startup.
 Stale lock recovery atomically renames the old lock to a unique quarantine file
 before removing it; it never removes a newly-created owner lock at the shared
-path. A project-set central config is also rejected by every doctor mode until
-strict routing is enabled, avoiding a probe against an unrelated legacy
-checkout.
+path. Project-set central configs are supported by doctor modes; probes use the
+selected repository policy and do not inspect an unrelated launch-directory
+checkout. Strict attach still requires a compatible verified checkout and
+runtime envelope.
 After front matter is moved, `doctor`, `debug`, and `rehydrate` load the central
 policy so operational recovery continues to use the migrated OpenHands and
 tracker settings.
 For `legacy_single`, the same central policy resolves the selected repository's
 `instructions.path` beneath its checkout instead of silently reverting to the
 checkout root `WORKFLOW.md`.
+
+Strict repository-bound runs publish checkout generations under the configured
+workspace root. Operators should treat a generation manifest as immutable
+provenance: it records the canonical remote fingerprint, target branch and
+commit, instruction hash/source commit, and verification state. Drift or
+partial publication is quarantined and retried as a new generation; do not
+manually reset a quarantined checkout into service. The runtime envelope also
+records that current local containment is process `cwd` containment on a
+trusted host, not a sandbox boundary.
+
+Strict `opensymphony rehydrate` also derives the desired repository, harness,
+model, and generation envelope from the current central routing inventory before
+creating a replacement conversation. If that envelope differs from the
+persisted run, rehydration stops and leaves the existing conversation intact
+until the checkout is rematerialized or the configuration is reconciled.
+When several configured aliases identify the same repository, recovery first
+preserves and validates the alias recorded in the persisted binding; an alias
+that now resolves to a different repository is rejected rather than silently
+rewritten.
+
+Terminal OpenHands archival uses the retry verification mode for the checkout.
+That mode still requires the recorded generation, repository binding, ancestry,
+and instruction provenance, while permitting ordinary worker commits or dirty
+worktree changes that a terminal worker legitimately left behind.
+When a route switches between OpenHands and Codex, the previous session remains
+active until the replacement manifest has been durably written with the expected
+runtime envelope and conversation binding; a failed replacement therefore does
+not destroy the session needed for recovery. Before that replacement starts, its
+previous conversation manifest is also recorded in
+`.opensymphony/superseded-conversations.json`. Restart recovery and terminal
+cleanup use that durable evidence to archive the old OpenHands conversation or
+Codex thread, and successful retirement clears the evidence without overwriting
+the replacement manifest.
 
 Rollback refuses to proceed when the central catalog fingerprint differs from
 the activation marker. This deliberate safety stop keeps captures made after

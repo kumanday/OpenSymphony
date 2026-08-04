@@ -21,13 +21,14 @@ use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
     ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_SUMMARIES_BY_STATE_QUERY,
-    ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
-    IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
-    IssueCreateData, IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
-    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
-    IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
-    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueSummariesByStateData,
+    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
+    ISSUE_SUMMARIES_BY_STATE_QUERY, ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData,
+    IssueArchiveVariables, IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData,
+    IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
+    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
+    IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
+    IssueRelationCreateVariables, IssueRelationMutationNode, IssueStatesByIdsData,
+    IssueStatesByIdsUnscopedVariables, IssueStatesByIdsVariables, IssueSummariesByStateData,
     IssueSummariesByStateVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
     IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
     LinearProjectNode, LinearRelationConnection, PROJECT_BY_ID_QUERY, PROJECT_BY_SLUG_QUERY,
@@ -69,6 +70,9 @@ pub struct LinearConfig {
     pub api_key: String,
     pub base_url: String,
     pub project_slug: String,
+    pub project_ids: Vec<String>,
+    pub project_slugs: Vec<String>,
+    pub project_id_slug_fallbacks: Vec<bool>,
     pub project_id: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -83,6 +87,9 @@ impl LinearConfig {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             project_slug: project_slug.into(),
+            project_ids: Vec::new(),
+            project_slugs: Vec::new(),
+            project_id_slug_fallbacks: Vec::new(),
             project_id: None,
             active_states: Vec::new(),
             terminal_states: Vec::new(),
@@ -98,6 +105,7 @@ pub struct LinearClient {
     http: Client,
     config: LinearConfig,
     project_slug_cache: Arc<OnceCell<String>>,
+    project_slugs_cache: Arc<OnceCell<Vec<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +282,36 @@ impl LinearClient {
         config.api_key = normalize_required_string("LINEAR_API_KEY", &config.api_key)?;
         config.project_slug =
             normalize_required_string("tracker.project_slug", &config.project_slug)?;
+        config.project_ids = config
+            .project_ids
+            .iter()
+            .map(|id| normalize_required_string("tracker.project_ids", id))
+            .collect::<Result<Vec<_>, _>>()?;
+        config.project_slugs = if config.project_slugs.is_empty() {
+            vec![config.project_slug.clone()]
+        } else {
+            config
+                .project_slugs
+                .iter()
+                .map(|slug| normalize_required_string("tracker.project_slugs", slug))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if !config.project_ids.is_empty() && config.project_ids.len() != config.project_slugs.len()
+        {
+            return Err(LinearError::InvalidConfiguration(
+                "tracker project ID and slug lists must have the same length".to_owned(),
+            ));
+        }
+        if !config.project_ids.is_empty() {
+            if config.project_id_slug_fallbacks.is_empty() {
+                config.project_id_slug_fallbacks = vec![false; config.project_ids.len()];
+            } else if config.project_id_slug_fallbacks.len() != config.project_ids.len() {
+                return Err(LinearError::InvalidConfiguration(
+                    "tracker project ID fallback flags must have the same length as project IDs"
+                        .to_owned(),
+                ));
+            }
+        }
         config.project_id = config
             .project_id
             .as_deref()
@@ -293,11 +331,20 @@ impl LinearClient {
             http,
             config,
             project_slug_cache: Arc::new(OnceCell::new()),
+            project_slugs_cache: Arc::new(OnceCell::new()),
         })
     }
 
     pub async fn candidate_issues(&self) -> Result<Vec<TrackerIssue>, LinearError> {
         self.issues_by_state_names(&self.config.active_states).await
+    }
+
+    pub fn has_multiple_configured_projects(&self) -> bool {
+        self.config
+            .project_ids
+            .len()
+            .max(self.config.project_slugs.len())
+            > 1
     }
 
     pub async fn candidate_issue_summaries(&self) -> Result<Vec<TrackerIssueSummary>, LinearError> {
@@ -513,39 +560,48 @@ impl LinearClient {
         &self,
         include_archived: bool,
     ) -> Result<Vec<TrackerIssue>, LinearError> {
-        let project_slug = self.project_slug_for_queries().await?;
-        let mut after = None;
         let mut issues = Vec::new();
+        let mut issue_indices = HashMap::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = ProjectIssuesVariables {
+                    project_slug: project_slug.clone(),
+                    include_archived,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                    label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+                };
+                let response: ProjectIssuesData = self
+                    .execute_graphql(PROJECT_ISSUES_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = ProjectIssuesVariables {
-                project_slug: project_slug.clone(),
-                include_archived,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
-            };
-            let response: ProjectIssuesData = self
-                .execute_graphql(PROJECT_ISSUES_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    let issue = normalize_issue(self.expand_issue(node).await?)?;
+                    if let Some(index) = issue_indices.get(&issue.id).copied() {
+                        issues[index] = issue;
+                    } else {
+                        issue_indices.insert(issue.id.clone(), issues.len());
+                        issues.push(issue);
+                    }
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear project issues page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear project issues page indicated a next page without an end cursor"
-                        .to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     async fn issues_by_state_names_with_archived<S>(
@@ -561,40 +617,49 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut issues = Vec::new();
+        let mut issue_indices = HashMap::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = IssuesByStateVariables {
+                    project_slug: project_slug.clone(),
+                    state_names: state_names.clone(),
+                    include_archived,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                    label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+                };
+                let response: IssuesByStateData = self
+                    .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = IssuesByStateVariables {
-                project_slug: project_slug.clone(),
-                state_names: state_names.clone(),
-                include_archived,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
-            };
-            let response: IssuesByStateData = self
-                .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    let issue = normalize_issue(self.expand_issue(node).await?)?;
+                    if let Some(index) = issue_indices.get(&issue.id).copied() {
+                        issues[index] = issue;
+                    } else {
+                        issue_indices.insert(issue.id.clone(), issues.len());
+                        issues.push(issue);
+                    }
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear issues page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear issues page indicated a next page without an end cursor".to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     async fn issue_summaries_by_state_names<S>(
@@ -609,40 +674,48 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut issues = Vec::new();
+        let mut issue_indices = HashMap::new();
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            let mut after = None;
+            loop {
+                let variables = IssueSummariesByStateVariables {
+                    project_slug: project_slug.clone(),
+                    state_names: state_names.clone(),
+                    include_archived: false,
+                    first: self.config.page_size,
+                    after: after.clone(),
+                    relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                };
+                let response: IssueSummariesByStateData = self
+                    .execute_graphql(ISSUE_SUMMARIES_BY_STATE_QUERY, json!(variables))
+                    .await?;
 
-        loop {
-            let variables = IssueSummariesByStateVariables {
-                project_slug: project_slug.clone(),
-                state_names: state_names.clone(),
-                include_archived: false,
-                first: self.config.page_size,
-                after: after.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-            };
-            let response: IssueSummariesByStateData = self
-                .execute_graphql(ISSUE_SUMMARIES_BY_STATE_QUERY, json!(variables))
-                .await?;
+                let page_info = response.issues.page_info;
+                for node in response.issues.nodes {
+                    let issue = normalize_issue_summary(node)?;
+                    if let Some(index) = issue_indices.get(&issue.id).copied() {
+                        issues[index] = issue;
+                    } else {
+                        issue_indices.insert(issue.id.clone(), issues.len());
+                        issues.push(issue);
+                    }
+                }
 
-            let page_info = response.issues.page_info;
-            for node in response.issues.nodes {
-                issues.push(normalize_issue_summary(node)?);
+                if !page_info.has_next_page {
+                    break;
+                }
+
+                after = Some(page_info.end_cursor.ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "Linear issue summaries page indicated a next page without an end cursor"
+                            .to_string(),
+                    )
+                })?);
             }
-
-            if !page_info.has_next_page {
-                return Ok(issues);
-            }
-
-            after = Some(page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(
-                    "Linear issue summaries page indicated a next page without an end cursor"
-                        .to_string(),
-                )
-            })?);
         }
+        Ok(issues)
     }
 
     pub async fn issue_states_by_ids<S>(
@@ -657,24 +730,91 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let project_slug = self.project_slug_for_queries().await?;
-
-        let mut after = None;
         let mut snapshots = Vec::new();
+        let mut snapshot_indices = HashMap::new();
 
+        let project_slugs = self.project_slugs_for_queries().await?;
+        for project_slug in &project_slugs {
+            for snapshot in self
+                .query_issue_states_by_ids(
+                    ISSUE_STATES_BY_IDS_QUERY,
+                    &issue_ids,
+                    Some(project_slug),
+                )
+                .await?
+            {
+                if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
+                    // A bound issue can temporarily be returned by more
+                    // than one configured project. Project queries run
+                    // sequentially, so the later response is the newest
+                    // state we observed and must replace the stale one.
+                    snapshots[index] = snapshot;
+                } else {
+                    snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
+                    snapshots.push(snapshot);
+                }
+            }
+        }
+
+        let missing_issue_ids = issue_ids
+            .iter()
+            .filter(|issue_id| !snapshot_indices.contains_key(*issue_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_issue_ids.is_empty() {
+            // Running issues can move out of the configured project set while
+            // they remain in the scheduler. Resolve only the bounded missing
+            // ID set without a project filter before reconciliation.
+            for snapshot in self
+                .query_issue_states_by_ids(
+                    ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
+                    &missing_issue_ids,
+                    None,
+                )
+                .await?
+            {
+                if let Some(index) = snapshot_indices.get(&snapshot.id).copied() {
+                    snapshots[index] = snapshot;
+                } else {
+                    snapshot_indices.insert(snapshot.id.clone(), snapshots.len());
+                    snapshots.push(snapshot);
+                }
+            }
+        }
+        Ok(snapshots)
+    }
+
+    async fn query_issue_states_by_ids(
+        &self,
+        query: &'static str,
+        issue_ids: &[String],
+        project_slug: Option<&str>,
+    ) -> Result<Vec<TrackerIssueStateSnapshot>, LinearError> {
+        let mut snapshots = Vec::new();
+        let mut after = None;
         loop {
-            let variables = IssueStatesByIdsVariables {
-                project_slug: project_slug.clone(),
-                issue_ids: issue_ids.clone(),
-                first: self.config.page_size,
-                after: after.clone(),
-                label_first: self.config.page_size,
-                label_after: None,
-            };
-            let response: IssueStatesByIdsData = self
-                .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(variables))
-                .await?;
-
+            let variables = project_slug.map_or_else(
+                || {
+                    json!(IssueStatesByIdsUnscopedVariables {
+                        issue_ids: issue_ids.to_vec(),
+                        first: self.config.page_size,
+                        after: after.clone(),
+                        label_first: self.config.page_size,
+                        label_after: None,
+                    })
+                },
+                |project_slug| {
+                    json!(IssueStatesByIdsVariables {
+                        project_slug: project_slug.to_owned(),
+                        issue_ids: issue_ids.to_vec(),
+                        first: self.config.page_size,
+                        after: after.clone(),
+                        label_first: self.config.page_size,
+                        label_after: None,
+                    })
+                },
+            );
+            let response: IssueStatesByIdsData = self.execute_graphql(query, variables).await?;
             let page_info = response.issues.page_info;
             for mut node in response.issues.nodes {
                 let mut labels = std::mem::take(&mut node.labels.nodes);
@@ -685,17 +825,29 @@ impl LinearClient {
                     "Linear issue-state label page",
                 )?;
                 while let Some(label_after_cursor) = label_after {
-                    let label_variables = IssueStatesByIdsVariables {
-                        project_slug: project_slug.clone(),
-                        issue_ids: vec![node.id.clone()],
-                        first: 1,
-                        after: None,
-                        label_first: self.config.page_size,
-                        label_after: Some(label_after_cursor),
-                    };
-                    let label_response: IssueStatesByIdsData = self
-                        .execute_graphql(ISSUE_STATES_BY_IDS_QUERY, json!(label_variables))
-                        .await?;
+                    let label_variables = project_slug.map_or_else(
+                        || {
+                            json!(IssueStatesByIdsUnscopedVariables {
+                                issue_ids: vec![node.id.clone()],
+                                first: 1,
+                                after: None,
+                                label_first: self.config.page_size,
+                                label_after: Some(label_after_cursor.clone()),
+                            })
+                        },
+                        |project_slug| {
+                            json!(IssueStatesByIdsVariables {
+                                project_slug: project_slug.to_owned(),
+                                issue_ids: vec![node.id.clone()],
+                                first: 1,
+                                after: None,
+                                label_first: self.config.page_size,
+                                label_after: Some(label_after_cursor.clone()),
+                            })
+                        },
+                    );
+                    let label_response: IssueStatesByIdsData =
+                        self.execute_graphql(query, label_variables).await?;
                     let mut label_nodes = label_response.issues.nodes;
                     let label_node = label_nodes.pop().ok_or_else(|| {
                         LinearError::InvalidResponse(format!(
@@ -721,9 +873,8 @@ impl LinearClient {
             }
 
             if !page_info.has_next_page {
-                return Ok(snapshots);
+                break;
             }
-
             after = Some(page_info.end_cursor.ok_or_else(|| {
                 LinearError::InvalidResponse(
                     "Linear issue-state page indicated a next page without an end cursor"
@@ -731,6 +882,7 @@ impl LinearClient {
                 )
             })?);
         }
+        Ok(snapshots)
     }
 
     pub async fn fetch_workpad_comment(
@@ -829,34 +981,70 @@ impl LinearClient {
         let slug = self
             .project_slug_cache
             .get_or_try_init(|| async {
-                let response: ProjectByIdData = self
-                    .execute_graphql(
-                        PROJECT_BY_ID_QUERY,
-                        json!(ProjectByIdVariables {
-                            id: project_id.to_owned(),
-                        }),
-                    )
-                    .await?;
-                let Some(project) = response.projects.nodes.into_iter().next() else {
-                    if self.config.project_slug != *project_id {
-                        // Migrated legacy configs explicitly carry the old slug
-                        // in project_slug. Typed central configs leave it equal
-                        // to the provider ID, so an unresolved ID fails closed.
-                        return Ok(self.config.project_slug.clone());
-                    }
-                    return Err(LinearError::InvalidConfiguration(format!(
-                        "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
-                    )));
-                };
-                if project.slug_id.trim().is_empty() {
-                    return Err(LinearError::InvalidConfiguration(format!(
-                        "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
-                    )));
-                }
-                Ok(project.slug_id)
+                self.fetch_project_slug_by_id(project_id, Some(&self.config.project_slug))
+                    .await
             })
             .await?;
         Ok(slug.clone())
+    }
+
+    async fn project_slugs_for_queries(&self) -> Result<Vec<String>, LinearError> {
+        self.project_slugs_cache
+            .get_or_try_init(|| async {
+                let mut project_slugs = self.config.project_slugs.clone();
+                if self.config.project_ids.is_empty() {
+                    if self.config.project_id.is_some() {
+                        project_slugs[0] = self.project_slug_for_queries().await?;
+                    }
+                    return Ok(project_slugs);
+                }
+                if self.config.project_ids.len() != project_slugs.len() {
+                    return Err(LinearError::InvalidConfiguration(
+                        "tracker project ID and slug lists must have the same length".to_owned(),
+                    ));
+                }
+                for (index, project_id) in self.config.project_ids.iter().enumerate() {
+                    project_slugs[index] = if self.config.project_id_slug_fallbacks[index] {
+                        project_slugs[index].clone()
+                    } else {
+                        self.fetch_project_slug_by_id(project_id, None).await?
+                    };
+                }
+                Ok(project_slugs)
+            })
+            .await
+            .cloned()
+    }
+
+    async fn fetch_project_slug_by_id(
+        &self,
+        project_id: &str,
+        fallback_slug: Option<&str>,
+    ) -> Result<String, LinearError> {
+        let response: ProjectByIdData = self
+            .execute_graphql(
+                PROJECT_BY_ID_QUERY,
+                json!(ProjectByIdVariables {
+                    id: project_id.to_owned(),
+                }),
+            )
+            .await?;
+        let Some(project) = response.projects.nodes.into_iter().next() else {
+            if let Some(fallback_slug) = fallback_slug
+                && fallback_slug != project_id
+            {
+                return Ok(fallback_slug.to_owned());
+            }
+            return Err(LinearError::InvalidConfiguration(format!(
+                "configured tracker.project_id `{project_id}` could not be resolved to a Linear project"
+            )));
+        };
+        if project.slug_id.trim().is_empty() {
+            return Err(LinearError::InvalidConfiguration(format!(
+                "configured tracker.project_id `{project_id}` resolved to a Linear project without a slugId"
+            )));
+        }
+        Ok(project.slug_id)
     }
 
     pub async fn update_project_content(

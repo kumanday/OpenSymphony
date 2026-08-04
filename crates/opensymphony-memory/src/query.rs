@@ -583,9 +583,26 @@ pub fn context_for_issue_with_options(
     source: &SourceFile,
     options: &MemoryContextOptions,
 ) -> Result<String, MemoryError> {
+    context_for_issue_with_options_and_scope(
+        config,
+        source,
+        options,
+        &MemoryScopeFilter::default(),
+    )
+}
+
+pub fn context_for_issue_with_options_and_scope(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    options: &MemoryContextOptions,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let issue_key = normalize_issue_key(&options.issue);
     let max_total = options.limit.clamp(1, 20);
-    let indexed_issues = load_indexed_issues(config)?;
+    let indexed_issues = load_indexed_issues(config)?
+        .into_iter()
+        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+        .collect::<Vec<_>>();
     let indexed_by_key = indexed_issues
         .iter()
         .map(|issue| (issue.issue_key.clone(), issue))
@@ -997,13 +1014,33 @@ fn indexed_issue_matches_scope(
         (KnowledgeScopeKind::Project, scope.project.as_ref()),
     ] {
         if let Some(requested) = requested.and_then(|value| normalize_optional(value))
-            && !issue_scope_matches_request(config, issue, requested_repo.as_deref(), kind, &requested)
+            && !issue_scope_matches_request(
+                config,
+                issue,
+                requested_repo.as_deref(),
+                kind,
+                &requested,
+                scope.project_id_only,
+            )
         {
             return false;
         }
     }
     if let Some(milestone) = scope.milestone.as_ref().and_then(|value| normalize_optional(value))
         && issue.milestone.as_deref() != Some(milestone.as_str())
+    {
+        return false;
+    }
+    if let Some(project_set) = scope
+        .project_set
+        .as_ref()
+        .and_then(|value| normalize_optional(value))
+        && !indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::ProjectSet, &project_set)
+    {
+        return false;
+    }
+    if let Some(project) = scope.project.as_ref().and_then(|value| normalize_optional(value))
+        && !indexed_issue_matches_project(issue, &project, scope.project_id_only)
     {
         return false;
     }
@@ -1020,12 +1057,44 @@ fn indexed_issue_matches_scope(
     true
 }
 
+fn indexed_issue_matches_project(
+    issue: &IndexedIssue,
+    project: &str,
+    project_id_only: bool,
+) -> bool {
+    let has_explicit_project_scope = issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == KnowledgeScopeKind::Project);
+    has_explicit_project_scope
+        && issue.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Project
+                && scope_ref_matches(scope, project, project_id_only)
+        })
+}
+
+fn indexed_issue_matches_scope_ref(
+    issue: &IndexedIssue,
+    kind: KnowledgeScopeKind,
+    expected: &str,
+) -> bool {
+    issue.scope_refs.iter().any(|scope| {
+        scope.kind == kind
+            && (scope.id.eq_ignore_ascii_case(expected)
+                || scope
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.eq_ignore_ascii_case(expected)))
+    })
+}
+
 fn issue_scope_matches_request(
     config: &MemoryConfig,
     issue: &IndexedIssue,
     repository_id: Option<&str>,
     kind: KnowledgeScopeKind,
     requested: &str,
+    project_id_only: bool,
 ) -> bool {
     if let Some(repository_id) = repository_id {
         let owned_scopes = issue
@@ -1035,9 +1104,14 @@ fn issue_scope_matches_request(
             .flat_map(|(_, scopes)| scopes.iter())
             .collect::<Vec<_>>();
         if !owned_scopes.is_empty() {
-            return owned_scopes
-                .iter()
-                .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested));
+            return owned_scopes.iter().any(|scope| {
+                scope.kind == kind
+                    && scope_ref_matches(
+                        scope,
+                        requested,
+                        kind == KnowledgeScopeKind::Project && project_id_only,
+                    )
+            });
         }
         if let Some(source) = config.repository_sources.get(repository_id)
             && kind == KnowledgeScopeKind::Project
@@ -1048,14 +1122,35 @@ fn issue_scope_matches_request(
                 .iter()
                 .any(|id| id.eq_ignore_ascii_case(requested))
                 && issue.scope_refs.iter().any(|scope| {
-                    scope.kind == kind && scope.id.eq_ignore_ascii_case(requested)
+                    scope.kind == kind
+                        && scope_ref_matches(
+                            scope,
+                            requested,
+                            kind == KnowledgeScopeKind::Project && project_id_only,
+                        )
                 });
         }
     }
     issue
         .scope_refs
         .iter()
-        .any(|scope| scope.kind == kind && scope.id.eq_ignore_ascii_case(requested))
+        .any(|scope| {
+            scope.kind == kind
+                && scope_ref_matches(
+                    scope,
+                    requested,
+                    kind == KnowledgeScopeKind::Project && project_id_only,
+                )
+        })
+}
+
+fn scope_ref_matches(scope: &KnowledgeScope, requested: &str, id_only: bool) -> bool {
+    scope.id.eq_ignore_ascii_case(requested)
+        || (!id_only
+            && scope
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case(requested)))
 }
 
 fn issue_source_belongs_to_repository(
@@ -1081,17 +1176,30 @@ fn indexed_issue_visible_in_scope(
 }
 
 fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
-    if !config.repository_sources.is_empty() {
-        return issue.scope_refs.iter().any(|scope| {
-            scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
-        });
+    if issue
+        .scope_refs
+        .iter()
+        .any(|scope| scope.kind == KnowledgeScopeKind::Repository)
+    {
+        return indexed_issue_matches_scope_ref(issue, KnowledgeScopeKind::Repository, repo);
     }
+    if !Path::new(repo).is_absolute() && repo.contains(':') {
+        return false;
+    }
+    if issue.changed_files.is_empty() {
+        return true;
+    }
+    let Some(repo) = repo_scope_prefix(config, repo) else {
+        // Canonical repository IDs are durable identities, not filesystem
+        // prefixes. Legacy capsules without explicit repository scope were
+        // rejected above so they cannot bypass a worker's repository grant.
+        return true;
+    };
     if issue.scope_refs.iter().any(|scope| {
         scope.kind == KnowledgeScopeKind::Repository && scope.id == repo
     }) {
         return true;
     }
-    let repo = repo_scope_prefix(config, repo);
     if repo.is_empty() || repo == "." {
         return true;
     }
@@ -1101,8 +1209,11 @@ fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo:
     })
 }
 
-fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> String {
+fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> Option<String> {
     let path = PathBuf::from(repo);
+    if !path.is_absolute() && repo.contains(':') {
+        return None;
+    }
     let relative = if path.is_absolute() {
         path.strip_prefix(&config.repo_root)
             .map(Path::to_path_buf)
@@ -1116,6 +1227,7 @@ fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> String {
         .filter(|component| component != ".")
         .collect::<Vec<_>>()
         .join("/")
+        .into()
 }
 
 pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, MemoryError> {

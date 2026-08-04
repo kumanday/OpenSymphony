@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -100,6 +100,63 @@ fn resolve_tracker<E: Environment>(
         DEFAULT_LINEAR_ENDPOINT,
     )?;
     let project_slug = require_literal(tracker.project_slug.as_deref(), "tracker.project_slug")?;
+    let project_ids = match tracker.project_ids.as_deref() {
+        Some([]) => {
+            return Err(WorkflowConfigError::MissingRequiredField {
+                field: "tracker.project_ids",
+            });
+        }
+        Some(ids) => ids
+            .iter()
+            .map(|id| require_literal(Some(id.as_str()), "tracker.project_ids"))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => tracker
+            .project_id
+            .as_deref()
+            .map(|id| vec![id.trim().to_owned()])
+            .unwrap_or_default(),
+    };
+    if let (Some(project_id), Some(first_project_id)) =
+        (tracker.project_id.as_deref(), project_ids.first())
+    {
+        let project_id = require_literal(Some(project_id), "tracker.project_id")?;
+        if project_id != *first_project_id {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "tracker.project_id",
+                message: "must match the first entry in tracker.project_ids".to_owned(),
+            });
+        }
+    }
+    let project_slugs = match tracker.project_slugs.as_deref() {
+        Some([]) => {
+            return Err(WorkflowConfigError::MissingRequiredField {
+                field: "tracker.project_slugs",
+            });
+        }
+        Some(slugs) => slugs
+            .iter()
+            .map(|slug| require_literal(Some(slug.as_str()), "tracker.project_slugs"))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => vec![project_slug.clone()],
+    };
+    reject_duplicate_tracker_values("tracker.project_ids", &project_ids, false)?;
+    reject_duplicate_tracker_values("tracker.project_slugs", &project_slugs, true)?;
+    if !project_ids.is_empty() && project_ids.len() != project_slugs.len() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "tracker.project_slugs",
+            message: "must have the same length as project_ids".to_owned(),
+        });
+    }
+    let project_id_slug_fallbacks = tracker
+        .project_id_slug_fallbacks
+        .clone()
+        .unwrap_or_else(|| vec![false; project_ids.len()]);
+    if project_id_slug_fallbacks.len() != project_ids.len() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "tracker.project_id_slug_fallbacks",
+            message: "must have the same length as project_ids".to_owned(),
+        });
+    }
     let api_key = resolve_tracker_api_key(tracker, env)?;
 
     Ok(TrackerConfig {
@@ -113,6 +170,9 @@ fn resolve_tracker<E: Environment>(
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
         project_slug,
+        project_ids,
+        project_slugs,
+        project_id_slug_fallbacks,
         active_states: resolve_state_list(
             tracker.active_states.as_deref(),
             "tracker.active_states",
@@ -122,6 +182,28 @@ fn resolve_tracker<E: Environment>(
             "tracker.terminal_states",
         )?,
     })
+}
+
+fn reject_duplicate_tracker_values(
+    field: &'static str,
+    values: &[String],
+    case_insensitive: bool,
+) -> Result<(), WorkflowConfigError> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let key = if case_insensitive {
+            value.to_ascii_lowercase()
+        } else {
+            value.clone()
+        };
+        if !seen.insert(key) {
+            return Err(WorkflowConfigError::InvalidField {
+                field,
+                message: "must not contain duplicate values".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resolve_tracker_api_key<E: Environment>(

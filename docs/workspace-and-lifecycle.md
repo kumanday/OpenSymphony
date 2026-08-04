@@ -59,6 +59,46 @@ requested repository.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 
+### Verified repository checkout generations
+
+When a resolved terminal binding has a central repository checkout policy, the
+workspace manager derives a collision-resistant key from the issue and
+canonical repository identity. It clones into a staging directory, verifies
+the remote fingerprint, target branch, non-shallow history, clean worktree,
+Git integrity, and instruction provenance, then publishes the generation with
+an atomic rename. Existing generations are reused only after the same checks;
+remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
+than reset in place. Startup cleanup also requires the matching durable
+staging-intent marker created before a clone; unrelated files and directories
+under `.opensymphony-staging` are preserved.
+
+The checkout manifest records the generation, binding, target commit,
+instruction path/hash/source commit, scheduler-policy generation, resolved
+review profile/provider and review-policy generation, and verification
+timestamps. Runtime manifests copy this provenance into a terminal envelope.
+Harness adapters must
+launch with the verified checkout as `cwd`; the current trusted-host
+containment receipt describes process working-directory containment and does
+not claim sandbox isolation. During discovery, a directory whose name merely
+resembles a published generation is not enough to authorize deletion: an
+incomplete published generation is swept only when its durable issue and
+checkout manifests form a mutually consistent ownership set (or a completed
+`after_create` receipt claims the exact path and generation). Foreign,
+partial, or malformed generation-shaped directories are preserved unless the
+matching staging intent proves them to be abandoned. Git verification and
+clone helpers clear inherited repository-selection variables such as `GIT_DIR`
+and `GIT_WORK_TREE` before using an explicit checkout path.
+Checkout retention and deletion remain `WorkspaceManager` decisions. Generated
+tree instruction pruning asks Git only for tracked `AGENTS.md` paths, so a
+large vendored tree with unrelated tracked files does not become an unbounded
+instruction-discovery traversal. The NUL-delimited Git probe streams its output
+and fails closed after 10,000 paths or 4 MiB. If that tracked-instruction probe
+cannot run or exits unsuccessfully, discovery fails closed instead of treating
+the failure as an empty instruction result. Instruction contents are hashed as
+streams and fail closed above 1 MiB per file or 4 MiB across the selected and
+natively discovered instruction set; prompt loading applies the same per-file
+limit before retaining content in memory.
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:
@@ -296,9 +336,21 @@ Current repository note:
 - queued retry recovery and frequent state reconciliation preserve the binding
   generation boundary: a changed repository binding removes the old workspace
   and prevents that retry from launching until the replacement is materialized.
+- when verification quarantines a retained checkout during `RetryQueued`, the
+  scheduler may attach the newly published generation when its deterministic
+  workspace key is unchanged; claimed and running executions keep their
+  existing workspace identity immutable.
+  The same boundary applies when a tracker issue keeps its immutable ID but its
+  identifier changes: because verified checkout keys include the identifier, the
+  scheduler supersedes the old workspace generation before materializing the
+  replacement.
   The frequent state read also refreshes child presence, so a running issue that
   becomes a parent is made repository-neutral and its old generation is stopped
   before dispatch can continue it.
+- strict tracked-instruction discovery scrubs repository credential and
+  repository-selection variables from its Git path checks, including checks
+  used while deciding whether a generated-named tree contains tracked
+  instructions.
 
 ## 8. Conversation metadata manifest
 

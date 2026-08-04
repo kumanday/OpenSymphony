@@ -1227,6 +1227,41 @@ mod tests {
     }
 
     #[test]
+    fn retry_queued_execution_adopts_same_key_replacement_generation() {
+        let mut execution = claimed_execution();
+        let issue = execution.issue().clone();
+        let run = execution
+            .current_run()
+            .expect("claimed execution should have a run")
+            .clone();
+        let outcome = WorkerOutcomeRecord::from_run(
+            &run,
+            WorkerOutcomeKind::Failed,
+            ts(60),
+            None,
+            Some("retryable failure".to_owned()),
+        );
+        let retry = must(RetryEntry::failure(
+            &issue,
+            run.attempt,
+            0,
+            ts(60),
+            RetryReason::Failure,
+            Some("retryable failure".to_owned()),
+            RetryPolicy::default(),
+        ));
+        execution = must(execution.queue_retry(retry, outcome));
+
+        let replacement = WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-260--replacement-generation"),
+            updated_at: Some(ts(99)),
+            ..sample_workspace()
+        };
+        must(execution.attach_workspace(replacement.clone()));
+        assert_eq!(execution.workspace(), Some(&replacement));
+    }
+
+    #[test]
     fn running_snapshot_last_event_at_stays_none_without_runtime_events() {
         let issue = sample_issue();
         let workspace = sample_workspace();

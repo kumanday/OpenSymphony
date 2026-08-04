@@ -37,7 +37,7 @@ use crate::opensymphony_orchestrator::{
     TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::ProcessEnvironment;
-use crate::opensymphony_workspace::WorkspaceError;
+use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde::Deserialize;
@@ -100,10 +100,6 @@ pub(crate) enum RunCommandError {
     ResolveConfig { path: PathBuf, detail: String },
     #[error("central config validation failed: {0}")]
     CentralConfig(#[from] config::CentralConfigError),
-    #[error(
-        "strict multi-repository routing is disabled until its release gates pass (config generation {generation})"
-    )]
-    StrictRoutingDisabled { generation: String },
     #[error("invalid control-plane bind address `{value}`: {source}")]
     InvalidBind {
         value: String,
@@ -995,20 +991,31 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 runtime.preserve_terminal_workspaces,
             ),
         )?
-        .with_legacy_repository(legacy_repository),
+        .with_legacy_repository(legacy_repository)
+        .with_legacy_single_routing(runtime.repository_routing.as_ref().is_some_and(|routing| {
+            matches!(
+                routing.mode,
+                crate::opensymphony_domain::RepositoryRoutingMode::LegacySingle
+            )
+        }))
+        .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default()),
     );
+    workspace_manager
+        .recover_abandoned_staging_checkouts()
+        .await?;
     let retry_state_root = runtime.state_root.clone().unwrap_or_else(|| {
         workspace_manager
             .config()
             .root
             .join(".opensymphony-retry-state")
     });
-    let workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
+    let mut workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
         workspace_manager.clone(),
         &runtime.workflow,
         runtime.retain_failed,
         retry_state_root,
-    );
+    )
+    .with_openhands_conversation_store(runtime.openhands_conversation_store.clone());
     let selected_openhands = selected_openhands_harness(&runtime);
     let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
@@ -1042,6 +1049,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     let mut memory_server = start_runtime_memory_server(&runtime).await?;
+    if let Some(server) = &memory_server {
+        workspace = workspace.with_scope_grants(Some(server.scope_grant_registry()));
+    }
     let execution_repo = runtime
         .memory_sources
         .values()
@@ -1056,7 +1066,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .and_then(|server| server.token.clone()),
         project: runtime.workflow.config.tracker.project_slug.clone(),
         project_set: runtime.project_set_id.clone(),
-        execution_repo,
+        execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
+        authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
+        authorized_repositories_by_project: runtime
+            .repository_routing
+            .as_ref()
+            .map(|routing| {
+                routing
+                    .project_repositories
+                    .iter()
+                    .map(|(project, repositories)| {
+                        (
+                            project.clone(),
+                            repositories.iter().map(ToString::to_string).collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        scope_grants: Some(server.scope_grant_registry()),
     });
     if let Some(env) = &memory_env {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
@@ -1066,7 +1094,6 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         build_runtime_transport(
             &runtime,
             managed_local_preparation.tooling,
-            memory_env.as_ref(),
             &linear_worker_env,
         )
         .await?
@@ -1087,6 +1114,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         workspace_manager,
         memory_env.clone(),
         linear_worker_env,
+    )
+    .with_openhands_conversation_store(runtime.openhands_conversation_store.clone())
+    .with_checkout_credential_envs(
+        runtime
+            .repository_checkouts
+            .as_ref()
+            .map(checkout_credential_environment_variables)
+            .unwrap_or_default(),
     );
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
@@ -1458,13 +1493,16 @@ fn linear_oauth_credentials_from_env() -> Option<(String, String)> {
     (!client_id.is_empty() && !client_secret.is_empty()).then_some((client_id, client_secret))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct RuntimeMemoryEnv {
     pub(super) endpoint: String,
     pub(super) token: Option<String>,
     pub(super) project: String,
     pub(super) project_set: Option<String>,
-    pub(super) execution_repo: Option<String>,
+    pub(super) execution_repo: String,
+    pub(super) authorized_repositories: BTreeSet<String>,
+    pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
+    pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,
 }
 
 async fn start_runtime_memory_server(
@@ -1813,6 +1851,7 @@ mod tests {
             openhands_conversation_store: None,
             retry_max_attempts: None,
             repository_routing: None,
+            repository_checkouts: None,
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
             memory_sources: BTreeMap::new(),

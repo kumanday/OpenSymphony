@@ -103,4 +103,28 @@ pub enum WorkspaceError {
     },
     #[error("failed to remove workspace {path}: {source}")]
     RemoveWorkspace { path: PathBuf, source: io::Error },
+    #[error("checkout generation {generation} at {path} is not attachable: {reason}")]
+    CheckoutVerification {
+        path: PathBuf,
+        generation: String,
+        reason: String,
+    },
+    #[error("checkout generation at {path} was quarantined: {reason}")]
+    CheckoutQuarantined { path: PathBuf, reason: String },
+    #[error("checkout operation {operation} failed at {path}: {detail}")]
+    CheckoutOperation {
+        operation: String,
+        path: PathBuf,
+        detail: String,
+    },
+    #[error("repository instruction path escapes checkout: {path}")]
+    InstructionPathEscape { path: PathBuf },
+    #[error("repository instruction file is missing in checkout: {path}")]
+    MissingInstruction { path: PathBuf },
+    #[error("repository instruction bytes at {path} exceed the {scope} limit of {limit} bytes")]
+    InstructionSizeLimit {
+        path: PathBuf,
+        scope: &'static str,
+        limit: u64,
+    },
 }

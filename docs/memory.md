@@ -446,6 +446,12 @@ ordinary MCP reads only inspect the existing schema. Code-intelligence lookups
 use the registered canonical repository ID rather than a caller-supplied local
 path.
 
+Managed local OpenHands workers receive the memory endpoint and their
+per-conversation scoped read grant through the worker environment. The
+process-wide server read token is never placed in the shared managed-server
+environment, so one worker cannot bypass its grant by reading that token from a
+shared agent-server process.
+
 `memory serve` exposes the memory command set through a local MCP-style
 Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
 when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct
@@ -461,6 +467,14 @@ token-gated deployments can restrict ad hoc query execution. Admin tools are
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
+On a supervised server with a configured workspace root, unauthenticated
+unscoped reads are still rejected as worker requests; an operator using the
+configured read or admin bearer may perform ordinary read calls without a
+worker grant. Worker calls remain bound to their server-issued project,
+repository, issue, and optional checkout-generation grant. Strict project-set
+grants resolve live code against that verified generation; generation-less
+legacy grants keep using the registered repository source and legacy workspace
+overlay path.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include code-intelligence artifacts alongside selected memory. For requested
 Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
@@ -473,6 +487,24 @@ The rendered artifact/provider contract is owned by `opensymphony_code_intel`;
 memory keeps the legacy `CodeIntelIndex` and `CodeIntelArtifact` surface as an
 adapter around that provider contract instead of requiring code-intelligence
 providers to import memory internals.
+
+Worker-scoped memory access uses a stable per-issue bearer grant bound to the
+worker's project, execution repository, authorized repository set, issue, and
+checkout generation. In-process retries refresh that registry entry in place so
+the default reusable OpenHands conversation retains its MCP bearer while its
+verified checkout scope changes. Durable daemon recovery reconstructs the
+registry, so a queued retry or recovered worker gets a one-time fresh
+conversation before another turn can use the new grant. The grant is
+server-local, non-persisted, and replaced with the latest verified scope.
+Terminal, inactive, and binding-superseded worker lifecycles revoke the issue
+entry only after the harness confirms it has stopped, so a retained live worker
+keeps its bearer while stop acknowledgement is retried. If a retained issue
+later reopens, the next grant is marked for a
+one-time fresh conversation so the old conversation cannot retain the revoked
+bearer. It must not become a process-wide authorization. This project scope applies to direct
+`memory.show` capsule reads
+as well as search, context, brief, related, docs, and status tools, and worker
+project matching uses canonical project IDs rather than display labels.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.

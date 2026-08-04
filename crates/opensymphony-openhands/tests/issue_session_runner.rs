@@ -839,13 +839,8 @@ async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversat
             .as_str(),
     )
     .expect("conversation ID should parse");
-    let first_messages = latest_message_texts(
-        client
-            .search_all_events(first_conversation_id)
-            .await
-            .expect("first conversation events should be searchable")
-            .items(),
-    );
+
+    let first_events = client.search_all_events(first_conversation_id).await;
     let second_messages = latest_message_texts(
         client
             .search_all_events(second_conversation_id)
@@ -853,7 +848,10 @@ async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversat
             .expect("second conversation events should be searchable")
             .items(),
     );
-    assert_eq!(first_messages.len(), 1);
+    assert!(
+        first_events.is_err(),
+        "superseded conversation should be retired"
+    );
     assert_eq!(second_messages.len(), 1);
     assert!(second_messages[0].contains("Issue: COE-282-fresh-each-run"));
 
@@ -2445,6 +2443,84 @@ async fn rehydrate_conversation_deletes_old_and_creates_new_with_token_preservat
     assert!(
         new_conversation_result.is_ok(),
         "new conversation should exist on server"
+    );
+}
+
+#[tokio::test]
+async fn rehydrate_failure_keeps_old_conversation_available() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let failing_workflow = workflow_with_llm_provider_overrides(
+        &workspace_root,
+        server.base_url(),
+        Some("WORKFLOW_MISSING_API_KEY"),
+        None,
+    );
+    let issue = sample_issue("COE-549-rehydrate-failure");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), IssueSessionRunnerConfig::default());
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("initial", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-1", None, 8);
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("initial run should succeed");
+    let old_conversation_id = first_result
+        .conversation
+        .expect("initial run should create a conversation")
+        .conversation_id;
+    let old_manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+
+    let failing_runner = IssueSessionRunner::with_environment(
+        client.clone(),
+        runner_config(&failing_workflow),
+        BTreeMap::new(),
+    );
+    let rehydrate_run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-2", None, 8);
+    let error = failing_runner
+        .rehydrate_conversation(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &rehydrate_run,
+            &issue,
+            &failing_workflow,
+            &old_manifest,
+            crate::opensymphony_openhands::RehydrationOptions {
+                reason: "replacement failure test".to_string(),
+                summarize: false,
+                max_summary_events: 0,
+            },
+        )
+        .await
+        .expect_err("rehydration should fail when replacement credentials are unavailable");
+    assert!(error.to_string().contains("rehydration failed"));
+
+    let old_conversation_uuid = uuid::Uuid::parse_str(old_conversation_id.as_str())
+        .expect("old conversation ID should be valid");
+    assert!(
+        client.get_conversation(old_conversation_uuid).await.is_ok(),
+        "failed replacement must not retire the old conversation"
     );
 }
 

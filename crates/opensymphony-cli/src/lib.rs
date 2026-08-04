@@ -9,7 +9,7 @@ mod orchestrator_run;
 mod update_repo;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     net::SocketAddr,
     num::NonZeroU64,
@@ -18,11 +18,13 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_codex::CODEX_APP_SERVER_KIND;
 use crate::opensymphony_control::{
     AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
     WorkerOutcome,
 };
+use crate::opensymphony_domain::{RepositoryRouting, RepositoryRoutingMode};
 use crate::opensymphony_openhands::{
     ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
     SupervisedServerConfig, SupervisorConfig, TransportConfig,
@@ -30,6 +32,7 @@ use crate::opensymphony_openhands::{
 use crate::opensymphony_workflow::{
     Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
 };
+use crate::opensymphony_workspace::{TerminalRuntimeEnvelope, environment_variable_names_equal};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
 use install_tooling::{
@@ -204,28 +207,67 @@ struct LinearDoctorConfig {
 struct DoctorRuntimeConfig {
     target_repo: PathBuf,
     workflow_path: PathBuf,
+    instruction_path_required: bool,
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
     probe_llm_base_url_env: Option<String>,
+    checkout_credential_envs: BTreeSet<String>,
 }
 
 struct RehydrateRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
+    repository_routing: Option<RepositoryRouting>,
+    repository_checkouts:
+        Option<BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>>,
+}
+
+fn strict_recovery_enabled(repository_routing: Option<&RepositoryRouting>) -> bool {
+    repository_routing
+        .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::ProjectSet))
+}
+
+fn strict_recovery_configured(
+    repository_routing: Option<&RepositoryRouting>,
+    repository_checkouts: Option<
+        &BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>,
+    >,
+) -> bool {
+    let _ = repository_checkouts;
+    strict_recovery_enabled(repository_routing)
+}
+
+fn live_openhands_checks_blocked(
+    repository_routing: Option<&RepositoryRouting>,
+    repository_checkouts: Option<
+        &BTreeMap<String, crate::opensymphony_workspace::CheckoutRepository>,
+    >,
+) -> bool {
+    strict_recovery_configured(repository_routing, repository_checkouts)
 }
 
 struct DoctorWorkflowEnvironment {
     fallback_linear_api_key: bool,
+    blocked: BTreeSet<String>,
 }
 
 impl Environment for DoctorWorkflowEnvironment {
     fn get(&self, name: &str) -> Option<String> {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
+            return None;
+        }
         env::var_os(name)
             .map(|value| value.to_string_lossy().into_owned())
             .or_else(|| {
-                if self.fallback_linear_api_key && name == "LINEAR_API_KEY" {
+                if self.fallback_linear_api_key
+                    && environment_variable_names_equal(name, "LINEAR_API_KEY")
+                {
                     Some("doctor-linear-disabled-placeholder".to_string())
                 } else {
                     None
@@ -504,16 +546,6 @@ pub async fn run_doctor_command(
     } else {
         None
     };
-    if central_config.as_ref().is_some_and(|central| {
-        project_set_doctor_mutation_blocked(&central.mode, live_openhands, rehydrate)
-    }) {
-        checks.push(CheckResult::fail(
-            "config",
-            "doctor is disabled for project_set central routing until strict routing is enabled",
-        ));
-        print_checks(&checks);
-        return ExitCode::from(1);
-    }
     let config = match central_config.as_ref() {
         Some(central) => {
             checks.push(CheckResult::pass(
@@ -591,6 +623,14 @@ pub async fn run_doctor_command(
         central_config
             .as_ref()
             .map(|central| &central.workflow_front_matter),
+        central_config
+            .as_ref()
+            .map(|central| {
+                crate::opensymphony_workspace::checkout_credential_environment_variables(
+                    &central.repository_checkouts,
+                )
+            })
+            .unwrap_or_default(),
     );
 
     // For repo check, try to find the cargo workspace root from the config_root
@@ -601,7 +641,14 @@ pub async fn run_doctor_command(
 
     let (runtime, rendered_probe_prompt) = match runtime {
         Ok(runtime) => {
-            checks.push(check_target_repo(&runtime.target_repo, &runtime.workflow_path).await);
+            checks.push(
+                check_target_repo(
+                    &runtime.target_repo,
+                    &runtime.workflow_path,
+                    runtime.instruction_path_required,
+                )
+                .await,
+            );
             checks.push(check_workflow(&runtime));
 
             let rendered_probe_prompt = match render_doctor_probe_prompt(&runtime.workflow) {
@@ -636,6 +683,7 @@ pub async fn run_doctor_command(
                 check_target_repo(
                     &fallback_target_repo,
                     &fallback_target_repo.join("WORKFLOW.md"),
+                    true,
                 )
                 .await,
             );
@@ -710,10 +758,24 @@ pub async fn run_doctor_command(
     let mut live_checks_supervisor = None;
 
     if live_openhands {
-        let live_checks =
-            run_live_openhands_checks(&runtime, &rendered_probe_prompt, tooling.as_ref()).await;
-        checks.extend(live_checks.checks);
-        live_checks_supervisor = live_checks.supervisor;
+        if live_openhands_checks_blocked(
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_routing),
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_checkouts),
+        ) {
+            checks.push(CheckResult::fail(
+                "openhands-live",
+                "live OpenHands checks are unavailable when verified checkout policies are configured; use issue-scoped strict recovery",
+            ));
+        } else {
+            let live_checks =
+                run_live_openhands_checks(&runtime, &rendered_probe_prompt, tooling.as_ref()).await;
+            checks.extend(live_checks.checks);
+            live_checks_supervisor = live_checks.supervisor;
+        }
     } else {
         checks.push(CheckResult::skip(
             "openhands-live",
@@ -723,19 +785,33 @@ pub async fn run_doctor_command(
 
     // Run bulk rehydration if requested
     if rehydrate {
-        match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
-            Ok((success_count, total_count)) => {
-                let fail_count = total_count - success_count;
-                checks.push(CheckResult::pass(
-                    "rehydration",
-                    format!(
-                        "rehydrated {}/{} conversations ({} failed)",
-                        success_count, total_count, fail_count
-                    ),
-                ));
-            }
-            Err(error) => {
-                checks.push(CheckResult::fail("rehydration", error));
+        if strict_recovery_configured(
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_routing),
+            central_config
+                .as_ref()
+                .map(|central| &central.repository_checkouts),
+        ) {
+            checks.push(CheckResult::fail(
+                "rehydration",
+                "bulk doctor rehydration is unavailable when verified checkout policies are configured; use issue-scoped strict recovery",
+            ));
+        } else {
+            match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
+                Ok((success_count, total_count)) => {
+                    let fail_count = total_count - success_count;
+                    checks.push(CheckResult::pass(
+                        "rehydration",
+                        format!(
+                            "rehydrated {}/{} conversations ({} failed)",
+                            success_count, total_count, fail_count
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    checks.push(CheckResult::fail("rehydration", error));
+                }
             }
         }
     }
@@ -763,17 +839,6 @@ pub async fn run_doctor_command(
     } else {
         ExitCode::SUCCESS
     }
-}
-
-fn project_set_doctor_mutation_blocked(
-    mode: &orchestrator_run::config::CentralRoutingMode,
-    _live_openhands: bool,
-    _rehydrate: bool,
-) -> bool {
-    matches!(
-        mode,
-        orchestrator_run::config::CentralRoutingMode::ProjectSet
-    )
 }
 
 fn central_doctor_probe_settings(
@@ -1179,7 +1244,9 @@ fn build_doctor_transport(
     runtime: &DoctorRuntimeConfig,
     base_url_override: Option<String>,
 ) -> Result<TransportConfig, String> {
-    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)
+    let environment =
+        BlockedEnvironment::new(ProcessEnvironment, runtime.checkout_credential_envs.clone());
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &environment)
         .map_err(|error| error.to_string())?;
     Ok(match base_url_override {
         Some(base_url) => TransportConfig::new(base_url).with_auth(transport.auth().clone()),
@@ -1193,6 +1260,7 @@ fn resolve_doctor_runtime(
     default_target_repo: &Path,
     central_instruction_path: Option<&Path>,
     central_front_matter: Option<&crate::opensymphony_workflow::WorkflowFrontMatter>,
+    checkout_credential_envs: BTreeSet<String>,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
         .target_repo
@@ -1202,8 +1270,15 @@ fn resolve_doctor_runtime(
     let workflow_path = central_instruction_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
-        .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
+    let instruction_path_required =
+        central_front_matter.is_none() || central_instruction_path.is_some();
+    let workflow = if central_front_matter.is_some() && central_instruction_path.is_none() {
+        WorkflowDefinition::parse("")
+            .map_err(|error| format!("failed to parse central workflow front matter: {error}"))?
+    } else {
+        WorkflowDefinition::load_from_path(&workflow_path)
+            .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?
+    };
     let workflow = central_front_matter
         .cloned()
         .map(|front_matter| WorkflowDefinition {
@@ -1217,6 +1292,7 @@ fn resolve_doctor_runtime(
     Ok(DoctorRuntimeConfig {
         target_repo,
         workflow_path,
+        instruction_path_required,
         workflow,
         tool_dir: config
             .openhands
@@ -1226,6 +1302,7 @@ fn resolve_doctor_runtime(
         probe_model: config.openhands.probe_model.clone(),
         probe_api_key_env: config.openhands.probe_api_key_env.clone(),
         probe_llm_base_url_env: config.openhands.probe_llm_base_url_env.clone(),
+        checkout_credential_envs,
     })
 }
 
@@ -1241,6 +1318,7 @@ fn resolve_doctor_workflow(
             target_repo,
             &DoctorWorkflowEnvironment {
                 fallback_linear_api_key: true,
+                blocked: BTreeSet::new(),
             },
         )
     }
@@ -1304,7 +1382,11 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
     }
 }
 
-async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckResult {
+async fn check_target_repo(
+    target_repo: &Path,
+    workflow_path: &Path,
+    instruction_path_required: bool,
+) -> CheckResult {
     if !target_repo.exists() {
         return CheckResult::fail(
             "target-repo",
@@ -1312,7 +1394,15 @@ async fn check_target_repo(target_repo: &Path, workflow_path: &Path) -> CheckRes
         );
     }
 
-    if workflow_path.exists() {
+    if !instruction_path_required {
+        CheckResult::pass(
+            "target-repo",
+            format!(
+                "found target repo {}; using central workflow front matter",
+                target_repo.display()
+            ),
+        )
+    } else if workflow_path.exists() {
         CheckResult::pass("target-repo", format!("found {}", workflow_path.display()))
     } else {
         CheckResult::fail(
@@ -1903,6 +1993,7 @@ fn maybe_start_local_supervisor(
         .local_server
         .env
         .clone();
+    supervisor_config.env_remove = runtime.checkout_credential_envs.clone();
     supervisor_config.startup_timeout = Duration::from_millis(
         runtime
             .workflow
@@ -2215,19 +2306,59 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let runtime = resolve_rehydrate_runtime(&current_dir, args.config.as_deref()).await?;
+    let configured_strict = strict_recovery_configured(
+        runtime.repository_routing.as_ref(),
+        runtime.repository_checkouts.as_ref(),
+    );
     let workflow = runtime.workflow;
 
     // Setup workspace manager
     let workspace_config = build_rehydrate_workspace_config(&workflow);
+    let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
+        routing
+            .legacy_repository
+            .as_ref()
+            .and_then(|alias| routing.inventory.get(alias))
+            .map(|entry| entry.identity.id.clone())
+    });
     let workspace_manager = WorkspaceManager::new(workspace_config)
-        .map_err(|e| format!("failed to create workspace manager: {}", e))?;
+        .map_err(|e| format!("failed to create workspace manager: {}", e))?
+        .with_legacy_repository(legacy_repository)
+        .with_legacy_single_routing(
+            runtime
+                .repository_routing
+                .as_ref()
+                .is_some_and(|routing| matches!(routing.mode, RepositoryRoutingMode::LegacySingle)),
+        )
+        .with_repository_checkouts(runtime.repository_checkouts.clone().unwrap_or_default());
 
     // Find workspace by issue reference
-    let workspace = workspace_manager
-        .find_workspace_by_issue_reference(&args.issue)
-        .await
-        .map_err(|e| format!("failed to find workspace: {}", e))?
-        .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
+    let (workspace, strict_recovery) = if configured_strict {
+        (
+            workspace_manager
+                .find_verified_workspace_by_issue_reference(&args.issue)
+                .await
+                .map_err(|e| format!("failed to find verified workspace: {}", e))?
+                .ok_or_else(|| format!("No verified workspace found for issue {}", args.issue))?,
+            true,
+        )
+    } else {
+        match workspace_manager
+            .find_verified_workspace_by_issue_reference(&args.issue)
+            .await
+            .map_err(|e| format!("failed to find verified workspace: {}", e))?
+        {
+            Some(workspace) => (workspace, true),
+            None => (
+                workspace_manager
+                    .find_workspace_by_issue_reference(&args.issue)
+                    .await
+                    .map_err(|e| format!("failed to find workspace: {}", e))?
+                    .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?,
+                false,
+            ),
+        }
+    };
 
     // Load existing conversation manifest
     let manifest_path = workspace.conversation_manifest_path();
@@ -2246,6 +2377,80 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
+    if old_manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND)
+        || old_manifest
+            .runtime_envelope
+            .as_ref()
+            .is_some_and(|envelope| envelope.harness == CODEX_APP_SERVER_KIND)
+    {
+        return Err(format!(
+            "Codex conversation {} cannot be rehydrated by the OpenHands rehydrate command; use the Codex adapter recovery path",
+            old_manifest.conversation_id
+        ));
+    }
+
+    let persisted_run_manifest = workspace_manager
+        .load_run_manifest(&workspace)
+        .await
+        .map_err(|e| format!("failed to read persisted run manifest: {e}"))?;
+    let persisted_runtime_envelope = if strict_recovery {
+        let persisted_run = persisted_run_manifest.as_ref().ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted run manifest",
+                workspace.identifier()
+            )
+        })?;
+        let run_envelope = persisted_run.runtime_envelope.clone().ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted run runtime envelope",
+                workspace.identifier()
+            )
+        })?;
+        let envelope = old_manifest.runtime_envelope.as_ref().ok_or_else(|| {
+            format!(
+                "strict workspace {} has no persisted runtime envelope",
+                workspace.identifier()
+            )
+        })?;
+        if envelope.conversation_binding.as_deref() != Some(old_manifest.conversation_id.as_str()) {
+            return Err(format!(
+                "strict conversation {} has a runtime envelope bound to a different conversation",
+                old_manifest.conversation_id
+            ));
+        }
+        if envelope != &run_envelope {
+            return Err(format!(
+                "strict conversation {} runtime envelope does not match its run manifest",
+                old_manifest.conversation_id
+            ));
+        }
+        workspace_manager
+            .verify_runtime_envelope_for_retry(&workspace, envelope)
+            .await
+            .map_err(|error| format!("strict recovery verification failed: {error}"))?;
+        Some(run_envelope)
+    } else {
+        old_manifest.runtime_envelope.clone()
+    };
+    let rehydration_runtime_envelope = persisted_runtime_envelope
+        .as_ref()
+        .map(|envelope| {
+            refresh_rehydration_runtime_envelope(
+                envelope,
+                &workflow,
+                runtime.repository_routing.as_ref(),
+            )
+        })
+        .transpose()?;
+    if strict_recovery
+        && persisted_runtime_envelope.as_ref() != rehydration_runtime_envelope.as_ref()
+    {
+        return Err(format!(
+            "strict conversation {} runtime envelope does not match the current repository, harness, or model configuration; refusing to replace it",
+            old_manifest.conversation_id
+        ));
+    }
+
     println!(
         "Found existing conversation: {}",
         old_manifest.conversation_id
@@ -2253,22 +2458,43 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("Created at: {:?}", old_manifest.created_at);
     println!("Last attached: {:?}", old_manifest.last_attached_at);
 
+    let checkout_credential_envs = runtime
+        .repository_checkouts
+        .as_ref()
+        .map(crate::opensymphony_workspace::checkout_credential_environment_variables)
+        .unwrap_or_default();
+    let environment = BlockedEnvironment {
+        base: ProcessEnvironment,
+        blocked: checkout_credential_envs.clone(),
+    };
+
     // Create OpenHands client with optional local server startup
-    let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
+    let transport = TransportConfig::from_workflow(&workflow, &environment)
         .map_err(|e| format!("failed to create transport config: {}", e))?;
 
-    let (client, _supervisor, server_message) =
-        build_rehydrate_client(&workflow, &transport, runtime.tool_dir.as_deref())?;
+    let (client, _supervisor, server_message) = build_rehydrate_client(
+        &workflow,
+        &transport,
+        runtime.tool_dir.as_deref(),
+        &checkout_credential_envs,
+    )?;
     println!("{}", server_message);
 
     // Create session runner
     let runner_config = IssueSessionRunnerConfig::default();
-    let runner = IssueSessionRunner::new(client, runner_config);
+    let runner = IssueSessionRunner::with_environment(client, runner_config, environment);
 
     // Create a minimal run descriptor for the rehydration
     use crate::opensymphony_workspace::RunDescriptor;
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
-    let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
+    let mut run_manifest = persisted_run_manifest.unwrap_or_else(|| {
+        let mut manifest = RunManifest::new(&workspace, &run_descriptor);
+        manifest.runtime_envelope = rehydration_runtime_envelope.clone();
+        manifest
+    });
+    if rehydration_runtime_envelope.is_some() {
+        run_manifest.runtime_envelope = rehydration_runtime_envelope;
+    }
 
     // Create a minimal RunAttempt for the rehydration
     use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
@@ -2356,6 +2582,55 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn refresh_rehydration_runtime_envelope(
+    persisted: &TerminalRuntimeEnvelope,
+    workflow: &ResolvedWorkflow,
+    routing: Option<&RepositoryRouting>,
+) -> Result<TerminalRuntimeEnvelope, String> {
+    let mut refreshed = persisted.clone();
+    if let Some(routing) = routing {
+        let entry = match routing.inventory.get(&persisted.repository_binding.alias) {
+            Some(entry) if entry.identity.id == persisted.repository_binding.repository.id => entry,
+            Some(_) => {
+                return Err(format!(
+                    "persisted repository alias {} resolves to a different current repository",
+                    persisted.repository_binding.alias
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "persisted repository alias {} is absent from the current repository inventory",
+                    persisted.repository_binding.alias
+                ));
+            }
+        };
+        refreshed.repository_binding.alias = entry.alias.clone();
+        refreshed.repository_binding.repository = entry.identity.clone();
+        refreshed.repository_binding.config_generation = routing.config_generation.clone();
+        refreshed.repository_binding.inventory_generation = routing.inventory_generation.clone();
+        refreshed.config_generation = routing.config_generation.clone();
+        refreshed.inventory_generation = routing.inventory_generation.clone();
+    }
+    refreshed.harness = workflow.config.routing.harness.clone();
+    refreshed.model_profile = workflow
+        .config
+        .routing
+        .model_profile
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    refreshed.model = workflow.config.routing.model.clone().or_else(|| {
+        workflow
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.model.clone())
+    });
+    Ok(refreshed)
+}
+
 async fn resolve_rehydrate_runtime(
     current_dir: &Path,
     explicit_config_path: Option<&Path>,
@@ -2368,7 +2643,7 @@ async fn resolve_rehydrate_runtime(
     .await
 }
 
-async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
+async fn resolve_rehydrate_runtime_with_environment<E: Environment + Clone>(
     current_dir: &Path,
     explicit_config_path: Option<&Path>,
     environment: &E,
@@ -2377,67 +2652,79 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         orchestrator_run::config::select_config_path(current_dir, explicit_config_path)
             .unwrap_or_else(|| current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE));
     let mut central_instruction_path = None;
-    let (target_repo, tool_dir, central_front_matter) = if config_path.is_file() {
-        let raw = fs::read_to_string(&config_path)
-            .await
-            .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
-        if orchestrator_run::config::looks_like_central_config(&raw) {
-            let central = orchestrator_run::config::load_central_config(&config_path)
+    let (target_repo, tool_dir, central_front_matter, repository_routing, repository_checkouts) =
+        if config_path.is_file() {
+            let raw = fs::read_to_string(&config_path)
                 .await
-                .map_err(|error| error.to_string())?;
-            central_instruction_path = central.repository_instruction_path.clone();
-            (
-                central
-                    .require_legacy_target_repo()
-                    .map_err(|error| error.to_string())?,
-                central.tool_dir(),
-                Some(central.workflow_front_matter.clone()),
-            )
+                .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
+            if orchestrator_run::config::looks_like_central_config(&raw) {
+                let central = orchestrator_run::config::load_central_config(&config_path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                central_instruction_path = central.repository_instruction_path.clone();
+                (
+                    central.target_repo().unwrap_or_else(|| {
+                        config_path.parent().unwrap_or(current_dir).to_path_buf()
+                    }),
+                    central.tool_dir(),
+                    Some(central.workflow_front_matter.clone()),
+                    Some(central.repository_routing),
+                    Some(central.repository_checkouts),
+                )
+            } else {
+                let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
+                    .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
+                config.target_repo = config
+                    .target_repo
+                    .take()
+                    .map(|value| resolve_rehydrate_value(&config_path, value))
+                    .transpose()?;
+                config.openhands.tool_dir = config
+                    .openhands
+                    .tool_dir
+                    .take()
+                    .map(|value| resolve_rehydrate_value(&config_path, value))
+                    .transpose()?;
+
+                let config_root = config_path.parent().unwrap_or(current_dir);
+                let target_repo = config
+                    .target_repo
+                    .as_deref()
+                    .map(|value| resolve_path(config_root, value))
+                    .unwrap_or_else(|| current_dir.to_path_buf());
+                let tool_dir = config
+                    .openhands
+                    .tool_dir
+                    .as_deref()
+                    .map(|value| resolve_path(config_root, value));
+                (target_repo, tool_dir, None, None, None)
+            }
         } else {
-            let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
-                .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
-            config.target_repo = config
-                .target_repo
-                .take()
-                .map(|value| resolve_rehydrate_value(&config_path, value))
-                .transpose()?;
-            config.openhands.tool_dir = config
-                .openhands
-                .tool_dir
-                .take()
-                .map(|value| resolve_rehydrate_value(&config_path, value))
-                .transpose()?;
+            (current_dir.to_path_buf(), None, None, None, None)
+        };
 
-            let config_root = config_path.parent().unwrap_or(current_dir);
-            let target_repo = config
-                .target_repo
-                .as_deref()
-                .map(|value| resolve_path(config_root, value))
-                .unwrap_or_else(|| current_dir.to_path_buf());
-            let tool_dir = config
-                .openhands
-                .tool_dir
-                .as_deref()
-                .map(|value| resolve_path(config_root, value));
-            (target_repo, tool_dir, None)
-        }
-    } else {
-        (current_dir.to_path_buf(), None, None)
-    };
-
+    let central_instruction_configured = central_instruction_path.is_some();
+    let checkout_credential_envs = repository_checkouts
+        .as_ref()
+        .map(crate::opensymphony_workspace::checkout_credential_environment_variables)
+        .unwrap_or_default();
     let workflow_path = central_instruction_path.unwrap_or_else(|| target_repo.join("WORKFLOW.md"));
-    if !workflow_path.exists() {
+    if central_front_matter.is_none() && !workflow_path.exists() {
         return Err(format!(
             "repository instruction file not found at {}",
             workflow_path.display()
         ));
     }
 
-    let workflow_content = fs::read_to_string(&workflow_path)
-        .await
-        .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
-    let workflow_def = WorkflowDefinition::parse(&workflow_content)
-        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    let workflow_def = if central_front_matter.is_some() && !central_instruction_configured {
+        WorkflowDefinition::parse("").expect("empty central project-set workflow should parse")
+    } else {
+        let workflow_content = fs::read_to_string(&workflow_path)
+            .await
+            .map_err(|e| format!("failed to read repository instruction file: {}", e))?;
+        WorkflowDefinition::parse(&workflow_content)
+            .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?
+    };
     let workflow_def = central_front_matter
         .map(|front_matter| WorkflowDefinition {
             front_matter,
@@ -2445,18 +2732,56 @@ async fn resolve_rehydrate_runtime_with_environment<E: Environment>(
         })
         .unwrap_or(workflow_def);
     let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
-        workflow_def.resolve(&target_repo, environment)
+        workflow_def.resolve(
+            &target_repo,
+            &BlockedEnvironment {
+                base: environment.clone(),
+                blocked: checkout_credential_envs.clone(),
+            },
+        )
     } else {
         workflow_def.resolve(
             &target_repo,
             &DoctorWorkflowEnvironment {
                 fallback_linear_api_key: true,
+                blocked: checkout_credential_envs,
             },
         )
     }
     .map_err(|e| format!("failed to resolve workflow: {}", e))?;
 
-    Ok(RehydrateRuntimeConfig { workflow, tool_dir })
+    Ok(RehydrateRuntimeConfig {
+        workflow,
+        tool_dir,
+        repository_routing,
+        repository_checkouts,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BlockedEnvironment<E> {
+    base: E,
+    blocked: BTreeSet<String>,
+}
+
+impl<E: Environment> Environment for BlockedEnvironment<E> {
+    fn get(&self, name: &str) -> Option<String> {
+        if self
+            .blocked
+            .iter()
+            .any(|blocked| environment_variable_names_equal(blocked, name))
+        {
+            None
+        } else {
+            self.base.get(name)
+        }
+    }
+}
+
+impl<E> BlockedEnvironment<E> {
+    pub(crate) fn new(base: E, blocked: BTreeSet<String>) -> Self {
+        Self { base, blocked }
+    }
 }
 
 fn resolve_rehydrate_value(path: &Path, value: String) -> Result<String, String> {
@@ -2491,6 +2816,7 @@ fn build_rehydrate_client(
     workflow: &ResolvedWorkflow,
     transport: &TransportConfig,
     configured_tool_dir: Option<&Path>,
+    checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), String> {
     let supervisor_base_url = transport
         .managed_local_server_base_url()
@@ -2521,6 +2847,7 @@ fn build_rehydrate_client(
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
     config.extra_env = workflow.extensions.openhands.local_server.env.clone();
+    config.env_remove = checkout_credential_envs.clone();
     config.startup_timeout = Duration::from_millis(
         workflow
             .extensions
@@ -2564,45 +2891,180 @@ fn build_rehydrate_client(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::PathBuf,
+        time::Duration,
+    };
 
     use crate::opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        RepositoryRouting, RepositoryRoutingMode,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_workspace::{CheckoutRepository, TerminalRuntimeEnvelope};
     use clap::{Parser, error::ErrorKind};
     use tempfile::TempDir;
 
     use super::{
-        Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        central_doctor_probe_settings, command_check_name, effective_openhands_probe_base_url,
-        executable_suffixes, find_cargo_workspace_root, project_set_doctor_mutation_blocked,
+        CheckStatus, Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
+        central_doctor_probe_settings, check_target_repo, command_check_name,
+        effective_openhands_probe_base_url, executable_suffixes, find_cargo_workspace_root,
         resolve_doctor_runtime, resolve_doctor_workflow, resolve_rehydrate_runtime,
         resolve_rehydrate_runtime_with_environment, sample_snapshot, spawn_demo_updates,
     };
 
     #[test]
-    fn project_set_doctor_mutations_are_blocked_before_checkout_resolution() {
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            true,
-            false,
+    fn strict_recovery_requires_project_set_routing() {
+        let mut routing = RepositoryRouting {
+            mode: RepositoryRoutingMode::LegacySingle,
+            inventory: BTreeMap::new(),
+            project_repositories: BTreeMap::new(),
+            active_projects: BTreeSet::new(),
+            legacy_repository: Some("repo".to_owned()),
+            config_generation: "config".to_owned(),
+            inventory_generation: "inventory".to_owned(),
+        };
+
+        assert!(!super::strict_recovery_enabled(Some(&routing)));
+        routing.mode = RepositoryRoutingMode::ProjectSet;
+        assert!(super::strict_recovery_enabled(Some(&routing)));
+        assert!(!super::strict_recovery_enabled(None));
+    }
+
+    #[test]
+    fn strict_recovery_ignores_checkout_policies_for_legacy_single() {
+        let routing = RepositoryRouting {
+            mode: RepositoryRoutingMode::LegacySingle,
+            inventory: BTreeMap::new(),
+            project_repositories: BTreeMap::new(),
+            active_projects: BTreeSet::new(),
+            legacy_repository: Some("repo".to_owned()),
+            config_generation: "config".to_owned(),
+            inventory_generation: "inventory".to_owned(),
+        };
+        let checkouts = BTreeMap::from([(
+            "repo".to_owned(),
+            CheckoutRepository {
+                provider: "git".to_owned(),
+                provider_id: None,
+                remote_locator: "owner/repo".to_owned(),
+                remote: "git@github.com:owner/repo.git".to_owned(),
+                target_branch: "develop".to_owned(),
+                credential_kind: "ssh-agent".to_owned(),
+                credential_reference: None,
+                credential_env: None,
+                instructions_path: PathBuf::from("AGENTS.md"),
+                policy_generation: "scheduler-policy".to_owned(),
+                review_profile: "default".to_owned(),
+                review_provider: "git".to_owned(),
+                review_policy_generation: "review-policy".to_owned(),
+            },
+        )]);
+
+        assert!(!super::strict_recovery_configured(
+            Some(&routing),
+            Some(&checkouts)
         ));
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            false,
-            true,
+        assert!(!super::live_openhands_checks_blocked(
+            Some(&routing),
+            Some(&checkouts)
         ));
-        assert!(project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::ProjectSet,
-            false,
-            false,
-        ));
-        assert!(!project_set_doctor_mutation_blocked(
-            &super::orchestrator_run::config::CentralRoutingMode::LegacySingle,
-            true,
-            true,
-        ));
+    }
+
+    #[test]
+    fn rehydrate_envelope_refresh_uses_current_repository_routing() {
+        let runtime = sample_doctor_runtime();
+        let persisted: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "repository_binding": {
+                "alias": "repo-z",
+                "repository": {
+                    "id": "git:repository:repo",
+                    "safe_remote_fingerprint": "sha256:old"
+                },
+                "config_generation": "old-config",
+                "inventory_generation": "old-inventory"
+            },
+            "config_generation": "old-config",
+            "inventory_generation": "old-inventory",
+            "policy_generation": "old-config",
+            "checkout_generation": "generation-1",
+            "checkout_path": "/workspace/COE-549--generation-1",
+            "target_branch": "develop",
+            "target_commit": "commit-1",
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:instructions",
+                "source_commit": "commit-1",
+                "source": "configured",
+                "native_discovery_paths": [],
+                "native_discovery_hashes": {}
+            },
+            "harness": "openhands_agent_server",
+            "model_profile": "old-profile",
+            "model": "old-model",
+            "requested_execution_scope": "single_checkout",
+            "effective_containment": "trusted_host_process_cwd",
+            "conversation_binding": "conversation-1",
+            "cleanup_intent": "workspace_manager_owned"
+        }))
+        .expect("runtime envelope fixture should decode");
+        let mut routing: RepositoryRouting = serde_json::from_value(serde_json::json!({
+            "mode": "project_set",
+            "inventory": {
+                "repo-a": {
+                    "alias": "repo-a",
+                    "identity": {
+                        "id": "git:repository:repo",
+                        "safe_remote_fingerprint": "sha256:new"
+                    }
+                },
+                "repo-z": {
+                    "alias": "repo-z",
+                    "identity": {
+                        "id": "git:repository:repo",
+                        "safe_remote_fingerprint": "sha256:new"
+                    }
+                }
+            },
+            "project_repositories": {},
+            "active_projects": [],
+            "legacy_repository": null,
+            "config_generation": "new-config",
+            "inventory_generation": "new-inventory"
+        }))
+        .expect("routing fixture should decode");
+
+        let refreshed = super::refresh_rehydration_runtime_envelope(
+            &persisted,
+            &runtime.workflow,
+            Some(&routing),
+        )
+        .expect("current routing should refresh the desired envelope");
+
+        assert_eq!(
+            refreshed
+                .repository_binding
+                .repository
+                .safe_remote_fingerprint
+                .as_str(),
+            "sha256:new"
+        );
+        assert_eq!(refreshed.repository_binding.alias, "repo-z");
+        assert_eq!(refreshed.config_generation, "new-config");
+        assert_eq!(refreshed.inventory_generation, "new-inventory");
+        assert_eq!(refreshed.policy_generation, "old-config");
+        assert_ne!(refreshed, persisted);
+
+        routing.inventory.remove("repo-z");
+        let error = super::refresh_rehydration_runtime_envelope(
+            &persisted,
+            &runtime.workflow,
+            Some(&routing),
+        )
+        .expect_err("rehydration must not silently replace a missing persisted alias");
+        assert!(error.contains("persisted repository alias repo-z is absent"));
     }
 
     #[test]
@@ -2764,11 +3226,52 @@ mod tests {
             &target_repo,
             Some(&instruction_path),
             Some(&front_matter),
+            BTreeSet::new(),
         )
         .expect("doctor runtime should use the configured instruction path");
 
         assert_eq!(runtime.workflow_path, instruction_path);
         assert_eq!(runtime.workflow.config.tracker.project_slug, "central");
+    }
+
+    #[tokio::test]
+    async fn doctor_runtime_accepts_instructionless_central_workflow() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target_repo = temp_dir.path().join("checkout");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        let front_matter = WorkflowDefinition::parse(
+            "---\ntracker:\n  kind: linear\n  project_slug: central\n  active_states: [Todo]\n  terminal_states: [Done]\nworkspace:\n  root: ./central-workspaces\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:8000\n---\n",
+        )
+        .expect("central front matter should parse")
+        .front_matter;
+        let config = super::DoctorConfig {
+            target_repo: None,
+            openhands: super::OpenHandsDoctorConfig {
+                tool_dir: None,
+                probe_model: None,
+                probe_api_key_env: None,
+                probe_llm_base_url_env: None,
+            },
+            linear: super::LinearDoctorConfig { enabled: false },
+        };
+
+        let runtime = resolve_doctor_runtime(
+            &config,
+            temp_dir.path(),
+            &target_repo,
+            None,
+            Some(&front_matter),
+            BTreeSet::new(),
+        )
+        .expect("instructionless central workflow should resolve");
+
+        assert!(!runtime.instruction_path_required);
+        assert!(matches!(
+            check_target_repo(&runtime.target_repo, &runtime.workflow_path, false)
+                .await
+                .status,
+            CheckStatus::Pass
+        ));
     }
 
     #[test]
@@ -2917,7 +3420,12 @@ openhands:
         )
         .expect("transport should resolve");
 
-        let error = match super::build_rehydrate_client(&runtime.workflow, &transport, None) {
+        let error = match super::build_rehydrate_client(
+            &runtime.workflow,
+            &transport,
+            None,
+            &BTreeSet::new(),
+        ) {
             Err(error) => error,
             Ok(_) => panic!("managed-local rehydration should require tool_dir"),
         };
@@ -2941,11 +3449,15 @@ openhands:
         let temp_dir = TempDir::new().expect("temp dir");
         let tool_dir = temp_dir.path().join("missing/openhands-server");
 
-        let error =
-            match super::build_rehydrate_client(&runtime.workflow, &transport, Some(&tool_dir)) {
-                Err(error) => error,
-                Ok(_) => panic!("invalid managed-local tooling should be reported"),
-            };
+        let error = match super::build_rehydrate_client(
+            &runtime.workflow,
+            &transport,
+            Some(&tool_dir),
+            &BTreeSet::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid managed-local tooling should be reported"),
+        };
 
         assert!(
             error.contains("opensymphony install openhands")
@@ -3021,11 +3533,13 @@ openhands:
         DoctorRuntimeConfig {
             target_repo,
             workflow_path: temp_dir.path().join("target-repo/WORKFLOW.md"),
+            instruction_path_required: true,
             workflow,
             tool_dir: Some(temp_dir.path().join("tools/openhands-server")),
             probe_model: None,
             probe_api_key_env: None,
             probe_llm_base_url_env: None,
+            checkout_credential_envs: BTreeSet::new(),
         }
     }
 }

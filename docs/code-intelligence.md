@@ -59,7 +59,11 @@ for repositories that are not present in the configured source registry.
 
 ## Target-branch repository snapshots
 
-The Code Graph repository index is an explicit, server-side operation:
+The Code Graph repository index is an explicit, server-side operation. Graph
+MCP calls resolve enablement from the selected registered repository rather
+than the catalog's default repository policy; `repo` and `repository` are
+accepted as compatibility aliases but conflicting values are rejected before
+scope authorization:
 
 ```text
 POST /api/v1/code/repos/{repo_id}/index
@@ -136,12 +140,19 @@ opensymphony memory context --issue COE-123 \
 Use `code.graph.context` to find likely symbols, callers, references, related
 tests, and diagnostics without injecting the full repository graph into a
 prompt. It returns bounded source citations and provenance for either the
-indexed baseline or the supplied run's workspace overlay. The server resolves
+indexed baseline or the supplied run's workspace overlay. The `runId` argument
+is optional: omit it for a worker-granted baseline query, and supply it only
+when the verified checkout overlay is needed. The server resolves
 the repository and workspace; tool arguments cannot widen filesystem,
 visibility, or snippet policies. Then read the cited files and run targeted
 `memory.context --include-code-intel --paths ...` live scanning before changing
 behavior and again after touched-file changes. Current source files and tests
 remain authoritative over indexed evidence.
+
+Worker grants with a nonempty checkout generation use that verified generation
+for AST reads and run overlays. Generation-less legacy grants continue through
+the registered repository source and legacy workspace path; they do not require
+a checkout-generation manifest.
 
 Generated, vendor, build, and cache directories such as `node_modules`,
 `target`, `dist`, `build`, `.venv`, `.next`, `.turbo`, `vendor`, and

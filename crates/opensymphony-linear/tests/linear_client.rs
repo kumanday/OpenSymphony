@@ -154,6 +154,133 @@ async fn candidate_issues_normalize_fixture_payloads() {
 }
 
 #[tokio::test]
+async fn candidate_issues_scan_every_configured_project() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"first-id","name":"First","slugId":"first-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"second-id","name":"Second","slugId":"second-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["first-id".to_owned(), "second-id".to_owned()];
+    config.project_slugs = vec!["first-project".to_owned(), "second-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should scan every project");
+
+    assert_eq!(issues.len(), 2);
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["variables"]["id"], "first-id");
+    assert_eq!(requests[1].body["variables"]["id"], "second-id");
+    assert_eq!(
+        requests[2].body["variables"]["projectSlug"],
+        "first-project"
+    );
+    assert_eq!(
+        requests[3].body["variables"]["projectSlug"],
+        "second-project"
+    );
+}
+
+#[tokio::test]
+async fn candidate_issues_prefers_the_latest_snapshot_across_projects() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-overlap",
+            "COE-260",
+            "Earlier project snapshot",
+            "In Progress",
+            "started",
+        )])),
+        QueuedResponse::json(project_issues_response_with_states(&[(
+            "issue-overlap",
+            "COE-260",
+            "Later project snapshot",
+            "In Progress",
+            "started",
+        )])),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_slugs = vec!["old-project".to_owned(), "new-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should retain the latest project snapshot");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].title, "Later project snapshot");
+}
+
+#[tokio::test]
+async fn mixed_project_ids_keep_slug_only_entries_on_their_slug() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"typed-id","name":"Typed","slugId":"typed-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["legacy-project".to_owned(), "typed-id".to_owned()];
+    config.project_slugs = vec!["legacy-project".to_owned(), "typed-id".to_owned()];
+    config.project_id_slug_fallbacks = vec![true, false];
+
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("mixed project scan should resolve");
+
+    assert_eq!(issues.len(), 2);
+}
+
+#[tokio::test]
+async fn candidate_issue_summaries_deduplicate_across_configured_projects() {
+    let fixture = include_str!("fixtures/candidate_issues_page.json");
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"first-id","name":"First","slugId":"first-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(
+            r#"{"data":{"projects":{"nodes":[{"id":"second-id","name":"Second","slugId":"second-project","url":null,"content":null}]}}}"#,
+        ),
+        QueuedResponse::json(fixture),
+        QueuedResponse::json(fixture),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["first-id".to_owned(), "second-id".to_owned()];
+    config.project_slugs = vec!["first-project".to_owned(), "second-project".to_owned()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issue_summaries()
+        .await
+        .expect("candidate summary query should scan every project");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 4);
+}
+
+#[tokio::test]
 async fn configured_project_id_resolves_to_the_linear_project_slug_for_issue_queries() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(
@@ -200,6 +327,29 @@ async fn unresolved_configured_project_id_fails_closed() {
         .expect_err("an unresolved provider project ID should fail");
     assert!(
         matches!(error, LinearError::InvalidConfiguration(message) if message.contains("missing-project-id"))
+    );
+    assert_eq!(server.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn stale_first_project_id_does_not_fall_back_to_configured_slug() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"projects":{"nodes":[]}}}"#,
+    )])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_id = None;
+    config.project_ids = vec!["stale-project-id".to_owned()];
+    config.project_slugs = vec!["configured-project-slug".to_owned()];
+    config.project_id_slug_fallbacks = vec![false];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("a stale non-fallback project ID should fail closed");
+    assert!(
+        matches!(error, LinearError::InvalidConfiguration(message) if message.contains("stale-project-id"))
     );
     assert_eq!(server.recorded_requests().await.len(), 1);
 }
@@ -723,6 +873,56 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
 }
 
 #[tokio::test]
+async fn issue_states_by_ids_prefers_the_latest_snapshot_across_projects() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-overlap",
+                "identifier": "COE-260",
+                "updatedAt": "2026-03-21T16:00:00Z",
+                "project": {"id": "project-old-id", "slugId": "old-project"},
+                "state": {"id": "state-progress", "name": "In Progress", "type": "started"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+            }"#,
+        ),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-overlap",
+                "identifier": "COE-260",
+                "updatedAt": "2026-03-21T17:00:00Z",
+                "project": {"id": "project-new-id", "slugId": "new-project"},
+                "state": {"id": "state-done", "name": "Done", "type": "completed"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+            }"#,
+        ),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.project_slugs = vec!["old-project".to_string(), "new-project".to_string()];
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let snapshots = client
+        .issue_states_by_ids(&["issue-overlap"])
+        .await
+        .expect("overlapping project state queries should succeed");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].state.name, "Done");
+    assert_eq!(snapshots[0].project_id.as_deref(), Some("project-new-id"));
+    assert_eq!(snapshots[0].project_slug.as_deref(), Some("new-project"));
+    assert_eq!(
+        snapshots[0].updated_at.to_rfc3339(),
+        "2026-03-21T17:00:00+00:00"
+    );
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["projectSlug"], "old-project");
+    assert_eq!(requests[1].body["variables"]["projectSlug"], "new-project");
+}
+
+#[tokio::test]
 async fn issue_states_by_ids_paginates_nested_labels() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!("fixtures/issue_states_with_label_paging.json")),
@@ -754,10 +954,20 @@ async fn issue_states_by_ids_paginates_nested_labels() {
 }
 
 #[tokio::test]
-async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
-    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
-        "fixtures/issue_states_missing_id.json"
-    ))])
+async fn issue_states_by_ids_resolves_missing_ids_without_project_filter() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(include_str!("fixtures/issue_states_missing_id.json")),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issues": {"nodes": [{
+                "id": "issue-264",
+                "identifier": "COE-264",
+                "updatedAt": "2026-03-21T18:00:00Z",
+                "state": {"id": "state-progress", "name": "In Progress", "type": "started"}
+              }], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+            }}"#,
+        ),
+    ])
     .await;
     let client = LinearClient::new(test_config(server.base_url()))
         .expect("client configuration should be valid");
@@ -765,10 +975,20 @@ async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
     let snapshots = client
         .issue_states_by_ids(&["issue-260".to_string(), "issue-264".to_string()])
         .await
-        .expect("missing issue ids should be ignored during recovery reconciliation");
+        .expect("missing project-scoped issue ids should use the unscoped fallback");
 
-    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots.len(), 2);
     assert_eq!(snapshots[0].identifier, "COE-260");
+    assert_eq!(snapshots[1].identifier, "COE-264");
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["variables"]["projectSlug"], "e7b957855cb7");
+    assert!(
+        !requests[1].body["query"]
+            .as_str()
+            .expect("unscoped fallback query should be a string")
+            .contains("project: { slugId: { eq: $projectSlug } }")
+    );
 }
 
 #[tokio::test]
@@ -964,6 +1184,25 @@ fn client_configuration_requires_project_slug() {
     match error {
         LinearError::InvalidConfiguration(message) => {
             assert!(message.contains("tracker.project_slug"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_configuration_requires_project_id_and_slug_vectors_to_align() {
+    let mut config = LinearConfig::new("test-token", "e7b957855cb7");
+    config.project_ids = vec!["first".to_owned(), "second".to_owned()];
+    config.project_slugs = vec!["first".to_owned()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("misaligned project vectors should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("same length"));
         }
         other => panic!("expected invalid configuration error, got {other:?}"),
     }
@@ -1341,6 +1580,7 @@ async fn archive_issue_uses_issue_archive_mutation() {
 fn test_config(base_url: &str) -> LinearConfig {
     let mut config = LinearConfig::new("test-token", "e7b957855cb7");
     config.base_url = base_url.to_string();
+    config.project_slugs = vec!["e7b957855cb7".to_string()];
     config.active_states = vec!["In Progress".to_string()];
     config.terminal_states = vec!["Done".to_string(), "Canceled".to_string()];
     config.request_timeout = Duration::from_secs(2);

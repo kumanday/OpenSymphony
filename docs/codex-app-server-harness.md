@@ -468,7 +468,10 @@ and does not start a turn. On later runs, the worker validates the existing
 manifest, sends `thread/resume` for the recorded id, verifies that Codex returns
 the same id, and then starts a full or continuation turn as appropriate. It
 never starts a replacement thread after manifest, resume, response-validation,
-or turn failures.
+or turn failures. If restart recovery finds a prepared run with no persisted
+turn id and `thread/resume` reports no active turn, the worker submits that
+already-prepared prompt with `turn/start` on the same canonical thread; it does
+not convert the unsent prompt into a failed retry.
 
 Terminal workspace cleanup delegates to `WorkspaceManager`, so the configured
 retention decision and lifecycle hooks apply once per retained workspace in a

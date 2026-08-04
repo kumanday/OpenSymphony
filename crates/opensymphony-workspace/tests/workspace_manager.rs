@@ -1,14 +1,15 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, process::Command, time::Duration};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
     SafeRemoteFingerprint,
 };
 use crate::opensymphony_workspace::{
-    CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
-    HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
-    IssueLifecycleState, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus,
-    SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest,
+    HookConfig, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
+    IssueContextArtifact, IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor,
+    PromptKind, RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError,
+    WorkspaceManager, WorkspaceManagerConfig, compose_terminal_prompt,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -37,6 +38,38 @@ fn manager_config(
         hooks,
         cleanup,
     }
+}
+
+fn git(path: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn terminal_prompt_keeps_repository_instructions_in_one_section() {
+    let prompt = compose_terminal_prompt(
+        "central policy",
+        "issue facts\nDescription:\nacceptance criteria",
+        "verified checkout",
+        Some("repository-only instruction"),
+        "trusted host",
+    );
+
+    assert!(prompt.contains("## Central Execution Procedure\n\ncentral policy"));
+    assert!(prompt.contains("Description:\nacceptance criteria"));
+    assert!(prompt.contains("## Repository Instructions\n\nrepository-only instruction"));
+    assert!(!prompt.contains("other repository"));
 }
 
 #[cfg(unix)]
@@ -87,6 +120,16 @@ fn after_create_requires_empty_workspace_command() -> &'static str {
 #[cfg(windows)]
 fn after_create_requires_empty_workspace_command() -> &'static str {
     "if exist .opensymphony\\NUL (echo metadata-present 1>&2 && exit /b 17) else (echo after_create> after_create.txt)"
+}
+
+#[cfg(unix)]
+fn after_create_published_path_command() -> &'static str {
+    "pwd > .git/after_create_cwd.txt"
+}
+
+#[cfg(windows)]
+fn after_create_published_path_command() -> &'static str {
+    "cd > .git\\after_create_cwd.txt"
 }
 
 #[cfg(unix)]
@@ -187,6 +230,1090 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
         .await
         .expect("attempt marker lookup should succeed")
     );
+}
+
+#[tokio::test]
+async fn checkout_timeout_does_not_override_legacy_hook_timeout() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(timeout_command())),
+            timeout: Duration::from_millis(200),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+
+    let error = manager
+        .ensure_with_checkout_timeout(
+            &sample_issue("COE-549-hook-timeout"),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("legacy hook should use its configured timeout");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::HookTimedOut {
+            hook: HookKind::AfterCreate,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let source = temp_dir.path().join("source");
+    let origin = temp_dir.path().join("origin.git");
+    std::fs::create_dir_all(&source).expect("source should exist");
+    std::fs::create_dir_all(&origin).expect("origin should exist");
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    git(&source, &["config", "user.name", "OpenSymphony Test"]);
+    std::fs::write(source.join("AGENTS.md"), "source-only instructions\n")
+        .expect("instructions should be written");
+    std::fs::create_dir(source.join("configured-dir"))
+        .expect("non-file instruction path should be written");
+    std::fs::write(source.join("configured-dir/marker"), "not instructions\n")
+        .expect("non-file instruction marker should be written");
+    std::fs::write(source.join("README.md"), "clean\n").expect("readme should be written");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(&origin, &["init", "--bare"]);
+    git(
+        &source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    git(&source, &["push", "-u", "origin", "main"]);
+
+    let binding = RepositoryBinding {
+        alias: "source".to_owned(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::from_remote(
+                "local",
+                None,
+                origin.to_str().expect("origin path"),
+            )
+            .expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "local",
+                None,
+                origin.to_str().expect("origin path"),
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-1".to_owned(),
+        inventory_generation: "inventory-1".to_owned(),
+    };
+    let repository = CheckoutRepository {
+        provider: "local".to_owned(),
+        provider_id: None,
+        remote_locator: origin.to_str().expect("origin path").to_owned(),
+        remote: origin.to_str().expect("origin path").to_owned(),
+        target_branch: "main".to_owned(),
+        credential_kind: "environment".to_owned(),
+        credential_reference: None,
+        credential_env: Some("HOME".to_owned()),
+        instructions_path: "AGENTS.md".into(),
+        policy_generation: "scheduler-policy-1".to_owned(),
+        review_profile: "local".to_owned(),
+        review_provider: "local".to_owned(),
+        review_policy_generation: "review-policy-1".to_owned(),
+    };
+    let missing_policy_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("missing-policy manager should be constructed")
+    .with_repository_checkouts(BTreeMap::from([(
+        "other-repository".to_owned(),
+        repository.clone(),
+    )]));
+    let mut missing_policy_issue = sample_issue("COE-549/missing-policy");
+    missing_policy_issue.repository_binding =
+        Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let missing_policy_error = missing_policy_manager
+        .ensure_with_run_id(&missing_policy_issue, Some("run-missing-policy"))
+        .await
+        .expect_err("resolved bindings without policies must not fall back to legacy workspaces");
+    assert!(matches!(
+        missing_policy_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
+    ));
+    assert!(
+        !temp_dir
+            .path()
+            .join("workspaces/COE-549-missing-policy")
+            .exists(),
+        "missing checkout policy must not create a legacy workspace"
+    );
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository.clone(),
+    )]));
+    let mut issue = sample_issue("COE-549/terminal");
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+
+    let abandoned_staging = temp_dir.path().join(
+        "workspaces/.opensymphony-staging/orphan-generation--0123456789abcdef0123456789abcdef",
+    );
+    tokio::fs::create_dir_all(&abandoned_staging)
+        .await
+        .expect("abandoned staging generation should be created");
+    tokio::fs::write(abandoned_staging.join("partial-clone"), b"incomplete")
+        .await
+        .expect("abandoned staging marker should be written");
+    let abandoned_marker = abandoned_staging
+        .parent()
+        .expect("abandoned staging root should exist")
+        .join("orphan-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        &abandoned_marker,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "orphan-generation",
+            "staging_path": abandoned_staging.clone()
+        }))
+        .expect("staging intent should encode"),
+    )
+    .await
+    .expect("staging intent should be written");
+    let foreign_staging = abandoned_staging
+        .parent()
+        .expect("abandoned staging root should exist")
+        .join("foreign-data");
+    tokio::fs::create_dir_all(&foreign_staging)
+        .await
+        .expect("foreign staging directory should be created");
+    tokio::fs::write(foreign_staging.join("must-survive"), b"foreign")
+        .await
+        .expect("foreign staging data should be written");
+    manager
+        .recover_abandoned_staging_checkouts()
+        .await
+        .expect("workspace discovery should sweep abandoned staging generations");
+    assert!(!abandoned_staging.exists());
+    assert!(foreign_staging.join("must-survive").exists());
+
+    let first = manager
+        .ensure_with_run_id(&issue, Some("run-terminal-1"))
+        .await
+        .expect("checkout should publish");
+    assert!(first.created);
+    assert!(first.handle.checkout_generation().is_some());
+    assert!(first.handle.workspace_path().join("AGENTS.md").is_file());
+    assert_eq!(
+        manager
+            .read_checkout_instructions(&first.handle)
+            .await
+            .expect("instructions should load")
+            .expect("instructions should exist")
+            .trim(),
+        "source-only instructions"
+    );
+    let manifest = tokio::fs::read_to_string(first.handle.checkout_manifest_path())
+        .await
+        .expect("checkout manifest should exist");
+    let manifest_record: CheckoutManifest =
+        serde_json::from_str(&manifest).expect("checkout manifest should decode");
+    assert_eq!(manifest_record.run_id, "run-terminal-1");
+    assert_eq!(manifest_record.policy_generation, "scheduler-policy-1");
+    assert_eq!(manifest_record.review_profile, "local");
+    assert_eq!(manifest_record.review_provider, "local");
+    assert_eq!(manifest_record.review_policy_generation, "review-policy-1");
+    assert_eq!(
+        manifest_record.workspace_path,
+        first.handle.workspace_path()
+    );
+    assert!(!manifest.contains("HOME"));
+    assert!(!manifest.contains(origin.to_str().expect("origin path")));
+
+    for field in [
+        "policy_generation",
+        "review_profile",
+        "review_provider",
+        "review_policy_generation",
+    ] {
+        let mut forged: serde_json::Value =
+            serde_json::from_str(&manifest).expect("checkout manifest should decode");
+        forged[field] = serde_json::Value::String("forged".to_owned());
+        tokio::fs::write(
+            first.handle.checkout_manifest_path(),
+            serde_json::to_vec_pretty(&forged).expect("forged manifest should encode"),
+        )
+        .await
+        .expect("forged manifest should be writable");
+        assert!(matches!(
+            manager.verify_checkout_for_retry(&first.handle).await,
+            Err(WorkspaceError::CheckoutVerification { reason, .. })
+                if reason == "checkout manifest provenance is inconsistent"
+        ));
+    }
+    tokio::fs::write(first.handle.checkout_manifest_path(), manifest.as_bytes())
+        .await
+        .expect("checkout manifest should be restored");
+
+    let reused = manager.ensure(&issue).await.expect("checkout should reuse");
+    assert!(!reused.created);
+    assert_eq!(
+        reused.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+    assert_eq!(
+        reused.handle.checkout_generation(),
+        first.handle.checkout_generation(),
+        "reused verified checkouts must retain their generation marker"
+    );
+
+    let outside_objects = temp_dir.path().join("outside-objects");
+    std::fs::create_dir_all(&outside_objects).expect("outside objects should exist");
+    let alternates = first
+        .handle
+        .workspace_path()
+        .join(".git/objects/info/alternates");
+    std::fs::write(&alternates, format!("{}\n", outside_objects.display()))
+        .expect("alternates file should be written");
+    assert!(matches!(
+        manager.verify_checkout(&first.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("alternates")
+    ));
+    std::fs::remove_file(&alternates).expect("alternates file should be removed");
+
+    let grafts = first.handle.workspace_path().join(".git/info/grafts");
+    std::fs::write(&grafts, b"").expect("grafts file should be written");
+    assert!(matches!(
+        manager.verify_checkout(&first.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("grafts")
+    ));
+    std::fs::remove_file(&grafts).expect("grafts file should be removed");
+
+    let outside_worktree = temp_dir.path().join("outside-worktree");
+    std::fs::create_dir_all(&outside_worktree).expect("outside worktree should exist");
+    git(
+        first.handle.workspace_path(),
+        &[
+            "config",
+            "core.worktree",
+            outside_worktree.to_str().expect("outside worktree path"),
+        ],
+    );
+    let root_error = manager
+        .verify_checkout(&first.handle)
+        .await
+        .expect_err("checkout with an escaped Git worktree root must be rejected");
+    assert!(matches!(
+        root_error,
+        WorkspaceError::CheckoutVerification { .. }
+    ));
+    git(
+        first.handle.workspace_path(),
+        &["config", "--unset", "core.worktree"],
+    );
+
+    std::fs::remove_dir_all(first.handle.workspace_path().join(".git"))
+        .expect("broken checkout Git metadata should be removable");
+    let repaired_missing_git = manager
+        .ensure(&issue)
+        .await
+        .expect("missing Git metadata should quarantine and republish");
+    assert!(repaired_missing_git.created);
+    assert_ne!(
+        repaired_missing_git.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+
+    std::fs::write(source.join("README.md"), "advanced upstream\n")
+        .expect("upstream update should be written");
+    git(&source, &["add", "README.md"]);
+    git(&source, &["commit", "-m", "advance upstream"]);
+    git(&source, &["push", "origin", "main"]);
+    manager
+        .verify_checkout(&repaired_missing_git.handle)
+        .await
+        .expect("recorded pinned target should remain valid after origin advances");
+
+    let mut non_file_repository = repository.clone();
+    non_file_repository.instructions_path = "configured-dir".into();
+    let non_file_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("non-file manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        non_file_repository,
+    )]));
+    let mut non_file_issue = sample_issue("COE-549/non-file");
+    non_file_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let error = non_file_manager
+        .ensure_with_run_id(&non_file_issue, Some("run-non-file"))
+        .await
+        .expect_err("configured instruction directories must block publication");
+    assert!(matches!(
+        error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "configured instruction path is not a regular file"
+    ));
+
+    git(
+        repaired_missing_git.handle.workspace_path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            source.to_str().expect("source path"),
+        ],
+    );
+    let repaired = manager
+        .ensure(&issue)
+        .await
+        .expect("wrong remote should quarantine and retry");
+    assert!(repaired.created);
+    assert_ne!(
+        repaired.handle.workspace_path(),
+        first.handle.workspace_path()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join("workspaces/.opensymphony-quarantine")
+            .read_dir()
+            .expect("quarantine should exist")
+            .next()
+            .is_some()
+    );
+
+    std::fs::write(
+        repaired.handle.workspace_path().join("dirty.txt"),
+        "dirty\n",
+    )
+    .expect("dirty marker should be written");
+    let mut prepared_run = RunManifest::new(
+        &repaired.handle,
+        &RunDescriptor::new("run-prepared-trigger-pending", 1),
+    );
+    prepared_run.status = RunStatus::Prepared;
+    manager
+        .write_run_manifest(&repaired.handle, &prepared_run)
+        .await
+        .expect("prepared run manifest should be written");
+    manager
+        .write_json_artifact(
+            &repaired.handle,
+            &repaired.handle.conversation_manifest_path(),
+            &json!({
+                "active_run_id": "run-prepared-trigger-pending",
+                "trigger_pending_run_id": "run-prepared-trigger-pending"
+            }),
+        )
+        .await
+        .expect("trigger-pending conversation markers should be written");
+    let clean_retry = manager
+        .ensure(&issue)
+        .await
+        .expect("prepared trigger-pending checkout should be retained");
+    assert!(!clean_retry.created);
+    assert_eq!(
+        clean_retry.handle.workspace_path(),
+        repaired.handle.workspace_path()
+    );
+    std::fs::write(
+        clean_retry
+            .handle
+            .workspace_path()
+            .join("after-trigger-clear.txt"),
+        "worker edit after trigger\n",
+    )
+    .expect("post-trigger worker edit should be written");
+    manager
+        .write_json_artifact(
+            &clean_retry.handle,
+            &clean_retry.handle.conversation_manifest_path(),
+            &json!({
+                "active_run_id": "run-prepared-trigger-pending",
+                "trigger_pending_run_id": null
+            }),
+        )
+        .await
+        .expect("cleared trigger marker should be written");
+    let retained_after_trigger_clear = manager
+        .ensure(&issue)
+        .await
+        .expect("active prepared checkout should survive cleared trigger marker");
+    assert!(!retained_after_trigger_clear.created);
+    assert_eq!(
+        retained_after_trigger_clear.handle.workspace_path(),
+        clean_retry.handle.workspace_path()
+    );
+
+    let mut run_manifest = RunManifest::new(
+        &clean_retry.handle,
+        &RunDescriptor::new("run-feature-branch", 1),
+    );
+    run_manifest.status = RunStatus::Running;
+    manager
+        .write_run_manifest(&clean_retry.handle, &run_manifest)
+        .await
+        .expect("running manifest should be written");
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "-b", "worker-feature"],
+    );
+    manager
+        .verify_checkout_for_retry(&clean_retry.handle)
+        .await
+        .expect("worker feature branches should remain attachable");
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "--detach", "HEAD"],
+    );
+
+    git(
+        clean_retry.handle.workspace_path(),
+        &["checkout", "--orphan", "rewritten"],
+    );
+    git(clean_retry.handle.workspace_path(), &["rm", "-rf", "."]);
+    git(
+        clean_retry.handle.workspace_path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(
+        clean_retry.handle.workspace_path(),
+        &["config", "user.name", "OpenSymphony Test"],
+    );
+    std::fs::write(
+        clean_retry.handle.workspace_path().join("AGENTS.md"),
+        "rewritten instructions\n",
+    )
+    .expect("rewritten instructions should be written");
+    git(clean_retry.handle.workspace_path(), &["add", "AGENTS.md"]);
+    git(
+        clean_retry.handle.workspace_path(),
+        &["commit", "-m", "unrelated rewrite"],
+    );
+    git(
+        clean_retry.handle.workspace_path(),
+        &["branch", "-M", "main"],
+    );
+    let ancestry_error = manager
+        .verify_checkout_for_retry(&clean_retry.handle)
+        .await
+        .expect_err("unrelated retained HEAD should be rejected");
+    assert!(matches!(
+        ancestry_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason.contains("no longer descends")
+    ));
+    let replacement_error = manager
+        .ensure(&issue)
+        .await
+        .expect_err("conversation-owned drift must block replacement");
+    assert!(matches!(
+        replacement_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason.contains("no longer descends")
+    ));
+    assert!(clean_retry.handle.workspace_path().exists());
+
+    let checkout_manifest_path = clean_retry.handle.checkout_manifest_path();
+    let mut tampered_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&checkout_manifest_path)
+            .await
+            .expect("checkout manifest should be readable"),
+    )
+    .expect("checkout manifest should decode");
+    tampered_manifest["target_commit"] = serde_json::Value::String("tampered".to_owned());
+    tokio::fs::write(
+        &checkout_manifest_path,
+        serde_json::to_vec_pretty(&tampered_manifest).expect("tampered manifest should encode"),
+    )
+    .await
+    .expect("tampered manifest should be writable");
+    assert!(matches!(
+        manager.verify_checkout(&clean_retry.handle).await,
+        Err(WorkspaceError::CheckoutVerification { .. })
+    ));
+    assert!(matches!(
+        manager
+            .find_verified_workspace_by_issue_reference(&issue.identifier)
+            .await,
+        Err(WorkspaceError::CheckoutVerification { .. })
+    ));
+
+    let renamed_issue = IssueDescriptor {
+        issue_id: issue.issue_id.clone(),
+        identifier: "COE-549/renamed".to_owned(),
+        title: "Issue COE-549/renamed".to_owned(),
+        current_state: issue.current_state.clone(),
+        last_seen_tracker_refresh_at: None,
+        repository_binding: issue.repository_binding.clone(),
+    };
+    let renamed = manager
+        .ensure(&renamed_issue)
+        .await
+        .expect("renamed issue should publish a new generation");
+    assert!(renamed.created);
+    assert_ne!(
+        renamed.handle.workspace_path(),
+        clean_retry.handle.workspace_path()
+    );
+
+    let mut mismatched_key_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(renamed.handle.issue_manifest_path())
+            .await
+            .expect("renamed issue manifest should be readable"),
+    )
+    .expect("renamed issue manifest should decode");
+    mismatched_key_manifest["sanitized_workspace_key"] =
+        serde_json::Value::String("wrong-deterministic-key".to_owned());
+    tokio::fs::write(
+        renamed.handle.issue_manifest_path(),
+        serde_json::to_vec_pretty(&mismatched_key_manifest)
+            .expect("mismatched key manifest should encode"),
+    )
+    .await
+    .expect("mismatched key manifest should be writable");
+    let repaired_key = manager
+        .ensure(&renamed_issue)
+        .await
+        .expect("mismatched deterministic key should quarantine and republish");
+    assert!(repaired_key.created);
+    assert_ne!(
+        repaired_key.handle.workspace_path(),
+        renamed.handle.workspace_path()
+    );
+
+    let mut quarantined_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(repaired_key.handle.checkout_manifest_path())
+            .await
+            .expect("checkout manifest should be readable"),
+    )
+    .expect("checkout manifest should decode");
+    quarantined_manifest["quarantined"] = serde_json::Value::Bool(true);
+    quarantined_manifest["quarantine_reason"] = serde_json::Value::String("test quarantine".into());
+    tokio::fs::write(
+        repaired_key.handle.checkout_manifest_path(),
+        serde_json::to_vec_pretty(&quarantined_manifest)
+            .expect("quarantined manifest should encode"),
+    )
+    .await
+    .expect("quarantined manifest should be writable");
+    assert!(matches!(
+        manager.verify_checkout(&repaired_key.handle).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason == "checkout generation is already quarantined"
+    ));
+
+    let hook_manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces-after-create"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(after_create_published_path_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("after-create manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository,
+    )]));
+    let hooked = hook_manager
+        .ensure(&issue)
+        .await
+        .expect("after-create checkout should publish");
+    let recorded_cwd = std::fs::read_to_string(
+        hooked
+            .handle
+            .workspace_path()
+            .join(".git/after_create_cwd.txt"),
+    )
+    .expect("after-create cwd should be recorded");
+    assert_eq!(
+        std::fs::canonicalize(recorded_cwd.trim()).expect("recorded cwd should exist"),
+        std::fs::canonicalize(hooked.handle.workspace_path()).expect("checkout should exist")
+    );
+
+    assert!(!clean_retry.handle.workspace_path().exists());
+    assert!(
+        temp_dir
+            .path()
+            .join("workspaces/.opensymphony-quarantine")
+            .read_dir()
+            .expect("quarantine should exist")
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn legacy_workspace_lookup_skips_malformed_generation_manifests() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-549-malformed-generation");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("legacy workspace should exist");
+
+    let malformed_path =
+        workspace_root.join("malformed-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(malformed_path.join(".opensymphony"))
+        .await
+        .expect("malformed generation directory should exist");
+    let mut issue_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(ensured.handle.issue_manifest_path())
+            .await
+            .expect("issue manifest should be readable"),
+    )
+    .expect("issue manifest should decode");
+    issue_manifest["sanitized_workspace_key"] =
+        serde_json::Value::String("malformed-generation".to_owned());
+    issue_manifest["workspace_path"] = serde_json::Value::String(
+        std::fs::canonicalize(&malformed_path)
+            .expect("malformed generation path should canonicalize")
+            .display()
+            .to_string(),
+    );
+    tokio::fs::write(
+        malformed_path.join(".opensymphony/issue.json"),
+        serde_json::to_vec_pretty(&issue_manifest).expect("issue manifest should encode"),
+    )
+    .await
+    .expect("malformed issue manifest should be written");
+    tokio::fs::write(
+        malformed_path.join(".opensymphony/checkout.json"),
+        b"not-json",
+    )
+    .await
+    .expect("malformed checkout manifest should be written");
+
+    let owned_malformed_path =
+        workspace_root.join("owned-malformed-generation--abcdef0123456789abcdef0123456789");
+    tokio::fs::create_dir_all(owned_malformed_path.join(".opensymphony"))
+        .await
+        .expect("owned malformed generation directory should exist");
+    tokio::fs::write(
+        owned_malformed_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("owned malformed issue manifest should be written");
+    let owned_checkout_manifest = json!({
+        "schema_version": 1,
+        "generation": "abcdef0123456789abcdef0123456789",
+        "issue_id": issue.issue_id.clone(),
+        "identifier": issue.identifier.clone(),
+        "run_id": "owned-malformed-run",
+        "sanitized_workspace_key": "owned-malformed-generation",
+        "workspace_path": std::fs::canonicalize(&owned_malformed_path)
+            .expect("owned malformed generation path should canonicalize"),
+        "repository_binding": {
+            "alias": "owned-malformed-repository",
+            "repository": {
+                "id": "git:repository:owned-malformed",
+                "safe_remote_fingerprint": "sha256:owned-malformed"
+            },
+            "config_generation": "config-1",
+            "inventory_generation": "inventory-1"
+        },
+        "remote_fingerprint": "sha256:owned-malformed",
+        "target_branch": "develop",
+        "target_commit": "commit-1",
+        "current_branch": "develop",
+        "head": "commit-1",
+        "shallow": false,
+        "clean": true,
+        "instruction": {
+            "path": "AGENTS.md",
+            "content_hash": "sha256:instructions",
+            "source_commit": "commit-1",
+            "source": "configured",
+            "native_discovery_paths": [],
+            "native_discovery_hashes": {}
+        },
+        "created_at": chrono::Utc::now(),
+        "verified_at": chrono::Utc::now(),
+        "quarantined": false,
+        "quarantine_reason": null
+    });
+    tokio::fs::write(
+        owned_malformed_path.join(".opensymphony/checkout.json"),
+        serde_json::to_vec_pretty(&owned_checkout_manifest)
+            .expect("owned checkout manifest should encode"),
+    )
+    .await
+    .expect("owned checkout manifest should be written");
+    let _: CheckoutManifest = serde_json::from_value(owned_checkout_manifest.clone())
+        .expect("owned checkout manifest should decode");
+
+    let foreign_malformed_path = workspace_root.join("notes--abc");
+    tokio::fs::create_dir_all(foreign_malformed_path.join(".opensymphony"))
+        .await
+        .expect("foreign malformed generation directory should exist");
+    tokio::fs::write(
+        foreign_malformed_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("foreign malformed issue manifest should be written");
+    tokio::fs::write(
+        foreign_malformed_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("foreign malformed checkout manifest should be written");
+
+    let malformed_issue_path = workspace_root.join("malformed-issue-generation");
+    tokio::fs::create_dir_all(malformed_issue_path.join(".opensymphony"))
+        .await
+        .expect("malformed issue generation directory should exist");
+    tokio::fs::write(
+        malformed_issue_path.join(".opensymphony/issue.json"),
+        b"not-json",
+    )
+    .await
+    .expect("malformed issue manifest should be written");
+    tokio::fs::write(
+        malformed_issue_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("strict generation marker should be written");
+
+    let missing_checkout_path =
+        workspace_root.join("malformed-generation--missing-checkout-manifest");
+    tokio::fs::create_dir_all(missing_checkout_path.join(".opensymphony"))
+        .await
+        .expect("missing checkout manifest directory should exist");
+    let mut missing_checkout_issue = issue_manifest.clone();
+    missing_checkout_issue["sanitized_workspace_key"] =
+        serde_json::Value::String("malformed-generation".to_owned());
+    missing_checkout_issue["workspace_path"] =
+        serde_json::Value::String(missing_checkout_path.display().to_string());
+    tokio::fs::write(
+        missing_checkout_path.join(".opensymphony/issue.json"),
+        serde_json::to_vec_pretty(&missing_checkout_issue)
+            .expect("missing checkout issue manifest should encode"),
+    )
+    .await
+    .expect("missing checkout issue manifest should be written");
+
+    let missing_issue_path = workspace_root.join("missing-issue-generation");
+    tokio::fs::create_dir_all(missing_issue_path.join(".opensymphony"))
+        .await
+        .expect("missing issue manifest directory should exist");
+    tokio::fs::write(
+        missing_issue_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("checkout metadata without an issue manifest should be written");
+
+    let receipt_owned_path =
+        workspace_root.join("receipt-owned-generation--abcdef0123456789abcdef0123456789");
+    tokio::fs::create_dir_all(receipt_owned_path.join(".opensymphony"))
+        .await
+        .expect("receipt-owned generation directory should exist");
+    let receipt = serde_json::json!({
+        "issue_id": "receipt-owned-issue",
+        "identifier": "COE-549-receipt-owned",
+        "sanitized_workspace_key": "receipt-owned-generation",
+        "workspace_path": std::fs::canonicalize(&receipt_owned_path)
+            .expect("receipt-owned path should canonicalize"),
+        "completed_at": chrono::Utc::now(),
+    });
+    tokio::fs::write(
+        receipt_owned_path.join(".opensymphony.after_create.json"),
+        serde_json::to_vec_pretty(&receipt).expect("receipt should encode"),
+    )
+    .await
+    .expect("receipt should be written");
+
+    manager
+        .list_all_workspaces()
+        .await
+        .expect("workspace discovery should inspect malformed generations");
+    assert!(malformed_path.exists());
+    assert!(
+        owned_malformed_path
+            .parent()
+            .expect("owned malformed generation should have a parent")
+            .join(".opensymphony-quarantine")
+            .exists()
+    );
+    assert!(!owned_malformed_path.exists());
+    assert!(foreign_malformed_path.exists());
+    assert!(missing_checkout_path.exists());
+    assert!(receipt_owned_path.exists());
+
+    let found = manager
+        .find_workspace_by_issue_reference(&issue.issue_id)
+        .await
+        .expect("malformed generations should not abort legacy lookup")
+        .expect("legacy workspace should still be found");
+    assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
+    assert!(
+        workspace_root
+            .join(".opensymphony-quarantine")
+            .read_dir()
+            .expect("malformed generation quarantine should exist")
+            .next()
+            .is_some()
+    );
+    let sweep_root = temp_dir.path().join("sweep-workspaces");
+    let foreign_published_path =
+        sweep_root.join("foreign-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(&foreign_published_path)
+        .await
+        .expect("foreign published generation directory should exist");
+    tokio::fs::write(
+        foreign_published_path.join("foreign-data.txt"),
+        b"must survive discovery",
+    )
+    .await
+    .expect("foreign published data should be written");
+    let owned_published_path =
+        sweep_root.join("owned-generation--fedcba9876543210fedcba9876543210");
+    tokio::fs::create_dir_all(owned_published_path.join(".opensymphony"))
+        .await
+        .expect("owned published generation directory should exist");
+    let owned_manifest = json!({
+        "schema_version": 1,
+        "generation": "fedcba9876543210fedcba9876543210",
+        "issue_id": "owned-issue",
+        "identifier": "COE-549-owned",
+        "run_id": "owned-run",
+        "sanitized_workspace_key": "owned-generation",
+        "workspace_path": std::fs::canonicalize(&owned_published_path)
+            .expect("owned published path should canonicalize"),
+        "repository_binding": {
+            "alias": "owned-repository",
+            "repository": {
+                "id": "git:repository:owned",
+                "safe_remote_fingerprint": "sha256:owned"
+            },
+            "config_generation": "config-1",
+            "inventory_generation": "inventory-1"
+        },
+        "remote_fingerprint": "sha256:owned",
+        "target_branch": "develop",
+        "target_commit": "commit-1",
+        "current_branch": "develop",
+        "head": "commit-1",
+        "shallow": false,
+        "clean": true,
+        "instruction": {
+            "path": "AGENTS.md",
+            "content_hash": "sha256:instructions",
+            "source_commit": "commit-1",
+            "source": "configured",
+            "native_discovery_paths": [],
+            "native_discovery_hashes": {}
+        },
+        "created_at": chrono::Utc::now(),
+        "verified_at": chrono::Utc::now(),
+        "quarantined": false,
+        "quarantine_reason": null
+    });
+    tokio::fs::write(
+        owned_published_path.join(".opensymphony/checkout.json"),
+        serde_json::to_vec_pretty(&owned_manifest).expect("owned checkout marker should encode"),
+    )
+    .await
+    .expect("owned published checkout marker should be written");
+    let sweep_manager = WorkspaceManager::new(manager_config(
+        &sweep_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("sweep manager should build");
+    sweep_manager
+        .list_all_workspaces()
+        .await
+        .expect("workspace discovery should inspect generation-shaped directories");
+    assert!(
+        foreign_published_path.exists(),
+        "foreign generation-shaped directories should survive discovery"
+    );
+    assert!(
+        !owned_published_path.exists(),
+        "owned incomplete published generations should be swept during discovery"
+    );
+
+    let intent_owned_path =
+        sweep_root.join("intent-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(intent_owned_path.join(".opensymphony"))
+        .await
+        .expect("intent-owned published generation directory should exist");
+    let intent_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("intent-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(
+        intent_staging_path
+            .parent()
+            .expect("staging root should have a parent"),
+    )
+    .await
+    .expect("staging root should exist");
+    let intent_marker_path = intent_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("intent-owned-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        intent_marker_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "intent-owned-generation",
+            "staging_path": intent_staging_path,
+            "published_path": intent_owned_path,
+        }))
+        .expect("published staging intent should encode"),
+    )
+    .await
+    .expect("published staging intent should be written");
+    let partial_published_path =
+        sweep_root.join("partial-owned-generation--0123456789abcdef0123456789abcdef");
+    tokio::fs::create_dir_all(partial_published_path.join(".opensymphony"))
+        .await
+        .expect("partial published generation directory should exist");
+    tokio::fs::write(
+        partial_published_path.join(".opensymphony/checkout.json"),
+        b"{}",
+    )
+    .await
+    .expect("partial checkout marker should be written");
+    let partial_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("partial-owned-generation--0123456789abcdef0123456789abcdef");
+    let partial_marker_path = partial_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("partial-owned-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        partial_marker_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "partial-owned-generation",
+            "staging_path": partial_staging_path,
+            "published_path": partial_published_path,
+        }))
+        .expect("partial staging intent should encode"),
+    )
+    .await
+    .expect("partial staging intent should be written");
+    sweep_manager
+        .recover_abandoned_staging_checkouts()
+        .await
+        .expect("published staging intent should prove ownership during recovery");
+    assert!(
+        !intent_owned_path.exists(),
+        "a published generation claimed by a staging intent should be swept after a publish crash"
+    );
+    assert!(
+        !partial_published_path.exists(),
+        "a checkout marker without a matching issue manifest must not preserve a generation"
+    );
+
+    let missing_published_path =
+        sweep_root.join("missing-published-generation--0123456789abcdef0123456789abcdef");
+    let missing_published_staging_path = sweep_root
+        .join(".opensymphony-staging")
+        .join("missing-published-generation--0123456789abcdef0123456789abcdef");
+    let missing_published_marker_path = missing_published_staging_path
+        .parent()
+        .expect("staging root should exist")
+        .join("missing-published-generation--0123456789abcdef0123456789abcdef.intent.json");
+    tokio::fs::write(
+        missing_published_marker_path.clone(),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "generation": "0123456789abcdef0123456789abcdef",
+            "workspace_key": "missing-published-generation",
+            "staging_path": missing_published_staging_path,
+            "published_path": missing_published_path,
+        }))
+        .expect("missing published staging intent should encode"),
+    )
+    .await
+    .expect("missing published staging intent should be written");
+    sweep_manager
+        .recover_abandoned_staging_checkouts()
+        .await
+        .expect("orphan intent should be removable after published path disappearance");
+    assert!(!missing_published_marker_path.exists());
+}
+
+#[tokio::test]
+async fn legacy_workspace_lookup_rejects_semantically_invalid_published_manifest() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-549-semantic-generation");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+
+    let mut issue_manifest: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(ensured.handle.issue_manifest_path())
+            .await
+            .expect("issue manifest should be readable"),
+    )
+    .expect("issue manifest should decode");
+    issue_manifest["workspace_path"] = serde_json::Value::String(
+        workspace_root
+            .join("claimed-by-another-workspace")
+            .display()
+            .to_string(),
+    );
+    tokio::fs::write(
+        ensured.handle.issue_manifest_path(),
+        serde_json::to_vec_pretty(&issue_manifest).expect("issue manifest should encode"),
+    )
+    .await
+    .expect("semantic mismatch should be written");
+    tokio::fs::write(ensured.handle.checkout_manifest_path(), b"{}")
+        .await
+        .expect("published checkout marker should be written");
+
+    let error = manager
+        .find_workspace_by_issue_reference(&issue.issue_id)
+        .await
+        .expect_err("published semantic ownership mismatch must not be silently ignored");
+    assert!(matches!(error, WorkspaceError::CheckoutVerification { .. }));
 }
 
 #[tokio::test]
@@ -450,22 +1577,7 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
         CleanupConfig::default(),
     ))
     .expect("manager should build");
-    let mut issue = sample_issue("COE-263-after-create-receipt");
-    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(RepositoryBinding {
-        alias: "core".to_string(),
-        repository: RepositoryIdentity {
-            id: CanonicalRepositoryId::new("github:repository:core")
-                .expect("repository id should be valid"),
-            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
-                "github",
-                Some("core"),
-                "owner/repository",
-            )
-            .expect("fingerprint should be valid"),
-        },
-        config_generation: "config-1".to_string(),
-        inventory_generation: "inventory-1".to_string(),
-    }));
+    let issue = sample_issue("COE-263-after-create-receipt");
 
     let first_error = manager
         .ensure(&issue)
@@ -487,10 +1599,10 @@ async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() 
     let receipt = tokio::fs::read_to_string(workspace_path.join(".opensymphony.after_create.json"))
         .await
         .expect("after_create receipt should be readable");
-    assert_eq!(
+    assert!(
         serde_json::from_str::<serde_json::Value>(&receipt).expect("receipt should be valid JSON")
-            ["repository_binding"]["repository"]["id"],
-        "github:repository:core"
+            ["repository_binding"]
+            .is_null()
     );
 
     tokio::fs::remove_file(workspace_path.join(".opensymphony"))
@@ -626,18 +1738,13 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
         HookConfig::default(),
         CleanupConfig::default(),
     ))
-    .expect("manager should build")
-    .with_legacy_repository(Some(binding.repository.id.clone()));
-    let mut issue = sample_issue("COE-548");
-    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    .expect("manager should build");
+    let issue = sample_issue("COE-548");
     let ensured = manager
         .ensure(&issue)
         .await
         .expect("workspace should exist");
-    assert_eq!(
-        ensured.issue_manifest.repository_binding,
-        Some(RepositoryBindingOutcome::Resolved(binding.clone()))
-    );
+    assert_eq!(ensured.issue_manifest.repository_binding, None);
 
     let manifest = manager
         .start_run(
@@ -650,7 +1757,7 @@ async fn repository_binding_is_persisted_before_and_during_a_run_claim() {
 }
 
 #[tokio::test]
-async fn existing_workspace_rejects_a_changed_repository_identity() {
+async fn resolved_repository_binding_without_checkout_policy_fails_closed() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
@@ -672,30 +1779,25 @@ async fn existing_workspace_rejects_a_changed_repository_identity() {
         config_generation: "config-1".to_string(),
         inventory_generation: "inventory-1".to_string(),
     };
-    let first_binding = binding("core", "github:repository:core");
-    let second_binding = binding("web", "github:repository:web");
-    let mut first_issue = sample_issue("COE-548-rebind");
-    first_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(first_binding));
-    manager
-        .ensure(&first_issue)
-        .await
-        .expect("initial workspace should exist");
-
-    let mut changed_issue = first_issue;
-    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(second_binding));
+    let mut changed_issue = sample_issue("COE-548-rebind");
+    changed_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding(
+        "core",
+        "github:repository:core",
+    )));
     let error = manager
         .ensure(&changed_issue)
         .await
-        .expect_err("changed repository identity must not reuse the old workspace");
+        .expect_err("resolved bindings must not fall back to legacy workspaces");
 
     assert!(matches!(
         error,
-        WorkspaceError::RepositoryBindingMismatch { .. }
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
     ));
 }
 
 #[tokio::test]
-async fn legacy_workspace_backfills_a_new_repository_identity() {
+async fn legacy_workspace_requires_checkout_policy_for_repository_backfill() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let binding = RepositoryBinding {
         alias: "core".to_string(),
@@ -733,15 +1835,16 @@ async fn legacy_workspace_backfills_a_new_repository_identity() {
 
     let mut upgraded_issue = legacy_issue;
     upgraded_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
-    let ensured = manager
+    let error = manager
         .ensure(&upgraded_issue)
         .await
-        .expect("legacy workspace should accept a safe repository backfill");
+        .expect_err("repository backfill must require a checkout policy");
 
-    assert_eq!(
-        ensured.issue_manifest.repository_binding,
-        Some(RepositoryBindingOutcome::Resolved(binding))
-    );
+    assert!(matches!(
+        error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
+    ));
 }
 
 #[tokio::test]
@@ -782,7 +1885,8 @@ async fn legacy_workspace_rejects_unproven_repository_backfill() {
 
     assert!(matches!(
         error,
-        WorkspaceError::RepositoryBindingMismatch { .. }
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason == "resolved repository binding has no configured checkout policy"
     ));
 }
 

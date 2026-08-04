@@ -457,7 +457,11 @@ impl IssueExecution {
             let expected_path = comparable_workspace_path(&current.path);
             let actual_path = comparable_workspace_path(&workspace.path);
 
-            if current.workspace_key != workspace.workspace_key || expected_path != actual_path {
+            let replacement_generation = matches!(self.state, SchedulerState::RetryQueued { .. })
+                && current.workspace_key == workspace.workspace_key;
+            if current.workspace_key != workspace.workspace_key
+                || (expected_path != actual_path && !replacement_generation)
+            {
                 return Err(StateTransitionError::WorkspaceIdentityMismatch {
                     expected_key: current.workspace_key.clone(),
                     actual_key: workspace.workspace_key.clone(),
@@ -469,8 +473,8 @@ impl IssueExecution {
             let expected_key = issue_workspace_key(&self.issue);
             let actual_path = comparable_workspace_path(&workspace.path);
 
-            if workspace.workspace_key != expected_key
-                || !workspace_path_matches_key(&actual_path, &expected_key)
+            if !workspace_key_matches_issue(&workspace.workspace_key, &expected_key)
+                || !workspace_path_matches_key(&actual_path, &workspace.workspace_key)
             {
                 return Err(StateTransitionError::WorkspaceIssueMismatch {
                     expected_key,
@@ -801,8 +805,23 @@ fn issue_workspace_key(issue: &NormalizedIssue) -> WorkspaceKey {
 }
 
 fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
-    path.file_name()
-        .is_some_and(|name| name == OsStr::new(key.as_str()))
+    path.file_name().is_some_and(|name| {
+        name == OsStr::new(key.as_str())
+            || name
+                .to_str()
+                .and_then(|name| name.strip_prefix(&format!("{}--", key.as_str())))
+                .is_some_and(|generation| !generation.is_empty())
+    })
+}
+
+fn workspace_key_matches_issue(actual: &WorkspaceKey, expected: &WorkspaceKey) -> bool {
+    actual == expected
+        || actual
+            .as_str()
+            .strip_prefix(&format!("{}-", expected.as_str()))
+            .is_some_and(|digest| {
+                digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
 }
 
 fn comparable_workspace_path(path: &Path) -> PathBuf {

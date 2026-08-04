@@ -52,6 +52,16 @@ the legacy retry behavior.
 The explicit `legacy_single` compatibility path retains terminal workspaces as
 before, including successful, cancelled, and tracker-terminal releases. Future
 strict routing may opt into terminal cleanup only through an explicit policy.
+
+For strict repository-bound terminal tasks, each inventory entry also resolves
+the target branch, credential environment-variable reference, instruction
+path, and review profile into the checkout policy. Credential values are used
+only while staging the clone; they are not written to remotes, manifests,
+prompts, logs, or process arguments. The resulting config and inventory
+generations are copied into the run envelope and must match on recovery.
+The checkout credential must match the clone transport: `ssh-agent` is valid
+for SSH clone URLs, while `environment` credentials are rejected for SSH
+clones.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before
@@ -105,15 +115,18 @@ routing:
 That repository must also appear in the sole selected Linear project's
 `repositories` association set; a mismatch fails before tracker polling so a
 legacy run cannot execute a project's tasks from an unrelated checkout.
+Central repository checkout policies are consumed only by `project_set`
+routing; legacy runs continue to use their configured `checkout_path` and do
+not require clone credentials or verified-generation acquisition.
 The repository inventory entry's `instructions.path` is resolved beneath its
 configured checkout and is the workflow file loaded for that legacy run;
 repository implementation guidance remains separate from central front matter.
-`project_set` validates the multi-repository model but remains disabled until
-its later release gates pass; it fails before starting the scheduler rather
-than silently falling back to the current directory. Operational recovery
-commands (`debug` and `rehydrate`), plus all doctor modes, reject the same gated
-mode before selecting an unrelated checkout for workflow or conversation-store
-discovery.
+`project_set` enables multi-repository routing. Each active project's
+repository association is resolved before tracker polling; tasks without a
+canonical binding are blocked rather than falling back to the current
+directory. Operational recovery commands (`debug` and `rehydrate`), plus all
+doctor modes, use the selected repository policy and verified checkout
+envelope, and refuse attach when binding or provenance is incompatible.
 `rehydrate` also accepts `--config <path>` when an instance is not the default
 home configuration. `memory init` refuses to treat a selected central config
 as a repository-local memory file; initialize the local memory config instead.

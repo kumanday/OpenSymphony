@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -23,6 +23,7 @@ use tokio::{
     sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
 };
+use uuid::Uuid;
 
 use crate::{
     opensymphony_code_intel::{
@@ -45,12 +46,12 @@ use crate::{
         archive_blocking_warning_count, backfill_legacy_memory_source_scopes, brief_with_scope,
         code_graph_context, code_graph_workspace_context_overlay, code_index_branch_for_config,
         code_repository_has_commit, code_repository_has_rows, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, export_okf_bundle, import_okf_bundle, lint,
-        lint_okf_bundle, load_issue_capsule_with_scope, load_source_file, mark_archived,
-        merge_legacy_code_index, merge_legacy_memory_index, merge_memory_index_from_okf,
-        migrate_code_repository_identity, persist_code_intel_documents,
-        persist_code_intel_skipped_files, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, reconcile_memory_sources, refresh_memory_index,
+        context_for_issue_with_options_and_scope, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_issue_capsule_with_scope,
+        load_source_file, mark_archived, merge_legacy_code_index, merge_legacy_memory_index,
+        merge_memory_index_from_okf, migrate_code_repository_identity,
+        persist_code_intel_documents, persist_code_intel_skipped_files, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, reconcile_memory_sources, refresh_memory_index,
         refresh_memory_index_from_okf, register_memory_source, registered_memory_sources,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, sha256_hex,
@@ -64,7 +65,7 @@ use crate::{
     opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
         CleanupConfig, HookConfig, IssueManifest, WorkspaceManager, WorkspaceManagerConfig,
-        workspace_path_for_root,
+        checkout_workspace_key, workspace_path_for_root,
     },
 };
 
@@ -1942,6 +1943,107 @@ struct MemoryServerState {
     resolved_workflow: Option<ResolvedWorkflow>,
     config_generation: Option<String>,
     writer_gate: MemoryWriterGate,
+    scope_grants: MemoryScopeGrantRegistry,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MemoryScopeGrantRegistry {
+    state: Arc<RwLock<MemoryScopeGrantRegistryState>>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryScopeGrantRegistryState {
+    grants: HashMap<String, MemoryScopeGrant>,
+    revoked_issues: HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryScopeGrant {
+    pub(crate) project: String,
+    pub(crate) execution_repo: String,
+    pub(crate) authorized_repositories: BTreeSet<String>,
+    pub(crate) issue: String,
+    pub(crate) checkout_generation: Option<String>,
+}
+
+impl MemoryScopeGrantRegistry {
+    pub(crate) fn issue_or_refresh_with_lifecycle(
+        &self,
+        project: &str,
+        execution_repo: &str,
+        authorized_repositories: BTreeSet<String>,
+        issue: &str,
+        checkout_generation: Option<String>,
+    ) -> (String, bool) {
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let requires_fresh_conversation = state.revoked_issues.contains(issue);
+        if let Some((token, grant)) = state
+            .grants
+            .iter_mut()
+            .find(|(_, grant)| grant.issue == issue)
+        {
+            *grant = MemoryScopeGrant {
+                project: project.to_owned(),
+                execution_repo: execution_repo.to_owned(),
+                authorized_repositories,
+                issue: issue.to_owned(),
+                checkout_generation,
+            };
+            return (token.clone(), requires_fresh_conversation);
+        }
+
+        let token = format!("opensymphony-worker-{}", Uuid::new_v4());
+        state.grants.insert(
+            token.clone(),
+            MemoryScopeGrant {
+                project: project.to_owned(),
+                execution_repo: execution_repo.to_owned(),
+                authorized_repositories,
+                issue: issue.to_owned(),
+                checkout_generation,
+            },
+        );
+        (token, requires_fresh_conversation)
+    }
+
+    pub(crate) fn acknowledge_fresh_conversation(&self, issue: &str) {
+        self.state
+            .write()
+            .expect("memory grant registry poisoned")
+            .revoked_issues
+            .remove(issue);
+    }
+
+    pub(crate) fn revoke_issue(&self, issue: &str) -> bool {
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let tokens = state
+            .grants
+            .iter()
+            .filter(|(_, grant)| grant.issue == issue)
+            .map(|(token, _)| token.clone())
+            .collect::<Vec<_>>();
+        let revoked = !tokens.is_empty();
+        for token in tokens {
+            state.grants.remove(&token);
+        }
+        // Keep the lifecycle tombstone even when this process has no live
+        // grant for the issue (for example after a daemon restart). The next
+        // reopened run must not reuse a conversation carrying a bearer that
+        // this registry can no longer revoke or refresh.
+        state.revoked_issues.insert(issue.to_owned());
+        revoked
+    }
+
+    fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
+        token.and_then(|token| {
+            self.state
+                .read()
+                .expect("memory grant registry poisoned")
+                .grants
+                .get(token)
+                .cloned()
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1995,6 +2097,7 @@ pub(crate) struct MemoryServerHandle {
     task: Option<JoinHandle<Result<(), String>>>,
     shutdown: watch::Sender<bool>,
     writer_gate: MemoryWriterGate,
+    scope_grants: MemoryScopeGrantRegistry,
 }
 
 impl Drop for MemoryServerHandle {
@@ -2010,6 +2113,10 @@ impl MemoryServerHandle {
 
     pub(crate) fn writer_gate(&self) -> Option<MemoryWriterGate> {
         (!self.is_finished()).then(|| Arc::clone(&self.writer_gate))
+    }
+
+    pub(crate) fn scope_grant_registry(&self) -> MemoryScopeGrantRegistry {
+        self.scope_grants.clone()
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -2174,6 +2281,7 @@ async fn start_memory_server_with_auth(
         MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
     })?;
     let writer_gate = Arc::new(Mutex::new(Some(coordination_lock)));
+    let scope_grants = MemoryScopeGrantRegistry::default();
     let state = MemoryServerState {
         config,
         auth,
@@ -2182,6 +2290,7 @@ async fn start_memory_server_with_auth(
         resolved_workflow,
         config_generation,
         writer_gate: Arc::clone(&writer_gate),
+        scope_grants: scope_grants.clone(),
     };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
@@ -2206,6 +2315,7 @@ async fn start_memory_server_with_auth(
         task: Some(task),
         shutdown,
         writer_gate,
+        scope_grants,
     })
 }
 
@@ -3059,12 +3169,26 @@ async fn memory_server_mcp(
     headers: axum::http::HeaderMap,
     axum::Json(request): axum::Json<MemoryMcpRequest>,
 ) -> (axum::http::StatusCode, axum::Json<Value>) {
-    if let Err(response) = authorize_memory_request(
+    let bearer = bearer_token(&headers);
+    let scoped_grant = state.scope_grants.get(bearer);
+    let required_access = required_access_for_request(&request, &state.auth);
+    if let Err(response) = authorize_memory_request_with_scoped_grant(
         &headers,
         &state.auth,
-        required_access_for_request(&request, &state.auth),
+        required_access,
+        scoped_grant.is_some(),
     ) {
         return response;
+    }
+    if state.workspace_root.is_some()
+        && request.method == "tools/call"
+        && required_access == MemoryServerAccess::Read
+        && scoped_grant.is_none()
+        && !memory_operator_authenticated(bearer, &state.auth)
+    {
+        return memory_scope_forbidden(
+            "strict memory workers require a server-issued per-worker scope grant",
+        );
     }
     let id = request.id.clone();
     let writer_request = request.method == "tools/call"
@@ -3084,6 +3208,7 @@ async fn memory_server_mcp(
         let workspace_root = state.workspace_root.clone();
         let central_config_path = state.central_config_path.clone();
         let resolved_workflow = state.resolved_workflow.clone();
+        let worker_grant = scoped_grant.clone();
         let task = tokio::spawn(async move {
             let _writer_guard = writer_guard;
             call_memory_tool_with_workspace(
@@ -3092,6 +3217,7 @@ async fn memory_server_mcp(
                 workspace_root.as_deref(),
                 central_config_path.as_deref(),
                 resolved_workflow.as_ref(),
+                worker_grant.as_ref(),
             )
             .await
         });
@@ -3132,6 +3258,7 @@ async fn memory_server_mcp(
                     state.workspace_root.as_deref(),
                     state.central_config_path.as_deref(),
                     state.resolved_workflow.as_ref(),
+                    scoped_grant.as_ref(),
                 ),
             )
             .await
@@ -3228,6 +3355,31 @@ fn memory_tool_descriptors(config: &MemoryConfig, auth: &MemoryServerAuth) -> Ve
                 "access": match required_access_for_tool(name, auth) {
                     MemoryServerAccess::Read => "read",
                     MemoryServerAccess::Admin => "admin",
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "repo": { "type": "string", "description": "Canonical repository scope or explicit repository path" },
+                        "repository": { "type": "string", "description": "Canonical repository scope" },
+                        "project": { "type": "string", "description": "Project scope used to select one repository" },
+                        "projectSet": { "type": "string", "description": "Project-set scope used to select one repository" },
+                        "milestone": { "type": "string", "description": "Milestone scope" },
+                        "issue": { "type": "string", "description": "Issue identifier owning the verified checkout" },
+                        "currentIssue": { "type": "object", "properties": { "identifier": { "type": "string" } } },
+                        "area": { "type": "string", "description": "Memory area scope" },
+                        "allAccessible": { "type": "boolean", "description": "Ignore default project and repository scopes" },
+                        "all_accessible": { "type": "boolean", "description": "Legacy alias for allAccessible" },
+                        "paths": { "type": "array", "items": { "type": "string" } },
+                        "path": { "type": "string" },
+                        "symbol": { "type": "string" },
+                        "query": { "type": "string" },
+                        "kinds": { "type": "array", "items": { "type": "string" } },
+                        "symbols": { "type": "array", "items": { "type": "string" } },
+                        "language": { "type": "string" },
+                        "queryPack": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+                    }
                 }
             })
         }));
@@ -3333,7 +3485,7 @@ fn memory_config_for_code_graph_scope(
     arguments: &Value,
 ) -> Result<MemoryConfig, MemoryError> {
     let mut scope = scope_filter_from_mcp(config, arguments, true)?;
-    if let Some(repository_id) = optional_string_arg(arguments, "repository") {
+    if let Some(repository_id) = repository_scope_argument(arguments)? {
         scope.repo = Some(repository_id);
     }
     if scope.repo.is_none() && (scope.project.is_some() || scope.project_set.is_some()) {
@@ -3358,10 +3510,20 @@ fn memory_config_for_code_graph_scope(
     Ok(resolved)
 }
 
+#[cfg(test)]
 fn authorize_memory_request(
     headers: &axum::http::HeaderMap,
     auth: &MemoryServerAuth,
     required_access: MemoryServerAccess,
+) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+    authorize_memory_request_with_scoped_grant(headers, auth, required_access, false)
+}
+
+fn authorize_memory_request_with_scoped_grant(
+    headers: &axum::http::HeaderMap,
+    auth: &MemoryServerAuth,
+    required_access: MemoryServerAccess,
+    scoped_grant: bool,
 ) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -3378,12 +3540,12 @@ fn authorize_memory_request(
             })),
         ));
     }
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+    let bearer = bearer_token(headers);
     let authorized = match required_access {
         MemoryServerAccess::Read => {
+            if scoped_grant {
+                return Ok(());
+            }
             let read_token = non_empty_str(auth.read_token.as_deref());
             let admin_token = non_empty_str(auth.admin_token.as_deref());
             match (read_token, admin_token) {
@@ -3425,6 +3587,33 @@ fn authorize_memory_request(
     }
 }
 
+fn memory_operator_authenticated(bearer: Option<&str>, auth: &MemoryServerAuth) -> bool {
+    let Some(bearer) = bearer else {
+        return false;
+    };
+    non_empty_str(auth.read_token.as_deref()).is_some_and(|token| token == bearer)
+        || non_empty_str(auth.admin_token.as_deref()).is_some_and(|token| token == bearer)
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+fn memory_scope_forbidden(message: &str) -> (axum::http::StatusCode, axum::Json<Value>) {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(json!({
+            "error": {
+                "code": "memory_scope_forbidden",
+                "message": message,
+            }
+        })),
+    )
+}
+
 fn non_empty_str(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -3444,7 +3633,7 @@ fn origin_is_localhost(origin: &str) -> bool {
 
 #[cfg(test)]
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
-    call_memory_tool_with_workspace(config, params, None, None, None).await
+    call_memory_tool_with_workspace(config, params, None, None, None, None).await
 }
 
 async fn call_memory_tool_with_workspace(
@@ -3453,22 +3642,82 @@ async fn call_memory_tool_with_workspace(
     workspace_root: Option<&Path>,
     central_config_path: Option<&Path>,
     resolved_workflow: Option<&ResolvedWorkflow>,
+    worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MemoryError::InvalidInput("tools/call requires params.name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if let Some(worker_grant) = worker_grant {
+        validate_worker_memory_scope(name, &arguments, worker_grant)?;
+    }
     if central_config_path.is_some() && resolved_workflow.is_none() && name == "memory.context" {
         let _ = load_central_resolved_workflow(&config.repo_root, central_config_path)?;
     }
     if is_memory_writer_tool(name) {
         reject_project_set_memory_write(central_config_path, name)?;
     }
+    if name == "memory.context" {
+        let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
+        if workspace_root.is_some()
+            && !scope.all_accessible
+            && scope.project.is_none()
+            && scope.repo.is_none()
+        {
+            return Err(MemoryError::InvalidInput(
+                "strict memory.context requires the worker's project or repository grant"
+                    .to_owned(),
+            ));
+        }
+    }
+    let code_intel_config = if name == "code.ast.status" {
+        None
+    } else if AST_MCP_TOOL_NAMES.contains(&name)
+        || name == "memory.ingest_code_intel"
+        || (name == "memory.context"
+            && (bool_arg(&arguments, "includeCodeIntel")
+                || bool_arg(&arguments, "include_code_intel")))
+    {
+        let mut scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
+        if workspace_root.is_none()
+            && scope.repo.is_none()
+            && (scope.project.is_some() || scope.project_set.is_some())
+        {
+            scope.repo = Some(unique_repository_for_memory_scope(config, &scope)?);
+        }
+        let issue = optional_string_arg(&arguments, "issue").or_else(|| {
+            arguments
+                .get("currentIssue")
+                .and_then(|current| optional_string_arg(current, "identifier"))
+        });
+        Some(if workspace_root.is_some() {
+            resolve_code_intel_config_async(
+                config,
+                &scope,
+                workspace_root,
+                issue.as_deref(),
+                worker_grant,
+            )
+            .await?
+        } else {
+            memory_config_for_code_intel_scope(config, &arguments)?
+        })
+    } else {
+        None
+    };
+    let resolved_ast_config = || {
+        code_intel_config.clone().ok_or_else(|| {
+            MemoryError::InvalidInput(format!(
+                "AST code-intelligence configuration was not resolved for `{name}`"
+            ))
+        })
+    };
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let mut context_scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let mut context_scope =
+                worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             context_scope.issue = None;
             if context_scope.repo.is_none()
                 && (context_scope.project.is_some() || context_scope.project_set.is_some())
@@ -3489,12 +3738,22 @@ async fn call_memory_tool_with_workspace(
             let source = context_source_from_mcp(&arguments);
             let context_config =
                 memory_config_for_repository(config, options.scope.repo.as_deref())?;
-            let mut text = context_for_issue_with_options(&context_config, &source, &options)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
+            let mut text = context_for_issue_with_options_and_scope(
+                &context_config,
+                &source,
+                &options,
+                &scope,
+            )?;
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
-                let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
-                let mut code_scope = scope_filter_from_mcp(config, &arguments, true)?;
+                let code_config = match code_intel_config.clone() {
+                    Some(code_config) => code_config,
+                    None => memory_config_for_code_intel_scope(config, &arguments)?,
+                };
+                let mut code_scope =
+                    worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
                 if code_scope.repo.is_none()
                     && (code_scope.project.is_some() || code_scope.project_set.is_some())
                 {
@@ -3514,14 +3773,14 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.search" => {
             let query = required_string_arg(&arguments, "query")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let results =
                 search_with_scope(config, &query, usize_arg(&arguments, "limit", 10), &scope)?;
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
         "memory.related" => {
             let limit = usize_arg(&arguments, "limit", 10);
-            let scope = scope_filter_from_mcp(config, &arguments, false)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, false, worker_grant)?;
             let results = if let Some(issue) = optional_string_arg(&arguments, "issue") {
                 related_by_issue_with_scope(config, &issue, limit, &scope)?
             } else if let Some(area) = optional_string_arg(&arguments, "area") {
@@ -3542,19 +3801,19 @@ async fn call_memory_tool_with_workspace(
         }
         "memory.brief" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let scope = brief_scope_filter(config, &arguments)?;
+            let scope = brief_scope_filter_for_worker(config, &arguments, worker_grant)?;
             Ok(mcp_text(brief_with_scope(config, &issue, &scope)?))
         }
         "memory.show" => {
             let issue = required_string_arg(&arguments, "issue")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             Ok(mcp_text(load_issue_capsule_with_scope(
                 config, &issue, &scope,
             )?))
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let docs_config = memory_config_for_docs_scope(config, &scope, &area)?;
             Ok(mcp_text(docs_for_area_with_scope(
                 &docs_config,
@@ -3563,7 +3822,7 @@ async fn call_memory_tool_with_workspace(
             )?))
         }
         "memory.status" => {
-            let scope = scope_filter_from_mcp(config, &arguments, true)?;
+            let scope = worker_scope_filter_from_mcp(config, &arguments, true, worker_grant)?;
             let effective_scope = if scope.all_accessible
                 && (scope.project_set.is_some() || scope.project.is_some() || scope.repo.is_some())
             {
@@ -3618,35 +3877,41 @@ async fn call_memory_tool_with_workspace(
                 graph_config,
                 arguments.clone(),
                 workspace_root.map(Path::to_path_buf),
+                worker_grant,
             )
             .await
         }
         "code.ast.status" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = code_intel_config
+                .clone()
+                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
             call_code_ast_status_tool(&code_config)
         }
         "code.ast.outline" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = resolved_ast_config()?;
             call_code_ast_outline_tool(code_config, arguments.clone()).await
         }
         "code.ast.symbols" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = resolved_ast_config()?;
             call_code_ast_symbols_tool(code_config, arguments.clone()).await
         }
         "code.ast.references" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = resolved_ast_config()?;
             call_code_ast_references_tool(code_config, arguments.clone()).await
         }
         "code.ast.query" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = resolved_ast_config()?;
             call_code_ast_query_tool(code_config, arguments.clone()).await
         }
         "code.ast.context" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = match code_intel_config.as_ref() {
+                Some(code_config) => code_config.clone(),
+                None => memory_config_for_code_intel_scope(config, &arguments)?,
+            };
             call_code_ast_context_tool(&code_config, &arguments).await
         }
         "code.ast.diagnostics" => {
-            let code_config = memory_config_for_code_intel_scope(config, &arguments)?;
+            let code_config = resolved_ast_config()?;
             call_code_ast_diagnostics_tool(code_config, arguments.clone()).await
         }
         "memory.capture" => {
@@ -3658,22 +3923,117 @@ async fn call_memory_tool_with_workspace(
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
         "memory.export_okf" => call_memory_export_okf_tool(config, &arguments),
         "memory.import_okf" => call_memory_import_okf_tool(config, &arguments),
-        "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
+        "memory.ingest_code_intel" => {
+            call_memory_ingest_code_intel_tool(
+                code_intel_config.as_ref().unwrap_or(config),
+                &arguments,
+            )
+            .await
+        }
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
         ))),
     }
 }
 
+fn validate_worker_memory_scope(
+    tool_name: &str,
+    arguments: &Value,
+    grant: &MemoryScopeGrant,
+) -> Result<(), MemoryError> {
+    if bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible") {
+        return Err(MemoryError::InvalidInput(
+            "worker memory grants cannot request all accessible records".to_owned(),
+        ));
+    }
+    let requested_project = optional_string_arg(arguments, "project");
+    let requested_repo = repository_scope_argument(arguments)?;
+    let project_required = matches!(
+        tool_name,
+        "memory.brief"
+            | "memory.context"
+            | "memory.search"
+            | "memory.related"
+            | "memory.show"
+            | "memory.docs"
+            | "memory.status"
+    );
+    if project_required && requested_project.as_deref() != Some(grant.project.as_str()) {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant permits project `{}`; requested scope is not permitted",
+            grant.project
+        )));
+    }
+    if requested_project
+        .as_deref()
+        .is_some_and(|project| project != grant.project)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant permits project `{}`; requested scope is not permitted",
+            grant.project
+        )));
+    }
+    let Some(requested_repo) = requested_repo else {
+        return Err(MemoryError::InvalidInput(
+            "worker memory grant requires an explicit repository filter".to_owned(),
+        ));
+    };
+    if tool_name.starts_with("code.") && requested_repo != grant.execution_repo {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker live code access is limited to execution repository `{}`",
+            grant.execution_repo
+        )));
+    }
+    if !grant.authorized_repositories.contains(&requested_repo) {
+        return Err(MemoryError::InvalidInput(
+            "requested repository is outside the worker's project grant".to_owned(),
+        ));
+    }
+    if tool_name.starts_with("code.") {
+        let requested_issue = if tool_name == "code.graph.context" {
+            optional_string_arg(arguments, "runId")
+                .or_else(|| optional_string_arg(arguments, "run"))
+        } else {
+            optional_string_arg(arguments, "issue").or_else(|| {
+                arguments
+                    .get("currentIssue")
+                    .and_then(|current| optional_string_arg(current, "identifier"))
+            })
+        };
+        if requested_issue
+            .as_deref()
+            .is_some_and(|issue| issue != grant.issue)
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "worker memory grant is bound to issue `{}`; requested code scope is not permitted",
+                grant.issue
+            )));
+        }
+    }
+    if arguments
+        .get("projectSet")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "worker memory grant does not permit project-set scope for `{tool_name}`"
+        )));
+    }
+    Ok(())
+}
+
 async fn call_code_graph_context_tool(
     config: MemoryConfig,
     arguments: Value,
     workspace_root: Option<PathBuf>,
+    worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
-    let mut scope = scope_filter_from_mcp(&config, &arguments, true)?;
+    let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    let strict_checkout = checkout_generation
+        .as_deref()
+        .is_some_and(|generation| !generation.trim().is_empty());
+    let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
-        let repo_id = optional_string_arg(&arguments, "repository")
-            .or_else(|| optional_string_arg(&arguments, "repo"))
+        let repo_id = repository_scope_argument(&arguments)?
             .or_else(|| config.default_repository_id.clone())
             .unwrap_or_else(|| {
                 config
@@ -3712,6 +4072,8 @@ async fn call_code_graph_context_tool(
                     &repo_id,
                     &run_id,
                     &context_query,
+                    strict_checkout,
+                    checkout_generation.as_deref(),
                 )
             })
             .transpose()?;
@@ -3727,6 +4089,8 @@ fn resolve_code_graph_overlay(
     repo_id: &str,
     run_id: &str,
     context_query: &CodeGraphContextQuery,
+    strict_checkout: bool,
+    checkout_generation: Option<&str>,
 ) -> Result<CodeWorkspaceOverlay, MemoryError> {
     let workspace_root = workspace_root.ok_or_else(|| {
         MemoryError::InvalidInput(
@@ -3740,8 +4104,17 @@ fn resolve_code_graph_overlay(
                 path: workspace_root.to_path_buf(),
                 source,
             })?;
-    let workspace_candidate = workspace_path_for_root(&workspace_root, run_id)
-        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    let workspace_candidate = if strict_checkout {
+        find_verified_checkout_for_code_intel(
+            &workspace_root,
+            Some(repo_id),
+            Some(run_id),
+            checkout_generation,
+        )?
+    } else {
+        workspace_path_for_root(&workspace_root, run_id)
+            .map_err(|error| MemoryError::InvalidInput(error.to_string()))?
+    };
     if let Ok(metadata) = fs::symlink_metadata(&workspace_candidate)
         && metadata.file_type().is_symlink()
     {
@@ -3794,7 +4167,7 @@ fn resolve_code_graph_overlay(
             "run workspace has no repository binding and does not resolve to the requested repository".to_string(),
         ));
     }
-    let workspace_key = workspace_candidate
+    let workspace_name = workspace_candidate
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
@@ -3806,8 +4179,17 @@ fn resolve_code_graph_overlay(
                 path: manifest.workspace_path.clone(),
                 source,
             })?;
+    let workspace_ownership_matches = if strict_checkout {
+        let generation = workspace_name
+            .strip_prefix(&format!("{}--", manifest.sanitized_workspace_key))
+            .filter(|generation| !generation.is_empty());
+        generation.is_some()
+            && checkout_generation.is_none_or(|expected| generation == Some(expected))
+    } else {
+        manifest.sanitized_workspace_key == workspace_name
+    };
     if (manifest.identifier != run_id && manifest.issue_id != run_id)
-        || manifest.sanitized_workspace_key != workspace_key
+        || !workspace_ownership_matches
         || manifest_workspace_path != workspace_path
     {
         return Err(MemoryError::InvalidInput(
@@ -5839,6 +6221,190 @@ fn resolve_code_intel_repo(
     Ok(resolved)
 }
 
+fn resolve_code_intel_config(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+    workspace_root: Option<&Path>,
+    issue: Option<&str>,
+    checkout_generation: Option<&str>,
+) -> Result<MemoryConfig, MemoryError> {
+    let repo = scope.repo.as_deref().and_then(non_empty);
+    let repo_root = if let (Some(workspace_root), Some(checkout_generation)) = (
+        workspace_root,
+        checkout_generation.filter(|generation| !generation.trim().is_empty()),
+    ) {
+        let issue = issue.ok_or_else(|| {
+            MemoryError::InvalidInput(
+                "strict code-intelligence requests require `repo` and `issue` scope arguments"
+                    .to_owned(),
+            )
+        })?;
+        find_verified_checkout_for_code_intel(
+            workspace_root,
+            repo.as_deref(),
+            Some(issue),
+            Some(checkout_generation),
+        )?
+    } else {
+        repo.as_deref()
+            .map(|repo| resolve_code_intel_repo(config, Some(repo)))
+            .unwrap_or_else(|| Ok(config.repo_root.clone()))?
+    };
+    let mut scoped = config.clone();
+    scoped.repo_root = repo_root;
+    if let Some(repository_id) = scope.repo.as_deref().and_then(non_empty) {
+        if let Some(source) = scoped.repository_sources.get_mut(&repository_id) {
+            source.root = scoped.repo_root.clone();
+        }
+        scoped.default_repository_id = Some(repository_id.to_owned());
+    }
+    Ok(scoped)
+}
+
+async fn resolve_code_intel_config_async(
+    config: &MemoryConfig,
+    scope: &MemoryScopeFilter,
+    workspace_root: Option<&Path>,
+    issue: Option<&str>,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryConfig, MemoryError> {
+    let config = config.clone();
+    let scope = scope.clone();
+    let workspace_root = workspace_root.map(Path::to_path_buf);
+    let issue = issue.map(str::to_owned);
+    let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    tokio::task::spawn_blocking(move || {
+        resolve_code_intel_config(
+            &config,
+            &scope,
+            workspace_root.as_deref(),
+            issue.as_deref(),
+            checkout_generation.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "code-intelligence checkout discovery task failed: {error}"
+        ))
+    })?
+}
+
+fn find_verified_checkout_for_code_intel(
+    workspace_root: &Path,
+    repository_id: Option<&str>,
+    issue: Option<&str>,
+    checkout_generation: Option<&str>,
+) -> Result<PathBuf, MemoryError> {
+    let canonical_root =
+        workspace_root
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: workspace_root.to_path_buf(),
+                source,
+            })?;
+    let mut matches = Vec::new();
+    let entries = fs::read_dir(&canonical_root).map_err(|source| MemoryError::ReadFile {
+        path: canonical_root.clone(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: canonical_root.clone(),
+            source,
+        })?;
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        let checkout_path = candidate.join(".opensymphony/checkout.json");
+        let Ok(raw_checkout) = fs::read_to_string(&checkout_path) else {
+            continue;
+        };
+        let Ok(checkout) = serde_json::from_str::<Value>(&raw_checkout) else {
+            continue;
+        };
+        let Some(found_repository_id) = checkout
+            .pointer("/repository_binding/repository/id")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(found_issue_id) = checkout.get("issue_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_identifier) = checkout.get("identifier").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_generation) = checkout.get("generation").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(found_workspace_key) = checkout
+            .get("sanitized_workspace_key")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(expected_workspace_key) =
+            checkout_workspace_key(found_identifier, found_issue_id, found_repository_id)
+        else {
+            continue;
+        };
+        let expected_workspace_name = format!("{expected_workspace_key}--{found_generation}");
+        if found_workspace_key != expected_workspace_key
+            || candidate.file_name().and_then(|name| name.to_str())
+                != Some(expected_workspace_name.as_str())
+        {
+            continue;
+        }
+        if repository_id.is_some_and(|repository_id| found_repository_id != repository_id)
+            || checkout
+                .get("quarantined")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        if checkout_generation.is_some_and(|generation| found_generation != generation) {
+            continue;
+        }
+        if let Some(issue) = issue
+            && checkout.get("issue_id").and_then(Value::as_str) != Some(issue)
+            && checkout.get("identifier").and_then(Value::as_str) != Some(issue)
+        {
+            continue;
+        }
+        let Ok(canonical_candidate) = candidate.canonicalize() else {
+            continue;
+        };
+        let Some(manifest_path) = checkout.get("workspace_path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(canonical_manifest_path) = Path::new(manifest_path).canonicalize() else {
+            continue;
+        };
+        if canonical_manifest_path != canonical_candidate
+            || !canonical_manifest_path.starts_with(&canonical_root)
+        {
+            continue;
+        }
+        matches.push(canonical_candidate);
+    }
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(MemoryError::InvalidInput(format!(
+            "no verified checkout for repository `{}` and issue `{}`",
+            repository_id.unwrap_or("<unspecified>"),
+            issue.unwrap_or("<unspecified>")
+        ))),
+        _ => Err(MemoryError::InvalidInput(format!(
+            "multiple verified checkouts for repository `{}` and issue `{}`",
+            repository_id.unwrap_or("<unspecified>"),
+            issue.unwrap_or("<unspecified>")
+        ))),
+    }
+}
+
 fn resolve_code_intel_repo_for_scope(
     config: &MemoryConfig,
     scope: &MemoryScopeFilter,
@@ -6026,6 +6592,7 @@ where
         ),
         area: area.and_then(non_empty),
         all_accessible: scope.all_accessible,
+        project_id_only: false,
     }
 }
 
@@ -6111,17 +6678,54 @@ fn scope_filter_from_mcp(
     arguments: &Value,
     include_issue: bool,
 ) -> Result<MemoryScopeFilter, MemoryError> {
+    scope_filter_from_mcp_with_env(config, arguments, include_issue, env_scope_value)
+}
+
+fn worker_scope_filter_from_mcp(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let mut scope = scope_filter_from_mcp(config, arguments, include_issue)?;
+    scope.project_id_only = worker_grant.is_some();
+    Ok(scope)
+}
+
+fn scope_filter_from_mcp_with_env<F>(
+    config: &MemoryConfig,
+    arguments: &Value,
+    include_issue: bool,
+    mut read_env: F,
+) -> Result<MemoryScopeFilter, MemoryError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let all_accessible =
+        bool_arg(arguments, "allAccessible") || bool_arg(arguments, "all_accessible");
     let mut scope = MemoryScopeFilter {
-        project_set: optional_string_arg(arguments, "projectSet"),
-        project: optional_string_arg(arguments, "project"),
+        project_set: optional_string_arg(arguments, "projectSet").or_else(|| {
+            (!all_accessible)
+                .then(|| read_env("OPENSYMPHONY_MEMORY_PROJECT_SET"))
+                .flatten()
+        }),
+        project: optional_string_arg(arguments, "project").or_else(|| {
+            (!all_accessible)
+                .then(|| read_env("OPENSYMPHONY_MEMORY_PROJECT"))
+                .flatten()
+        }),
         milestone: optional_string_arg(arguments, "milestone"),
         issue: include_issue
             .then(|| optional_string_arg(arguments, "issue"))
             .flatten(),
-        repo: optional_string_arg(arguments, "repo"),
+        repo: optional_string_arg(arguments, "repo").or_else(|| {
+            (!all_accessible)
+                .then(|| read_env("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
+                .flatten()
+        }),
         area: optional_string_arg(arguments, "area"),
-        all_accessible: bool_arg(arguments, "allAccessible")
-            || bool_arg(arguments, "all_accessible"),
+        all_accessible,
+        project_id_only: false,
     };
     if !scope.all_accessible
         && scope.project_set.is_none()
@@ -6145,11 +6749,20 @@ fn scope_filter_from_mcp(
     Ok(scope)
 }
 
+#[cfg(test)]
 fn brief_scope_filter(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<MemoryScopeFilter, MemoryError> {
-    let scope = scope_filter_from_mcp(config, arguments, false)?;
+    brief_scope_filter_for_worker(config, arguments, None)
+}
+
+fn brief_scope_filter_for_worker(
+    config: &MemoryConfig,
+    arguments: &Value,
+    worker_grant: Option<&MemoryScopeGrant>,
+) -> Result<MemoryScopeFilter, MemoryError> {
+    let scope = worker_scope_filter_from_mcp(config, arguments, false, worker_grant)?;
     if scope.all_accessible
         || scope.project_set.is_some()
         || scope.project.is_some()
@@ -6260,6 +6873,19 @@ fn optional_string_arg(arguments: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .and_then(non_empty)
+}
+
+fn repository_scope_argument(arguments: &Value) -> Result<Option<String>, MemoryError> {
+    let repo = optional_string_arg(arguments, "repo");
+    let repository = optional_string_arg(arguments, "repository");
+    if let (Some(repo), Some(repository)) = (&repo, &repository)
+        && repo != repository
+    {
+        return Err(MemoryError::InvalidInput(
+            "conflicting repository aliases `repo` and `repository`".to_owned(),
+        ));
+    }
+    Ok(repo.or(repository))
 }
 
 fn string_list_arg(arguments: &Value, key: &str) -> Vec<String> {
@@ -7054,6 +7680,14 @@ async fn update_linear_memory_status(
     issue_keys: &[String],
     warnings: &[String],
 ) -> Result<(), MemoryError> {
+    if client.has_multiple_configured_projects() {
+        tracing::debug!(
+            issue_count = issue_keys.len(),
+            warning_count = warnings.len(),
+            "skipping aggregate Linear memory status for multi-project tracker configuration"
+        );
+        return Ok(());
+    }
     let Some(project) = client
         .project_overview()
         .await
@@ -7243,6 +7877,10 @@ fn linear_client_from_resolved_workflow(
         resolved.config.tracker.project_slug.clone(),
     );
     linear_config.base_url = resolved.config.tracker.endpoint.clone();
+    linear_config.project_ids = resolved.config.tracker.project_ids.clone();
+    linear_config.project_slugs = resolved.config.tracker.project_slugs.clone();
+    linear_config.project_id_slug_fallbacks =
+        resolved.config.tracker.project_id_slug_fallbacks.clone();
     linear_config.project_id = resolved.config.tracker.project_id.clone();
     linear_config.active_states = resolved.config.tracker.active_states.clone();
     linear_config.terminal_states = resolved.config.tracker.terminal_states.clone();
@@ -7526,16 +8164,18 @@ mod tests {
     use std::{collections::BTreeSet, path::PathBuf};
 
     use super::{
-        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
-        authorize_memory_request, brief_scope_filter, call_code_graph_context_tool,
-        call_memory_ingest_code_intel_tool, call_memory_tool, context_source_from_mcp,
-        load_memory_config, memory_server_health, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
-        refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
-        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
-        resolve_code_graph_overlay, resolve_code_intel_repo, run_init, sha256_file_hex,
-        trim_auto_memory_status_log,
+        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryScopeGrant,
+        MemoryScopeGrantRegistry, MemoryServerAccess, MemoryServerAuth, MemoryServerState,
+        RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
+        brief_scope_filter, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
+        call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
+        find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, refresh_memory_index_from_okf_and_reimport_pending,
+        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
+        resolve_code_intel_repo, run_init, sha256_file_hex, trim_auto_memory_status_log,
+        validate_worker_memory_scope,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -7547,7 +8187,7 @@ mod tests {
         persist_code_intel_documents, plan_capture, register_memory_source,
         registered_memory_sources, write_capture_plan,
     };
-    use crate::opensymphony_workspace::IssueManifest;
+    use crate::opensymphony_workspace::{IssueManifest, checkout_workspace_key};
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::Utc;
     use duckdb::{Connection, params};
@@ -7999,6 +8639,24 @@ mod tests {
     }
 
     #[test]
+    fn mcp_all_accessible_scope_ignores_worker_environment_defaults() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("memory config");
+        let scope = super::scope_filter_from_mcp_with_env(
+            &config,
+            &json!({"allAccessible": true, "issue": "COE-550"}),
+            true,
+            |name| Some(format!("worker-{name}")),
+        )
+        .expect("all-accessible MCP scope should resolve");
+        assert!(scope.all_accessible);
+        assert!(scope.project_set.is_none());
+        assert!(scope.project.is_none());
+        assert!(scope.repo.is_none());
+        assert_eq!(scope.issue.as_deref(), Some("COE-550"));
+    }
+
+    #[test]
     fn all_accessible_keeps_explicit_repository_and_project_constraints() {
         let repo = TempDir::new().expect("temp repo");
         let mut config = MemoryConfig::load(repo.path(), None).expect("memory config");
@@ -8096,6 +8754,27 @@ mod tests {
         assert!(names.contains(&"code.ast.query".to_string()));
         assert!(names.contains(&"code.ast.context".to_string()));
         assert!(names.contains(&"code.ast.diagnostics".to_string()));
+        let ast_tool = memory_tool_descriptors(&config, &MemoryServerAuth::default())
+            .into_iter()
+            .find(|tool| tool["name"] == "code.ast.context")
+            .expect("AST context tool");
+        for field in [
+            "repo",
+            "repository",
+            "project",
+            "projectSet",
+            "milestone",
+            "issue",
+            "currentIssue",
+            "area",
+            "allAccessible",
+            "all_accessible",
+        ] {
+            assert!(
+                ast_tool["inputSchema"]["properties"].get(field).is_some(),
+                "AST schema should advertise accepted scope field {field}"
+            );
+        }
     }
 
     #[test]
@@ -8271,6 +8950,60 @@ mod tests {
                 .any(|tool| tool["name"] == "code.graph.context")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "code.ast.status"));
+    }
+
+    #[tokio::test]
+    async fn code_graph_context_uses_selected_repository_enablement() {
+        let catalog = TempDir::new().expect("catalog repo");
+        let repository = TempDir::new().expect("secondary repository");
+        std::fs::write(
+            catalog.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: false\n",
+        )
+        .expect("catalog config");
+        std::fs::write(
+            repository.path().join("opensymphony-memory.yaml"),
+            "code_intel:\n  enabled: true\n",
+        )
+        .expect("repository config");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("catalog config");
+        config.repository_sources.insert(
+            "repo-selected".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-selected".to_string(),
+                root: repository.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::new(),
+                target_branch: None,
+            },
+        );
+
+        let selected = super::memory_config_for_code_graph_scope(
+            &config,
+            &json!({ "repository": "repo-selected" }),
+        )
+        .expect("selected repository graph policy");
+        assert!(selected.enabled);
+        assert!(selected.code_intel.enabled);
+        let error = call_memory_tool(
+            &config,
+            json!({
+                "name": "code.graph.context",
+                "arguments": { "repository": "repo-selected", "query": "missing", "limit": 1 }
+            }),
+        )
+        .await
+        .expect_err("the fixture has no graph index");
+        assert!(
+            error
+                .to_string()
+                .contains("code graph index is unavailable")
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("disabled for the selected repository")
+        );
     }
 
     #[tokio::test]
@@ -8475,6 +9208,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("overlay graph context");
@@ -8508,6 +9242,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("overlay diagnostic graph context");
@@ -8535,6 +9270,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("diagnostic-only overlay graph context");
@@ -8570,6 +9306,7 @@ mod tests {
                 "limit": 10
             }),
             Some(workspaces.path().to_path_buf()),
+            None,
         )
         .await
         .expect("unanalyzed overlay graph context");
@@ -8619,6 +9356,7 @@ mod tests {
                 "runId": "COE-550",
                 "query": "answer",
             }),
+            None,
             None,
         )
         .await
@@ -8670,6 +9408,8 @@ mod tests {
             "repo",
             "COE-544",
             &context_query,
+            false,
+            None,
         )
         .expect_err("foreign workspace must be rejected");
         assert!(foreign.to_string().contains("ownership"));
@@ -8684,6 +9424,8 @@ mod tests {
             "repo",
             "COE-544",
             &context_query,
+            false,
+            None,
         )
         .expect_err("symlinked workspace must be rejected");
         assert!(symlinked.to_string().contains("symlink"));
@@ -11732,6 +12474,13 @@ Public memory concept.
         )
         .expect_err("foreign graph repository should be rejected");
         assert!(error.to_string().contains("not accessible"));
+
+        let error = super::memory_config_for_code_graph_scope(
+            &config,
+            &json!({"repo": "repo-a", "repository": "repo-b"}),
+        )
+        .expect_err("conflicting graph repository aliases should be rejected");
+        assert!(error.to_string().contains("conflicting repository aliases"));
     }
 
     #[tokio::test]
@@ -11877,6 +12626,28 @@ Public memory concept.
     }
 
     #[test]
+    fn strict_memory_server_distinguishes_authenticated_operator_reads() {
+        let auth = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("admin-token".to_string()),
+        };
+
+        assert!(super::memory_operator_authenticated(
+            Some("read-token"),
+            &auth
+        ));
+        assert!(super::memory_operator_authenticated(
+            Some("admin-token"),
+            &auth
+        ));
+        assert!(!super::memory_operator_authenticated(
+            Some("worker-token"),
+            &auth
+        ));
+        assert!(!super::memory_operator_authenticated(None, &auth));
+    }
+
+    #[test]
     fn read_authorization_requires_admin_token_when_only_admin_auth_is_configured() {
         let auth = MemoryServerAuth {
             read_token: None,
@@ -11927,6 +12698,7 @@ Public memory concept.
             resolved_workflow: None,
             config_generation: Some("sha256:pinned-generation".to_string()),
             writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            scope_grants: MemoryScopeGrantRegistry::default(),
         };
 
         let axum::Json(payload) = memory_server_health(axum::extract::State(state)).await;
@@ -12022,6 +12794,435 @@ Public memory concept.
         )
         .expect_err("outside repo must be rejected");
         assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn code_intel_config_uses_an_explicit_repository_path_as_its_root() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        let service = repo.path().join("service");
+        std::fs::create_dir(&service).expect("service directory");
+        let scope = MemoryScopeFilter {
+            repo: Some("service".to_owned()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_code_intel_config(&config, &scope, None, None, None)
+            .expect("explicit repository path should resolve");
+        assert_eq!(
+            resolved.repo_root,
+            service.canonicalize().expect("service should canonicalize")
+        );
+    }
+
+    #[tokio::test]
+    async fn generationless_worker_ast_uses_the_registered_legacy_source() {
+        let catalog = TempDir::new().expect("catalog");
+        let source = TempDir::new().expect("legacy source");
+        let source_root = source.path().canonicalize().expect("canonical source");
+        std::fs::create_dir_all(source_root.join("src")).expect("source directory");
+        std::fs::write(
+            source_root.join("src/lib.rs"),
+            "pub fn legacy_answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "github:repository:legacy";
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("catalog config")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: repository_id.to_owned(),
+                root: source_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_owned()]),
+                target_branch: None,
+            })
+            .with_default_repository_id(repository_id);
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: repository_id.to_owned(),
+            authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: None,
+        };
+
+        let outline = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": {
+                    "repo": repository_id,
+                    "issue": "COE-549",
+                    "paths": ["src/lib.rs"]
+                }
+            }),
+            Some(workspace_root.path()),
+            None,
+            None,
+            Some(&grant),
+        )
+        .await
+        .expect("generation-less grants should use the registered legacy source");
+
+        assert_eq!(
+            outline["documents"][0]["symbols"][0]["name"],
+            "legacy_answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_worker_ast_does_not_resolve_an_unused_inventory_source() {
+        let catalog = TempDir::new().expect("catalog");
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "github:repository:strict";
+        let workspace_key =
+            checkout_workspace_key("COE-549", "issue-549", repository_id).expect("workspace key");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation-1"));
+        std::fs::create_dir_all(checkout.join(".opensymphony")).expect("checkout metadata");
+        std::fs::create_dir_all(checkout.join("src")).expect("checkout source directory");
+        std::fs::write(
+            checkout.join("src/lib.rs"),
+            "pub fn strict_answer() -> u8 { 42 }\n",
+        )
+        .expect("checkout source");
+        std::fs::write(
+            checkout.join(".opensymphony/checkout.json"),
+            serde_json::to_vec(&json!({
+                "generation": "generation-1",
+                "issue_id": "issue-549",
+                "identifier": "COE-549",
+                "sanitized_workspace_key": workspace_key,
+                "workspace_path": checkout,
+                "quarantined": false,
+                "repository_binding": {
+                    "repository": { "id": repository_id }
+                }
+            }))
+            .expect("checkout manifest should serialize"),
+        )
+        .expect("checkout manifest");
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("catalog config")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: repository_id.to_owned(),
+                root: catalog.path().join("inventory-source-not-cloned"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_owned()]),
+                target_branch: None,
+            })
+            .with_default_repository_id(repository_id);
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: repository_id.to_owned(),
+            authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: Some("generation-1".to_owned()),
+        };
+
+        let outline = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": {
+                    "repo": repository_id,
+                    "issue": "COE-549",
+                    "paths": ["src/lib.rs"]
+                }
+            }),
+            Some(workspace_root.path()),
+            None,
+            None,
+            Some(&grant),
+        )
+        .await
+        .expect("strict AST tools should use the verified generation directly");
+
+        assert_eq!(
+            outline["documents"][0]["symbols"][0]["name"],
+            "strict_answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_memory_context_requires_a_worker_scope_grant() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        let error = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "memory.context",
+                "arguments": { "issue": "COE-549" }
+            }),
+            Some(repo.path()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("strict context must reject an unscoped worker request");
+        assert!(
+            error
+                .to_string()
+                .contains("worker's project or repository grant")
+        );
+    }
+
+    #[test]
+    fn worker_memory_grant_rejects_foreign_and_unscoped_requests() {
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: "repo-alpha".to_owned(),
+            authorized_repositories: BTreeSet::from(["repo-alpha".to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: Some("generation-1".to_owned()),
+        };
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"project": "project-alpha", "repo": "repo-alpha"}),
+            &grant,
+        )
+        .expect("exact worker scope should be accepted");
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-beta", "repo": "repo-alpha"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.show",
+                &json!({"project": "project-beta", "repo": "repo-alpha"}),
+                &grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.related",
+                &json!({"project": "project-alpha", "repo": "repo-alpha", "allAccessible": true}),
+                &grant,
+            )
+            .is_err()
+        );
+        let project_grant = MemoryScopeGrant {
+            authorized_repositories: BTreeSet::from([
+                "repo-alpha".to_owned(),
+                "repo-beta".to_owned(),
+            ]),
+            ..grant.clone()
+        };
+        validate_worker_memory_scope(
+            "memory.search",
+            &json!({"project": "project-alpha", "repo": "repo-beta"}),
+            &project_grant,
+        )
+        .expect("project grant should permit its other authorized repositories");
+        validate_worker_memory_scope(
+            "memory.show",
+            &json!({"project": "project-alpha", "repo": "repo-beta"}),
+            &project_grant,
+        )
+        .expect("direct capsule reads should remain project-scoped");
+        assert!(
+            validate_worker_memory_scope(
+                "memory.search",
+                &json!({"project": "project-alpha", "repo": "repo-outsider"}),
+                &project_grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope("memory.brief", &json!({"repo": "repo-alpha"}), &grant,)
+                .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "code.ast.context",
+                &json!({"repo": "repo-beta", "issue": "COE-549"}),
+                &project_grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "code.ast.context",
+                &json!({"repo": "repo-alpha", "issue": "COE-544"}),
+                &grant,
+            )
+            .is_err()
+        );
+        validate_worker_memory_scope(
+            "code.ast.context",
+            &json!({"repo": "repo-alpha", "issue": "COE-549"}),
+            &grant,
+        )
+        .expect("code scope should remain bound to the worker issue");
+        validate_worker_memory_scope("code.graph.context", &json!({"repo": "repo-alpha"}), &grant)
+            .expect("baseline graph scope should not require a run overlay");
+    }
+
+    #[test]
+    fn worker_memory_grant_refresh_preserves_bearer_for_conversation_reuse() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+        let (refreshed, fresh_again) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-2".to_owned()),
+        );
+
+        assert!(!fresh);
+        assert!(!fresh_again);
+        assert_eq!(refreshed, token);
+        assert_eq!(
+            registry
+                .get(Some(&token))
+                .expect("refreshed worker grant should remain valid")
+                .checkout_generation
+                .as_deref(),
+            Some("generation-2")
+        );
+    }
+
+    #[test]
+    fn worker_memory_grant_can_be_revoked_at_issue_lifecycle_boundary() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+
+        assert!(!fresh);
+        assert!(registry.revoke_issue("COE-549"));
+        assert!(registry.get(Some(&token)).is_none());
+        assert!(!registry.revoke_issue("COE-549"));
+    }
+
+    #[test]
+    fn worker_memory_revoke_records_a_tombstone_without_a_live_grant() {
+        let registry = MemoryScopeGrantRegistry::default();
+
+        assert!(!registry.revoke_issue("COE-549"));
+        let (_, requires_fresh_conversation) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+
+        assert!(requires_fresh_conversation);
+    }
+
+    #[test]
+    fn worker_memory_grant_reopen_requires_a_fresh_conversation_after_revocation() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let arguments = || {
+            (
+                "project-alpha",
+                "repo-alpha",
+                BTreeSet::from(["repo-alpha".to_owned()]),
+                "COE-549",
+                Some("generation-1".to_owned()),
+            )
+        };
+
+        let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(!fresh);
+        assert!(registry.get(Some(&token)).is_some());
+
+        assert!(registry.revoke_issue("COE-549"));
+        let (reopened_token, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(fresh);
+        assert_ne!(reopened_token, token);
+
+        let (_, still_fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(still_fresh);
+        registry.acknowledge_fresh_conversation("COE-549");
+        let (_, fresh) = registry.issue_or_refresh_with_lifecycle(
+            arguments().0,
+            arguments().1,
+            arguments().2,
+            arguments().3,
+            arguments().4,
+        );
+        assert!(!fresh);
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_maps_a_canonical_worker_repository_to_its_checkout() {
+        let workspace_root = TempDir::new().expect("workspace root");
+        let workspace_key =
+            checkout_workspace_key("COE-123", "issue-123", "github:github.com:repository:123")
+                .expect("fixture workspace key should be valid");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation"));
+        let metadata = checkout.join(".opensymphony");
+        std::fs::create_dir_all(&metadata).expect("checkout metadata should exist");
+        std::fs::write(
+            metadata.join("checkout.json"),
+            serde_json::to_vec(&json!({
+                "generation": "generation",
+                "issue_id": "issue-123",
+                "identifier": "COE-123",
+                "sanitized_workspace_key": workspace_key,
+                "workspace_path": checkout,
+                "quarantined": false,
+                "repository_binding": {
+                    "repository": { "id": "github:github.com:repository:123" }
+                }
+            }))
+            .expect("checkout manifest should serialize"),
+        )
+        .expect("checkout manifest should write");
+
+        let resolved = find_verified_checkout_for_code_intel(
+            workspace_root.path(),
+            Some("github:github.com:repository:123"),
+            Some("COE-123"),
+            Some("generation"),
+        )
+        .expect("canonical repository should resolve through the issue checkout");
+        assert_eq!(
+            resolved,
+            checkout
+                .canonicalize()
+                .expect("checkout should canonicalize")
+        );
     }
 
     #[test]

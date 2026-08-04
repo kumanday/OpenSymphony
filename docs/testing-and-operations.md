@@ -87,10 +87,13 @@ Current implementation:
   `target/duckdb-download` and reused across rebuilds in the same target
   directory.
 - `cargo test` exercises the full root package, including the fake-server contract suite from `tests/fake_server_contract.rs`
-- `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, lightweight dispatch-summary reads, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, long rate-limit reset return-without-sleep behavior with the 30s inline cap, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
+- `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, lightweight dispatch-summary reads, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, long rate-limit reset return-without-sleep behavior with the 30s inline cap, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh with bounded unscoped fallback for moved issues, and tracker error mapping against a local stub server
 - `cargo test --test linear_client live_linear_client_reads_opensymphony_project -- --ignored --nocapture` is a read-only live evidence probe for PRs that need to show the actual Linear HTTP/GraphQL client path against the OpenSymphony project
 - `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, Linear cooldown behavior, separated Linear polling cadences, manifest-backed workspace recovery against fake tracker/workspace/worker backends, external retry-marker proof, metadata-only workspace recovery, binding-drift workspace rematerialization, legacy parent neutrality, same-ID generation retention, independent running/discovery cadences, and adoption of every launched worker after persistence errors
 - `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
+- `cargo test --test workspace_manager` covers durable checkout/staging ownership-marker sweeps, preservation of foreign generation-shaped directories and staging content, receipt-owned recovery, and the retry verification mode that permits legitimate worker changes while retaining checkout provenance checks
+- `cargo test --lib opensymphony_workspace::manager::tests::discover_agents` and the memory scope tests cover bounded tracked-instruction probes, failure propagation, canonical project-ID filtering, and project-scoped direct capsule reads
+- `cargo test --lib orchestrator_run::backends::tests` covers deferred cross-harness retirement so a failed replacement keeps the previous session recoverable
 - `tests/doctor.rs` runs the CLI live-probe path against the internal `opensymphony_testkit` module
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
@@ -243,6 +246,8 @@ and login -> Enable device code authorization for Codex before retrying.
 - reject symlink-based `cwd` escapes for hooks
 - reject symlinked `.opensymphony` manifest reads and writes
 - cleanup on terminal issue state
+- revoke worker memory grants at terminal, inactive, and binding-supersession
+  boundaries
 
 ## 3.3 OpenHands adapter
 
@@ -260,6 +265,13 @@ and login -> Enable device code authorization for Codex before retrying.
 - `fresh_each_run` reset/new-conversation behavior
 - runtime rejection of unsupported reuse-policy values
 - persisted policy-drift resets
+- recovered trigger-pending `/run` retry after a `409 Conflict`
+- recovered `409 Conflict` baseline refresh after the previous turn drains
+- preservation of untrusted superseded conversations without remote retirement
+- condenser replacement evidence persistence and post-retirement clearing
+- identifier-derived workspace-key supersession for same-ID tracker changes
+- same-harness Codex supersession evidence and harness-specific persistence paths
+- prepared Codex recovery without a persisted turn id resumes with `turn/start`
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
 - recreation of a missing conversation with persisted history
@@ -484,6 +496,11 @@ Expected assertions:
 - the first run uses the full workflow prompt
 - the first run records the exact assistant reply `run 1: workspace-created`
 - `.opensymphony/` manifests and prompt captures exist for debugging
+
+The focused terminal-envelope tests additionally use temporary Git remotes to
+prove atomic staged publication, target-branch and non-shallow verification,
+clean-worktree enforcement, wrong-remote quarantine, collision-resistant
+checkout keys, instruction hashing, and repository-only prompt composition.
 
 ### Scenario B: conversation reuse
 
