@@ -20,7 +20,7 @@ Prove the complete multi-repository lifecycle with deterministic local fixtures,
 systematic restart/fault injection, migration rollback, and one bounded
 non-production live rollout before strict mode can be activated.
 
-## COE-547 Code Baseline
+## Inherited Foundation Evidence
 
 Build the inherited-evidence inventory from these suites:
 
@@ -41,7 +41,13 @@ Build the inherited-evidence inventory from these suites:
   `crates/opensymphony-openhands/src/session.rs`, and
   `crates/opensymphony-orchestrator/tests/scheduler.rs`, including prepared
   OpenHands/Codex reattachment, retry exhaustion, interrupt acknowledgement,
-  tracker reactivation, and retention cases.
+  tracker reactivation, binding/project supersession, conversation fencing,
+  scoped-memory credential replacement, and retention cases.
+- Verified checkout generations and leaf cleanup:
+  `crates/opensymphony-workspace/tests/workspace_manager.rs`, including atomic
+  checkout publication, remote/target/instruction/review-policy verification,
+  drift quarantine, staging recovery, runtime-envelope validation, hook
+  receipts, and terminal cleanup.
 - Catalog coordination:
   `crates/opensymphony-cli/src/memory.rs`, especially
   `central_memory_writers_share_a_catalog_coordination_lock`,
@@ -61,7 +67,7 @@ duplicating the unit matrices.
 
 ### In scope
 
-- Inventory the COE-547 regression cases and map them to the lifecycle fault
+- Inventory the inherited regression cases and map them to the lifecycle fault
   matrix before adding new fixtures.
 - Build a hermetic fixture with at least three local bare repositories,
   contradictory repository instructions, fake Linear hierarchy, fake provider,
@@ -81,7 +87,7 @@ duplicating the unit matrices.
   stale handles, hierarchy mutation, missing merge evidence, provider outage,
   check/review failure, memory scope widening, process timeout, and cleanup
   failure.
-- Compose the COE-547 migration preflight/apply/activation/rollback fixtures
+- Compose the existing migration preflight/apply/activation/rollback fixtures
   into the full lifecycle and verify strict mode remains default-off.
 - Add an opt-in disposable live test with bounded credentials, budgets, timeouts,
   unique repositories/issues/ports, and complete teardown evidence.
@@ -92,7 +98,7 @@ duplicating the unit matrices.
 
 ### Out of scope
 
-- Recreating COE-547's subsystem-level config, migration, marker, retry,
+- Recreating subsystem-level config, migration, checkout-generation, marker, retry,
   reattachment, memory-lock, or generic operator-projection test matrices.
 - Production activation.
 - Hosted multi-tenant isolation.
@@ -101,7 +107,7 @@ duplicating the unit matrices.
 ## Deliverables
 
 - Hermetic multi-repository lifecycle test harness and a fault matrix that maps
-  inherited COE-547 evidence plus remaining cross-subsystem gaps.
+  inherited evidence plus remaining cross-subsystem gaps.
 - Composed migration/rollback and negative-scope integration suite.
 - Opt-in bounded live-test script and teardown report.
 - Release checklist, evidence template, and isolated rollout runbook.
@@ -114,7 +120,7 @@ duplicating the unit matrices.
       services.
 - [ ] Restart at every numbered boundary reaches the same result without
       duplicate side effects or lost leases/evidence.
-- [ ] The fault matrix cites each inherited COE-547 regression and adds new
+- [ ] The fault matrix cites each inherited regression and adds new
       coverage only where the complete multi-repository lifecycle has an
       uncovered transition or interaction.
 - [ ] Every binding, workspace, merge, memory, hierarchy, process, provider, and
@@ -131,7 +137,7 @@ duplicating the unit matrices.
 
 ## Test Plan
 
-- Inventory and run the inherited COE-547 subsystem regressions, then run the
+- Inventory and run the inherited subsystem regressions, then run the
   hermetic suite with systematic restart and cross-subsystem fault injection.
 - Run focused config, Linear, workspace, orchestrator, provider, harness, memory,
   gateway, TUI, web, and desktop tests.
@@ -149,16 +155,12 @@ duplicating the unit matrices.
   snapshot/overlay fixtures.
 - Build the inherited-evidence map from the named suites before writing the
   hermetic harness.
-- After COE-547 closeout is indexed, `memory.context` scoped to issue `COE-547`
-  and areas `testing`, `operations`, `configuration`, `memory`, and
-  `orchestrator` may help recover rationale and evidence links; verify them
-  against the named source and tests.
 - The delegated fork and its PR #20 live harness are reference evidence only;
   they are not sufficient release validation.
 
 ## Definition of Ready
 
-- [x] The COE-547 inherited evidence and remaining hermetic lifecycle boundary
+- [x] The inherited foundation evidence and remaining hermetic lifecycle boundary
       are explicit.
 - [x] Required fixtures, docs, and release evidence are explicitly referenced.
 - [ ] OSYM-894 is merged and the complete implemented state/event surface is

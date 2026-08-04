@@ -20,6 +20,28 @@ Run topology-neutral parent integration and final verification through one
 durable orchestrator-owned state machine, with bounded command evidence,
 cross-repository memory, and deterministic restart behavior.
 
+## Existing Code Baseline
+
+Compose the parent controller from the earlier leaf and parent-root slices:
+
+- `crates/opensymphony-orchestrator/src/scheduler.rs` is the sole owner of
+  mutable scheduling state. Its durable run/interrupt records, recovery
+  bootstrap, immutable binding checks, project/binding supersession, and
+  stop-acknowledgement fence are the transition and cancellation substrate.
+- `crates/opensymphony-cli/src/orchestrator_run/backends.rs` owns harness
+  launch, event normalization, conversation recovery, runtime-envelope
+  verification, and bounded diagnostics. Parent attempts extend that adapter
+  path rather than creating a second worker lifecycle.
+- OSYM-888 supplies authorization-before-filter, run/attempt-aware leaf claims,
+  and strict live-overlay ownership. OSYM-890 supplies generation-bound child
+  handles, the parent root, and the truthful cross-harness execution envelope.
+  Parent grants and attempts must reference those identities.
+
+The remaining work is the durable parent state machine, bounded verification
+attempts, parent-specific grants/capture, and higher-ancestor propagation. Leaf
+worker recovery, checkout verification, and issue-level credential revocation
+are inherited behavior.
+
 ## Scope
 
 ### In scope
@@ -111,9 +133,9 @@ cross-repository memory, and deterministic restart behavior.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [x] Scheduler, harness, memory, and parent-root ownership points are explicit.
+- [x] Parent transition, attempt, capture, and restart evidence is measurable.
+- [x] Provider repair side effects remain assigned to OSYM-892.
 
 ## Notes
 

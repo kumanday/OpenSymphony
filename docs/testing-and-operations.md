@@ -563,7 +563,7 @@ That document covers:
 
 ## Current model
 
-- COE-546 contributed: PR #217: Code Graph bootstrap indexing UX and E2E validation (merge `5cc1e83`)
+- COE-549 contributed: PR #231: Verified checkout generations and harness envelopes (merge `a757a7d`)
 
 ## Important invariants
 
@@ -580,10 +580,10 @@ That document covers:
 
 ## Recent changes
 
-- COE-546: Code Graph Bootstrap UX And End-To-End Validation
+- COE-549: Verified Checkouts Instructions And Harness Envelopes
 
 ## Source refs
 
-- COE-546
+- COE-549
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

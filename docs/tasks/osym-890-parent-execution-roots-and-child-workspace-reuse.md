@@ -19,6 +19,33 @@ Build one repository-neutral parent execution root whose contained integration
 worktrees reuse retained child Git storage and launch through a generic,
 truthfully reported harness execution scope.
 
+## Existing Code Baseline
+
+Extend the landed leaf-generation path instead of introducing alternate
+checkout or launch identities:
+
+- `crates/opensymphony-workspace/src/models.rs::{WorkspaceHandle,
+  CheckoutManifest, TerminalRuntimeEnvelope}` already bind an issue to a
+  verified checkout generation, canonical repository, target commit,
+  instruction provenance, review-policy generations, harness/model,
+  conversation, requested execution scope, effective containment, and cleanup
+  intent.
+- `crates/opensymphony-workspace/src/manager.rs` owns verified checkout
+  materialization, retry verification, generation quarantine, recovery, and
+  atomic artifact writes. Parent checkout handles must resolve through this
+  ownership boundary and retain its remote, cleanliness, containment, and
+  generation checks.
+- `crates/opensymphony-cli/src/orchestrator_run/backends.rs` composes leaf
+  runtime envelopes and launches OpenHands or Codex with the verified checkout
+  as `cwd`. Add the parent-root scope to that shared launch path; do not add a
+  parent-only harness backend or reuse mutable tracker paths as checkout
+  handles.
+
+The remaining work is the repository-neutral parent root, contained
+integration worktrees, and multi-checkout launch envelope. It does not include
+another leaf clone, recovery, quarantine, prompt-instruction, or conversation
+lifecycle.
+
 ## Scope
 
 ### In scope
@@ -98,9 +125,10 @@ truthfully reported harness execution scope.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [x] The verified leaf-generation and harness-envelope substrate is explicit.
+- [x] Parent-root, handle, worktree, and launch ownership is measurable.
+- [x] Controller and repair side effects remain assigned to OSYM-891 and
+      OSYM-892.
 
 ## Notes
 

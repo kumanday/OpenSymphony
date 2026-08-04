@@ -21,7 +21,7 @@ Expose truthful, sanitized multi-repository routing, parent, lease, repair,
 memory, containment, and cleanup state consistently across the control plane,
 CLI, TUI, web, and desktop clients.
 
-## COE-547 Code Baseline
+## Landed Leaf Projection Baseline
 
 Extend this projection chain:
 
@@ -40,9 +40,17 @@ Extend this projection chain:
   `GatewayServer::with_terminal_states`.
 - `crates/opensymphony-workspace/src/models.rs::redact_runtime_diagnostic` is
   the shared credential and bounded-diagnostic redaction boundary.
-- Existing FrankenTUI projections consume the Rust control-plane model. COE-547
-  did not add matching TypeScript/web/desktop multi-repository schemas, so
-  those remain explicit deliverables here.
+- `crates/opensymphony-workspace/src/models.rs::{CheckoutManifest,
+  TerminalRuntimeEnvelope}` already carries canonical repository binding,
+  project/config/inventory/policy generations, checkout generation and path,
+  target branch/commit, instruction provenance, review profile/provider/policy
+  generation, harness/model, requested execution scope, effective containment,
+  conversation binding, and cleanup intent. These are authoritative projection
+  inputs; do not rediscover them from tracker text or local paths.
+- Existing FrankenTUI projections consume the Rust control-plane model. The
+  landed checkout and runtime facts do not yet have matching Rust control-plane
+  fields or TypeScript/web/desktop multi-repository schemas, so those remain
+  explicit deliverables here.
 
 Preserve the regressions
 `retry_exhausted_release_preserves_explicit_reason`,
@@ -83,7 +91,7 @@ cross-client parity.
 
 ### Out of scope
 
-- Redesigning COE-547 retry, terminal-release, tracker-completion, config
+- Redesigning landed retry, terminal-release, tracker-completion, config
   generation, or generic diagnostic-redaction semantics.
 - New scheduling or provider behavior.
 - Hosted tenant RBAC or sandbox implementation.
@@ -91,7 +99,7 @@ cross-client parity.
 
 ## Deliverables
 
-- Rust and TypeScript schema extensions layered on the existing COE-547 runtime
+- Rust and TypeScript schema extensions layered on the existing runtime
   projections, with round-trip fixtures.
 - Gateway snapshots/events and sanitized diagnostic bundles.
 - CLI, TUI, web, and desktop multi-repository projections.
@@ -102,7 +110,7 @@ cross-client parity.
 
 - [ ] Every client agrees on routing, repository, parent, lease, repair, memory,
       containment, provider, verification, and cleanup states.
-- [ ] Existing COE-547 retry, exhaustion, interrupt, release-reason, completion,
+- [ ] Existing retry, exhaustion, interrupt, release-reason, completion,
       config-generation, and diagnostic-redaction fixtures remain stable across
       the new cross-client projections.
 - [ ] Blocked, degraded, quarantined, failed, canceled, and cleaning work never
@@ -120,7 +128,7 @@ cross-client parity.
 
 ## Test Plan
 
-- Inventory the COE-547 Rust DTO and FrankenTUI fixtures first, then add
+- Inventory the existing Rust DTO and FrankenTUI fixtures first, then add
   Rust/TypeScript round trips only for the remaining multi-repository fields.
 - Add gateway snapshot and event tests for leaf, waiting parent, integration,
   repair, blocked, cleaning, and completed states.
@@ -139,9 +147,6 @@ cross-client parity.
   `apps/web`, and `apps/desktop`.
 - Follow the named Rust snapshot-to-gateway projection chain, then compare it
   with the TypeScript and client surfaces listed above.
-- After COE-547 closeout is indexed, `memory.context` scoped to issue `COE-547`
-  and areas `gateway`, `tui`, and `workspace-lifecycle` may supply provenance
-  and rationale; verify it against the named source and fixtures.
 - Treat the generic runtime projections as compatibility inputs, not as a
   reason to broaden this task into scheduling or recovery changes.
 - Public repository identity uses canonical IDs and safe display aliases, never
@@ -149,7 +154,7 @@ cross-client parity.
 
 ## Definition of Ready
 
-- [x] The COE-547 projection baseline and remaining multi-repository operator
+- [x] The landed projection baseline and remaining multi-repository operator
       surface are explicit.
 - [x] Required Rust, TypeScript, client, and documentation paths are explicitly
       referenced.

@@ -42,13 +42,19 @@ overlay paths:
   `resolve_code_graph_overlay`. The current leaf scaffold carries one project,
   execution repository, authorized sibling repositories, issue, and checkout
   generation; it fails closed, requires an explicit repository, and limits
-  live code tools to the execution repository.
+  live code tools to the execution repository. Its
+  `issue_or_refresh_with_lifecycle`, `revoke_issue`, and
+  `acknowledge_fresh_conversation` methods already preserve a bearer across a
+  compatible conversation, revoke it at issue lifecycle boundaries, and force
+  a fresh conversation after revocation or process recovery.
 - `crates/opensymphony-cli/src/orchestrator_run/backends.rs` issues worker
   credentials from the resolved project and repository binding.
   `crates/opensymphony-openhands/src/session.rs::MemoryWorkerAccess` injects the
   scoped MCP endpoint and bearer credential and supersedes conversations whose
   process-scoped credential cannot be refreshed. The Codex backend injects the
-  equivalent CLI scope environment.
+  equivalent CLI scope environment. Scheduler release and binding/project
+  supersession revoke those credentials only after the worker stop path has
+  fenced the prior conversation.
 - `crates/opensymphony-workspace/src/models.rs::{CheckoutManifest,
   TerminalRuntimeEnvelope}` already records immutable repository binding,
   config/inventory/policy generations, checkout generation and path, target
@@ -59,6 +65,8 @@ overlay paths:
 Preserve the fail-closed intent and secret-redaction coverage around
 `worker_memory_grant_rejects_foreign_and_unscoped_requests`,
 `strict_memory_context_requires_a_worker_scope_grant`,
+`worker_memory_grant_refresh_preserves_bearer_for_conversation_reuse`,
+`worker_memory_grant_reopen_requires_a_fresh_conversation_after_revocation`,
 `memory_env_injection_sets_worker_cli_scope`, and
 `memory_worker_access_builds_a_scoped_mcp_server_config`, updating the first
 test's blanket `allAccessible` rejection to the grant-bounded semantics below.
@@ -72,10 +80,11 @@ The process-local registry is a leaf scaffold, not the final claim lifecycle.
   attempt identity, project set, Linear projects, work item, canonical
   repositories, visibility, and administrative capabilities (empty for
   ordinary workers) while preserving its fail-closed behavior.
-- Reconstruct claims from the durable terminal envelope after restart and
-  expire or revoke process credentials when a run, attempt, checkout
-  generation, binding, or conversation is superseded. Do not persist bearer
-  secrets.
+- Extend the existing issue-level credential lifecycle with run and attempt
+  identity. Reconstruct the enriched claims from the durable terminal envelope
+  after restart, rotate them when run/attempt or checkout generation changes,
+  and preserve the landed stop-before-revocation ordering for binding, project,
+  and conversation supersession. Do not persist bearer secrets.
 - Keep authorization claims independent of query filters; every filter narrows
   the grant and `all_accessible` means only all records inside the grant.
 - Permit persisted memory and exact-commit target-branch code snapshots for
@@ -83,10 +92,10 @@ The process-local registry is a leaf scaffold, not the final claim lifecycle.
   authorized sibling repository.
 - Require an explicit canonical repository filter when querying another
   authorized repository.
-- Split persisted code-snapshot authorization from live-overlay authorization:
-  an authorized sibling may supply persisted code, but a live overlay must
-  match the worker's execution repository, issue, run/attempt, and verified
-  checkout generation, target commit, and checkout HEAD.
+- Extend the existing execution-repository and verified-generation overlay
+  checks with run/attempt, target-commit, and checkout-HEAD validation. Keep
+  persisted code-snapshot authorization separate: an authorized sibling may
+  supply persisted code, but never a live overlay.
 - Record and return overlay commit, dirtiness, run owner, source type,
   freshness, and persisted-versus-live provenance.
 - Deny unrelated repositories and every other worker's dirty overlay even when
@@ -172,6 +181,9 @@ The process-local registry is a leaf scaffold, not the final claim lifecycle.
   retrieval contracts.
 - Trace the named baseline types and regressions before changing grant,
   filtering, overlay, credential, capture, or conversation-reuse behavior.
+- Do not redesign verified checkout materialization, harness conversation
+  replacement, issue-level grant revocation, catalog routing, or AST tool
+  schemas; extend those paths only for the remaining claim dimensions.
 
 ## Definition of Ready
 

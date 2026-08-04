@@ -894,7 +894,7 @@ copy that guide into the target repository.
 
 ## Current model
 
-- COE-550 contributed: PR #230: Per-instance memory catalog and canonical source migration (merge `4e6cae8`)
+- COE-549 contributed: PR #231: Verified checkout generations and harness envelopes (merge `a757a7d`)
 
 ## Important invariants
 
@@ -911,10 +911,10 @@ copy that guide into the target repository.
 
 ## Recent changes
 
-- COE-550: Per-Instance Memory Catalog And Source Migration
+- COE-549: Verified Checkouts Instructions And Harness Envelopes
 
 ## Source refs
 
-- COE-550
+- COE-549
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

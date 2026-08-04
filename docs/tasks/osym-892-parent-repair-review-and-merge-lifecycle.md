@@ -20,6 +20,30 @@ Turn integration defects into durable, repository-specific repair attempts that
 create new branches and pull requests, complete configured review, merge
 idempotently, and refresh before final verification.
 
+## Existing Code Baseline
+
+Use the landed repository policy and lifecycle identities as inputs:
+
+- `crates/opensymphony-cli/src/orchestrator_run/config.rs` resolves each
+  repository's credential, target branch, review profile, review provider, and
+  separate review-policy generation into
+  `crates/opensymphony-workspace/src/models.rs::CheckoutRepository`.
+  `CheckoutManifest` and `TerminalRuntimeEnvelope` persist those policy
+  identities with the target commit and `InstructionProvenance`.
+- `crates/opensymphony-workspace/src/manager.rs` rejects retry or recovery when
+  the verified checkout's repository, target, instruction, or review-policy
+  identity drifts. Repair attempts must start from the generation-bound handles
+  supplied by OSYM-890 and persist new attempt receipts atomically.
+- `crates/opensymphony-orchestrator/src/scheduler.rs` already fences a running
+  worker before binding/project supersession and handles the existing Human
+  Review-to-Merging interrupt transition. Reuse those stop and tracker-state
+  semantics; this task adds provider operations and durable repair state rather
+  than a second generic review worker lifecycle.
+
+No GitHub branch/PR/check/review/merge adapter exists in this baseline. That
+provider path and its idempotent repair-attempt records remain the substantive
+work of this task.
+
 ## Scope
 
 ### In scope
@@ -98,9 +122,11 @@ idempotently, and refresh before final verification.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [x] Repository review-policy, checkout, and scheduler lifecycle inputs are
+      explicit.
+- [x] The missing provider adapter and durable repair-attempt behavior are
+      measurable.
+- [x] Subtree cleanup remains assigned to OSYM-893.
 
 ## Notes
 

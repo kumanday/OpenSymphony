@@ -46,6 +46,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -286,6 +287,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -338,6 +340,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -476,6 +479,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -513,14 +517,17 @@ areas:
       docs:
       - docs/configuration.md
       linear_labels:
+      - area:codex-runtime
       - area:configuration
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:workflow
+      - area:workspace-lifecycle
       - configuration
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
@@ -632,6 +639,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -938,6 +946,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -1067,6 +1076,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -1190,6 +1200,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -1681,14 +1692,17 @@ areas:
     - migration
     source_refs:
       linear_labels:
+      - area:codex-runtime
       - area:configuration
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:workflow
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M12.95: Multi-Repository Foundations'
   migration-1-0-0:
@@ -2086,10 +2100,14 @@ areas:
     - planning
     source_refs:
       linear_labels:
+      - area:codex-runtime
       - area:configuration
       - area:mcp
       - area:memory
+      - area:openhands-runtime
       - area:planning
+      - area:workflow
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M12.95: Multi-Repository Foundations'
   prerequisites:
@@ -2137,6 +2155,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -2186,6 +2205,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -2242,6 +2262,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -2353,6 +2374,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -2510,6 +2532,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -2552,6 +2575,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -2662,6 +2686,7 @@ areas:
       - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -2696,6 +2721,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -2747,6 +2773,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -2947,6 +2974,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
@@ -3002,6 +3030,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:operations
       - area:orchestrator
       - area:planning
@@ -3066,6 +3095,7 @@ areas:
       - area:mcp
       - area:memory
       - area:migration
+      - area:openhands-runtime
       - area:orchestrator
       - area:planning
       - area:release
