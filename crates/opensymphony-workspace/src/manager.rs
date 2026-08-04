@@ -2356,6 +2356,45 @@ impl WorkspaceManager {
                     reason: "configured instruction path is not a regular file".to_owned(),
                 });
             }
+            if source == "configured" {
+                let relative =
+                    relative
+                        .to_str()
+                        .ok_or_else(|| WorkspaceError::CheckoutVerification {
+                            path: path.clone(),
+                            generation: source_commit.to_owned(),
+                            reason: "configured instruction path is not valid Unicode".to_owned(),
+                        })?;
+                #[cfg(windows)]
+                let relative = relative.replace('\\', "/");
+                let blob = format!("{source_commit}:{relative}");
+                let literal_path = format!(":(literal){relative}");
+                if !matches!(
+                    self.git(checkout, &["cat-file", "-t", &blob]).await,
+                    Ok(kind) if kind == "blob"
+                ) || self
+                    .git(
+                        checkout,
+                        &[
+                            "diff",
+                            "--quiet",
+                            "--no-ext-diff",
+                            source_commit,
+                            "--",
+                            &literal_path,
+                        ],
+                    )
+                    .await
+                    .is_err()
+                {
+                    return Err(WorkspaceError::CheckoutVerification {
+                        path,
+                        generation: source_commit.to_owned(),
+                        reason: "configured instruction is not a blob matching the source commit"
+                            .to_owned(),
+                    });
+                }
+            }
             if metadata.is_file() {
                 selected = Some((relative, path, source));
                 break;
@@ -4166,17 +4205,30 @@ fn ssh_agent_socket_is_usable() -> bool {
 }
 
 fn ssh_agent_socket_path_is_usable(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
     #[cfg(unix)]
     {
-        metadata.file_type().is_socket()
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        metadata.is_file()
+        windows_named_pipe_path(path)
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_named_pipe_path(path: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let prefix = r"\\.\pipe\";
+    path.len() > prefix.len()
+        && path
+            .get(..prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -4930,7 +4982,7 @@ mod tests {
         WorkspaceError, WorkspaceManager, WorkspaceManagerConfig, build_shell_command,
         discover_agents, git_askpass_username, path_from_git_bytes, read_bounded_instruction_file,
         remote_contains_credentials, sanitize_git_environment, shell_single_quote,
-        ssh_agent_socket_path_is_usable, tracked_instruction_tree,
+        ssh_agent_socket_path_is_usable, tracked_instruction_tree, windows_named_pipe_path,
     };
     use crate::opensymphony_workspace::{CleanupConfig, HookConfig};
 
@@ -5040,6 +5092,78 @@ mod tests {
             error,
             WorkspaceError::InstructionPathEscape { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn configured_instruction_must_belong_to_the_source_commit() {
+        let checkout = tempfile::tempdir().expect("checkout should exist");
+        std::fs::write(checkout.path().join("AGENTS.md"), "tracked instructions\n")
+            .expect("tracked instructions should be written");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "AGENTS.md"],
+            vec![
+                "-c",
+                "user.name=OpenSymphony Test",
+                "-c",
+                "user.email=test@opensymphony.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(checkout.path())
+                    .args(args)
+                    .status()
+                    .expect("git command should launch")
+                    .success()
+            );
+        }
+        let local_instruction = checkout.path().join(".git/hooks/local-instructions.md");
+        std::fs::write(&local_instruction, "machine-local instructions\n")
+            .expect("local instructions should be written");
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse should launch");
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout)
+            .expect("HEAD should be UTF-8")
+            .trim()
+            .to_owned();
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: checkout.path().join("workspaces"),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        let repository = crate::opensymphony_workspace::CheckoutRepository {
+            provider: "git".to_owned(),
+            provider_id: None,
+            remote_locator: "example/repo".to_owned(),
+            remote: "git@example.com:example/repo.git".to_owned(),
+            target_branch: "develop".to_owned(),
+            credential_kind: "ssh-agent".to_owned(),
+            credential_reference: None,
+            credential_env: None,
+            instructions_path: PathBuf::from(".git/hooks/local-instructions.md"),
+            policy_generation: String::new(),
+            review_profile: String::new(),
+            review_provider: String::new(),
+            review_policy_generation: String::new(),
+        };
+
+        let error = manager
+            .load_instruction_provenance(checkout.path(), &repository, &head)
+            .await
+            .expect_err("machine-local instructions must not claim commit provenance");
+        assert!(matches!(error, WorkspaceError::CheckoutVerification { .. }));
     }
 
     #[tokio::test]
@@ -5315,6 +5439,22 @@ mod tests {
             let _listener = UnixListener::bind(&socket_path).expect("Unix socket should bind");
             assert!(ssh_agent_socket_path_is_usable(&socket_path));
         }
+    }
+
+    #[test]
+    fn windows_ssh_agent_endpoint_requires_a_named_pipe_path() {
+        assert!(windows_named_pipe_path(
+            PathBuf::from(r"\\.\pipe\openssh-ssh-agent").as_path()
+        ));
+        assert!(windows_named_pipe_path(
+            PathBuf::from(r"\\.\PIPE\custom-agent").as_path()
+        ));
+        assert!(!windows_named_pipe_path(
+            PathBuf::from("agent.sock").as_path()
+        ));
+        assert!(!windows_named_pipe_path(
+            PathBuf::from(r"\\.\pipe\").as_path()
+        ));
     }
 
     #[test]

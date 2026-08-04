@@ -1005,6 +1005,15 @@ fn resolve_central_config(
     } else {
         None
     };
+    let mode = match config.routing.mode.trim() {
+        "legacy_single" => CentralRoutingMode::LegacySingle,
+        "project_set" => CentralRoutingMode::ProjectSet,
+        _ => {
+            return Err(CentralConfigError::InvalidReference {
+                field: "routing.mode".to_owned(),
+            });
+        }
+    };
 
     let mut checkout_roots: Vec<PathBuf> = Vec::new();
     for (repository_id, repository) in &config.repositories {
@@ -1019,7 +1028,8 @@ fn resolve_central_config(
                 field: format!("repositories.{repository_id}.credential"),
             });
         };
-        if !matches!(credential.kind.as_str(), "ssh-agent")
+        if mode == CentralRoutingMode::ProjectSet
+            && !matches!(credential.kind.as_str(), "ssh-agent")
             && !(credential.kind == "environment" && credential.variable.is_some())
         {
             return Err(CentralConfigError::InvalidReference {
@@ -1120,20 +1130,22 @@ fn resolve_central_config(
             )?;
         }
     }
-    reject_checkout_credential_env_reuse(&config)?;
-    for (repository_id, repository) in &config.repositories {
-        let Some(credential) = config.credentials.get(&repository.credential) else {
-            return Err(CentralConfigError::InvalidReference {
-                field: format!("repositories.{repository_id}.credential"),
-            });
-        };
-        if (credential.kind == "ssh-agent" && !is_ssh_clone_transport(&repository.remote.clone))
-            || (credential.kind == "environment"
-                && !is_https_clone_transport(&repository.remote.clone))
-        {
-            return Err(CentralConfigError::InvalidReference {
-                field: format!("repositories.{repository_id}.credential"),
-            });
+    if mode == CentralRoutingMode::ProjectSet {
+        reject_checkout_credential_env_reuse(&config)?;
+        for (repository_id, repository) in &config.repositories {
+            let Some(credential) = config.credentials.get(&repository.credential) else {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("repositories.{repository_id}.credential"),
+                });
+            };
+            if (credential.kind == "ssh-agent" && !is_ssh_clone_transport(&repository.remote.clone))
+                || (credential.kind == "environment"
+                    && !is_https_clone_transport(&repository.remote.clone))
+            {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("repositories.{repository_id}.credential"),
+                });
+            }
         }
     }
     for (project_id, project) in &config.linear_projects {
@@ -1226,15 +1238,6 @@ fn resolve_central_config(
         });
     }
 
-    let mode = match config.routing.mode.trim() {
-        "legacy_single" => CentralRoutingMode::LegacySingle,
-        "project_set" => CentralRoutingMode::ProjectSet,
-        _ => {
-            return Err(CentralConfigError::InvalidReference {
-                field: "routing.mode".to_owned(),
-            });
-        }
-    };
     let active_project_set = config.routing.active_project_set.as_deref();
     let mut integration_instructions = None;
     let mut active_repositories = BTreeSet::new();
@@ -3795,6 +3798,30 @@ scheduler:
             CentralConfigError::InvalidReference { field }
                 if field == "repositories.core-repo.credential"
         ));
+    }
+
+    #[test]
+    fn central_legacy_config_skips_verified_checkout_credential_constraints() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let legacy = central_fixture(root.path())
+            .replace(
+                "mode: project_set\n  active_project_set: suite",
+                "mode: legacy_single\n  repository: core-repo",
+            )
+            .replace("    integration_instructions: integration.md\n", "");
+        let typed = legacy.replace(
+            "  github-ssh:\n    kind: ssh-agent",
+            "  github-ssh:\n    kind: codex_cli_login\n    reference: codex-cli:chatgpt-login",
+        );
+        resolve_central_config(&root.path().join("typed.yaml"), &typed)
+            .expect("legacy routing must not validate unused checkout credential providers");
+
+        let mismatched_transport = legacy.replace(
+            "git@github.com:kumanday/OpenSymphony.git",
+            "https://github.com/kumanday/OpenSymphony.git",
+        );
+        resolve_central_config(&root.path().join("mismatched.yaml"), &mismatched_transport)
+            .expect("legacy routing must not validate unused clone transport credentials");
     }
 
     #[test]
