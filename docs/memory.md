@@ -471,7 +471,10 @@ On a supervised server with a configured workspace root, unauthenticated
 unscoped reads are still rejected as worker requests; an operator using the
 configured read or admin bearer may perform ordinary read calls without a
 worker grant. Worker calls remain bound to their server-issued project,
-repository, issue, and checkout-generation grant.
+repository, issue, and optional checkout-generation grant. Strict project-set
+grants resolve live code against that verified generation; generation-less
+legacy grants keep using the registered repository source and legacy workspace
+overlay path.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include code-intelligence artifacts alongside selected memory. For requested
 Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
@@ -494,8 +497,9 @@ registry, so a queued retry or recovered worker gets a one-time fresh
 conversation before another turn can use the new grant. The grant is
 server-local, non-persisted, and replaced with the latest verified scope.
 Terminal, inactive, and binding-superseded worker lifecycles revoke the issue
-entry so an old worker environment cannot reuse it after the issue leaves
-execution. If a retained issue later reopens, the next grant is marked for a
+entry only after the harness confirms it has stopped, so a retained live worker
+keeps its bearer while stop acknowledgement is retried. If a retained issue
+later reopens, the next grant is marked for a
 one-time fresh conversation so the old conversation cannot retain the revoked
 bearer. It must not become a process-wide authorization. This project scope applies to direct
 `memory.show` capsule reads

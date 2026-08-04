@@ -3698,6 +3698,13 @@ async fn call_memory_tool_with_workspace(
     } else {
         None
     };
+    let resolved_ast_config = || {
+        code_intel_config.clone().ok_or_else(|| {
+            MemoryError::InvalidInput(format!(
+                "AST code-intelligence configuration was not resolved for `{name}`"
+            ))
+        })
+    };
     match name {
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
@@ -3873,27 +3880,19 @@ async fn call_memory_tool_with_workspace(
             call_code_ast_status_tool(&code_config)
         }
         "code.ast.outline" => {
-            let code_config = code_intel_config
-                .clone()
-                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            let code_config = resolved_ast_config()?;
             call_code_ast_outline_tool(code_config, arguments.clone()).await
         }
         "code.ast.symbols" => {
-            let code_config = code_intel_config
-                .clone()
-                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            let code_config = resolved_ast_config()?;
             call_code_ast_symbols_tool(code_config, arguments.clone()).await
         }
         "code.ast.references" => {
-            let code_config = code_intel_config
-                .clone()
-                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            let code_config = resolved_ast_config()?;
             call_code_ast_references_tool(code_config, arguments.clone()).await
         }
         "code.ast.query" => {
-            let code_config = code_intel_config
-                .clone()
-                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            let code_config = resolved_ast_config()?;
             call_code_ast_query_tool(code_config, arguments.clone()).await
         }
         "code.ast.context" => {
@@ -3904,9 +3903,7 @@ async fn call_memory_tool_with_workspace(
             call_code_ast_context_tool(&code_config, &arguments).await
         }
         "code.ast.diagnostics" => {
-            let code_config = code_intel_config
-                .clone()
-                .unwrap_or(memory_config_for_code_intel_scope(config, &arguments)?);
+            let code_config = resolved_ast_config()?;
             call_code_ast_diagnostics_tool(code_config, arguments.clone()).await
         }
         "memory.capture" => {
@@ -4022,8 +4019,10 @@ async fn call_code_graph_context_tool(
     workspace_root: Option<PathBuf>,
     worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<Value, MemoryError> {
-    let strict_checkout = worker_grant.is_some();
     let checkout_generation = worker_grant.and_then(|grant| grant.checkout_generation.clone());
+    let strict_checkout = checkout_generation
+        .as_deref()
+        .is_some_and(|generation| !generation.trim().is_empty());
     let mut scope = worker_scope_filter_from_mcp(&config, &arguments, true, worker_grant)?;
     ast_mcp_tool_blocking("code.graph.context", move || {
         let repo_id = repository_scope_argument(&arguments)?
@@ -6222,7 +6221,10 @@ fn resolve_code_intel_config(
     checkout_generation: Option<&str>,
 ) -> Result<MemoryConfig, MemoryError> {
     let repo = scope.repo.as_deref().and_then(non_empty);
-    let repo_root = if let Some(workspace_root) = workspace_root {
+    let repo_root = if let (Some(workspace_root), Some(checkout_generation)) = (
+        workspace_root,
+        checkout_generation.filter(|generation| !generation.trim().is_empty()),
+    ) {
         let issue = issue.ok_or_else(|| {
             MemoryError::InvalidInput(
                 "strict code-intelligence requests require `repo` and `issue` scope arguments"
@@ -6233,7 +6235,7 @@ fn resolve_code_intel_config(
             workspace_root,
             repo.as_deref(),
             Some(issue),
-            checkout_generation,
+            Some(checkout_generation),
         )?
     } else {
         repo.as_deref()
@@ -6243,6 +6245,9 @@ fn resolve_code_intel_config(
     let mut scoped = config.clone();
     scoped.repo_root = repo_root;
     if let Some(repository_id) = scope.repo.as_deref().and_then(non_empty) {
+        if let Some(source) = scoped.repository_sources.get_mut(&repository_id) {
+            source.root = scoped.repo_root.clone();
+        }
         scoped.default_repository_id = Some(repository_id.to_owned());
     }
     Ok(scoped)
@@ -12778,6 +12783,136 @@ Public memory concept.
         assert_eq!(
             resolved.repo_root,
             service.canonicalize().expect("service should canonicalize")
+        );
+    }
+
+    #[tokio::test]
+    async fn generationless_worker_ast_uses_the_registered_legacy_source() {
+        let catalog = TempDir::new().expect("catalog");
+        let source = TempDir::new().expect("legacy source");
+        let source_root = source.path().canonicalize().expect("canonical source");
+        std::fs::create_dir_all(source_root.join("src")).expect("source directory");
+        std::fs::write(
+            source_root.join("src/lib.rs"),
+            "pub fn legacy_answer() -> u8 { 42 }\n",
+        )
+        .expect("source");
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "github:repository:legacy";
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("catalog config")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: repository_id.to_owned(),
+                root: source_root,
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_owned()]),
+                target_branch: None,
+            })
+            .with_default_repository_id(repository_id);
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: repository_id.to_owned(),
+            authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: None,
+        };
+
+        let outline = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": {
+                    "repo": repository_id,
+                    "issue": "COE-549",
+                    "paths": ["src/lib.rs"]
+                }
+            }),
+            Some(workspace_root.path()),
+            None,
+            None,
+            Some(&grant),
+        )
+        .await
+        .expect("generation-less grants should use the registered legacy source");
+
+        assert_eq!(
+            outline["documents"][0]["symbols"][0]["name"],
+            "legacy_answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_worker_ast_does_not_resolve_an_unused_inventory_source() {
+        let catalog = TempDir::new().expect("catalog");
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "github:repository:strict";
+        let workspace_key =
+            checkout_workspace_key("COE-549", "issue-549", repository_id).expect("workspace key");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation-1"));
+        std::fs::create_dir_all(checkout.join(".opensymphony")).expect("checkout metadata");
+        std::fs::create_dir_all(checkout.join("src")).expect("checkout source directory");
+        std::fs::write(
+            checkout.join("src/lib.rs"),
+            "pub fn strict_answer() -> u8 { 42 }\n",
+        )
+        .expect("checkout source");
+        std::fs::write(
+            checkout.join(".opensymphony/checkout.json"),
+            serde_json::to_vec(&json!({
+                "generation": "generation-1",
+                "issue_id": "issue-549",
+                "identifier": "COE-549",
+                "sanitized_workspace_key": workspace_key,
+                "workspace_path": checkout,
+                "quarantined": false,
+                "repository_binding": {
+                    "repository": { "id": repository_id }
+                }
+            }))
+            .expect("checkout manifest should serialize"),
+        )
+        .expect("checkout manifest");
+        let config = MemoryConfig::load(catalog.path(), None)
+            .expect("catalog config")
+            .with_repository_source(MemoryRepositorySource {
+                repository_id: repository_id.to_owned(),
+                root: catalog.path().join("inventory-source-not-cloned"),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_owned()]),
+                target_branch: None,
+            })
+            .with_default_repository_id(repository_id);
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: repository_id.to_owned(),
+            authorized_repositories: BTreeSet::from([repository_id.to_owned()]),
+            issue: "COE-549".to_owned(),
+            checkout_generation: Some("generation-1".to_owned()),
+        };
+
+        let outline = call_memory_tool_with_workspace(
+            &config,
+            json!({
+                "name": "code.ast.outline",
+                "arguments": {
+                    "repo": repository_id,
+                    "issue": "COE-549",
+                    "paths": ["src/lib.rs"]
+                }
+            }),
+            Some(workspace_root.path()),
+            None,
+            None,
+            Some(&grant),
+        )
+        .await
+        .expect("strict AST tools should use the verified generation directly");
+
+        assert_eq!(
+            outline["documents"][0]["symbols"][0]["name"],
+            "strict_answer"
         );
     }
 

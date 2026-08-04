@@ -3065,8 +3065,6 @@ where
         };
 
         execution.refresh_issue(issue)?;
-        self.workspace
-            .revoke_issue_resources(execution.issue().identifier.as_str());
         let abort_requested = abort_reason.is_some();
         let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
@@ -3091,6 +3089,8 @@ where
             self.insert_execution(issue_id, execution);
             return Ok(());
         }
+        self.workspace
+            .revoke_issue_resources(execution.issue().identifier.as_str());
         let was_retry_exhausted = retry_exhausted_release(&execution);
         let retain_failed = was_retry_exhausted && self.workspace.retain_failed_workspaces();
         if execution.status() == SchedulerStatus::Released

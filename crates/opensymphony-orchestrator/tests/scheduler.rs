@@ -3389,6 +3389,7 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
     assert_eq!(scheduler.worker().interrupts.len(), 1);
     assert!(scheduler.worker().aborted.is_empty());
     assert!(scheduler.workspace().cleaned.is_empty());
+    assert!(scheduler.workspace().revoked_issue_resources.is_empty());
 
     scheduler
         .tick(ts(600_400))
@@ -3399,6 +3400,10 @@ async fn failed_terminal_interrupt_is_retried_before_cleanup() {
     assert_eq!(
         scheduler.workspace().cleaned,
         vec![("COE-271".to_string(), true)]
+    );
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-271".to_string()]
     );
     assert_eq!(
         scheduler
@@ -3497,6 +3502,7 @@ async fn failed_nonterminal_interrupt_keeps_execution_owned_until_acknowledged()
         SchedulerStatus::Running
     );
     assert!(scheduler.worker().aborted.is_empty());
+    assert!(scheduler.workspace().revoked_issue_resources.is_empty());
 
     scheduler
         .tick(ts(60_400))
@@ -3504,6 +3510,10 @@ async fn failed_nonterminal_interrupt_keeps_execution_owned_until_acknowledged()
         .expect("second inactive reconciliation should retry the stop");
     assert_eq!(scheduler.worker().interrupts.len(), 2);
     assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.workspace().revoked_issue_resources,
+        vec!["COE-272".to_string()]
+    );
     assert_eq!(
         scheduler
             .execution(&issue_id)

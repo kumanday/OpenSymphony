@@ -149,6 +149,11 @@ visibility, or snippet policies. Then read the cited files and run targeted
 behavior and again after touched-file changes. Current source files and tests
 remain authoritative over indexed evidence.
 
+Worker grants with a nonempty checkout generation use that verified generation
+for AST reads and run overlays. Generation-less legacy grants continue through
+the registered repository source and legacy workspace path; they do not require
+a checkout-generation manifest.
+
 Generated, vendor, build, and cache directories such as `node_modules`,
 `target`, `dist`, `build`, `.venv`, `.next`, `.turbo`, `vendor`, and
 `generated` are skipped with trace warnings during directory traversal.
