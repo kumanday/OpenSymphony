@@ -345,6 +345,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:template
       - area:testing
       - area:web
@@ -517,6 +518,7 @@ areas:
       docs:
       - docs/configuration.md
       linear_labels:
+      - area:code-intelligence
       - area:codex-runtime
       - area:configuration
       - area:linear
@@ -526,6 +528,7 @@ areas:
       - area:openhands-runtime
       - area:orchestrator
       - area:planning
+      - area:security
       - area:workflow
       - area:workspace-lifecycle
       - configuration
@@ -644,6 +647,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:testing
       - area:web
       - area:workflow
@@ -952,6 +956,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
@@ -1692,6 +1697,7 @@ areas:
     - migration
     source_refs:
       linear_labels:
+      - area:code-intelligence
       - area:codex-runtime
       - area:configuration
       - area:linear
@@ -1701,6 +1707,7 @@ areas:
       - area:openhands-runtime
       - area:orchestrator
       - area:planning
+      - area:security
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
@@ -2100,12 +2107,14 @@ areas:
     - planning
     source_refs:
       linear_labels:
+      - area:code-intelligence
       - area:codex-runtime
       - area:configuration
       - area:mcp
       - area:memory
       - area:openhands-runtime
       - area:planning
+      - area:security
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
@@ -2210,6 +2219,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:testing
       - area:web
       - area:workflow
@@ -2267,6 +2277,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:testing
       - area:web
       - area:workflow
@@ -2537,6 +2548,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
@@ -2580,6 +2592,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:template
       - area:testing
       - area:web
@@ -2979,6 +2992,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:testing
       - area:web
       - area:workflow
@@ -3100,6 +3114,7 @@ areas:
       - area:planning
       - area:release
       - area:run-detail
+      - area:security
       - area:testing
       - area:web
       - area:workflow

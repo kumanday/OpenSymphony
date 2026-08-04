@@ -11,7 +11,7 @@ last_memory_sync: 2026-07-02T03:46:15.373470+00:00
 
 ## Current model
 
-- COE-549 contributed: PR #231: Verified checkout generations and harness envelopes (merge `a757a7d`)
+- COE-551 contributed: PR #232: [COE-551] Scope cross-repository memory and leaf overlays (merge `c907f6f`)
 
 ## Important invariants
 
@@ -28,11 +28,11 @@ last_memory_sync: 2026-07-02T03:46:15.373470+00:00
 
 ## Recent changes
 
-- COE-549: Verified Checkouts Instructions And Harness Envelopes
+- COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 
 ## Source refs
 
-- COE-549
+- COE-551
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 ## Graph visualization workbench
