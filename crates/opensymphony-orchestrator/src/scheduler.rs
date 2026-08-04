@@ -93,6 +93,7 @@ pub struct SchedulerConfig {
     pub tracker_project_id: Option<String>,
     pub tracker_project_slug: Option<String>,
     pub tracker_project_ids: Vec<String>,
+    pub tracker_project_id_slug_fallbacks: Vec<bool>,
     pub tracker_project_slugs: Vec<String>,
     pub routing: RoutingConfig,
     pub repository_routing: Option<RepositoryRouting>,
@@ -147,6 +148,11 @@ impl SchedulerConfig {
             tracker_project_id: workflow.config.tracker.project_id.clone(),
             tracker_project_slug: Some(workflow.config.tracker.project_slug.clone()),
             tracker_project_ids: workflow.config.tracker.project_ids.clone(),
+            tracker_project_id_slug_fallbacks: workflow
+                .config
+                .tracker
+                .project_id_slug_fallbacks
+                .clone(),
             tracker_project_slugs: workflow.config.tracker.project_slugs.clone(),
             routing: workflow.config.routing.clone(),
             repository_routing: None,
@@ -3843,7 +3849,15 @@ fn project_belongs_to_configured_project(
         config
             .tracker_project_ids
             .iter()
-            .any(|project_id| issue_project_id.trim() == project_id.trim())
+            .enumerate()
+            .any(|(index, project_id)| {
+                !config
+                    .tracker_project_id_slug_fallbacks
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+                    && issue_project_id.trim() == project_id.trim()
+            })
     }) {
         return true;
     }
@@ -4381,6 +4395,7 @@ mod tests {
             tracker_project_id: Some("project-a".to_owned()),
             tracker_project_slug: None,
             tracker_project_ids: Vec::new(),
+            tracker_project_id_slug_fallbacks: Vec::new(),
             tracker_project_slugs: Vec::new(),
             routing: RoutingConfig {
                 harness: "rust_native".to_owned(),
@@ -4407,6 +4422,18 @@ mod tests {
         assert!(!tracker_issue_belongs_to_configured_project(
             &full_detail,
             &config
+        ));
+
+        let mut fallback_config = config;
+        fallback_config.tracker_project_id = None;
+        fallback_config.tracker_project_ids = vec!["legacy-project-slug".to_owned()];
+        fallback_config.tracker_project_id_slug_fallbacks = vec![true];
+        fallback_config.tracker_project_slugs = vec!["configured-project".to_owned()];
+        assert!(!project_belongs_to_configured_project(
+            &fallback_config,
+            Some("legacy-project-slug"),
+            Some("unconfigured-project"),
+            true,
         ));
     }
 }

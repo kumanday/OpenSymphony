@@ -48,6 +48,7 @@ fn scheduler_config() -> SchedulerConfig {
         tracker_project_id: None,
         tracker_project_slug: None,
         tracker_project_ids: Vec::new(),
+        tracker_project_id_slug_fallbacks: Vec::new(),
         tracker_project_slugs: Vec::new(),
         routing: RoutingConfig {
             harness: "openhands_agent_server".into(),

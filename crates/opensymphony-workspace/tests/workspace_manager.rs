@@ -445,6 +445,31 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
     assert!(!manifest.contains("HOME"));
     assert!(!manifest.contains(origin.to_str().expect("origin path")));
 
+    for field in [
+        "policy_generation",
+        "review_profile",
+        "review_provider",
+        "review_policy_generation",
+    ] {
+        let mut forged: serde_json::Value =
+            serde_json::from_str(&manifest).expect("checkout manifest should decode");
+        forged[field] = serde_json::Value::String("forged".to_owned());
+        tokio::fs::write(
+            first.handle.checkout_manifest_path(),
+            serde_json::to_vec_pretty(&forged).expect("forged manifest should encode"),
+        )
+        .await
+        .expect("forged manifest should be writable");
+        assert!(matches!(
+            manager.verify_checkout_for_retry(&first.handle).await,
+            Err(WorkspaceError::CheckoutVerification { reason, .. })
+                if reason == "checkout manifest provenance is inconsistent"
+        ));
+    }
+    tokio::fs::write(first.handle.checkout_manifest_path(), manifest.as_bytes())
+        .await
+        .expect("checkout manifest should be restored");
+
     let reused = manager.ensure(&issue).await.expect("checkout should reuse");
     assert!(!reused.created);
     assert_eq!(
@@ -699,6 +724,16 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         WorkspaceError::CheckoutVerification { reason, .. }
             if reason.contains("no longer descends")
     ));
+    let replacement_error = manager
+        .ensure(&issue)
+        .await
+        .expect_err("conversation-owned drift must block replacement");
+    assert!(matches!(
+        replacement_error,
+        WorkspaceError::CheckoutVerification { reason, .. }
+            if reason.contains("no longer descends")
+    ));
+    assert!(clean_retry.handle.workspace_path().exists());
 
     let checkout_manifest_path = clean_retry.handle.checkout_manifest_path();
     let mut tampered_manifest: serde_json::Value = serde_json::from_str(

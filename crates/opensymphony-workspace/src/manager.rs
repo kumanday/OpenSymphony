@@ -867,6 +867,10 @@ impl WorkspaceManager {
                     .safe_remote_fingerprint
                     .as_str()
             || manifest.target_branch != repository.target_branch
+            || manifest.policy_generation != repository.policy_generation
+            || manifest.review_profile != repository.review_profile
+            || manifest.review_provider != repository.review_provider
+            || manifest.review_policy_generation != repository.review_policy_generation
             || (!allow_worker_changes && manifest.target_branch != manifest.current_branch)
             || manifest.target_commit != manifest.head
         {
@@ -1321,6 +1325,9 @@ impl WorkspaceManager {
                 }
                 Err(error) => {
                     if is_proven_checkout_invalid(&error) {
+                        if path_exists(&handle.conversation_manifest_path()).await? {
+                            return Err(error);
+                        }
                         self.quarantine_checkout(&handle, error.to_string()).await?;
                     } else {
                         return Err(error);
