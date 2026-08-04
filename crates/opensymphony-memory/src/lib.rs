@@ -855,6 +855,22 @@ pub struct IssueEvidence {
     pub project_slug: Option<String>,
     #[serde(default)]
     pub project_name: Option<String>,
+    /// Explicit runtime ownership captured from the immutable terminal
+    /// envelope. Project association is only a fallback for legacy captures.
+    #[serde(default)]
+    pub repository_id: Option<String>,
+    #[serde(default)]
+    pub execution_run_id: Option<String>,
+    #[serde(default)]
+    pub execution_attempt: Option<u32>,
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    #[serde(default)]
+    pub target_commit: Option<String>,
+    #[serde(default)]
+    pub checkout_head: Option<String>,
+    #[serde(default)]
+    pub instruction_hash: Option<String>,
     #[serde(default)]
     pub parent: Option<IssueLinkEvidence>,
     #[serde(default)]
@@ -1041,6 +1057,15 @@ pub struct MemoryScopeFilter {
     pub all_accessible: bool,
     #[serde(skip)]
     pub project_id_only: bool,
+    /// Repository authorization supplied by a worker grant. This is kept out
+    /// of the public filter payload: callers may narrow a grant, but cannot
+    /// manufacture or widen its repository set through query arguments.
+    #[serde(skip)]
+    pub authorized_repositories: Option<BTreeSet<String>>,
+    /// `public` narrows a worker read to public records. A private grant is
+    /// allowed to read both private and public records.
+    #[serde(skip)]
+    pub max_visibility: Option<MemoryVisibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3370,6 +3395,30 @@ Reviews are triggered when you open a pull request for review.
         };
 
         assert!(indexed_issue_matches_scope(&config, &issue, &scope));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from(["repository-1".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from(["repository-2".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                max_visibility: Some(MemoryVisibility::Public),
+                ..MemoryScopeFilter::default()
+            }
+        ));
         assert!(!indexed_issue_matches_scope(
             &config,
             &issue,

@@ -285,10 +285,22 @@ pub fn code_graph_context(
         frontier = next_frontier;
     }
 
+    let source_type = if overlay.is_some() {
+        "workspace_overlay"
+    } else {
+        "indexed_snapshot"
+    };
+    let snapshot_origin = if overlay.is_some() { "live" } else { "persisted" };
+    let dirty = overlay.is_some_and(|overlay| !overlay.changed_paths.is_empty());
+    let run_owner = overlay.map(|overlay| overlay.run_id.clone());
     let provenance = overlay
         .map(|overlay| {
             serde_json::json!({
                 "kind": "workspace_overlay",
+                "sourceType": source_type,
+                "snapshotOrigin": snapshot_origin,
+                "dirty": dirty,
+                "runOwner": overlay.run_id,
                 "runId": overlay.run_id,
                 "baseRevision": overlay.base_revision,
                 "headRevision": overlay.head_revision,
@@ -298,6 +310,10 @@ pub fn code_graph_context(
         .unwrap_or_else(|| {
             serde_json::json!({
                 "kind": "indexed_baseline",
+                "sourceType": source_type,
+                "snapshotOrigin": snapshot_origin,
+                "dirty": false,
+                "runOwner": serde_json::Value::Null,
                 "baseRevision": base_revision
             })
         });
@@ -441,6 +457,14 @@ pub fn code_graph_context(
     Ok(serde_json::json!({
         "repository": options.repo_id,
         "baseRevision": base_revision,
+        "commit": overlay
+            .map(|overlay| overlay.head_revision.clone())
+            .or_else(|| Some(base_revision.clone())),
+        "dirty": dirty,
+        "runOwner": run_owner,
+        "sourceType": source_type,
+        "snapshotOrigin": snapshot_origin,
+        "freshness": if overlay.is_some() { "live" } else { "persisted" },
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
         "provenance": provenance,
         "depth": depth,
@@ -472,12 +496,27 @@ fn context_diagnostic_json(
         "parserVersion": metadata.parser_version,
         "queryPackVersion": metadata.query_pack_version,
         "baseRevision": base_revision,
+        "commit": overlay
+            .map(|overlay| overlay.head_revision.clone())
+            .or_else(|| Some(base_revision.to_owned())),
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
         "provenance": if is_live_overlay_path(overlay, path) {
             "workspace_overlay"
         } else {
             "indexed_baseline"
         },
+        "sourceType": if is_live_overlay_path(overlay, path) {
+            "workspace_overlay"
+        } else {
+            "indexed_snapshot"
+        },
+        "snapshotOrigin": if is_live_overlay_path(overlay, path) {
+            "live"
+        } else {
+            "persisted"
+        },
+        "dirty": overlay.is_some_and(|overlay| overlay.changed_paths.contains(path)),
+        "runOwner": overlay.map(|overlay| overlay.run_id.clone()),
         "freshness": metadata.freshness,
         "sourceRef": context_source_ref(
             path,
@@ -974,8 +1013,15 @@ fn context_symbol_json(
         "confidence": "exact",
         "freshness": symbol.freshness,
         "baseRevision": base_revision,
+        "commit": overlay
+            .map(|overlay| overlay.head_revision.clone())
+            .or_else(|| Some(base_revision.to_owned())),
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
         "provenance": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceType": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_snapshot" },
+        "snapshotOrigin": if is_live_overlay_path(overlay, &symbol.path) { "live" } else { "persisted" },
+        "dirty": overlay.is_some_and(|overlay| overlay.changed_paths.contains(&symbol.path)),
+        "runOwner": overlay.map(|overlay| overlay.run_id.clone()),
         "sourceRef": context_source_ref(&symbol.path, symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col)
     })
 }
@@ -1005,6 +1051,10 @@ fn context_edge_json(
         "baseRevision": base_revision,
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
         "provenance": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceType": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_snapshot" },
+        "snapshotOrigin": if is_live_overlay_path(overlay, &edge.path) { "live" } else { "persisted" },
+        "dirty": overlay.is_some_and(|overlay| overlay.changed_paths.contains(&edge.path)),
+        "runOwner": overlay.map(|overlay| overlay.run_id.clone()),
         "sourceRef": context_source_ref(&edge.path, edge.start_line, edge.start_col, edge.end_line, edge.end_col)
     })
 }

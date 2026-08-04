@@ -166,6 +166,27 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 registration_source_id: None,
             })
             .collect::<Vec<_>>();
+        let mut live_source_refs = live_source_refs;
+        if let (Some(repository_id), Some(run_id)) = (
+            issue_plan.issue.repository_id.as_deref(),
+            issue_plan.issue.execution_run_id.as_deref(),
+        ) {
+            live_source_refs.push(MemorySourceRef {
+                kind: "terminal_runtime_envelope".to_owned(),
+                id: format!(
+                    "run={run_id};attempt={};repo={repository_id};target_branch={};target_commit={};checkout_head={};instruction_hash={}",
+                    issue_plan.issue.execution_attempt.unwrap_or_default(),
+                    issue_plan.issue.target_branch.as_deref().unwrap_or(""),
+                    issue_plan.issue.target_commit.as_deref().unwrap_or(""),
+                    issue_plan.issue.checkout_head.as_deref().unwrap_or(""),
+                    issue_plan.issue.instruction_hash.as_deref().unwrap_or(""),
+                ),
+                url: None,
+                repo_id: Some(repository_id.to_owned()),
+                symbol_key: None,
+                registration_source_id: None,
+            });
+        }
         for source_ref in live_source_refs {
             if !source_refs.contains(&source_ref) {
                 source_refs.push(source_ref);
@@ -537,7 +558,7 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
         .into_iter()
         .flatten()
         .collect::<BTreeSet<_>>();
-    let routed_repository_id = {
+    let routed_repository_id = plan.issue.repository_id.clone().or_else(|| {
         let candidates = config
             .repository_sources
             .values()
@@ -554,7 +575,7 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             .then(|| candidates.into_iter().next())
             .flatten()
             .or_else(|| config.default_repository_id.clone())
-    }
+    })
         .or_else(|| {
             (config.repository_sources.len() == 1)
                 .then(|| config.repository_sources.keys().next().cloned())
@@ -569,6 +590,16 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             kind: KnowledgeScopeKind::Repository,
             id: repository_id.to_string(),
             label: None,
+        });
+    }
+    if let (Some(repository_id), Some(run_id)) = (
+        plan.issue.repository_id.as_deref(),
+        plan.issue.execution_run_id.as_deref(),
+    ) {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Repository,
+            id: format!("{repository_id}@{run_id}"),
+            label: Some("immutable terminal runtime envelope".to_owned()),
         });
     }
     refs

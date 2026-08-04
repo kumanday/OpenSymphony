@@ -605,6 +605,7 @@ fn render_issue_capsule(
                 .iter()
                 .filter_map(|pr| pr.merge_sha.clone())
                 .collect(),
+            terminal_runtime: terminal_runtime_source_ref(&plan.issue),
         },
         timestamp: plan
             .issue
@@ -766,6 +767,21 @@ struct SourceRefs {
     github_prs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     github_merge_shas: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_runtime: Option<String>,
+}
+
+fn terminal_runtime_source_ref(issue: &IssueEvidence) -> Option<String> {
+    let repository_id = issue.repository_id.as_deref()?;
+    let run_id = issue.execution_run_id.as_deref()?;
+    Some(format!(
+        "run={run_id};attempt={};repo={repository_id};target_branch={};target_commit={};checkout_head={};instruction_hash={}",
+        issue.execution_attempt.unwrap_or_default(),
+        issue.target_branch.as_deref().unwrap_or(""),
+        issue.target_commit.as_deref().unwrap_or(""),
+        issue.checkout_head.as_deref().unwrap_or(""),
+        issue.instruction_hash.as_deref().unwrap_or(""),
+    ))
 }
 
 #[derive(Debug, Serialize)]

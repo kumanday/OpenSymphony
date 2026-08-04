@@ -8,7 +8,10 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use crate::opensymphony_cli::{BlockedEnvironment, memory::MemoryScopeGrantRegistry};
+use crate::opensymphony_cli::{
+    BlockedEnvironment,
+    memory::{MemoryScopeGrant, MemoryScopeGrantRegistry},
+};
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
@@ -2321,6 +2324,8 @@ impl RuntimeWorkerBackend {
                         initially_verified_checkout = Some(checkout.clone());
                         Some(TerminalRuntimeEnvelope {
                             repository_binding: checkout.repository_binding.clone(),
+                            run_id: run_id.clone(),
+                            attempt,
                             project_id: issue.project_id.clone(),
                             project_slug: issue.project_slug.clone(),
                             config_generation: checkout
@@ -2380,15 +2385,20 @@ impl RuntimeWorkerBackend {
             let worker_memory_env = memory_env.as_ref().map(|memory| {
                 let mut scoped = memory.clone();
                 scoped.project = worker_memory_project(&issue, &memory.project);
-                // Worker requests carry an issue-specific project and repository grant.
-                // Do not inherit the central project-set scope alongside that grant: the
-                // memory server treats project-set plus a different explicit project as a
-                // conflicting scope and rejects otherwise authorized reads.
-                scoped.project_set = None;
                 scoped.execution_repo = runtime_envelope
                     .as_ref()
                     .map(|envelope| envelope.repository_binding.repository.id.to_string())
                     .unwrap_or_else(|| memory.execution_repo.clone());
+                scoped.run_id = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.run_id.clone());
+                scoped.attempt = runtime_envelope.as_ref().map(|envelope| envelope.attempt);
+                scoped.target_commit = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.target_commit.clone());
+                scoped.checkout_head = initially_verified_checkout
+                    .as_ref()
+                    .map(|checkout| checkout.head.clone());
                 let authorized_repositories = scoped
                     .authorized_repositories_by_project
                     .get(&scoped.project)
@@ -2404,16 +2414,23 @@ impl RuntimeWorkerBackend {
                     .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
                 scoped.authorized_repositories = authorized_repositories.clone();
                 if let Some(grants) = &scoped.scope_grants {
-                    let (token, requires_fresh_conversation) = grants
-                        .issue_or_refresh_with_lifecycle(
-                            &scoped.project,
-                            &scoped.execution_repo,
+                    let (token, requires_fresh_conversation) =
+                        grants.issue_or_refresh_with_claims(MemoryScopeGrant {
+                            project: scoped.project.clone(),
+                            project_set: scoped.project_set.clone(),
+                            execution_repo: scoped.execution_repo.clone(),
                             authorized_repositories,
-                            issue.identifier.as_str(),
-                            runtime_envelope
+                            issue: issue.identifier.to_string(),
+                            run_id: scoped.run_id.clone(),
+                            attempt: scoped.attempt,
+                            checkout_generation: runtime_envelope
                                 .as_ref()
                                 .map(|envelope| envelope.checkout_generation.clone()),
-                        );
+                            target_commit: scoped.target_commit.clone(),
+                            checkout_head: scoped.checkout_head.clone(),
+                            visibility: scoped.visibility,
+                            capabilities: BTreeSet::new(),
+                        });
                     memory_grant_requires_fresh_conversation = requires_fresh_conversation;
                     scoped.token = Some(token.clone());
                 }
@@ -3037,10 +3054,57 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
+    if let Some(run_id) = &memory.run_id {
+        env.insert("OPENSYMPHONY_MEMORY_RUN_ID".to_string(), run_id.clone());
+    }
+    if let Some(attempt) = memory.attempt {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_ATTEMPT".to_string(),
+            attempt.to_string(),
+        );
+    }
+    if !memory.authorized_repositories.is_empty() {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES".to_string(),
+            memory
+                .authorized_repositories
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
 }
 
 fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
-    memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+    let mut prompt = memory_scope_prompt_values(&memory.project, &memory.execution_repo);
+    if let Some(project_set) = &memory.project_set {
+        prompt.push_str(&format!(" Project set is {project_set}."));
+    }
+    if !memory.authorized_repositories.is_empty() {
+        prompt.push_str(&format!(
+            " Authorized repositories are {}; name a sibling repository explicitly for persisted reads.",
+            memory
+                .authorized_repositories
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(run_id) = &memory.run_id {
+        prompt.push_str(&format!(" Run identity is {run_id}"));
+        prompt.push_str(
+            " For code.graph.context, pass this exact value as runId for a live overlay.",
+        );
+    }
+    if let Some(attempt) = memory.attempt {
+        prompt.push_str(&format!(" Attempt is {attempt}"));
+    }
+    prompt.push_str(
+        " Sibling repositories are persisted-memory and target-snapshot reads only; live workspace overlays are limited to this execution repository and verified run.",
+    );
+    prompt
 }
 
 fn worker_memory_project(issue: &NormalizedIssue, fallback: &str) -> String {
@@ -3058,10 +3122,32 @@ fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
 }
 
 fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) -> Option<String> {
-    Some(memory_scope_prompt_values(
+    let mut prompt = memory_scope_prompt_values(
         environment.get("OPENSYMPHONY_MEMORY_PROJECT")?,
         environment.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")?,
-    ))
+    );
+    if let Some(project_set) = environment.get("OPENSYMPHONY_MEMORY_PROJECT_SET") {
+        prompt.push_str(&format!(" Project set is {project_set}."));
+    }
+    if let Some(repositories) = environment.get("OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES")
+        && !repositories.trim().is_empty()
+    {
+        prompt.push_str(&format!(
+            " Authorized repositories are {repositories}; name a sibling repository explicitly for persisted reads."
+        ));
+    }
+    if let Some(run_id) = environment.get("OPENSYMPHONY_MEMORY_RUN_ID") {
+        prompt.push_str(&format!(
+            " Run identity is {run_id}; pass this exact value as runId only for a live execution-repository overlay."
+        ));
+    }
+    if let Some(attempt) = environment.get("OPENSYMPHONY_MEMORY_ATTEMPT") {
+        prompt.push_str(&format!(" Attempt is {attempt}."));
+    }
+    prompt.push_str(
+        " Sibling repositories are persisted-memory and target-snapshot reads only; live workspace overlays are limited to this execution repository and verified run.",
+    );
+    Some(prompt)
 }
 
 fn memory_access_from_runtime(
@@ -3074,6 +3160,8 @@ fn memory_access_from_runtime(
         project: Some(memory.project.clone()),
         execution_repo: Some(memory.execution_repo.clone()),
         authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
+        run_id: memory.run_id.clone(),
+        attempt: memory.attempt,
         // A recovered supervised memory server has a newly reconstructed grant
         // registry, so its bearer differs from the one stored in a reusable
         // OpenHands conversation. In-process retries keep their conversation.
@@ -5586,12 +5674,18 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     .get(worker_id.as_str())
                     .map(|task| task.run.issue_identifier.to_string())
             });
-        if matches!(
+        let revoke_after_stop = matches!(
             reason,
             WorkerAbortReason::TrackerInactive
                 | WorkerAbortReason::TrackerTerminal
                 | WorkerAbortReason::BindingSuperseded
-        ) && let Some(issue_identifier) = issue_identifier
+        );
+        self.abort_tracked_task(worker_id.as_str());
+        // The runtime stop/cancel fence must be issued before the bearer is
+        // revoked. Otherwise an in-flight MCP request can race a grant
+        // replacement and observe a partially torn-down worker lifecycle.
+        if revoke_after_stop
+            && let Some(issue_identifier) = issue_identifier
             && let Some(scope_grants) = self
                 .memory_env
                 .as_ref()
@@ -5599,7 +5693,6 @@ impl WorkerBackend for RuntimeWorkerBackend {
         {
             scope_grants.revoke_issue(&issue_identifier);
         }
-        self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }
 
@@ -8906,6 +8999,11 @@ mod tests {
             authorized_repositories_by_project: BTreeMap::new(),
             scope_grants: None,
             project_set: None,
+            visibility: crate::opensymphony_memory::MemoryVisibility::Private,
+            run_id: None,
+            attempt: None,
+            target_commit: None,
+            checkout_head: None,
         };
         let mut env = BTreeMap::new();
 

@@ -99,6 +99,8 @@ pub struct MemoryWorkerAccess {
     pub project_set: Option<String>,
     pub execution_repo: Option<String>,
     pub authorized_repositories: Vec<String>,
+    pub run_id: Option<String>,
+    pub attempt: Option<u32>,
     /// The token is issued by this process's memory server. A recovered
     /// supervised server may require a replacement conversation because its
     /// reconstructed grant registry cannot update the bearer stored by the
@@ -4048,8 +4050,25 @@ fn append_memory_scope_guidance(
         return guidance;
     };
     guidance.push_str(&format!(
-        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope."
+        "\nMemory tool scope: project={project}; repo={repo}. Pass these exact values as `project` and `repo` arguments to memory.context, memory.search, and memory.related; do not use process-global scope. Sibling repositories are persisted-memory and target-snapshot reads only; live code overlays are limited to the verified execution checkout."
     ));
+    if let Some(project_set) = memory.project_set.as_deref() {
+        guidance.push_str(&format!(" Project set is {project_set}."));
+    }
+    if !memory.authorized_repositories.is_empty() {
+        guidance.push_str(&format!(
+            " Authorized repositories are {}; name a sibling repository explicitly for persisted reads.",
+            memory.authorized_repositories.join(", ")
+        ));
+    }
+    if let Some(run_id) = memory.run_id.as_deref() {
+        guidance.push_str(&format!(
+            " Current run={run_id}; pass it as runId only for a live execution-repository overlay."
+        ));
+    }
+    if let Some(attempt) = memory.attempt {
+        guidance.push_str(&format!(" Current attempt={attempt}."));
+    }
     guidance
 }
 
@@ -4897,6 +4916,8 @@ mod tests {
             project_set: Some("set-alpha".to_string()),
             execution_repo: Some("/tmp/repo-alpha".to_string()),
             authorized_repositories: vec!["repo-alpha".to_string()],
+            run_id: None,
+            attempt: None,
             requires_fresh_conversation: false,
         };
 
@@ -4976,6 +4997,8 @@ mod tests {
                 project_set: None,
                 execution_repo: Some("repo-alpha".to_owned()),
                 authorized_repositories: vec!["repo-alpha".to_owned()],
+                run_id: None,
+                attempt: None,
                 requires_fresh_conversation: false,
             }),
         );
@@ -4994,6 +5017,8 @@ mod tests {
             project_set: None,
             execution_repo: Some("repo-alpha".to_owned()),
             authorized_repositories: vec!["repo-alpha".to_owned(), "repo-beta".to_owned()],
+            run_id: None,
+            attempt: None,
             requires_fresh_conversation: false,
         };
 

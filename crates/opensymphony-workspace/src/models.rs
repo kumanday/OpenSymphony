@@ -73,6 +73,13 @@ pub struct InstructionProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalRuntimeEnvelope {
     pub repository_binding: RepositoryBinding,
+    /// Durable run identity used to bind worker capabilities and live overlay
+    /// reads. Empty values only occur in manifests written before this field
+    /// was introduced and are rejected by strict worker overlay validation.
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub attempt: u32,
     /// Tracker project identity is part of the prompt/runtime binding. A
     /// retained checkout must not silently resume a conversation created for
     /// a different configured project.
