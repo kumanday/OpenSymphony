@@ -579,6 +579,13 @@ fn load_terminal_capture_bindings_inner(
         let Some(envelope) = run.runtime_envelope.as_ref() else {
             continue;
         };
+        // Retained manifests written before run/attempt provenance existed
+        // deserialize these fields as empty/zero. They are not usable capture
+        // bindings, but an unrelated legacy workspace must not abort capture
+        // for the terminal candidates being processed by this poll.
+        if envelope.run_id.trim().is_empty() || envelope.attempt == 0 {
+            continue;
+        }
         if envelope.run_id != run.run_id || envelope.attempt != run.attempt {
             return Err(MemoryError::InvalidInput(format!(
                 "runtime envelope for `{}` does not match its durable run manifest",
@@ -4164,9 +4171,7 @@ fn validate_worker_memory_scope(
             grant.issue
         )));
     }
-    if (is_memory_writer_tool(tool_name) || tool_name == "code.ast.query")
-        && !grant.capabilities.contains(tool_name)
-    {
+    if is_memory_writer_tool(tool_name) && !grant.capabilities.contains(tool_name) {
         return Err(MemoryError::InvalidInput(format!(
             "worker memory grant has no administrative capability for `{tool_name}`"
         )));
@@ -7071,6 +7076,13 @@ fn worker_scope_filter_from_mcp(
     worker_grant: Option<&MemoryScopeGrant>,
 ) -> Result<MemoryScopeFilter, MemoryError> {
     let mut scope = scope_filter_from_mcp(config, arguments, include_issue)?;
+    if let Some(repository_id) = repository_scope_argument(arguments)? {
+        // AST clients advertise the canonical repository under `repository`,
+        // while older memory tools use `repo`. Resolve both aliases before
+        // worker fallback can bind the request to the execution repository.
+        scope.repo = Some(repository_id);
+        normalize_memory_scope_repository(config, &mut scope);
+    }
     if let Some(grant) = worker_grant {
         // The bearer supplies the upper bound. Explicit query arguments may
         // only narrow it, including when `all_accessible` is requested.
@@ -7124,7 +7136,7 @@ where
         issue: include_issue
             .then(|| optional_string_arg(arguments, "issue"))
             .flatten(),
-        repo: optional_string_arg(arguments, "repo").or_else(|| {
+        repo: repository_scope_argument(arguments)?.or_else(|| {
             (!all_accessible)
                 .then(|| read_env("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
                 .flatten()
@@ -13382,6 +13394,53 @@ Public memory concept.
     }
 
     #[test]
+    fn worker_scope_filter_honors_repository_alias_before_execution_fallback() {
+        let catalog = TempDir::new().expect("catalog");
+        let execution_repo = TempDir::new().expect("execution repository");
+        let sibling_repo = TempDir::new().expect("sibling repository");
+        let mut config = MemoryConfig::load(catalog.path(), None).expect("memory config");
+        config.repository_sources.insert(
+            "repo-alpha".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-alpha".to_string(),
+                root: execution_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: None,
+            },
+        );
+        config.repository_sources.insert(
+            "repo-beta".to_string(),
+            MemoryRepositorySource {
+                repository_id: "repo-beta".to_string(),
+                root: sibling_repo.path().to_path_buf(),
+                commit_sha: None,
+                project_scope_ids: BTreeSet::from(["project-alpha".to_string()]),
+                target_branch: None,
+            },
+        );
+        let grant = MemoryScopeGrant {
+            project: "project-alpha".to_string(),
+            execution_repo: "repo-alpha".to_string(),
+            authorized_repositories: BTreeSet::from([
+                "repo-alpha".to_string(),
+                "repo-beta".to_string(),
+            ]),
+            issue: "COE-551".to_string(),
+            ..MemoryScopeGrant::default()
+        };
+
+        let scope = super::worker_scope_filter_from_mcp(
+            &config,
+            &json!({ "repository": "repo-beta", "issue": "COE-551" }),
+            true,
+            Some(&grant),
+        )
+        .expect("repository alias should select the requested sibling");
+        assert_eq!(scope.repo.as_deref(), Some("repo-beta"));
+    }
+
+    #[test]
     fn worker_memory_grant_rejects_foreign_and_unscoped_requests() {
         let grant = MemoryScopeGrant {
             project: "project-alpha".to_owned(),
@@ -13490,6 +13549,8 @@ Public memory concept.
             &project_grant,
         )
         .expect("authorized sibling code may use its persisted target snapshot");
+        validate_worker_memory_scope("code.ast.query", &json!({"repo": "repo-alpha"}), &grant)
+            .expect("read-only AST queries do not require an admin capability");
         validate_worker_memory_scope(
             "code.graph.context",
             &json!({"repo": "repo-beta", "query": "answer"}),
@@ -14080,6 +14141,23 @@ Public memory concept.
             r#"{"head":"head-551"}"#,
         )
         .expect("checkout manifest");
+
+        let legacy_workspace = workspace_root.path().join("legacy");
+        std::fs::create_dir_all(legacy_workspace.join(".opensymphony")).expect("legacy workspace");
+        let mut legacy_run = serde_json::to_value(&run).expect("legacy run manifest value");
+        legacy_run["identifier"] = json!("COE-legacy");
+        legacy_run["issue_id"] = json!("issue-legacy");
+        legacy_run["workspace_path"] = json!(legacy_workspace);
+        let runtime_envelope = legacy_run["runtime_envelope"]
+            .as_object_mut()
+            .expect("legacy runtime envelope");
+        runtime_envelope.remove("run_id");
+        runtime_envelope.remove("attempt");
+        std::fs::write(
+            legacy_workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&legacy_run).expect("legacy run manifest JSON"),
+        )
+        .expect("legacy run manifest");
 
         let bindings =
             super::load_terminal_capture_bindings(workspace_root.path(), &["COE-551".to_string()])

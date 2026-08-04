@@ -467,6 +467,9 @@ token-gated deployments can restrict ad hoc query execution. Admin tools are
 require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
 `opensymphony memory serve`. If an admin token is configured without a separate
 read token, the admin token also protects read tools.
+Worker-grant capability checks follow that server access decision: a local
+read-only `code.ast.query` does not require an administrative grant capability,
+while a configured admin token still gates the request at the server boundary.
 On a supervised server with a configured workspace root, unauthenticated
 unscoped reads are still rejected as worker requests; an operator using the
 configured read or admin bearer may perform ordinary read calls without a
@@ -476,7 +479,9 @@ Explicit filters can only narrow those claims. `all_accessible` is therefore
 bounded by the grant, and an authorized sibling repository must be named
 explicitly. Ordinary worker grants have no administrative capability. Persisted
 sibling memory and target-branch code use the registered canonical source;
-live overlays resolve only the execution repository's verified checkout.
+AST requests may name that source using the `repository` alias as well as the
+legacy `repo` field; live overlays resolve only the execution repository's
+verified checkout.
 The overlay must match the worker's issue, run, attempt, checkout generation,
 and target commit. A worker may advance that checkout during its run; strict
 discovery verifies that the current `HEAD` descends from the target commit
@@ -516,6 +521,9 @@ envelope for repository ownership and commits, and documentation sync uses
 that explicit owner. Terminal capture snapshots those durable envelopes before
 the scheduler performs terminal workspace cleanup, so removal or retention
 policy cannot erase the repository/run provenance needed for capture.
+Retained legacy run envelopes that lack usable run/attempt provenance are
+skipped as non-bindable entries during the pre-cleanup scan rather than
+preventing unrelated terminal captures from completing.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.
