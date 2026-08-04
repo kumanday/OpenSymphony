@@ -478,8 +478,11 @@ explicitly. Ordinary worker grants have no administrative capability. Persisted
 sibling memory and target-branch code use the registered canonical source;
 live overlays resolve only the execution repository's verified checkout.
 The overlay must match the worker's issue, run, attempt, checkout generation,
-target commit, and checkout `HEAD`, and its result reports canonical repository,
-commit, source path or symbol, freshness, and persisted-versus-live provenance.
+and target commit. A worker may advance that checkout during its run; strict
+discovery verifies that the current `HEAD` descends from the target commit
+instead of freezing the overlay to the startup `HEAD`. Each result reports the
+canonical repository, the revision that actually produced its source path or
+symbol, freshness, and persisted-versus-live provenance.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include code-intelligence artifacts alongside selected memory. For requested
 Rust paths, OpenSymphony renders Tree-sitter AST summaries, symbols, diagnostics,
@@ -497,8 +500,9 @@ Worker-scoped memory access uses a server-local, non-persisted bearer grant
 bound to the worker's project-set, project, work item, execution repository,
 authorized repository set, visibility, run/attempt, and checkout generation.
 An unchanged claim set may reuse the conversation bearer; a changed run,
-attempt, binding, target commit, checkout `HEAD`, or generation rotates the
-bearer and requires a fresh conversation. Durable daemon recovery reconstructs
+attempt, binding, target commit, or generation rotates the bearer and requires a
+fresh conversation. The startup checkout `HEAD` is retained as capture
+provenance, not as a live-overlay equality requirement. Durable daemon recovery reconstructs
 the claims from the terminal runtime envelope and forces a fresh conversation
 when the in-memory registry was replaced. Terminal, inactive, and
 binding-superseded lifecycles issue the stop/cancel fence before revoking the
@@ -509,7 +513,9 @@ central service stops, the control-plane status is explicitly degraded and
 scoped worker reads remain blocked; they do not silently fall back to an
 unrelated repository-local store. Leaf capture reads the immutable runtime
 envelope for repository ownership and commits, and documentation sync uses
-that explicit owner.
+that explicit owner. Terminal capture snapshots those durable envelopes before
+the scheduler performs terminal workspace cleanup, so removal or retention
+policy cannot erase the repository/run provenance needed for capture.
 The direct `code.ast.*` tools return JSON with path, line range, content hash,
 parser version, query-pack version, trace, and truncation metadata for targeted
 agent inspection. `memory.context` remains the recommended kickoff path.

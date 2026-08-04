@@ -523,6 +523,7 @@ pub(crate) struct TerminalCaptureBinding {
 
 /// Read durable run envelopes before terminal capture so repository ownership
 /// comes from the execution record rather than project association inference.
+#[cfg(test)]
 pub(crate) fn load_terminal_capture_bindings(
     workspace_root: &Path,
     identifiers: &[String],
@@ -531,6 +532,20 @@ pub(crate) fn load_terminal_capture_bindings(
         .iter()
         .map(|identifier| identifier.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
+    load_terminal_capture_bindings_inner(workspace_root, Some(&requested))
+}
+
+/// Read every durable run envelope before terminal cleanup can remove its workspace.
+pub(crate) fn load_all_terminal_capture_bindings(
+    workspace_root: &Path,
+) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
+    load_terminal_capture_bindings_inner(workspace_root, None)
+}
+
+fn load_terminal_capture_bindings_inner(
+    workspace_root: &Path,
+    requested: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
     let root = workspace_root
         .canonicalize()
         .map_err(|source| MemoryError::ResolvePath {
@@ -558,7 +573,7 @@ pub(crate) fn load_terminal_capture_bindings(
             continue;
         };
         let key = run.identifier.to_ascii_lowercase();
-        if !requested.contains(&key) {
+        if requested.is_some_and(|requested| !requested.contains(&key)) {
             continue;
         }
         let Some(envelope) = run.runtime_envelope.as_ref() else {
@@ -577,7 +592,25 @@ pub(crate) fn load_terminal_capture_bindings(
                     path: candidate.clone(),
                     source,
                 })?;
-        if !workspace_path.starts_with(&root) || envelope.checkout_path != run.workspace_path {
+        let manifest_workspace_path =
+            run.workspace_path
+                .canonicalize()
+                .map_err(|source| MemoryError::ResolvePath {
+                    path: run.workspace_path.clone(),
+                    source,
+                })?;
+        let envelope_workspace_path =
+            envelope
+                .checkout_path
+                .canonicalize()
+                .map_err(|source| MemoryError::ResolvePath {
+                    path: envelope.checkout_path.clone(),
+                    source,
+                })?;
+        if !workspace_path.starts_with(&root)
+            || manifest_workspace_path != workspace_path
+            || envelope_workspace_path != workspace_path
+        {
             return Err(MemoryError::InvalidInput(format!(
                 "runtime envelope for `{}` is outside its configured workspace",
                 run.identifier
@@ -6605,7 +6638,7 @@ fn find_verified_checkout_for_code_intel_with_claims(
     checkout_generation: Option<&str>,
     run_id: Option<&str>,
     target_commit: Option<&str>,
-    checkout_head: Option<&str>,
+    _checkout_head: Option<&str>,
 ) -> Result<PathBuf, MemoryError> {
     let canonical_root =
         workspace_root
@@ -6689,11 +6722,6 @@ fn find_verified_checkout_for_code_intel_with_claims(
         }) {
             continue;
         }
-        if checkout_head.is_some_and(|checkout_head| {
-            checkout.get("head").and_then(Value::as_str) != Some(checkout_head)
-        }) {
-            continue;
-        }
         if let Some(issue) = issue
             && checkout.get("issue_id").and_then(Value::as_str) != Some(issue)
             && checkout.get("identifier").and_then(Value::as_str) != Some(issue)
@@ -6714,7 +6742,7 @@ fn find_verified_checkout_for_code_intel_with_claims(
         {
             continue;
         }
-        if let Some(expected_head) = checkout_head {
+        if let Some(target_commit) = target_commit {
             let actual_head = process::Command::new("git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(&canonical_candidate)
@@ -6723,7 +6751,16 @@ fn find_verified_checkout_for_code_intel_with_claims(
                 .filter(|output| output.status.success())
                 .and_then(|output| String::from_utf8(output.stdout).ok())
                 .map(|head| head.trim().to_owned());
-            if actual_head.as_deref() != Some(expected_head) {
+            let Some(actual_head) = actual_head else {
+                continue;
+            };
+            let is_ancestor = process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", target_commit, &actual_head])
+                .current_dir(&canonical_candidate)
+                .status()
+                .ok()
+                .is_some_and(|status| status.success());
+            if !is_ancestor {
                 continue;
             }
         }
@@ -8540,13 +8577,13 @@ mod tests {
         RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
         brief_scope_filter, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
         call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
-        find_verified_checkout_for_code_intel, load_memory_config, memory_server_health,
-        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
-        parse_remote_memory_response, refresh_memory_index_from_okf_and_reimport_pending,
-        remote_memory_tool_request, remote_memory_tool_token, replace_or_append_managed_section,
-        required_access_for_request, resolve_code_graph_overlay, resolve_code_intel_config,
-        resolve_code_intel_repo, run_init, sha256_file_hex, trim_auto_memory_status_log,
-        validate_worker_memory_scope,
+        find_verified_checkout_for_code_intel, find_verified_checkout_for_code_intel_with_claims,
+        load_memory_config, memory_server_health, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
+        remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
+        resolve_code_graph_overlay, resolve_code_intel_config, resolve_code_intel_repo, run_init,
+        sha256_file_hex, trim_auto_memory_status_log, validate_worker_memory_scope,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -13647,6 +13684,88 @@ Public memory concept.
     }
 
     #[test]
+    fn strict_checkout_accepts_a_run_owned_descendant_head() {
+        let workspace_root = TempDir::new().expect("workspace root");
+        let repository_id = "repo-551";
+        let workspace_key = checkout_workspace_key("COE-551", "issue-551", repository_id)
+            .expect("fixture workspace key should be valid");
+        let checkout = workspace_root
+            .path()
+            .join(format!("{workspace_key}--generation"));
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        std::fs::write(checkout.join("README.md"), "baseline\n").expect("baseline file");
+        init_test_git_repo(&checkout, "develop");
+        let target_commit = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&checkout)
+            .output()
+            .expect("target commit")
+            .stdout;
+        let target_commit = String::from_utf8(target_commit)
+            .expect("target commit should be UTF-8")
+            .trim()
+            .to_owned();
+        std::fs::write(checkout.join("README.md"), "worker commit\n").expect("worker change");
+        for args in [&["add", "."][..], &["commit", "-m", "worker commit"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .expect("worker commit command")
+                    .success()
+            );
+        }
+        let actual_head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&checkout)
+            .output()
+            .expect("actual head")
+            .stdout;
+        let actual_head = String::from_utf8(actual_head)
+            .expect("actual head should be UTF-8")
+            .trim()
+            .to_owned();
+        assert_ne!(actual_head, target_commit);
+
+        std::fs::create_dir_all(checkout.join(".opensymphony")).expect("metadata directory");
+        std::fs::write(
+            checkout.join(".opensymphony/checkout.json"),
+            serde_json::to_vec(&json!({
+                "generation": "generation",
+                "issue_id": "issue-551",
+                "identifier": "COE-551",
+                "sanitized_workspace_key": workspace_key,
+                "workspace_path": checkout,
+                "run_id": "run-551",
+                "target_commit": target_commit,
+                "head": target_commit,
+                "quarantined": false,
+                "repository_binding": { "repository": { "id": repository_id } }
+            }))
+            .expect("checkout manifest JSON"),
+        )
+        .expect("checkout manifest");
+
+        let resolved = find_verified_checkout_for_code_intel_with_claims(
+            workspace_root.path(),
+            Some(repository_id),
+            Some("COE-551"),
+            Some("generation"),
+            Some("run-551"),
+            Some(&target_commit),
+            Some(&target_commit),
+        )
+        .expect("run-owned descendant head should remain a verified checkout");
+        assert_eq!(
+            resolved,
+            checkout
+                .canonicalize()
+                .expect("checkout should canonicalize")
+        );
+    }
+
+    #[test]
     fn code_intel_repo_resolution_uses_registered_canonical_identity() {
         let instance = TempDir::new().expect("instance");
         let repository = TempDir::new().expect("repository");
@@ -13971,6 +14090,32 @@ Public memory concept.
         assert_eq!(bindings["coe-551"].target_commit, "commit-551");
         assert_eq!(bindings["coe-551"].checkout_head, "head-551");
         assert_eq!(bindings["coe-551"].instruction_hash, "sha256:instructions");
+
+        let all_bindings = super::load_all_terminal_capture_bindings(workspace_root.path())
+            .expect("all durable capture bindings");
+        assert_eq!(all_bindings, bindings);
+
+        let outside = workspace_root.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside path");
+        let mut invalid_run: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join(".opensymphony/run.json")).expect("run manifest"),
+        )
+        .expect("run manifest JSON");
+        invalid_run["workspace_path"] = json!(outside);
+        invalid_run["runtime_envelope"]["checkout_path"] = json!(outside);
+        std::fs::write(
+            workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&invalid_run).expect("invalid run manifest JSON"),
+        )
+        .expect("invalid run manifest");
+        let error =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-551".to_string()])
+                .expect_err("capture binding must match the scanned workspace path");
+        assert!(
+            error
+                .to_string()
+                .contains("outside its configured workspace")
+        );
     }
 
     #[test]

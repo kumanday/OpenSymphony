@@ -1285,6 +1285,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             result = async {
                 ticker.tick().await;
                 let observed_at = now_timestamp();
+                let capture_bindings_before_tick = if runtime.memory.auto_capture {
+                    super::memory::load_all_terminal_capture_bindings(
+                        &runtime.workflow.config.workspace.root,
+                    )
+                } else {
+                    Ok(BTreeMap::new())
+                };
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
@@ -1294,9 +1301,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, result)
+                (observed_at, capture_bindings_before_tick, result)
             } => {
-                let (observed_at, result) = result;
+                let (observed_at, capture_bindings_before_tick, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1325,10 +1332,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &recent_events,
                         )).await;
                         if !auto_capture_candidates.is_empty() {
-                            let auto_capture_result = match super::memory::load_terminal_capture_bindings(
-                                &runtime.workflow.config.workspace.root,
-                                &auto_capture_candidates,
-                            ) {
+                            let auto_capture_result = match capture_bindings_before_tick {
                                 Ok(capture_bindings) => {
                                     super::memory::auto_capture_terminal(
                                         &runtime.target_repo,

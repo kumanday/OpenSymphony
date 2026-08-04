@@ -484,6 +484,7 @@ fn context_diagnostic_json(
     metadata: ContextDiagnosticMetadata<'_>,
     diagnostic: &CodeDiagnostic,
 ) -> serde_json::Value {
+    let live_overlay = is_live_overlay_path(overlay, path);
     serde_json::json!({
         "kind": "diagnostic",
         "repository": repo_id,
@@ -496,21 +497,19 @@ fn context_diagnostic_json(
         "parserVersion": metadata.parser_version,
         "queryPackVersion": metadata.query_pack_version,
         "baseRevision": base_revision,
-        "commit": overlay
-            .map(|overlay| overlay.head_revision.clone())
-            .or_else(|| Some(base_revision.to_owned())),
+        "commit": context_record_commit(base_revision, overlay, live_overlay),
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "provenance": if is_live_overlay_path(overlay, path) {
+        "provenance": if live_overlay {
             "workspace_overlay"
         } else {
             "indexed_baseline"
         },
-        "sourceType": if is_live_overlay_path(overlay, path) {
+        "sourceType": if live_overlay {
             "workspace_overlay"
         } else {
             "indexed_snapshot"
         },
-        "snapshotOrigin": if is_live_overlay_path(overlay, path) {
+        "snapshotOrigin": if live_overlay {
             "live"
         } else {
             "persisted"
@@ -997,6 +996,7 @@ fn context_symbol_json(
     symbol: &CodeSymbolRecord,
     relation: &str,
 ) -> serde_json::Value {
+    let live_overlay = is_live_overlay_path(overlay, &symbol.path);
     serde_json::json!({
         "kind": "symbol",
         "relation": relation,
@@ -1013,13 +1013,11 @@ fn context_symbol_json(
         "confidence": "exact",
         "freshness": symbol.freshness,
         "baseRevision": base_revision,
-        "commit": overlay
-            .map(|overlay| overlay.head_revision.clone())
-            .or_else(|| Some(base_revision.to_owned())),
+        "commit": context_record_commit(base_revision, overlay, live_overlay),
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "provenance": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_baseline" },
-        "sourceType": if is_live_overlay_path(overlay, &symbol.path) { "workspace_overlay" } else { "indexed_snapshot" },
-        "snapshotOrigin": if is_live_overlay_path(overlay, &symbol.path) { "live" } else { "persisted" },
+        "provenance": if live_overlay { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceType": if live_overlay { "workspace_overlay" } else { "indexed_snapshot" },
+        "snapshotOrigin": if live_overlay { "live" } else { "persisted" },
         "dirty": overlay.is_some_and(|overlay| overlay.changed_paths.contains(&symbol.path)),
         "runOwner": overlay.map(|overlay| overlay.run_id.clone()),
         "sourceRef": context_source_ref(&symbol.path, symbol.start_line, symbol.start_col, symbol.end_line, symbol.end_col)
@@ -1034,6 +1032,7 @@ fn context_edge_json(
     related_symbol: Option<&CodeSymbolRecord>,
     relation: &str,
 ) -> serde_json::Value {
+    let live_overlay = is_live_overlay_path(overlay, &edge.path);
     serde_json::json!({
         "kind": "edge",
         "relation": relation,
@@ -1049,14 +1048,29 @@ fn context_edge_json(
         "confidence": edge.confidence,
         "freshness": edge.freshness,
         "baseRevision": base_revision,
+        "commit": context_record_commit(base_revision, overlay, live_overlay),
         "overlayDigest": overlay.map(|overlay| overlay.workspace_content_digest.clone()),
-        "provenance": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_baseline" },
-        "sourceType": if is_live_overlay_path(overlay, &edge.path) { "workspace_overlay" } else { "indexed_snapshot" },
-        "snapshotOrigin": if is_live_overlay_path(overlay, &edge.path) { "live" } else { "persisted" },
+        "provenance": if live_overlay { "workspace_overlay" } else { "indexed_baseline" },
+        "sourceType": if live_overlay { "workspace_overlay" } else { "indexed_snapshot" },
+        "snapshotOrigin": if live_overlay { "live" } else { "persisted" },
         "dirty": overlay.is_some_and(|overlay| overlay.changed_paths.contains(&edge.path)),
         "runOwner": overlay.map(|overlay| overlay.run_id.clone()),
         "sourceRef": context_source_ref(&edge.path, edge.start_line, edge.start_col, edge.end_line, edge.end_col)
     })
+}
+
+fn context_record_commit(
+    base_revision: &str,
+    overlay: Option<&CodeWorkspaceOverlay>,
+    live_overlay: bool,
+) -> String {
+    if live_overlay {
+        overlay
+            .map(|overlay| overlay.head_revision.clone())
+            .unwrap_or_else(|| base_revision.to_owned())
+    } else {
+        base_revision.to_owned()
+    }
 }
 
 fn is_live_overlay_path(overlay: Option<&CodeWorkspaceOverlay>, path: &str) -> bool {
@@ -7991,7 +8005,7 @@ mod code_graph_tests {
     };
     use chrono::Utc;
     use duckdb::Connection;
-    use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command, sync::Arc};
+    use std::{collections::{BTreeMap, BTreeSet}, fs, path::{Path, PathBuf}, process::Command, sync::Arc};
     use tempfile::TempDir;
 
     use super::{
@@ -8011,6 +8025,7 @@ mod code_graph_tests {
         re_resolve_workspace_edges,
         CodeEdgeRecord, CodeSymbolRecord,
         repository_scope_matches, workspace_git_bytes, CodeGraphProjectionError,
+        CodeWorkspaceOverlay,
     };
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -8087,6 +8102,47 @@ mod code_graph_tests {
             freshness: "current".to_string(),
             indexed_at: "now".to_string(),
         }
+    }
+
+    #[test]
+    fn context_records_keep_the_base_commit_for_persisted_overlay_paths() {
+        let overlay = CodeWorkspaceOverlay {
+            run_id: "run-551".to_string(),
+            base_revision: "base-revision".to_string(),
+            head_revision: "overlay-head+worktree".to_string(),
+            workspace_content_digest: "digest".to_string(),
+            base_symbols: BTreeMap::new(),
+            base_paths: BTreeSet::new(),
+            base_edges: Vec::new(),
+            symbols: BTreeMap::new(),
+            edges: Vec::new(),
+            changed_paths: BTreeSet::from(["src/live.rs".to_string()]),
+            tombstones: BTreeSet::new(),
+            unanalyzed_files: Vec::new(),
+            diagnostics: BTreeMap::new(),
+            diagnostic_metadata: BTreeMap::new(),
+            retrieval_dropped: 0,
+        };
+
+        let baseline = super::context_symbol_json(
+            "repo-551",
+            "base-revision",
+            Some(&overlay),
+            &test_symbol("baseline", "src/base.rs"),
+            "direct",
+        );
+        assert_eq!(baseline["commit"], "base-revision");
+        assert_eq!(baseline["provenance"], "indexed_baseline");
+
+        let live = super::context_symbol_json(
+            "repo-551",
+            "base-revision",
+            Some(&overlay),
+            &test_symbol("live", "src/live.rs"),
+            "direct",
+        );
+        assert_eq!(live["commit"], "overlay-head+worktree");
+        assert_eq!(live["provenance"], "workspace_overlay");
     }
 
     #[test]
