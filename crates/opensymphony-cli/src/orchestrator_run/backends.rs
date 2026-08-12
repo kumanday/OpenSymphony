@@ -20,9 +20,9 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
-    IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
-    RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
+    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome,
+    RetryEntry, RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
     TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
@@ -120,6 +120,8 @@ pub(super) struct RuntimeTrackerBackend {
     github_http: reqwest::Client,
     github_token: Option<String>,
 }
+
+const GITHUB_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ActiveConversationStorePreparation {
@@ -322,9 +324,13 @@ fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment
 pub(super) fn build_tracker_backend(
     workflow: &ResolvedWorkflow,
 ) -> Result<RuntimeTrackerBackend, LinearError> {
+    let github_http = reqwest::Client::builder()
+        .timeout(GITHUB_ELIGIBILITY_TIMEOUT)
+        .build()
+        .map_err(|error| LinearError::InvalidConfiguration(format!("GitHub client: {error}")))?;
     Ok(RuntimeTrackerBackend {
         client: build_linear_client(workflow)?,
-        github_http: reqwest::Client::new(),
+        github_http,
         github_token: env::var("GITHUB_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty()),
@@ -914,10 +920,11 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 .ok_or_else(|| LinearError::MissingIssueIds {
                     issue_ids: vec![edge.child_identifier.as_str().to_owned()],
                 })?;
-            let (provider_merge_confirmed, merge_result_commit) = match child.pr_url.as_deref() {
-                Some(pr_url) => self.github_merge_evidence(pr_url).await?,
-                None => (false, None),
-            };
+            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) =
+                match child.pr_url.as_deref() {
+                    Some(pr_url) => self.github_merge_evidence(pr_url).await?,
+                    None => (false, None, None),
+                };
             evidence.push(ChildEligibilityEvidence {
                 child_id: edge.child_id.clone(),
                 hierarchy_generation: hierarchy.generation,
@@ -926,6 +933,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 orchestrator_terminal: false,
                 provider_merge_confirmed,
                 merge_result_commit,
+                merge_repository_id,
                 resource: None,
                 unresolved_failure: None,
             });
@@ -975,7 +983,7 @@ impl RuntimeTrackerBackend {
     async fn github_merge_evidence(
         &self,
         pr_url: &str,
-    ) -> Result<(bool, Option<String>), LinearError> {
+    ) -> Result<(bool, Option<String>, Option<CanonicalRepositoryId>), LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
         })?;
@@ -997,6 +1005,14 @@ impl RuntimeTrackerBackend {
             "https://api.github.com/repos/{}/{}/pulls/{}",
             segments[0], segments[1], segments[3]
         );
+        let merge_repository_id = CanonicalRepositoryId::from_remote(
+            "github",
+            None,
+            format!("{}/{}", segments[0], segments[1]),
+        )
+        .map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub repository identity: {error}"))
+        })?;
         let mut request = self
             .github_http
             .get(endpoint)
@@ -1024,6 +1040,7 @@ impl RuntimeTrackerBackend {
         Ok((
             pull_request.merged_at.is_some(),
             pull_request.merge_commit_sha,
+            Some(merge_repository_id),
         ))
     }
 }

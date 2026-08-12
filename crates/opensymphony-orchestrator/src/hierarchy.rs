@@ -255,6 +255,8 @@ pub struct ChildEligibilityEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_result_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_repository_id: Option<CanonicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<LeaseResource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unresolved_failure: Option<String>,
@@ -280,6 +282,7 @@ impl ParentEligibilityEvidence {
                     orchestrator_terminal: false,
                     provider_merge_confirmed: false,
                     merge_result_commit: None,
+                    merge_repository_id: None,
                     resource: None,
                     unresolved_failure: None,
                 })
@@ -324,6 +327,16 @@ impl ParentEligibilityEvidence {
             {
                 return Err(HierarchyBlockedReason::MissingTargetCommit);
             }
+            if child
+                .merge_repository_id
+                .as_ref()
+                .zip(child.resource.as_ref())
+                .is_some_and(|(merge_repository, resource)| {
+                    merge_repository != &resource.repository_id
+                })
+            {
+                return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
+            }
             if child.resource.is_none() {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
             }
@@ -367,6 +380,8 @@ pub struct DurableOrchestratorState {
     pub hierarchy: BTreeMap<IssueId, HierarchySnapshot>,
     #[serde(default)]
     pub leases: Vec<LeaseRecord>,
+    #[serde(default)]
+    pub run_hierarchy_generations: BTreeMap<IssueId, u64>,
 }
 
 impl Default for DurableOrchestratorState {
@@ -375,6 +390,7 @@ impl Default for DurableOrchestratorState {
             schema_version: HIERARCHY_STATE_SCHEMA_VERSION,
             hierarchy: BTreeMap::new(),
             leases: Vec::new(),
+            run_hierarchy_generations: BTreeMap::new(),
         }
     }
 }
@@ -626,6 +642,7 @@ mod tests {
                 orchestrator_terminal: true,
                 provider_merge_confirmed: true,
                 merge_result_commit: Some("abc123".to_owned()),
+                merge_repository_id: None,
                 resource: Some(resource.clone()),
                 unresolved_failure: None,
             }],

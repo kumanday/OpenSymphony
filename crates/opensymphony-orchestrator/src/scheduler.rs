@@ -557,7 +557,9 @@ pub struct Scheduler<T, W, M> {
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     parent_issue_ids: HashSet<IssueId>,
     terminal_child_failure_ids: HashSet<IssueId>,
+    parent_eligibility_checked_at: BTreeMap<IssueId, TimestampMs>,
     hierarchy_state: DurableOrchestratorState,
+    hierarchy_state_dirty: bool,
     durable_state_loaded: bool,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
@@ -598,7 +600,9 @@ where
             worker_metadata: HashMap::new(),
             parent_issue_ids: HashSet::new(),
             terminal_child_failure_ids: HashSet::new(),
+            parent_eligibility_checked_at: BTreeMap::new(),
             hierarchy_state: DurableOrchestratorState::default(),
+            hierarchy_state_dirty: false,
             durable_state_loaded: false,
             pending_retry_persistence: BTreeMap::new(),
             pending_retry_exhaustion_persistence: BTreeMap::new(),
@@ -1113,39 +1117,59 @@ where
     ) -> Result<bool, SchedulerError> {
         let mut durable_state_changed = false;
         for tracker_issue in &tracker_snapshot.active {
-            let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
-            let should_retain_parent_identity = !tracker_issue.sub_issues.is_empty()
-                || self
-                    .hierarchy_state
-                    .hierarchy
-                    .get(&normalized.id)
-                    .is_some_and(|snapshot| {
-                        !snapshot.required_child_edges.is_empty()
-                            || snapshot.frozen
-                            || snapshot.blocked_reason.is_some()
-                    });
-            if should_retain_parent_identity {
-                self.terminal_child_failure_ids.remove(&normalized.id);
-                self.parent_issue_ids.insert(normalized.id.clone());
-                if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
-                    self.hierarchy_state
-                        .hierarchy
-                        .insert(normalized.id.clone(), HierarchySnapshot::new(tracker_issue));
-                    durable_state_changed = true;
-                }
-                if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id)
-                    && !matches!(
-                        snapshot.reconcile(&tracker_issue.sub_issues),
-                        super::HierarchyReconciliation::Unchanged
-                    )
-                {
-                    durable_state_changed = true;
-                }
-            } else {
-                self.parent_issue_ids.remove(&normalized.id);
-            }
+            durable_state_changed |= self.reconcile_hierarchy_issue(tracker_issue)?;
         }
+        self.hierarchy_state_dirty |= durable_state_changed;
         Ok(durable_state_changed)
+    }
+
+    fn reconcile_hierarchy_issue(
+        &mut self,
+        tracker_issue: &TrackerIssue,
+    ) -> Result<bool, SchedulerError> {
+        let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+        if self.terminal_child_failure_ids.contains(&normalized.id)
+            && self.executions.get(&normalized.id).is_none_or(|execution| {
+                execution.retry().is_none()
+                    && execution.last_worker_outcome().is_none_or(|outcome| {
+                        matches!(outcome.outcome, WorkerOutcomeKind::Succeeded)
+                    })
+            })
+        {
+            self.terminal_child_failure_ids.remove(&normalized.id);
+        }
+        let should_retain_parent_identity = !tracker_issue.sub_issues.is_empty()
+            || self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| {
+                    !snapshot.required_child_edges.is_empty()
+                        || snapshot.frozen
+                        || snapshot.blocked_reason.is_some()
+                });
+        if !should_retain_parent_identity {
+            self.parent_issue_ids.remove(&normalized.id);
+            return Ok(false);
+        }
+        self.terminal_child_failure_ids.remove(&normalized.id);
+        self.parent_issue_ids.insert(normalized.id.clone());
+        if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
+            self.hierarchy_state
+                .hierarchy
+                .insert(normalized.id.clone(), HierarchySnapshot::new(tracker_issue));
+            return Ok(true);
+        }
+        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id)
+            && !matches!(
+                snapshot.reconcile(&tracker_issue.sub_issues),
+                super::HierarchyReconciliation::Unchanged
+            )
+        {
+            self.parent_eligibility_checked_at.remove(&normalized.id);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn set_linear_cooldown_from_tracker_error(
@@ -1180,7 +1204,7 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        if self.reconcile_hierarchy_snapshots(tracker_snapshot)? {
+        if self.reconcile_hierarchy_snapshots(tracker_snapshot)? || self.hierarchy_state_dirty {
             self.persist_orchestrator_state().await?;
         }
         if self.recovered {
@@ -1950,7 +1974,7 @@ where
             }
         }
 
-        if durable_state_changed {
+        if durable_state_changed || self.hierarchy_state_dirty {
             self.persist_orchestrator_state().await?;
         }
         Ok(())
@@ -2828,6 +2852,11 @@ where
                 }
             }
 
+            if self.reconcile_hierarchy_issue(&tracker_issue)? || self.hierarchy_state_dirty {
+                self.hierarchy_state_dirty = true;
+                self.persist_orchestrator_state().await?;
+            }
+
             if !normalized.sub_issues.is_empty() {
                 let parent_retry = self
                     .executions
@@ -2843,6 +2872,29 @@ where
                     .await?
                 {
                     continue;
+                }
+            }
+
+            if let Some(hierarchy_generation) = self
+                .hierarchy_state
+                .hierarchy
+                .values()
+                .filter(|snapshot| {
+                    snapshot
+                        .required_child_edges
+                        .iter()
+                        .any(|edge| edge.required && edge.child_id == issue_id)
+                })
+                .map(|snapshot| snapshot.generation)
+                .max()
+            {
+                let previous_state = self.hierarchy_state.clone();
+                self.hierarchy_state
+                    .run_hierarchy_generations
+                    .insert(issue_id.clone(), hierarchy_generation);
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    return Err(error);
                 }
             }
 
@@ -3709,6 +3761,20 @@ where
         if snapshot.dispatch_intended() {
             return Ok(false);
         }
+        if self
+            .parent_eligibility_checked_at
+            .get(&normalized.id)
+            .is_some_and(|checked_at| {
+                checked_at
+                    .as_u64()
+                    .saturating_add(DISPATCH_DISCOVERY_INTERVAL_MS)
+                    > observed_at.as_u64()
+            })
+        {
+            return Ok(false);
+        }
+        self.parent_eligibility_checked_at
+            .insert(normalized.id.clone(), observed_at);
         let mut evidence = match self
             .tracker
             .parent_eligibility(tracker_issue, &snapshot)
@@ -3928,7 +3994,9 @@ where
             .await
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
-            })
+            })?;
+        self.hierarchy_state_dirty = false;
+        Ok(())
     }
 
     async fn retain_terminal_child_lease(
@@ -3964,16 +4032,22 @@ where
         let leaf_owner = super::LeaseOwner::leaf_worker(&issue_id);
         let hierarchy_generation = self
             .hierarchy_state
-            .hierarchy
-            .values()
-            .filter(|snapshot| {
-                snapshot
-                    .required_child_edges
-                    .iter()
-                    .any(|edge| edge.required && edge.child_id == issue_id)
+            .run_hierarchy_generations
+            .get(&issue_id)
+            .copied()
+            .or_else(|| {
+                self.hierarchy_state
+                    .hierarchy
+                    .values()
+                    .filter(|snapshot| {
+                        snapshot
+                            .required_child_edges
+                            .iter()
+                            .any(|edge| edge.required && edge.child_id == issue_id)
+                    })
+                    .map(|snapshot| snapshot.generation)
+                    .max()
             })
-            .map(|snapshot| snapshot.generation)
-            .max()
             .unwrap_or_default();
         if self.hierarchy_state.leases.iter().any(|lease| {
             lease.active()

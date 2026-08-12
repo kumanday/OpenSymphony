@@ -724,6 +724,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             orchestrator_terminal: true,
             provider_merge_confirmed: true,
             merge_result_commit: Some("merge-commit".to_owned()),
+            merge_repository_id: None,
             resource: Some(resource),
             unresolved_failure: None,
         }],
