@@ -36,7 +36,8 @@ use crate::opensymphony_openhands::{
     pending_conversation_manifest_path, superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
-    DurableOrchestratorState, LeaseResource, RecoveredRun, RecoveryRecord, RetryExhaustionRecord,
+    ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
+    ParentEligibilityEvidence, RecoveredRun, RecoveryRecord, RetryExhaustionRecord,
     RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
@@ -88,6 +89,8 @@ pub(super) enum CliWorkspaceError {
     ConversationLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
+    #[error("workspace cleanup deferred while a durable lease is active")]
+    CleanupDeferred,
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +117,8 @@ enum LaunchReport {
 
 pub(super) struct RuntimeTrackerBackend {
     client: LinearClient,
+    github_http: reqwest::Client,
+    github_token: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -319,6 +324,10 @@ pub(super) fn build_tracker_backend(
 ) -> Result<RuntimeTrackerBackend, LinearError> {
     Ok(RuntimeTrackerBackend {
         client: build_linear_client(workflow)?,
+        github_http: reqwest::Client::new(),
+        github_token: env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty()),
     })
 }
 
@@ -881,6 +890,52 @@ fn strict_openhands_cleanup_requires_conversation_store(
 impl TrackerBackend for RuntimeTrackerBackend {
     type Error = LinearError;
 
+    async fn parent_eligibility(
+        &mut self,
+        _parent: &TrackerIssue,
+        hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        let identifiers = hierarchy
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+            .map(|edge| edge.child_identifier.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let children = self.client.issues_by_identifiers(&identifiers).await?;
+        let mut evidence = Vec::with_capacity(hierarchy.required_child_edges.len());
+        for edge in hierarchy
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+        {
+            let child = children
+                .iter()
+                .find(|child| child.id == edge.child_id.as_str())
+                .ok_or_else(|| LinearError::MissingIssueIds {
+                    issue_ids: vec![edge.child_identifier.as_str().to_owned()],
+                })?;
+            let (provider_merge_confirmed, merge_result_commit) = match child.pr_url.as_deref() {
+                Some(pr_url) => self.github_merge_evidence(pr_url).await?,
+                None => (false, None),
+            };
+            evidence.push(ChildEligibilityEvidence {
+                child_id: edge.child_id.clone(),
+                hierarchy_generation: hierarchy.generation,
+                // The scheduler overlays this provider evidence with its
+                // own durable terminal outcome for the child execution.
+                orchestrator_terminal: false,
+                provider_merge_confirmed,
+                merge_result_commit,
+                resource: None,
+                unresolved_failure: None,
+            });
+        }
+        Ok(ParentEligibilityEvidence {
+            hierarchy_generation: hierarchy.generation,
+            children: evidence,
+        })
+    }
+
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
     }
@@ -914,6 +969,69 @@ impl TrackerBackend for RuntimeTrackerBackend {
     fn retry_after(error: &Self::Error) -> Option<Duration> {
         error.retry_after()
     }
+}
+
+impl RuntimeTrackerBackend {
+    async fn github_merge_evidence(
+        &self,
+        pr_url: &str,
+    ) -> Result<(bool, Option<String>), LinearError> {
+        let url = Url::parse(pr_url).map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
+        })?;
+        if !matches!(url.host_str(), Some("github.com" | "www.github.com")) {
+            return Err(LinearError::InvalidResponse(format!(
+                "pull request URL is not hosted on GitHub: {pr_url}"
+            )));
+        }
+        let segments = url
+            .path_segments()
+            .map(|segments| segments.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if segments.len() != 4 || segments[2] != "pull" {
+            return Err(LinearError::InvalidResponse(format!(
+                "invalid GitHub pull request path: {pr_url}"
+            )));
+        }
+        let endpoint = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}",
+            segments[0], segments[1], segments[3]
+        );
+        let mut request = self
+            .github_http
+            .get(endpoint)
+            .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+        if let Some(token) = self.github_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(LinearError::HttpStatus {
+                status,
+                body: format!("GitHub pull request lookup failed for {pr_url}"),
+                retry_after: None,
+            });
+        }
+        let pull_request = response
+            .json::<GitHubPullRequest>()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        Ok((
+            pull_request.merged_at.is_some(),
+            pull_request.merge_commit_sha,
+        ))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequest {
+    merged_at: Option<String>,
+    merge_commit_sha: Option<String>,
 }
 
 impl RuntimeWorkspaceBackend {
@@ -999,7 +1117,7 @@ impl RuntimeWorkspaceBackend {
                     issue = %workspace.workspace_key,
                     "retaining terminal workspace while a durable lease is active"
                 );
-                return Ok(());
+                return Err(CliWorkspaceError::CleanupDeferred);
             }
             let Some(handle) = self
                 .manager

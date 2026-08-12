@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, IssueIdentifier, TrackerIssue, TrackerIssueRef,
@@ -53,6 +54,8 @@ pub struct HierarchySnapshot {
     pub blocked_reason: Option<HierarchyBlockedReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_intent_generation: Option<u64>,
 }
 
 impl HierarchySnapshot {
@@ -64,6 +67,7 @@ impl HierarchySnapshot {
             frozen: false,
             blocked_reason: None,
             dispatched_generation: None,
+            dispatch_intent_generation: None,
         };
         snapshot.required_child_edges = child_edges(&parent.sub_issues);
         snapshot
@@ -78,6 +82,7 @@ impl HierarchySnapshot {
         self.generation = self.generation.saturating_add(1);
         self.required_child_edges = next_edges;
         self.dispatched_generation = None;
+        self.dispatch_intent_generation = None;
         if self.frozen {
             self.blocked_reason = Some(HierarchyBlockedReason::HierarchyChanged);
             HierarchyReconciliation::BlockedForReplanning {
@@ -107,10 +112,24 @@ impl HierarchySnapshot {
         self.frozen = false;
         self.blocked_reason = None;
         self.dispatched_generation = None;
+        self.dispatch_intent_generation = None;
+    }
+
+    pub fn mark_dispatch_intent(&mut self) {
+        self.dispatch_intent_generation = Some(self.generation);
+    }
+
+    pub fn clear_dispatch_intent(&mut self) {
+        self.dispatch_intent_generation = None;
+    }
+
+    pub fn dispatch_intended(&self) -> bool {
+        self.dispatch_intent_generation == Some(self.generation)
     }
 
     pub fn mark_dispatched(&mut self) {
         self.dispatched_generation = Some(self.generation);
+        self.dispatch_intent_generation = None;
     }
 
     pub fn dispatch_claimed(&self) -> bool {
@@ -202,8 +221,20 @@ pub struct LeaseRecord {
 
 impl LeaseRecord {
     pub fn active(&self) -> bool {
-        self.released_at.is_none()
+        self.active_at(current_epoch_millis())
     }
+
+    pub fn active_at(&self, now: u64) -> bool {
+        self.released_at.is_none() && self.expires_at.is_none_or(|expires_at| expires_at > now)
+    }
+}
+
+fn current_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -425,6 +456,29 @@ impl DurableOrchestratorState {
         }
     }
 
+    pub fn release_leaf_leases_for_parent(&mut self, parent_id: &IssueId, released_at: u64) {
+        let ancestor_owner = LeaseOwner::ancestor(parent_id);
+        let resources = self
+            .leases
+            .iter()
+            .filter(|lease| {
+                lease.active()
+                    && lease.kind == LeaseKind::AncestorIntegration
+                    && lease.owner == ancestor_owner
+            })
+            .map(|lease| lease.resource.clone())
+            .collect::<Vec<_>>();
+        for lease in &mut self.leases {
+            if lease.active()
+                && lease.kind == LeaseKind::LeafWorker
+                && resources.iter().any(|resource| resource == &lease.resource)
+                && lease.owner == LeaseOwner::leaf_worker(&lease.resource.issue_id)
+            {
+                lease.released_at = Some(released_at);
+            }
+        }
+    }
+
     pub fn active_for(&self, resource: &LeaseResource) -> bool {
         self.leases
             .iter()
@@ -641,5 +695,25 @@ mod tests {
         snapshot.generation = 0;
         state.hierarchy.insert(parent_id, snapshot);
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn expired_leases_are_not_active() {
+        let resource = LeaseResource {
+            issue_id: IssueId::new("child").expect("id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let lease = LeaseRecord {
+            kind: LeaseKind::DiagnosticHold,
+            resource,
+            owner: LeaseOwner::diagnostic("operator"),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: Some(10),
+            released_at: None,
+        };
+        assert!(lease.active_at(9));
+        assert!(!lease.active_at(10));
     }
 }
