@@ -2,6 +2,7 @@ use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerProjectMilestone,
 };
+use url::Url;
 
 use super::error::LinearError;
 use super::graphql::{
@@ -110,10 +111,13 @@ fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> O
 }
 
 fn is_canonical_github_pr_url(url: &str) -> bool {
-    let Some(path) = url.trim().strip_prefix("https://github.com/") else {
+    let Ok(url) = Url::parse(url.trim()) else {
         return false;
     };
-    let mut parts = path.split('/');
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return false;
+    }
+    let mut parts = url.path_segments().into_iter().flatten();
     let (Some(owner), Some(repo), Some("pull"), Some(number), None) = (
         parts.next(),
         parts.next(),
@@ -253,9 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn github_pr_url_matching_requires_canonical_pull_path() {
+    fn github_pr_url_matching_supports_configured_enterprise_authorities() {
         assert!(is_canonical_github_pr_url(
             "https://github.com/kumanday/OpenSymphony/pull/155"
+        ));
+        assert!(is_canonical_github_pr_url(
+            "https://github.enterprise.example/kumanday/OpenSymphony/pull/155"
         ));
         assert!(!is_canonical_github_pr_url(
             "https://github.com/kumanday/OpenSymphony/wiki/pull/155"
@@ -264,7 +271,7 @@ mod tests {
             "https://github.com/kumanday/OpenSymphony/pull/not-a-number"
         ));
         assert!(!is_canonical_github_pr_url(
-            "https://example.com/kumanday/OpenSymphony/pull/155"
+            "http://github.enterprise.example/kumanday/OpenSymphony/pull/155"
         ));
     }
 }

@@ -30,8 +30,8 @@ use tracing::{debug, warn};
 
 use super::filter_issues_for_dispatch;
 use super::{
-    DurableOrchestratorState, HierarchySnapshot, LeaseRecord, LeaseResource,
-    ParentEligibilityEvidence,
+    DurableOrchestratorState, HierarchyBlockedReason, HierarchySnapshot, LeaseRecord,
+    LeaseResource, ParentEligibilityEvidence,
 };
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
@@ -857,6 +857,35 @@ where
         }
 
         self.insert_execution(issue_id, execution);
+        Ok(true)
+    }
+
+    /// Clear a durable `HierarchyChanged` block after an operator or parent
+    /// controller has deliberately accepted the current child-edge snapshot.
+    /// The transition keeps retained evidence and leases intact; the next
+    /// eligibility pass must reacquire the current generation's leases.
+    pub async fn replan_parent(
+        &mut self,
+        parent_id: &IssueId,
+        _observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        self.load_recovery_state().await?;
+        let Some(snapshot) = self.hierarchy_state.hierarchy.get(parent_id) else {
+            return Ok(false);
+        };
+        if snapshot.blocked_reason != Some(HierarchyBlockedReason::HierarchyChanged) {
+            return Ok(false);
+        }
+
+        let previous_state = self.hierarchy_state.clone();
+        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
+            snapshot.replan();
+        }
+        self.parent_eligibility_checked_at.remove(parent_id);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
         Ok(true)
     }
 
@@ -1697,6 +1726,8 @@ where
                         continue;
                     }
                 }
+                self.release_parent_leases_after_finalization(&issue_id, observed_at)
+                    .await?;
                 self.retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
                     .await?;
                 if self.workspace_has_active_lease(&record.workspace).await? {
@@ -3492,6 +3523,13 @@ where
         if cleanup_terminal {
             self.retain_terminal_child_lease(&execution).await?;
         }
+        if matches!(
+            reason,
+            ReleaseReason::TrackerTerminal | ReleaseReason::Completed
+        ) {
+            self.release_parent_leases_after_finalization(&issue_id, observed_at)
+                .await?;
+        }
         let mut retry_cleanup_succeeded = retain_failed;
         if cleanup_terminal
             && remote_stopped
@@ -3728,6 +3766,13 @@ where
         if cleanup_terminal {
             self.retain_terminal_child_lease(&execution).await?;
         }
+        if matches!(
+            reason,
+            ReleaseReason::TrackerTerminal | ReleaseReason::Completed
+        ) {
+            self.release_parent_leases_after_finalization(&execution.issue().id, observed_at)
+                .await?;
+        }
         if reason == ReleaseReason::RetryExhausted {
             let normal_retry_count = execution
                 .current_run()
@@ -3787,6 +3832,23 @@ where
             }
         }
         Ok(execution)
+    }
+
+    async fn release_parent_leases_after_finalization(
+        &mut self,
+        parent_id: &IssueId,
+        released_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let mut next_state = self.hierarchy_state.clone();
+        if !next_state.release_parent_leases(parent_id, released_at.as_u64()) {
+            return Ok(());
+        }
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn persist_retry_exhaustion(
@@ -3965,35 +4027,45 @@ where
                         });
             }
             if child.resource.is_none() {
-                let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
-                child.resource = self
+                let descendant_resources = self
                     .hierarchy_state
-                    .leases
-                    .iter()
-                    .find(|lease| {
-                        lease.active()
-                            && lease.kind == super::LeaseKind::LeafWorker
-                            && lease.hierarchy_generation == snapshot.generation
-                            && lease.owner == expected_owner
-                            && lease.resource.issue_id == child.child_id
-                    })
-                    .map(|lease| lease.resource.clone());
+                    .descendant_resources_for(&child.child_id);
+                if !descendant_resources.is_empty() {
+                    child.resource = descendant_resources.first().cloned();
+                    child.resources = descendant_resources;
+                } else {
+                    let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
+                    child.resource = self
+                        .hierarchy_state
+                        .leases
+                        .iter()
+                        .find(|lease| {
+                            lease.active()
+                                && lease.kind == super::LeaseKind::LeafWorker
+                                && lease.hierarchy_generation == snapshot.generation
+                                && lease.owner == expected_owner
+                                && lease.resource.issue_id == child.child_id
+                        })
+                        .map(|lease| lease.resource.clone());
+                }
+            }
+            if child.resources.is_empty() {
+                child.resources = child.resource.clone().into_iter().collect();
             }
         }
         if evidence.eligible_for(&snapshot).is_err() {
             return Ok(false);
         }
         if evidence.children.iter().any(|child| {
-            let Some(resource) = child.resource.as_ref() else {
-                return true;
-            };
-            let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
-            !self.hierarchy_state.leases.iter().any(|lease| {
-                lease.active()
-                    && lease.kind == super::LeaseKind::LeafWorker
-                    && lease.hierarchy_generation == snapshot.generation
-                    && lease.owner == expected_owner
-                    && lease.resource == *resource
+            child.resources().into_iter().any(|resource| {
+                let expected_owner = super::LeaseOwner::leaf_worker(&resource.issue_id);
+                !self.hierarchy_state.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == super::LeaseKind::LeafWorker
+                        && lease.hierarchy_generation == snapshot.generation
+                        && lease.owner == expected_owner
+                        && lease.resource == *resource
+                })
             })
         }) {
             return Ok(false);
@@ -4008,16 +4080,20 @@ where
         }
         next_snapshot.mark_dispatch_intent();
         let mut required_leases = evidence.integration_leases(&normalized.id, observed_at.as_u64());
-        required_leases.extend(evidence.children.iter().filter_map(|child| {
-            child.resource.clone().map(|resource| LeaseRecord {
-                kind: super::LeaseKind::Review,
-                resource,
-                owner: super::LeaseOwner::review(&child.child_id),
-                hierarchy_generation: evidence.hierarchy_generation,
-                acquired_at: observed_at.as_u64(),
-                expires_at: None,
-                released_at: None,
-            })
+        required_leases.extend(evidence.children.iter().flat_map(|child| {
+            child
+                .resources()
+                .into_iter()
+                .cloned()
+                .map(|resource| LeaseRecord {
+                    kind: super::LeaseKind::Review,
+                    resource,
+                    owner: super::LeaseOwner::review_for_parent(&normalized.id, &child.child_id),
+                    hierarchy_generation: evidence.hierarchy_generation,
+                    acquired_at: observed_at.as_u64(),
+                    expires_at: None,
+                    released_at: None,
+                })
         }));
         next_state
             .acquire_leases(required_leases)

@@ -726,6 +726,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             merge_result_commit: Some("merge-commit".to_owned()),
             merge_repository_id: None,
             resource: Some(resource),
+            resources: Vec::new(),
             unresolved_failure: None,
         }],
     };
@@ -788,6 +789,75 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("restart should respect the durable dispatch claim");
     assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_leases() {
+    let parent_id = IssueId::new("parent-replan").expect("parent id");
+    let mut parent = tracker_issue("parent-replan", "COE-REPLAN", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: "child-a".to_owned(),
+        identifier: "COE-CHILD".to_owned(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+    }];
+    let mut snapshot = HierarchySnapshot::new(&parent);
+    snapshot.freeze().expect("snapshot should freeze");
+    snapshot.reconcile(&[TrackerIssueRef {
+        id: "child-b".to_owned(),
+        identifier: "COE-CHILD-2".to_owned(),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+    }]);
+    let retained_lease = LeaseRecord {
+        kind: LeaseKind::AncestorIntegration,
+        resource: LeaseResource {
+            issue_id: IssueId::new("child-a").expect("child id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+            checkout_generation: "checkout-1".to_owned(),
+        },
+        owner: LeaseOwner::ancestor(&parent_id),
+        hierarchy_generation: 1,
+        acquired_at: 1,
+        expires_at: None,
+        released_at: None,
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+        leases: vec![retained_lease.clone()],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker::default(),
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    assert!(
+        scheduler
+            .replan_parent(&parent_id, ts(100))
+            .await
+            .expect("replan should persist")
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("replanned state should persist"),
+    )
+    .expect("state should decode");
+    assert_eq!(state.hierarchy[&parent_id].generation, 2);
+    assert!(!state.hierarchy[&parent_id].frozen);
+    assert!(state.hierarchy[&parent_id].blocked_reason.is_none());
+    assert_eq!(state.leases, vec![retained_lease]);
 }
 
 #[tokio::test]

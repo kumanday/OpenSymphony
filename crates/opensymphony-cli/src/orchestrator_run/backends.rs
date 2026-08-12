@@ -948,6 +948,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_result_commit,
                 merge_repository_id,
                 resource: None,
+                resources: Vec::new(),
                 unresolved_failure: None,
             });
         }
@@ -1021,11 +1022,11 @@ impl RuntimeTrackerBackend {
         if !repository.provider.eq_ignore_ascii_case("github") {
             return Ok((false, None, None));
         }
-        let Some(host) = url.host_str() else {
+        if url.scheme() != "https" {
             return Err(LinearError::InvalidResponse(format!(
-                "GitHub pull request URL has no host: {pr_url}"
+                "GitHub pull request URL must use https: {pr_url}"
             )));
-        };
+        }
         if !url.username().is_empty() || url.password().is_some() {
             return Err(LinearError::InvalidResponse(format!(
                 "GitHub pull request URL must not contain credentials: {pr_url}"
@@ -1040,13 +1041,22 @@ impl RuntimeTrackerBackend {
                 "invalid GitHub pull request path: {pr_url}"
             )));
         }
-        let public_github = matches!(host, "github.com" | "www.github.com");
-        let authority = if public_github {
-            "github.com".to_owned()
-        } else {
-            url.port()
-                .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
-        };
+        let authority = github_url_authority(&url).ok_or_else(|| {
+            LinearError::InvalidResponse(format!(
+                "GitHub pull request URL has no supported authority: {pr_url}"
+            ))
+        })?;
+        let configured_authority =
+            github_remote_authority(&repository.remote_locator).ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "configured GitHub remote has no authority: {}",
+                    repository.remote_locator
+                ))
+            })?;
+        if authority != configured_authority {
+            return Ok((false, None, None));
+        }
+        let public_github = authority == "github.com";
         let endpoint = if public_github {
             format!(
                 "https://api.github.com/repos/{}/{}/pulls/{}",
@@ -1116,6 +1126,42 @@ impl RuntimeTrackerBackend {
             pull_request.merge_commit_sha,
             Some(merge_repository_id),
         ))
+    }
+}
+
+fn github_url_authority(url: &Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let authority = url
+        .port()
+        .map_or(host.clone(), |port| format!("{host}:{port}"));
+    Some(normalize_github_authority(&authority))
+}
+
+fn github_remote_authority(locator: &str) -> Option<String> {
+    let locator = locator.trim();
+    if let Ok(url) = Url::parse(locator)
+        && let Some(authority) = github_url_authority(&url)
+    {
+        return Some(authority);
+    }
+    let scp_authority = locator
+        .strip_prefix("git@")
+        .or_else(|| locator.strip_prefix("ssh@"))
+        .and_then(|locator| locator.split_once(':').map(|(authority, _)| authority));
+    if let Some(authority) = scp_authority {
+        return Some(normalize_github_authority(&authority.to_ascii_lowercase()));
+    }
+    if locator.split('/').count() == 2 {
+        return Some("github.com".to_owned());
+    }
+    None
+}
+
+fn normalize_github_authority(authority: &str) -> String {
+    let authority = authority.trim().to_ascii_lowercase();
+    match authority.strip_prefix("www.") {
+        Some("github.com") => "github.com".to_owned(),
+        Some(_) | None => authority,
     }
 }
 

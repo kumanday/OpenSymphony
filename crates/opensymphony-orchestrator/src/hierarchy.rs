@@ -146,7 +146,7 @@ fn child_edges(children: &[TrackerIssueRef]) -> Vec<HierarchyChildEdge> {
     edges
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LeaseResource {
     pub issue_id: IssueId,
     pub repository_id: CanonicalRepositoryId,
@@ -177,6 +177,13 @@ impl LeaseOwner {
     pub fn review(child_id: &IssueId) -> Self {
         Self {
             id: format!("review:{child_id}"),
+            kind: "review".to_owned(),
+        }
+    }
+
+    pub fn review_for_parent(parent_id: &IssueId, child_id: &IssueId) -> Self {
+        Self {
+            id: format!("review:{parent_id}:{child_id}"),
             kind: "review".to_owned(),
         }
     }
@@ -258,6 +265,11 @@ pub struct ChildEligibilityEvidence {
     pub merge_repository_id: Option<CanonicalRepositoryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<LeaseResource>,
+    /// Repository-neutral child parents contribute the retained descendant
+    /// generations held by their own ancestor edge. Keep the legacy singular
+    /// field for direct leaf evidence and use this collection for subtrees.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<LeaseResource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unresolved_failure: Option<String>,
 }
@@ -284,6 +296,7 @@ impl ParentEligibilityEvidence {
                     merge_result_commit: None,
                     merge_repository_id: None,
                     resource: None,
+                    resources: Vec::new(),
                     unresolved_failure: None,
                 })
                 .collect(),
@@ -327,23 +340,26 @@ impl ParentEligibilityEvidence {
             {
                 return Err(HierarchyBlockedReason::MissingTargetCommit);
             }
+            let resources = child.resources();
             if child
                 .merge_repository_id
                 .as_ref()
-                .zip(child.resource.as_ref())
-                .is_some_and(|(merge_repository, resource)| {
-                    merge_repository != &resource.repository_id
+                .is_some_and(|merge_repository| {
+                    !resources
+                        .iter()
+                        .any(|resource| &resource.repository_id == merge_repository)
                 })
             {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
             }
-            if child.resource.is_none() {
+            if resources.is_empty() {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
             }
-            if child
-                .resource
-                .as_ref()
-                .is_some_and(|resource| resource.issue_id != child.child_id)
+            if child.resources.is_empty()
+                && child
+                    .resource
+                    .as_ref()
+                    .is_some_and(|resource| resource.issue_id != child.child_id)
             {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
             }
@@ -358,18 +374,27 @@ impl ParentEligibilityEvidence {
         let owner = LeaseOwner::ancestor(parent_id);
         self.children
             .iter()
-            .filter_map(|child| {
-                child.resource.clone().map(|resource| LeaseRecord {
-                    kind: LeaseKind::AncestorIntegration,
-                    resource,
-                    owner: owner.clone(),
-                    hierarchy_generation: self.hierarchy_generation,
-                    acquired_at: now,
-                    expires_at: None,
-                    released_at: None,
-                })
+            .flat_map(|child| child.resources().into_iter().cloned())
+            .map(|resource| LeaseRecord {
+                kind: LeaseKind::AncestorIntegration,
+                resource,
+                owner: owner.clone(),
+                hierarchy_generation: self.hierarchy_generation,
+                acquired_at: now,
+                expires_at: None,
+                released_at: None,
             })
             .collect()
+    }
+}
+
+impl ChildEligibilityEvidence {
+    pub fn resources(&self) -> Vec<&LeaseResource> {
+        if self.resources.is_empty() {
+            self.resource.iter().collect()
+        } else {
+            self.resources.iter().collect()
+        }
     }
 }
 
@@ -470,6 +495,49 @@ impl DurableOrchestratorState {
                 lease.released_at = Some(released_at);
             }
         }
+    }
+
+    pub fn release_parent_leases(&mut self, parent_id: &IssueId, released_at: u64) -> bool {
+        let ancestor_owner = LeaseOwner::ancestor(parent_id);
+        let review_prefix = format!("review:{parent_id}:");
+        let mut released = false;
+        for lease in &mut self.leases {
+            if !lease.active() {
+                continue;
+            }
+            let owned_by_parent = lease.owner == ancestor_owner
+                || (lease.kind == LeaseKind::Review
+                    && lease.owner.kind == "review"
+                    && lease.owner.id.starts_with(&review_prefix));
+            if owned_by_parent {
+                lease.released_at = Some(released_at);
+                released = true;
+            }
+        }
+        released
+    }
+
+    pub fn descendant_resources_for(&self, parent_id: &IssueId) -> Vec<LeaseResource> {
+        let owner = LeaseOwner::ancestor(parent_id);
+        let current_generation = self
+            .hierarchy
+            .get(parent_id)
+            .map(|snapshot| snapshot.generation)
+            .or_else(|| self.run_hierarchy_generations.get(parent_id).copied());
+        let mut resources = BTreeMap::<LeaseResource, u64>::new();
+        for lease in &self.leases {
+            if lease.kind == LeaseKind::AncestorIntegration
+                && lease.owner == owner
+                && current_generation
+                    .is_none_or(|generation| lease.hierarchy_generation == generation)
+            {
+                resources
+                    .entry(lease.resource.clone())
+                    .and_modify(|acquired_at| *acquired_at = (*acquired_at).max(lease.acquired_at))
+                    .or_insert(lease.acquired_at);
+            }
+        }
+        resources.into_keys().collect()
     }
 
     pub fn release_leaf_leases_for_parent(&mut self, parent_id: &IssueId, released_at: u64) {
@@ -611,6 +679,71 @@ mod tests {
     }
 
     #[test]
+    fn parent_release_keeps_higher_ancestor_and_nested_resources() {
+        let resource = LeaseResource {
+            issue_id: IssueId::new("leaf").expect("id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let intermediate = IssueId::new("intermediate").expect("id");
+        let higher = IssueId::new("higher").expect("id");
+        let mut state = DurableOrchestratorState::default();
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&intermediate),
+                    hierarchy_generation: 2,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::Review,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::review_for_parent(&intermediate, &resource.issue_id),
+                    hierarchy_generation: 2,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&higher),
+                    hierarchy_generation: 1,
+                    acquired_at: 3,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("nested leases should acquire");
+
+        assert_eq!(
+            state.descendant_resources_for(&intermediate),
+            vec![resource.clone()]
+        );
+        assert!(state.release_parent_leases(&intermediate, 4));
+        assert!(
+            state.leases.iter().any(|lease| {
+                lease.owner == LeaseOwner::ancestor(&higher) && lease.active_at(4)
+            })
+        );
+        assert!(
+            state
+                .leases
+                .iter()
+                .filter(|lease| {
+                    lease.owner == LeaseOwner::ancestor(&intermediate)
+                        || lease.owner
+                            == LeaseOwner::review_for_parent(&intermediate, &resource.issue_id)
+                })
+                .all(|lease| lease.released_at == Some(4))
+        );
+    }
+
+    #[test]
     fn tracker_terminal_state_alone_is_not_parent_eligibility() {
         let parent = parent(vec![child("child-a", "Done")]);
         let snapshot = HierarchySnapshot::new(&parent);
@@ -644,6 +777,7 @@ mod tests {
                 merge_result_commit: Some("abc123".to_owned()),
                 merge_repository_id: None,
                 resource: Some(resource.clone()),
+                resources: Vec::new(),
                 unresolved_failure: None,
             }],
         };
