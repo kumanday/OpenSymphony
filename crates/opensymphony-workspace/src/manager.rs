@@ -3040,6 +3040,9 @@ impl WorkspaceManager {
     where
         T: DeserializeOwned,
     {
+        if !path_exists(&self.config.root).await? {
+            return Ok(None);
+        }
         let handle = self.orchestrator_state_handle();
         self.load_manifest(&handle, &self.orchestrator_state_path())
             .await

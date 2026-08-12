@@ -556,6 +556,7 @@ pub struct Scheduler<T, W, M> {
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     parent_issue_ids: HashSet<IssueId>,
+    terminal_child_failure_ids: HashSet<IssueId>,
     hierarchy_state: DurableOrchestratorState,
     durable_state_loaded: bool,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
@@ -596,6 +597,7 @@ where
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
             parent_issue_ids: HashSet::new(),
+            terminal_child_failure_ids: HashSet::new(),
             hierarchy_state: DurableOrchestratorState::default(),
             durable_state_loaded: false,
             pending_retry_persistence: BTreeMap::new(),
@@ -1117,8 +1119,13 @@ where
                     .hierarchy_state
                     .hierarchy
                     .get(&normalized.id)
-                    .is_some_and(|snapshot| !snapshot.required_child_edges.is_empty());
+                    .is_some_and(|snapshot| {
+                        !snapshot.required_child_edges.is_empty()
+                            || snapshot.frozen
+                            || snapshot.blocked_reason.is_some()
+                    });
             if should_retain_parent_identity {
+                self.terminal_child_failure_ids.remove(&normalized.id);
                 self.parent_issue_ids.insert(normalized.id.clone());
                 if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
                     self.hierarchy_state
@@ -1651,6 +1658,15 @@ where
                 self.retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
                     .await?;
                 if self.workspace_has_active_lease(&record.workspace).await? {
+                    let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
+                    execution.attach_workspace(record.workspace.clone())?;
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerTerminal, None)?,
+                    );
+                    if record.completed_run && !record.successful_run && !record.cancelled_run {
+                        self.terminal_child_failure_ids.insert(issue_id.clone());
+                    }
                     retry_records.push(record);
                     continue;
                 }
@@ -2781,24 +2797,6 @@ where
                 continue;
             }
 
-            if !normalized.sub_issues.is_empty() {
-                let parent_retry = self
-                    .executions
-                    .get(&issue_id)
-                    .is_some_and(|execution| execution.status() == SchedulerStatus::RetryQueued);
-                if !self
-                    .parent_dispatch_is_eligible(
-                        &tracker_issue,
-                        &normalized,
-                        observed_at,
-                        parent_retry,
-                    )
-                    .await?
-                {
-                    continue;
-                }
-            }
-
             if normalized
                 .repository_binding
                 .as_ref()
@@ -2826,6 +2824,24 @@ where
                         .copied()
                         .unwrap_or_default();
                 if running_in_state >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                    continue;
+                }
+            }
+
+            if !normalized.sub_issues.is_empty() {
+                let parent_retry = self
+                    .executions
+                    .get(&issue_id)
+                    .is_some_and(|execution| execution.status() == SchedulerStatus::RetryQueued);
+                if !self
+                    .parent_dispatch_is_eligible(
+                        &tracker_issue,
+                        &normalized,
+                        observed_at,
+                        parent_retry,
+                    )
+                    .await?
+                {
                     continue;
                 }
             }
@@ -3693,14 +3709,45 @@ where
         if snapshot.dispatch_intended() {
             return Ok(false);
         }
-        let mut evidence = self
+        let mut evidence = match self
             .tracker
             .parent_eligibility(tracker_issue, &snapshot)
             .await
-            .map_err(|error| SchedulerError::Tracker {
-                detail: error.to_string(),
-            })?;
+        {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                warn!(
+                    parent = %normalized.identifier,
+                    error = %error,
+                    "parent eligibility provider lookup failed; keeping parent blocked"
+                );
+                return Ok(false);
+            }
+        };
         for child in &mut evidence.children {
+            if self.terminal_child_failure_ids.contains(&child.child_id)
+                || self
+                    .executions
+                    .get(&child.child_id)
+                    .is_some_and(|execution| {
+                        execution.retry().is_some()
+                            || execution.last_worker_outcome().is_some_and(|outcome| {
+                                matches!(
+                                    outcome.outcome,
+                                    WorkerOutcomeKind::Failed
+                                        | WorkerOutcomeKind::TimedOut
+                                        | WorkerOutcomeKind::Stalled
+                                        | WorkerOutcomeKind::Detached
+                                        | WorkerOutcomeKind::CancelFailed
+                                )
+                            })
+                    })
+            {
+                child.orchestrator_terminal = false;
+                child.unresolved_failure =
+                    Some("child has an unresolved worker failure or retry".to_owned());
+                continue;
+            }
             if !child.orchestrator_terminal {
                 child.orchestrator_terminal =
                     self.executions
@@ -3776,8 +3823,11 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
-        self.hierarchy_state = next_state;
-        self.persist_orchestrator_state().await?;
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
         Ok(true)
     }
 
@@ -3912,13 +3962,6 @@ where
         };
         let issue_id = issue.id.clone();
         let leaf_owner = super::LeaseOwner::leaf_worker(&issue_id);
-        if let Some(existing) = self.hierarchy_state.leases.iter().find(|lease| {
-            lease.kind == super::LeaseKind::LeafWorker
-                && lease.owner == leaf_owner
-                && lease.resource == resource
-        }) {
-            return Ok(existing.active());
-        }
         let hierarchy_generation = self
             .hierarchy_state
             .hierarchy
@@ -3932,20 +3975,44 @@ where
             .map(|snapshot| snapshot.generation)
             .max()
             .unwrap_or_default();
-        self.hierarchy_state
+        if self.hierarchy_state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.kind == super::LeaseKind::LeafWorker
+                && lease.owner == leaf_owner
+                && lease.resource == resource
+                && lease.hierarchy_generation == hierarchy_generation
+        }) {
+            return Ok(true);
+        }
+        let acquired_at = current_epoch_millis();
+        let mut next_state = self.hierarchy_state.clone();
+        for lease in &mut next_state.leases {
+            if lease.active()
+                && lease.kind == super::LeaseKind::LeafWorker
+                && lease.owner == leaf_owner
+                && lease.resource == resource
+            {
+                lease.released_at = Some(acquired_at);
+            }
+        }
+        next_state
             .acquire_leases(vec![LeaseRecord {
                 kind: super::LeaseKind::LeafWorker,
-                resource,
+                resource: resource.clone(),
                 owner: leaf_owner,
                 hierarchy_generation,
-                acquired_at: current_epoch_millis(),
+                acquired_at,
                 expires_at: None,
                 released_at: None,
             }])
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
-        self.persist_orchestrator_state().await?;
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
         Ok(true)
     }
 
