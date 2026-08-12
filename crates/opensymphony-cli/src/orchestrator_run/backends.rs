@@ -22,8 +22,9 @@ use crate::opensymphony_codex::{
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
     IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome,
-    RetryEntry, RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+    RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
+    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -44,10 +45,11 @@ use crate::opensymphony_orchestrator::{
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
-    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, WorkspaceManagerConfig, checkout_credential_environment_variables,
-    compose_terminal_prompt, environment_variable_names_equal,
+    CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
+    IssueLifecycleState, RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope,
+    WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
+    checkout_credential_environment_variables, compose_terminal_prompt,
+    environment_variable_names_equal,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -119,6 +121,8 @@ pub(super) struct RuntimeTrackerBackend {
     client: LinearClient,
     github_http: reqwest::Client,
     github_token: Option<String>,
+    repository_checkouts: BTreeMap<String, CheckoutRepository>,
+    repository_routing: Option<RepositoryRouting>,
 }
 
 const GITHUB_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -323,6 +327,8 @@ fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment
 
 pub(super) fn build_tracker_backend(
     workflow: &ResolvedWorkflow,
+    repository_checkouts: BTreeMap<String, CheckoutRepository>,
+    repository_routing: Option<RepositoryRouting>,
 ) -> Result<RuntimeTrackerBackend, LinearError> {
     let github_http = reqwest::Client::builder()
         .timeout(GITHUB_ELIGIBILITY_TIMEOUT)
@@ -334,6 +340,8 @@ pub(super) fn build_tracker_backend(
         github_token: env::var("GITHUB_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty()),
+        repository_checkouts,
+        repository_routing,
     })
 }
 
@@ -920,11 +928,16 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 .ok_or_else(|| LinearError::MissingIssueIds {
                     issue_ids: vec![edge.child_identifier.as_str().to_owned()],
                 })?;
-            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) =
-                match child.pr_url.as_deref() {
-                    Some(pr_url) => self.github_merge_evidence(pr_url).await?,
-                    None => (false, None, None),
-                };
+            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) = match (
+                child.pr_url.as_deref(),
+                self.checkout_policy_for_issue(child),
+            ) {
+                (Some(pr_url), Some(repository)) => {
+                    self.github_merge_evidence(pr_url, repository).await?
+                }
+                (None, _) => (false, None, None),
+                (Some(_), None) => (false, None, None),
+            };
             evidence.push(ChildEligibilityEvidence {
                 child_id: edge.child_id.clone(),
                 hierarchy_generation: hierarchy.generation,
@@ -980,16 +993,42 @@ impl TrackerBackend for RuntimeTrackerBackend {
 }
 
 impl RuntimeTrackerBackend {
+    fn checkout_policy_for_issue(&self, issue: &TrackerIssue) -> Option<&CheckoutRepository> {
+        if let Some(routing) = self.repository_routing.as_ref() {
+            let binding = routing.resolve(
+                &issue.labels,
+                issue.project_id.as_deref(),
+                issue.project_slug.as_deref(),
+                false,
+            );
+            return binding
+                .repository_id()
+                .and_then(|repository_id| self.repository_checkouts.get(repository_id.as_str()));
+        }
+        (self.repository_checkouts.len() == 1)
+            .then(|| self.repository_checkouts.values().next())
+            .flatten()
+    }
+
     async fn github_merge_evidence(
         &self,
         pr_url: &str,
+        repository: &CheckoutRepository,
     ) -> Result<(bool, Option<String>, Option<CanonicalRepositoryId>), LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
         })?;
-        if !matches!(url.host_str(), Some("github.com" | "www.github.com")) {
+        if !repository.provider.eq_ignore_ascii_case("github") {
+            return Ok((false, None, None));
+        }
+        let Some(host) = url.host_str() else {
             return Err(LinearError::InvalidResponse(format!(
-                "pull request URL is not hosted on GitHub: {pr_url}"
+                "GitHub pull request URL has no host: {pr_url}"
+            )));
+        };
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(LinearError::InvalidResponse(format!(
+                "GitHub pull request URL must not contain credentials: {pr_url}"
             )));
         }
         let segments = url
@@ -1001,14 +1040,31 @@ impl RuntimeTrackerBackend {
                 "invalid GitHub pull request path: {pr_url}"
             )));
         }
-        let endpoint = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}",
-            segments[0], segments[1], segments[3]
-        );
+        let public_github = matches!(host, "github.com" | "www.github.com");
+        let authority = if public_github {
+            "github.com".to_owned()
+        } else {
+            url.port()
+                .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
+        };
+        let endpoint = if public_github {
+            format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}",
+                segments[0], segments[1], segments[3]
+            )
+        } else {
+            format!(
+                "{}/api/v3/repos/{}/{}/pulls/{}",
+                url.origin().ascii_serialization(),
+                segments[0],
+                segments[1],
+                segments[3]
+            )
+        };
         let merge_repository_id = CanonicalRepositoryId::from_remote(
             "github",
-            None,
-            format!("{}/{}", segments[0], segments[1]),
+            repository.provider_id.as_deref(),
+            format!("https://{authority}/{}/{}", segments[0], segments[1]),
         )
         .map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub repository identity: {error}"))
@@ -1038,7 +1094,25 @@ impl RuntimeTrackerBackend {
             .await
             .map_err(|error| LinearError::Request(Box::new(error)))?;
         Ok((
-            pull_request.merged_at.is_some(),
+            pull_request.merged_at.is_some()
+                && pull_request
+                    .merge_commit_sha
+                    .as_deref()
+                    .is_some_and(|commit| !commit.trim().is_empty())
+                && pull_request.base.ref_name == repository.target_branch
+                && pull_request
+                    .base
+                    .repo
+                    .full_name
+                    .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
+                && repository.provider_id.as_deref().is_none_or(|provider_id| {
+                    pull_request
+                        .base
+                        .repo
+                        .native_ids()
+                        .iter()
+                        .any(|candidate| candidate == provider_id)
+                }),
             pull_request.merge_commit_sha,
             Some(merge_repository_id),
         ))
@@ -1049,6 +1123,33 @@ impl RuntimeTrackerBackend {
 struct GitHubPullRequest {
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
+    base: GitHubPullRequestBase,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestBase {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    repo: GitHubRepository,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRepository {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    node_id: Option<String>,
+    full_name: String,
+}
+
+impl GitHubRepository {
+    fn native_ids(&self) -> Vec<String> {
+        self.node_id
+            .iter()
+            .cloned()
+            .chain(self.id.iter().map(ToString::to_string))
+            .collect()
+    }
 }
 
 impl RuntimeWorkspaceBackend {

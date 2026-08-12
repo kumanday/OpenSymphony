@@ -976,7 +976,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         "starting OpenSymphony orchestrator"
     );
 
-    let mut tracker = build_tracker_backend(&runtime.workflow)?;
+    let mut tracker = build_tracker_backend(
+        &runtime.workflow,
+        runtime.repository_checkouts.clone().unwrap_or_default(),
+        runtime.repository_routing.clone(),
+    )?;
     let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
         routing
             .legacy_repository

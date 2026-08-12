@@ -1679,6 +1679,24 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
+                if let Some(recovered_run) = record.recovered_run.as_ref() {
+                    // A tracker terminal state does not prove that a run which
+                    // was in flight at restart has stopped. Fence and stop the
+                    // recovered worker before exposing a terminal outcome to
+                    // parent eligibility.
+                    if !self
+                        .stop_recovered_run_before_workspace_removal(
+                            &record,
+                            recovered_run,
+                            record.harness_kind.as_deref(),
+                            observed_at,
+                        )
+                        .await?
+                    {
+                        retry_records.push(record);
+                        continue;
+                    }
+                }
                 self.retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
                     .await?;
                 if self.workspace_has_active_lease(&record.workspace).await? {
@@ -1688,7 +1706,9 @@ where
                         issue_id.clone(),
                         execution.release(observed_at, ReleaseReason::TrackerTerminal, None)?,
                     );
-                    if record.completed_run && !record.successful_run && !record.cancelled_run {
+                    if record.had_in_flight_run
+                        || (record.completed_run && !record.successful_run && !record.cancelled_run)
+                    {
                         self.terminal_child_failure_ids.insert(issue_id.clone());
                     }
                     retry_records.push(record);
@@ -2794,6 +2814,7 @@ where
         }
 
         let mut pending_launches = Vec::new();
+        let mut first_error = None;
         let mut planned_running_by_state: HashMap<String, usize> = HashMap::new();
 
         for tracker_issue in ready {
@@ -2894,17 +2915,37 @@ where
                     .insert(issue_id.clone(), hierarchy_generation);
                 if let Err(error) = self.persist_orchestrator_state().await {
                     self.hierarchy_state = previous_state;
-                    return Err(error);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
                 }
             }
 
-            let workspace = self
+            let workspace = match self
                 .workspace
                 .ensure_workspace(&normalized, observed_at)
                 .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
+            {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
 
             if let Some(normal_retry_count) = self
                 .executions
@@ -2916,15 +2957,38 @@ where
                 // worker's start_run preparation writes the replacement run
                 // manifest. A crash before start_workers must recover the
                 // queued retry rather than an advanced, unqueued count.
-                self.workspace
+                if let Err(error) = self
+                    .workspace
                     .persist_retry_count(&workspace, normal_retry_count)
                     .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
+                {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
             }
 
-            let worker_id = self.next_worker_id()?;
+            let worker_id = match self.next_worker_id() {
+                Ok(worker_id) => worker_id,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
             let previous_retry = self
                 .executions
                 .get(&issue_id)
@@ -2946,14 +3010,59 @@ where
                     .and_then(RepositoryBindingOutcome::resolved_binding)
                     .cloned(),
             );
-            let route = decide_issue_route(&normalized, &self.config)?;
+            let route = match decide_issue_route(&normalized, &self.config) {
+                Ok(route) => route,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
 
             let mut execution = self
                 .remove_execution(&issue_id)
                 .unwrap_or_else(|| IssueExecution::new(normalized.clone(), observed_at));
-            execution.refresh_issue(normalized.clone())?;
-            execution.attach_workspace(workspace.clone())?;
-            execution = execution.claim(run.clone())?;
+            if let Err(error) = execution.refresh_issue(normalized.clone()) {
+                self.insert_execution(issue_id.clone(), execution);
+                let error = self
+                    .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error.into())
+                    .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+            if let Err(error) = execution.attach_workspace(workspace.clone()) {
+                self.insert_execution(issue_id.clone(), execution);
+                let error = self
+                    .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error.into())
+                    .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+            let execution_before_claim = execution.clone();
+            execution = match execution.claim(run.clone()) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    self.insert_execution(issue_id.clone(), execution_before_claim);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
             let claimed_run = execution
                 .current_run()
                 .cloned()
@@ -2983,7 +3092,6 @@ where
             )
             .await;
 
-        let mut first_error = None;
         for ((issue_id, mut execution, claimed_run, start_request), result) in
             pending_launches.into_iter().zip(start_results)
         {
@@ -3062,6 +3170,33 @@ where
         }
 
         first_error.map_or(Ok(()), Err)
+    }
+
+    async fn clear_parent_dispatch_intent_after_preparation_failure(
+        &mut self,
+        issue_id: &IssueId,
+        error: SchedulerError,
+    ) -> SchedulerError {
+        let should_clear = self
+            .hierarchy_state
+            .hierarchy
+            .get(issue_id)
+            .is_some_and(HierarchySnapshot::dispatch_intended);
+        if !should_clear {
+            return error;
+        }
+        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(issue_id) {
+            snapshot.clear_dispatch_intent();
+        }
+        if let Err(persist_error) = self.persist_orchestrator_state().await {
+            warn!(
+                issue = %issue_id,
+                error = %persist_error,
+                "failed to clear parent dispatch intent after launch preparation failure"
+            );
+            return persist_error;
+        }
+        error
     }
 
     async fn apply_worker_updates(

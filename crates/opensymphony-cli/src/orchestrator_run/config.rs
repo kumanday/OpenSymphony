@@ -519,11 +519,7 @@ pub(super) async fn resolve_runtime_config(
                     })?;
             if looks_like_central_config(&raw) {
                 let central = resolve_central_config(path, &raw)?;
-                let repository_checkouts = matches!(
-                    central.repository_routing.mode,
-                    RepositoryRoutingMode::ProjectSet
-                )
-                .then_some(central.repository_checkouts);
+                let repository_checkouts = Some(central.repository_checkouts);
                 (
                     central.runtime,
                     central.generation,
