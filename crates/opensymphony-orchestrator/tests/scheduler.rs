@@ -8,15 +8,16 @@ use crate::opensymphony_domain::{
     CanonicalRepositoryId, DurationMs, HarnessInterruptCommand, HarnessInterruptReason,
     HarnessInterruptStatus, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
     RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint,
-    TrackerErrorCategory,
+    TrackerErrorCategory, TrackerIssueRef,
 };
 use crate::opensymphony_orchestrator::{
-    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryAttempt,
-    RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState,
-    Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
+    IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
+    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, RecoveredRun, RecoveryRecord,
+    ReleaseReason, RetryAttempt, RetryEntry, RetryExhaustionRecord, RetryPendingRecord,
+    RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs,
+    TrackerBackend, TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
     decide_issue_route,
@@ -355,6 +356,7 @@ struct FakeTracker {
     terminal_requests: usize,
     detail_requests: Vec<Vec<String>>,
     state_requests: Vec<Vec<String>>,
+    parent_evidence: Option<ParentEligibilityEvidence>,
 }
 
 impl TrackerBackend for FakeTracker {
@@ -423,6 +425,20 @@ impl TrackerBackend for FakeTracker {
             .collect())
     }
 
+    async fn parent_eligibility(
+        &mut self,
+        _parent: &TrackerIssue,
+        _hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        Ok(self
+            .parent_evidence
+            .clone()
+            .unwrap_or_else(|| ParentEligibilityEvidence {
+                hierarchy_generation: 0,
+                children: Vec::new(),
+            }))
+    }
+
     fn error_category(error: &Self::Error) -> Option<TrackerErrorCategory> {
         error.category
     }
@@ -457,6 +473,8 @@ struct FakeWorkspace {
     persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
     persist_interrupt_results: VecDeque<Result<(), FakeError>>,
     retain_failed: bool,
+    durable_state: Option<serde_json::Value>,
+    persisted_durable_states: Vec<serde_json::Value>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -486,6 +504,19 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(self.durable_state.clone())
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        self.durable_state = Some(state.clone());
+        self.persisted_durable_states.push(state.clone());
+        Ok(())
     }
 
     async fn recover_retry_exhaustion(
@@ -651,6 +682,111 @@ impl WorkerBackend for FakeWorker {
                 timed_out: false,
             }))
     }
+}
+
+#[tokio::test]
+async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
+    let child_id = IssueId::new("child-1").expect("child id should be valid");
+    let child_identifier = IssueIdentifier::new("COE-1-child").expect("child identifier");
+    let parent_id = IssueId::new("parent-1").expect("parent id should be valid");
+    let mut parent = tracker_issue("parent-1", "COE-1", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: child_identifier.to_string(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+    }];
+    let snapshot = HierarchySnapshot::new(&parent);
+    let resource = LeaseResource {
+        issue_id: child_id.clone(),
+        repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+        checkout_generation: "checkout-1".to_owned(),
+    };
+    let mut durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot.clone())]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: resource.clone(),
+            owner: LeaseOwner::leaf_worker(&child_id),
+            hierarchy_generation: snapshot.generation,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        ..Default::default()
+    };
+    let evidence = ParentEligibilityEvidence {
+        hierarchy_generation: snapshot.generation,
+        children: vec![ChildEligibilityEvidence {
+            child_id: child_id.clone(),
+            hierarchy_generation: snapshot.generation,
+            orchestrator_terminal: true,
+            provider_merge_confirmed: true,
+            merge_result_commit: Some("merge-commit".to_owned()),
+            resource: Some(resource),
+            unresolved_failure: None,
+        }],
+    };
+    let tracker = FakeTracker {
+        active: vec![parent.clone()],
+        parent_evidence: Some(evidence.clone()),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("eligible parent should dispatch");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    durable_state = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("dispatch should persist durable state"),
+    )
+    .expect("durable state should decode");
+    assert!(durable_state.hierarchy[&parent_id].dispatch_claimed());
+    assert!(
+        durable_state
+            .leases
+            .iter()
+            .any(|lease| { lease.kind == LeaseKind::AncestorIntegration && lease.active() })
+    );
+    assert!(
+        durable_state
+            .leases
+            .iter()
+            .any(|lease| { lease.kind == LeaseKind::LeafWorker && lease.released_at.is_some() })
+    );
+
+    let tracker = FakeTracker {
+        active: vec![parent],
+        parent_evidence: Some(evidence),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut restarted = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    restarted
+        .tick(ts(200))
+        .await
+        .expect("restart should respect the durable dispatch claim");
+    assert!(restarted.worker().launches.is_empty());
 }
 
 #[tokio::test]
@@ -5298,7 +5434,7 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
 async fn unlabeled_parent_remains_repository_neutral() {
     let mut issue = tracker_issue("lin-repo-parent", "COE-548-PARENT", "In Progress", 0);
     issue.project_id = Some("project-id".to_string());
-    issue.sub_issues = vec![crate::opensymphony_domain::TrackerIssueRef {
+    issue.sub_issues = vec![TrackerIssueRef {
         id: "lin-repo-parent-child".to_string(),
         identifier: "COE-548-CHILD".to_string(),
         title: Some("Child".to_string()),

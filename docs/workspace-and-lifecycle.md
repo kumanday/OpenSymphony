@@ -99,6 +99,17 @@ streams and fail closed above 1 MiB per file or 4 MiB across the selected and
 natively discovered instruction set; prompt loading applies the same per-file
 limit before retaining content in memory.
 
+### Hierarchy leases and terminal retention
+
+The scheduler stores hierarchy snapshots and durable leases in the workspace
+root's `.opensymphony-orchestrator-state.json` through
+`WorkspaceManager::write_json_artifact_atomically`. A lease resource is the
+existing issue ID, canonical repository ID, and checkout generation; hierarchy
+state never stores an alternate checkout path. Terminal cleanup, including
+failed, forced, and restart-recovery cleanup, checks the active owner-identified
+leases before removal. A leased checkout and its conversation evidence remain
+present until all applicable review and ancestor leases are released.
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:

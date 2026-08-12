@@ -36,9 +36,10 @@ use crate::opensymphony_openhands::{
     pending_conversation_manifest_path, superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
-    WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    DurableOrchestratorState, LeaseResource, RecoveredRun, RecoveryRecord, RetryExhaustionRecord,
+    RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -993,6 +994,13 @@ impl RuntimeWorkspaceBackend {
         force_remove: bool,
     ) -> Result<(), CliWorkspaceError> {
         if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
+            if self.workspace_has_active_lease(workspace).await? {
+                tracing::debug!(
+                    issue = %workspace.workspace_key,
+                    "retaining terminal workspace while a durable lease is active"
+                );
+                return Ok(());
+            }
             let Some(handle) = self
                 .manager
                 .list_all_workspaces()
@@ -1313,6 +1321,99 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             });
         }
         Ok(recoveries)
+    }
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        self.manager
+            .load_orchestrator_state()
+            .await
+            .map_err(CliWorkspaceError::Workspace)
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        self.manager
+            .write_orchestrator_state_atomically(state)
+            .await
+            .map_err(CliWorkspaceError::Workspace)
+    }
+
+    async fn workspace_lease_resource(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<Option<LeaseResource>, Self::Error> {
+        let Some((handle, manifest)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Ok(None);
+        };
+        let Some(repository_id) = manifest
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::repository_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let Some(checkout_generation) = handle.checkout_generation() else {
+            return Ok(None);
+        };
+        Ok(Some(LeaseResource {
+            issue_id: issue.id.clone(),
+            repository_id,
+            checkout_generation: checkout_generation.to_owned(),
+        }))
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<bool, Self::Error> {
+        let Some(raw) = self
+            .manager
+            .load_orchestrator_state::<serde_json::Value>()
+            .await?
+        else {
+            return Ok(false);
+        };
+        let state: DurableOrchestratorState = serde_json::from_value(raw).map_err(|error| {
+            CliWorkspaceError::RetryState(format!("invalid durable hierarchy state: {error}"))
+        })?;
+        state.validate().map_err(CliWorkspaceError::RetryState)?;
+        let Some((handle, manifest)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Ok(false);
+        };
+        let Some(generation) = handle.checkout_generation() else {
+            return Ok(false);
+        };
+        let resource = LeaseResource {
+            issue_id: IssueId::new(manifest.issue_id.clone())?,
+            repository_id: manifest
+                .repository_binding
+                .as_ref()
+                .and_then(RepositoryBindingOutcome::repository_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CliWorkspaceError::RetryState(
+                        "managed checkout is missing its canonical repository identity".to_owned(),
+                    )
+                })?,
+            checkout_generation: generation.to_owned(),
+        };
+        Ok(state.active_for(&resource))
     }
 
     async fn recover_retry_exhaustion(

@@ -1,0 +1,645 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::opensymphony_domain::{
+    CanonicalRepositoryId, IssueId, IssueIdentifier, TrackerIssue, TrackerIssueRef,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const HIERARCHY_STATE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HierarchyChildEdge {
+    pub child_id: IssueId,
+    pub child_identifier: IssueIdentifier,
+    pub required: bool,
+}
+
+impl From<&TrackerIssueRef> for HierarchyChildEdge {
+    fn from(child: &TrackerIssueRef) -> Self {
+        Self {
+            child_id: IssueId::new(child.id.clone()).expect("tracker child ids are validated"),
+            child_identifier: IssueIdentifier::new(child.identifier.clone())
+                .expect("tracker child identifiers are validated"),
+            required: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HierarchyBlockedReason {
+    HierarchyChanged,
+    MissingMergeEvidence,
+    MissingTargetCommit,
+    MissingCheckoutEvidence,
+    UnresolvedFailure(String),
+    StaleGeneration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HierarchyReconciliation {
+    Unchanged,
+    GenerationAdvanced { generation: u64 },
+    BlockedForReplanning { generation: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HierarchySnapshot {
+    pub parent_id: IssueId,
+    pub generation: u64,
+    pub required_child_edges: Vec<HierarchyChildEdge>,
+    pub frozen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<HierarchyBlockedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_generation: Option<u64>,
+}
+
+impl HierarchySnapshot {
+    pub fn new(parent: &TrackerIssue) -> Self {
+        let mut snapshot = Self {
+            parent_id: IssueId::new(parent.id.clone()).expect("tracker ids are validated"),
+            generation: 1,
+            required_child_edges: Vec::new(),
+            frozen: false,
+            blocked_reason: None,
+            dispatched_generation: None,
+        };
+        snapshot.required_child_edges = child_edges(&parent.sub_issues);
+        snapshot
+    }
+
+    pub fn reconcile(&mut self, children: &[TrackerIssueRef]) -> HierarchyReconciliation {
+        let next_edges = child_edges(children);
+        if next_edges == self.required_child_edges {
+            return HierarchyReconciliation::Unchanged;
+        }
+
+        self.generation = self.generation.saturating_add(1);
+        self.required_child_edges = next_edges;
+        self.dispatched_generation = None;
+        if self.frozen {
+            self.blocked_reason = Some(HierarchyBlockedReason::HierarchyChanged);
+            HierarchyReconciliation::BlockedForReplanning {
+                generation: self.generation,
+            }
+        } else {
+            self.blocked_reason = None;
+            HierarchyReconciliation::GenerationAdvanced {
+                generation: self.generation,
+            }
+        }
+    }
+
+    pub fn freeze(&mut self) -> Result<(), HierarchyBlockedReason> {
+        if self.blocked_reason.is_some() {
+            return Err(self.blocked_reason.clone().expect("checked above"));
+        }
+        self.frozen = true;
+        Ok(())
+    }
+
+    pub fn accepts_event(&self, generation: u64) -> bool {
+        generation == self.generation && self.blocked_reason.is_none()
+    }
+
+    pub fn replan(&mut self) {
+        self.frozen = false;
+        self.blocked_reason = None;
+        self.dispatched_generation = None;
+    }
+
+    pub fn mark_dispatched(&mut self) {
+        self.dispatched_generation = Some(self.generation);
+    }
+
+    pub fn dispatch_claimed(&self) -> bool {
+        self.dispatched_generation == Some(self.generation)
+    }
+}
+
+fn child_edges(children: &[TrackerIssueRef]) -> Vec<HierarchyChildEdge> {
+    let mut edges = children
+        .iter()
+        .map(HierarchyChildEdge::from)
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| left.child_id.cmp(&right.child_id));
+    edges
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseResource {
+    pub issue_id: IssueId,
+    pub repository_id: CanonicalRepositoryId,
+    pub checkout_generation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseOwner {
+    pub id: String,
+    pub kind: String,
+}
+
+impl LeaseOwner {
+    pub fn leaf_worker(issue_id: &IssueId) -> Self {
+        Self {
+            id: format!("leaf-worker:{issue_id}"),
+            kind: "leaf_worker".to_owned(),
+        }
+    }
+
+    pub fn ancestor(parent_id: &IssueId) -> Self {
+        Self {
+            id: format!("ancestor-integration:{parent_id}"),
+            kind: "ancestor_integration".to_owned(),
+        }
+    }
+
+    pub fn review(child_id: &IssueId) -> Self {
+        Self {
+            id: format!("review:{child_id}"),
+            kind: "review".to_owned(),
+        }
+    }
+
+    pub fn repair(parent_id: &IssueId) -> Self {
+        Self {
+            id: format!("repair:{parent_id}"),
+            kind: "repair".to_owned(),
+        }
+    }
+
+    pub fn diagnostic(operator_id: impl Into<String>) -> Self {
+        Self {
+            id: format!("diagnostic:{}", operator_id.into()),
+            kind: "diagnostic_hold".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseKind {
+    LeafWorker,
+    Review,
+    AncestorIntegration,
+    Repair,
+    DiagnosticHold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseRecord {
+    pub kind: LeaseKind,
+    pub resource: LeaseResource,
+    pub owner: LeaseOwner,
+    pub hierarchy_generation: u64,
+    pub acquired_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<u64>,
+}
+
+impl LeaseRecord {
+    pub fn active(&self) -> bool {
+        self.released_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LeaseError {
+    #[error("lease resource {resource:?} is already owned by {owner}")]
+    Conflict {
+        resource: LeaseResource,
+        owner: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildEligibilityEvidence {
+    pub child_id: IssueId,
+    pub hierarchy_generation: u64,
+    pub orchestrator_terminal: bool,
+    pub provider_merge_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_result_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<LeaseResource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_failure: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentEligibilityEvidence {
+    pub hierarchy_generation: u64,
+    pub children: Vec<ChildEligibilityEvidence>,
+}
+
+impl ParentEligibilityEvidence {
+    pub fn tracker_only(parent: &TrackerIssue, generation: u64) -> Self {
+        Self {
+            hierarchy_generation: generation,
+            children: parent
+                .sub_issues
+                .iter()
+                .map(|child| ChildEligibilityEvidence {
+                    child_id: IssueId::new(child.id.clone())
+                        .expect("tracker child ids are validated"),
+                    hierarchy_generation: generation,
+                    orchestrator_terminal: false,
+                    provider_merge_confirmed: false,
+                    merge_result_commit: None,
+                    resource: None,
+                    unresolved_failure: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn eligible_for(&self, snapshot: &HierarchySnapshot) -> Result<(), HierarchyBlockedReason> {
+        if snapshot.blocked_reason.is_some() || self.hierarchy_generation != snapshot.generation {
+            return Err(HierarchyBlockedReason::StaleGeneration);
+        }
+        let expected = snapshot
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+            .map(|edge| edge.child_id.clone())
+            .collect::<BTreeSet<_>>();
+        let actual = self
+            .children
+            .iter()
+            .map(|child| child.child_id.clone())
+            .collect::<BTreeSet<_>>();
+        if expected != actual {
+            return Err(HierarchyBlockedReason::HierarchyChanged);
+        }
+        for child in &self.children {
+            if child.hierarchy_generation != snapshot.generation {
+                return Err(HierarchyBlockedReason::StaleGeneration);
+            }
+            if !child.orchestrator_terminal {
+                return Err(HierarchyBlockedReason::UnresolvedFailure(
+                    "child orchestrator outcome is not terminal".to_owned(),
+                ));
+            }
+            if !child.provider_merge_confirmed {
+                return Err(HierarchyBlockedReason::MissingMergeEvidence);
+            }
+            if child
+                .merge_result_commit
+                .as_deref()
+                .is_none_or(|commit| commit.trim().is_empty())
+            {
+                return Err(HierarchyBlockedReason::MissingTargetCommit);
+            }
+            if child.resource.is_none() {
+                return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
+            }
+            if child
+                .resource
+                .as_ref()
+                .is_some_and(|resource| resource.issue_id != child.child_id)
+            {
+                return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
+            }
+            if let Some(failure) = &child.unresolved_failure {
+                return Err(HierarchyBlockedReason::UnresolvedFailure(failure.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn integration_leases(&self, parent_id: &IssueId, now: u64) -> Vec<LeaseRecord> {
+        let owner = LeaseOwner::ancestor(parent_id);
+        self.children
+            .iter()
+            .filter_map(|child| {
+                child.resource.clone().map(|resource| LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource,
+                    owner: owner.clone(),
+                    hierarchy_generation: self.hierarchy_generation,
+                    acquired_at: now,
+                    expires_at: None,
+                    released_at: None,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableOrchestratorState {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub hierarchy: BTreeMap<IssueId, HierarchySnapshot>,
+    #[serde(default)]
+    pub leases: Vec<LeaseRecord>,
+}
+
+impl Default for DurableOrchestratorState {
+    fn default() -> Self {
+        Self {
+            schema_version: HIERARCHY_STATE_SCHEMA_VERSION,
+            hierarchy: BTreeMap::new(),
+            leases: Vec::new(),
+        }
+    }
+}
+
+impl DurableOrchestratorState {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != HIERARCHY_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported durable hierarchy schema version {}",
+                self.schema_version
+            ));
+        }
+        if self.hierarchy.iter().any(|(parent_id, snapshot)| {
+            parent_id != &snapshot.parent_id || snapshot.generation == 0
+        }) {
+            return Err("durable hierarchy snapshot has invalid identity or generation".to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn acquire_leases(&mut self, records: Vec<LeaseRecord>) -> Result<(), LeaseError> {
+        let mut next = self.leases.clone();
+        for requested in records {
+            if let Some(existing) = next.iter_mut().find(|existing| {
+                existing.active()
+                    && existing.kind == requested.kind
+                    && existing.resource == requested.resource
+                    && existing.owner == requested.owner
+            }) {
+                *existing = requested;
+                continue;
+            }
+            if let Some(existing) = next.iter().find(|existing| {
+                existing.active()
+                    && existing.kind == requested.kind
+                    && existing.resource == requested.resource
+                    && existing.owner != requested.owner
+                    && matches!(requested.kind, LeaseKind::LeafWorker)
+            }) {
+                return Err(LeaseError::Conflict {
+                    resource: requested.resource,
+                    owner: existing.owner.id.clone(),
+                });
+            }
+            next.push(requested);
+        }
+        self.leases = next;
+        Ok(())
+    }
+
+    pub fn acquire_required_and_release_leaf(
+        &mut self,
+        required: Vec<LeaseRecord>,
+        leaf_resources: &[LeaseResource],
+        released_at: u64,
+    ) -> Result<(), LeaseError> {
+        let mut next = self.clone();
+        next.acquire_leases(required)?;
+        let leaf_owner = LeaseOwner::leaf_worker;
+        for resource in leaf_resources {
+            for lease in next.leases.iter_mut().filter(|lease| {
+                lease.active()
+                    && lease.kind == LeaseKind::LeafWorker
+                    && lease.resource == *resource
+                    && lease.owner == leaf_owner(&resource.issue_id)
+            }) {
+                lease.released_at = Some(released_at);
+            }
+        }
+        *self = next;
+        Ok(())
+    }
+
+    pub fn release_owner(&mut self, owner: &LeaseOwner, released_at: u64) {
+        for lease in &mut self.leases {
+            if lease.active() && lease.owner == *owner {
+                lease.released_at = Some(released_at);
+            }
+        }
+    }
+
+    pub fn active_for(&self, resource: &LeaseResource) -> bool {
+        self.leases
+            .iter()
+            .any(|lease| lease.active() && lease.resource == *resource)
+    }
+
+    pub fn has_ancestor_edge(&self, child_id: &IssueId) -> bool {
+        self.hierarchy.values().any(|snapshot| {
+            snapshot
+                .required_child_edges
+                .iter()
+                .any(|edge| edge.required && &edge.child_id == child_id)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn child(id: &str, state: &str) -> TrackerIssueRef {
+        TrackerIssueRef {
+            id: id.to_owned(),
+            identifier: id.to_owned(),
+            title: None,
+            url: None,
+            state: state.to_owned(),
+        }
+    }
+
+    fn parent(children: Vec<TrackerIssueRef>) -> TrackerIssue {
+        TrackerIssue {
+            id: "parent".to_owned(),
+            identifier: "COE-1".to_owned(),
+            url: String::new(),
+            title: String::new(),
+            description: None,
+            priority: None,
+            state: "In Progress".to_owned(),
+            state_kind: crate::opensymphony_domain::TrackerIssueStateKind::Started,
+            branch_name: None,
+            pr_url: None,
+            labels: Vec::new(),
+            project_id: None,
+            project_slug: None,
+            project_name: None,
+            parent_id: None,
+            parent: None,
+            project_milestone: None,
+            blocked_by: Vec::new(),
+            sub_issues: children,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn mutation_after_freeze_blocks_and_stale_events_are_rejected() {
+        let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
+        assert_eq!(snapshot.generation, 1);
+        snapshot.freeze().expect("initial scope should freeze");
+
+        assert_eq!(
+            snapshot.reconcile(&[child("child-b", "Done")]),
+            HierarchyReconciliation::BlockedForReplanning { generation: 2 }
+        );
+        assert!(!snapshot.accepts_event(1));
+        assert!(!snapshot.accepts_event(2));
+        snapshot.replan();
+        assert!(snapshot.accepts_event(2));
+    }
+
+    #[test]
+    fn required_leases_are_atomic_and_release_leaf_only_after_acquisition() {
+        let resource = LeaseResource {
+            issue_id: IssueId::new("child").expect("id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState::default();
+        state
+            .acquire_leases(vec![LeaseRecord {
+                kind: LeaseKind::LeafWorker,
+                resource: resource.clone(),
+                owner: LeaseOwner::leaf_worker(&resource.issue_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }])
+            .expect("leaf lease should acquire");
+        let parent_id = IssueId::new("parent").expect("id");
+        state
+            .acquire_required_and_release_leaf(
+                vec![LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                }],
+                std::slice::from_ref(&resource),
+                3,
+            )
+            .expect("required lease transaction should succeed");
+        assert!(state.active_for(&resource));
+        assert!(
+            state.leases.iter().any(|lease| {
+                lease.kind == LeaseKind::LeafWorker && lease.released_at == Some(3)
+            })
+        );
+    }
+
+    #[test]
+    fn tracker_terminal_state_alone_is_not_parent_eligibility() {
+        let parent = parent(vec![child("child-a", "Done")]);
+        let snapshot = HierarchySnapshot::new(&parent);
+        let evidence = ParentEligibilityEvidence::tracker_only(&parent, snapshot.generation);
+
+        assert_eq!(
+            evidence.eligible_for(&snapshot),
+            Err(HierarchyBlockedReason::UnresolvedFailure(
+                "child orchestrator outcome is not terminal".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_evidence_requires_merge_commit_and_retained_generation() {
+        let parent = parent(vec![child("child-a", "Done")]);
+        let snapshot = HierarchySnapshot::new(&parent);
+        let child_id = IssueId::new("child-a").expect("id");
+        let resource = LeaseResource {
+            issue_id: child_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut evidence = ParentEligibilityEvidence {
+            hierarchy_generation: snapshot.generation,
+            children: vec![ChildEligibilityEvidence {
+                child_id,
+                hierarchy_generation: snapshot.generation,
+                orchestrator_terminal: true,
+                provider_merge_confirmed: true,
+                merge_result_commit: Some("abc123".to_owned()),
+                resource: Some(resource.clone()),
+                unresolved_failure: None,
+            }],
+        };
+        assert!(evidence.eligible_for(&snapshot).is_ok());
+        evidence.children[0].merge_result_commit = None;
+        assert_eq!(
+            evidence.eligible_for(&snapshot),
+            Err(HierarchyBlockedReason::MissingTargetCommit)
+        );
+    }
+
+    #[test]
+    fn nested_ancestor_leases_keep_distinct_owner_edges() {
+        let resource = LeaseResource {
+            issue_id: IssueId::new("child").expect("id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let first_parent = IssueId::new("parent-a").expect("id");
+        let second_parent = IssueId::new("parent-b").expect("id");
+        let mut state = DurableOrchestratorState::default();
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&first_parent),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&second_parent),
+                    hierarchy_generation: 2,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("nested owners should coexist");
+
+        state.release_owner(&LeaseOwner::ancestor(&first_parent), 3);
+
+        assert_eq!(
+            state.leases.iter().filter(|lease| lease.active()).count(),
+            1
+        );
+        assert_eq!(state.leases[1].owner, LeaseOwner::ancestor(&second_parent));
+    }
+
+    #[test]
+    fn durable_state_validation_rejects_unknown_schema_and_invalid_snapshot() {
+        let state = DurableOrchestratorState {
+            schema_version: HIERARCHY_STATE_SCHEMA_VERSION + 1,
+            ..Default::default()
+        };
+        assert!(state.validate().is_err());
+
+        let parent = parent(vec![child("child-a", "Done")]);
+        let parent_id = IssueId::new("parent").expect("id");
+        let mut state = DurableOrchestratorState::default();
+        let mut snapshot = HierarchySnapshot::new(&parent);
+        snapshot.generation = 0;
+        state.hierarchy.insert(parent_id, snapshot);
+        assert!(state.validate().is_err());
+    }
+}

@@ -78,6 +78,14 @@ Repository binding outcomes are carried into the control-plane issue snapshot;
 invalid outcomes mark the issue blocked while preserving the typed diagnostic
 for operator clients.
 
+Hierarchy reconciliation is scheduler-owned as a separate generation axis from
+checkout, run, and attempt generations. The scheduler persists required child
+edges and owner-identified leases through the workspace manager's atomic JSON
+artifact path. Parent dispatch consumes provider-backed merge evidence only
+after terminal orchestrator outcomes and retained checkout-generation lease
+resources are present; scope changes after freeze are recorded as
+`HierarchyChanged` and cannot silently widen the parent run.
+
 ### 3.2 OpenHands is the execution adapter
 
 OpenHands provides:

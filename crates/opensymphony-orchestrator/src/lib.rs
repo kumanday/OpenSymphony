@@ -1,3 +1,4 @@
+mod hierarchy;
 mod scheduler;
 mod selection;
 
@@ -13,6 +14,11 @@ pub use crate::opensymphony_domain::{
     TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
     TrackerIssueSummary, TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId,
     WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+};
+pub use hierarchy::{
+    ChildEligibilityEvidence, DurableOrchestratorState, HierarchyBlockedReason, HierarchyChildEdge,
+    HierarchyReconciliation, HierarchySnapshot, LeaseError, LeaseKind, LeaseOwner, LeaseRecord,
+    LeaseResource, ParentEligibilityEvidence,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,

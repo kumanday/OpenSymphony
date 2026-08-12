@@ -29,6 +29,10 @@ use tokio::{
 use tracing::{debug, warn};
 
 use super::filter_issues_for_dispatch;
+use super::{
+    DurableOrchestratorState, HierarchySnapshot, LeaseRecord, LeaseResource,
+    ParentEligibilityEvidence,
+};
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
@@ -337,6 +341,16 @@ pub trait TrackerBackend {
         &mut self,
         issue_ids: &[String],
     ) -> Result<Vec<TrackerIssueStateSnapshot>, Self::Error>;
+    async fn parent_eligibility(
+        &mut self,
+        parent: &TrackerIssue,
+        hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        Ok(ParentEligibilityEvidence::tracker_only(
+            parent,
+            hierarchy.generation,
+        ))
+    }
     fn error_category(_error: &Self::Error) -> Option<TrackerErrorCategory> {
         None
     }
@@ -356,6 +370,32 @@ pub trait WorkspaceBackend {
     ) -> Result<WorkspaceRecord, Self::Error>;
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        _state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn workspace_lease_resource(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Option<LeaseResource>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
 
     async fn recover_retry_exhaustion(
         &mut self,
@@ -516,6 +556,8 @@ pub struct Scheduler<T, W, M> {
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     parent_issue_ids: HashSet<IssueId>,
+    hierarchy_state: DurableOrchestratorState,
+    durable_state_loaded: bool,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
@@ -554,6 +596,8 @@ where
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
             parent_issue_ids: HashSet::new(),
+            hierarchy_state: DurableOrchestratorState::default(),
+            durable_state_loaded: false,
             pending_retry_persistence: BTreeMap::new(),
             pending_retry_exhaustion_persistence: BTreeMap::new(),
             pending_recovery: None,
@@ -1535,6 +1579,12 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
+                self.retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
+                    .await?;
+                if self.workspace_has_active_lease(&record.workspace).await? {
+                    retry_records.push(record);
+                    continue;
+                }
                 let retain_failed = !record.successful_run
                     && !record.cancelled_run
                     && self.retry_limit_reached(record.normal_retry_count)
@@ -1607,12 +1657,24 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let mut durable_state_changed = false;
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
             if normalized.sub_issues.is_empty() {
                 self.parent_issue_ids.remove(&normalized.id);
             } else {
                 self.parent_issue_ids.insert(normalized.id.clone());
+                let snapshot = self
+                    .hierarchy_state
+                    .hierarchy
+                    .entry(normalized.id.clone())
+                    .or_insert_with(|| HierarchySnapshot::new(tracker_issue));
+                if !matches!(
+                    snapshot.reconcile(&tracker_issue.sub_issues),
+                    super::HierarchyReconciliation::Unchanged
+                ) {
+                    durable_state_changed = true;
+                }
             }
             let retry_cleanup_workspace = self
                 .executions
@@ -1621,6 +1683,7 @@ where
                 .and_then(|execution| execution.workspace().cloned());
             if let Some(workspace) = retry_cleanup_workspace
                 && !self.workspace.retain_failed_workspaces()
+                && !self.workspace_has_active_lease(&workspace).await?
             {
                 match self.workspace.cleanup_failed_workspace(&workspace).await {
                     Ok(()) => {
@@ -1818,6 +1881,9 @@ where
             }
         }
 
+        if durable_state_changed {
+            self.persist_orchestrator_state().await?;
+        }
         Ok(())
     }
 
@@ -1828,7 +1894,9 @@ where
                 if execution.issue().state.category != IssueStateCategory::Active {
                     return false;
                 }
-                if self.parent_issue_ids.contains(&execution.issue().id) {
+                if execution.issue().sub_issues.is_empty()
+                    && self.parent_issue_ids.contains(&execution.issue().id)
+                {
                     return false;
                 }
                 match execution.status() {
@@ -2641,7 +2709,14 @@ where
             }
 
             let normalized = normalize_tracker_issue(&tracker_issue, &self.config)?;
-            if !normalized.sub_issues.is_empty() || self.parent_issue_ids.contains(&normalized.id) {
+            if normalized.sub_issues.is_empty() && self.parent_issue_ids.contains(&normalized.id) {
+                continue;
+            }
+            if !normalized.sub_issues.is_empty()
+                && !self
+                    .parent_dispatch_is_eligible(&tracker_issue, &normalized, observed_at)
+                    .await?
+            {
                 continue;
             }
             let issue_id = normalized.id.clone();
@@ -2796,6 +2871,16 @@ where
                             Some(start_request.route.harness_kind),
                         ),
                     );
+                    if !execution.issue().sub_issues.is_empty()
+                        && let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id)
+                    {
+                        snapshot.mark_dispatched();
+                        if let Err(error) = self.persist_orchestrator_state().await
+                            && first_error.is_none()
+                        {
+                            first_error = Some(error);
+                        }
+                    }
                     if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
                         if first_error.is_none() {
                             first_error = Some(SchedulerError::Workspace {
@@ -3123,11 +3208,15 @@ where
         } else {
             reason
         };
+        if cleanup_terminal {
+            self.retain_terminal_child_lease(&execution).await?;
+        }
         let mut retry_cleanup_succeeded = retain_failed;
         if cleanup_terminal
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
+            && !self.workspace_has_active_lease(&workspace).await?
         {
             match if cleanup_reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
@@ -3355,6 +3444,9 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
+        if cleanup_terminal {
+            self.retain_terminal_child_lease(&execution).await?;
+        }
         if reason == ReleaseReason::RetryExhausted {
             let normal_retry_count = execution
                 .current_run()
@@ -3373,6 +3465,7 @@ where
             if cleanup_terminal
                 && !retain_failed
                 && let Some(workspace) = execution.workspace().cloned()
+                && !self.workspace_has_active_lease(&workspace).await?
             {
                 let cleanup = self.workspace.cleanup_failed_workspace(&workspace).await;
                 match cleanup {
@@ -3394,6 +3487,7 @@ where
         if cleanup_terminal
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
+            && !self.workspace_has_active_lease(&workspace).await?
         {
             let cleanup = if reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
@@ -3505,6 +3599,78 @@ where
         first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
     }
 
+    async fn parent_dispatch_is_eligible(
+        &mut self,
+        tracker_issue: &TrackerIssue,
+        normalized: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
+            return Ok(false);
+        };
+        if snapshot.dispatch_claimed() {
+            return Ok(false);
+        }
+        let evidence = self
+            .tracker
+            .parent_eligibility(tracker_issue, &snapshot)
+            .await
+            .map_err(|error| SchedulerError::Tracker {
+                detail: error.to_string(),
+            })?;
+        if evidence.eligible_for(&snapshot).is_err() {
+            return Ok(false);
+        }
+        if evidence.children.iter().any(|child| {
+            child.resource.as_ref().is_none_or(|resource| {
+                !self.hierarchy_state.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == super::LeaseKind::LeafWorker
+                        && lease.resource == *resource
+                })
+            })
+        }) {
+            return Ok(false);
+        }
+
+        let mut next_state = self.hierarchy_state.clone();
+        let Some(next_snapshot) = next_state.hierarchy.get_mut(&normalized.id) else {
+            return Ok(false);
+        };
+        if next_snapshot.freeze().is_err() {
+            return Ok(false);
+        }
+        let mut required_leases = evidence.integration_leases(&normalized.id, observed_at.as_u64());
+        required_leases.extend(evidence.children.iter().filter_map(|child| {
+            child.resource.clone().map(|resource| LeaseRecord {
+                kind: super::LeaseKind::Review,
+                resource,
+                owner: super::LeaseOwner::review(&child.child_id),
+                hierarchy_generation: evidence.hierarchy_generation,
+                acquired_at: observed_at.as_u64(),
+                expires_at: None,
+                released_at: None,
+            })
+        }));
+        let leaf_resources = evidence
+            .children
+            .iter()
+            .filter_map(|child| child.resource.clone())
+            .collect::<Vec<_>>();
+        next_state
+            .acquire_required_and_release_leaf(
+                required_leases,
+                &leaf_resources,
+                observed_at.as_u64(),
+            )
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
+        self.hierarchy_state = next_state;
+        self.persist_orchestrator_state().await?;
+        Ok(true)
+    }
+
     async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
         let Some((retry, workspace)) = self.executions.get(issue_id).and_then(|execution| {
             execution
@@ -3542,6 +3708,26 @@ where
             return Ok(());
         }
 
+        if !self.durable_state_loaded {
+            if let Some(raw) = self
+                .workspace
+                .load_orchestrator_state()
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+            {
+                self.hierarchy_state =
+                    serde_json::from_value(raw).map_err(|error| SchedulerError::Workspace {
+                        detail: format!("invalid durable hierarchy state: {error}"),
+                    })?;
+                self.hierarchy_state
+                    .validate()
+                    .map_err(|detail| SchedulerError::Workspace { detail })?;
+            }
+            self.durable_state_loaded = true;
+        }
+
         let recoveries = self.workspace.recover_workspaces().await.map_err(|error| {
             SchedulerError::Workspace {
                 detail: error.to_string(),
@@ -3569,6 +3755,92 @@ where
         self.pending_retry_exhaustion = Some(retry_exhaustion);
         self.pending_retry_recovery = Some(retry_pending);
         Ok(())
+    }
+
+    async fn persist_orchestrator_state(&mut self) -> Result<(), SchedulerError> {
+        let state = serde_json::to_value(&self.hierarchy_state).map_err(|error| {
+            SchedulerError::Workspace {
+                detail: format!("failed to encode durable hierarchy state: {error}"),
+            }
+        })?;
+        self.workspace
+            .persist_orchestrator_state(&state)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })
+    }
+
+    async fn retain_terminal_child_lease(
+        &mut self,
+        execution: &IssueExecution,
+    ) -> Result<bool, SchedulerError> {
+        let Some(workspace) = execution.workspace() else {
+            return Ok(false);
+        };
+        self.retain_terminal_child_lease_for_workspace(execution.issue(), workspace)
+            .await
+    }
+
+    async fn retain_terminal_child_lease_for_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        if !self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            return Ok(false);
+        }
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(false);
+        };
+        let issue_id = issue.id.clone();
+        let hierarchy_generation = self
+            .hierarchy_state
+            .hierarchy
+            .values()
+            .filter(|snapshot| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .any(|edge| edge.required && edge.child_id == issue_id)
+            })
+            .map(|snapshot| snapshot.generation)
+            .max()
+            .unwrap_or_default();
+        self.hierarchy_state
+            .acquire_leases(vec![LeaseRecord {
+                kind: super::LeaseKind::LeafWorker,
+                resource,
+                owner: super::LeaseOwner::leaf_worker(&issue_id),
+                hierarchy_generation,
+                acquired_at: current_epoch_millis(),
+                expires_at: None,
+                released_at: None,
+            }])
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
+        self.persist_orchestrator_state().await?;
+        Ok(true)
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        self.workspace
+            .workspace_has_active_lease(workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })
     }
 
     async fn flush_pending_retry_exhaustion_persistence(&mut self) -> Result<(), SchedulerError> {
@@ -3605,6 +3877,18 @@ where
         else {
             return;
         };
+        match self.workspace_has_active_lease(&workspace).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    issue = %issue_id,
+                    %error,
+                    "unable to check durable lease before retry-exhausted cleanup"
+                );
+                return;
+            }
+        }
         match self.workspace.cleanup_failed_workspace(&workspace).await {
             Ok(()) => {
                 if let Some(execution) = self.executions.get_mut(issue_id) {

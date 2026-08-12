@@ -3033,6 +3033,46 @@ impl WorkspaceManager {
             .await
     }
 
+    /// Read the scheduler-owned state kept beside managed workspaces. The
+    /// synthetic handle keeps the same containment and symlink checks as a
+    /// normal workspace artifact.
+    pub async fn load_orchestrator_state<T>(&self) -> Result<Option<T>, WorkspaceError>
+    where
+        T: DeserializeOwned,
+    {
+        let handle = self.orchestrator_state_handle();
+        self.load_manifest(&handle, &self.orchestrator_state_path())
+            .await
+    }
+
+    pub async fn write_orchestrator_state_atomically<T>(
+        &self,
+        state: &T,
+    ) -> Result<(), WorkspaceError>
+    where
+        T: Serialize,
+    {
+        self.create_directory(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle();
+        self.write_json_artifact_atomically(&handle, &self.orchestrator_state_path(), state)
+            .await
+    }
+
+    fn orchestrator_state_handle(&self) -> WorkspaceHandle {
+        WorkspaceHandle::new(
+            "__opensymphony_orchestrator_state__",
+            "__opensymphony_orchestrator_state__",
+            "__opensymphony_orchestrator_state__",
+            self.config.root.clone(),
+        )
+    }
+
+    fn orchestrator_state_path(&self) -> PathBuf {
+        self.config
+            .root
+            .join(".opensymphony-orchestrator-state.json")
+    }
+
     pub async fn load_conversation_manifest(
         &self,
         workspace: &WorkspaceHandle,
@@ -5032,6 +5072,38 @@ mod tests {
         assert_eq!(hash, super::hash_bytes(b"abc"));
         assert!(contents.is_empty());
         assert_eq!(total_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_state_round_trips_through_atomic_workspace_artifact() {
+        let root = tempfile::tempdir().expect("workspace root should exist");
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: root.path().join("workspaces"),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        let state = serde_json::json!({
+            "schema_version": 1,
+            "hierarchy": {},
+            "leases": []
+        });
+
+        manager
+            .write_orchestrator_state_atomically(&state)
+            .await
+            .expect("scheduler state should write atomically");
+        let loaded: Option<serde_json::Value> = manager
+            .load_orchestrator_state()
+            .await
+            .expect("scheduler state should load");
+
+        assert_eq!(loaded, Some(state));
+        assert!(
+            root.path()
+                .join("workspaces/.opensymphony-orchestrator-state.json")
+                .is_file()
+        );
     }
 
     #[tokio::test]

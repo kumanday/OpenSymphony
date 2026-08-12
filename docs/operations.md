@@ -19,6 +19,12 @@ Recommended CLI commands:
 - `opensymphony doctor`
 - `opensymphony rehydrate <issue-id> --reason "..."`
 
+During restart recovery, `opensymphony run` loads the scheduler-owned
+hierarchy and lease artifact before reconciling terminal workspaces. The
+artifact is an internal durable record; operators should not edit it manually.
+Recovery rebuilds ancestor retention before cleanup, and cleanup remains
+blocked while any owner-identified lease for the checkout generation is active.
+
 ## 2. First-run flow
 
 ```bash
