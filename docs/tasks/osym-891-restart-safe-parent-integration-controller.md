@@ -32,15 +32,41 @@ Compose the parent controller from the earlier leaf and parent-root slices:
   launch, event normalization, conversation recovery, runtime-envelope
   verification, and bounded diagnostics. Parent attempts extend that adapter
   path rather than creating a second worker lifecycle.
-- OSYM-888 supplies authorization-before-filter, run/attempt-aware leaf claims,
-  and strict live-overlay ownership. OSYM-890 supplies generation-bound child
-  handles, the parent root, and the truthful cross-harness execution envelope.
-  Parent grants and attempts must reference those identities.
+- OSYM-888 landed `MemoryScopeGrant`,
+  `MemoryScopeGrantRegistry::issue_or_refresh_with_claims`,
+  `authorize_memory_request_with_scoped_grant`,
+  `validate_worker_memory_scope`, and
+  `resolve_code_graph_overlay_with_grant`, plus durable run/attempt/project
+  claims in `TerminalRuntimeEnvelope` and capture ownership through
+  `load_terminal_capture_bindings`/`apply_terminal_capture_bindings`. These
+  paths already enforce authorization-before-filter, grant-bounded
+  `all_accessible`, authorized persisted sibling snapshots, and one verified
+  leaf overlay. Extend them for descendant-scoped parent grants and several
+  parent-owned integration overlays; do not create a second memory server or
+  grant registry.
+- OSYM-890 supplies generation-bound child handles, the parent root, and the
+  truthful cross-harness execution envelope. Parent grants and attempts must
+  reference those identities.
 
 The remaining work is the durable parent state machine, bounded verification
 attempts, parent-specific grants/capture, and higher-ancestor propagation. Leaf
 worker recovery, checkout verification, and issue-level credential revocation
 are inherited behavior.
+
+## Adjacent Task Boundaries
+
+- OSYM-889 owns hierarchy reconciliation, eligibility, leases, and one-time
+  dispatch. OSYM-890 owns parent-root preparation and checkout-handle safety.
+  This controller consumes both and must not recreate them.
+- This task owns the no-repair parent state machine, bounded integration
+  commands, attempt/resource receipts, descendant-scoped parent memory,
+  capture, final verification, and higher-ancestor propagation.
+- OSYM-892 owns every branch, push, pull request, check, review, merge, and
+  post-merge provider side effect. A repair-required transition may stop here;
+  implementing the repair loop does not.
+- OSYM-893 owns cleanup intents, tombstones, and deletion. OSYM-894 owns
+  operator/client projections. OSYM-895 owns cross-subsystem fault injection
+  and rollout. Review feedback for those surfaces belongs in those slices.
 
 ## Scope
 

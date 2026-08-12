@@ -50,12 +50,16 @@ areas:
       - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
@@ -332,6 +336,7 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
@@ -341,17 +346,26 @@ areas:
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
@@ -518,17 +532,39 @@ areas:
       docs:
       - docs/configuration.md
       linear_labels:
+      - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
+      - area:debugging
+      - area:desktop
+      - area:documentation
+      - area:duckdb
+      - area:frontend
+      - area:gateway
+      - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
+      - area:release
+      - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
+      - area:testing
+      - area:tests
+      - area:threejs
+      - area:web
       - area:workflow
       - area:workspace-lifecycle
       - configuration
@@ -538,9 +574,11 @@ areas:
       - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
+      - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
       - 'M7: Shared Client And Desktop Alpha'
@@ -629,31 +667,46 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   deployment-modes:
@@ -942,6 +995,7 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
@@ -954,17 +1008,22 @@ areas:
       - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M11.5: LLM Wiki Graph View'
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
@@ -1088,6 +1147,7 @@ areas:
       - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -1697,21 +1757,49 @@ areas:
     - migration
     source_refs:
       linear_labels:
+      - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
+      - area:debugging
+      - area:desktop
+      - area:documentation
+      - area:duckdb
+      - area:frontend
+      - area:gateway
+      - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
+      - area:release
+      - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
+      - area:testing
+      - area:tests
+      - area:threejs
+      - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
+      - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.9: Code Graph View'
   migration-1-0-0:
     title: OpenSymphony 1.0.0 Migration Guide
     docs_target: docs/migration-1.0.0.md
@@ -2107,18 +2195,49 @@ areas:
     - planning
     source_refs:
       linear_labels:
+      - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
+      - area:debugging
+      - area:desktop
+      - area:documentation
+      - area:duckdb
+      - area:frontend
+      - area:gateway
+      - area:graph-view
+      - area:installer
+      - area:linear
       - area:mcp
       - area:memory
+      - area:migration
       - area:openhands-runtime
+      - area:operations
+      - area:orchestrator
       - area:planning
+      - area:query-packs
+      - area:release
+      - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
+      - area:testing
+      - area:tests
+      - area:threejs
+      - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
+      - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.9: Code Graph View'
   prerequisites:
     title: Prerequisites
     docs_target: docs/prerequisites.md
@@ -2171,6 +2290,7 @@ areas:
       - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -2201,11 +2321,13 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
@@ -2215,16 +2337,27 @@ areas:
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
@@ -2259,31 +2392,46 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   runtime:
@@ -2535,6 +2683,7 @@ areas:
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
@@ -2544,18 +2693,25 @@ areas:
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
@@ -2574,11 +2730,13 @@ areas:
       - area:accessibility
       - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
@@ -2588,17 +2746,25 @@ areas:
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
@@ -2738,8 +2904,10 @@ areas:
       - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
@@ -2790,12 +2958,15 @@ areas:
       - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
       - area:target-repo-bootstrap
       - area:template
       - area:testing
+      - area:tests
       - area:threejs
       - area:web
       - area:workflow
@@ -2974,31 +3145,46 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
   websocket-runtime:
@@ -3096,31 +3282,46 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:cli
       - area:code-intelligence
+      - area:code-review
       - area:codex-runtime
       - area:configuration
       - area:debugging
       - area:desktop
       - area:documentation
+      - area:duckdb
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:installer
       - area:linear
       - area:mcp
       - area:memory
       - area:migration
       - area:openhands-runtime
+      - area:operations
       - area:orchestrator
       - area:planning
+      - area:query-packs
       - area:release
       - area:run-detail
+      - area:rust
       - area:security
+      - area:target-repo-bootstrap
+      - area:template
       - area:testing
+      - area:tests
+      - area:threejs
       - area:web
       - area:workflow
       - area:workspace-lifecycle
       linear_milestones:
+      - 'M11.5: LLM Wiki Graph View'
+      - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.7: Workflow Target Branch Configuration'
       - 'M12.85: Codex Thread Lifecycle'
+      - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.9: Code Graph View'
 redaction:

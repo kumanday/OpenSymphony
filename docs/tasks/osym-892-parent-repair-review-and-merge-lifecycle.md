@@ -44,6 +44,19 @@ No GitHub branch/PR/check/review/merge adapter exists in this baseline. That
 provider path and its idempotent repair-attempt records remain the substantive
 work of this task.
 
+## Adjacent Task Boundaries
+
+- OSYM-889 owns hierarchy and lease semantics; OSYM-890 owns checkout handles
+  and integration worktrees; OSYM-891 owns the parent controller, command
+  attempts, memory, and final-verification state machine. This task plugs repair
+  states into those contracts without replacing them.
+- This task owns repair-attempt history and GitHub-first branch, push, pull
+  request, check, review, merge, reconciliation, and refresh side effects.
+- OSYM-893 owns cleanup eligibility, receipts, tombstones, and deletion after
+  repair/final verification. OSYM-894 owns projections and support bundles;
+  OSYM-895 owns hermetic lifecycle composition and rollout. Do not implement
+  those later surfaces in response to provider-review feedback here.
+
 ## Scope
 
 ### In scope

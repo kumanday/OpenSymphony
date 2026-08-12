@@ -233,7 +233,12 @@ Key takeaways carried forward:
 
 ## Current model
 
-- COE-551 contributed: PR #232: [COE-551] Scope cross-repository memory and leaf overlays (merge `c907f6f`)
+- COE-498 contributed: PR #151: Add Rust tree-sitter code intelligence skeleton (merge `ebd27c2`)
+- COE-499 contributed: PR #167: feat(memory): use AST code intel for context (merge `2e0a092`)
+- COE-500 contributed: PR #168: feat(code-intel): add query packs for agent languages (merge `3fdc146`)
+- COE-501 contributed: PR #172: COE-501: Persist code intelligence ingest rows (merge `f75f0f6`)
+- COE-502 contributed: PR #174: Expose read-only AST MCP tools (merge `4de8d58`)
+- COE-503 contributed: PR #175: feat(code-intel): harden AST limits and docs (merge `c6241a9`)
 
 ## Important invariants
 
@@ -250,10 +255,42 @@ Key takeaways carried forward:
 
 ## Recent changes
 
+- COE-498: Tree-sitter Provider Skeleton And Rust Parsing
+- COE-499: Memory Context AST Provider Integration
+- COE-500: Query Packs For Supported Agent Languages
+- COE-501: Code Intelligence Persistence And Ingestion
+- COE-502: Read-Only AST MCP And CLI Tools
+- COE-503: Code Intelligence Performance Docs And Hardening
+- COE-505: Add scheduler-side Codex stdio interrupt channel
+- COE-506: Invert CodeIntelIndex trait ownership after AST memory integration
+- COE-507: Deduplicate query-pack assets for grammar variants
+- COE-508: Cache code-intel parsers and compiled query packs
+- COE-540: Canonical Codex Thread Reuse And Workspace Retention
+- COE-541: Durable Codex Thread Archive And Debug Recovery
+- COE-547: Central Multi-Repository Config And Safe Migration
+- COE-548: Canonical Repository Binding And Task Propagation
+- COE-549: Verified Checkouts Instructions And Harness Envelopes
+- COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 
 ## Source refs
 
+- COE-498
+- COE-499
+- COE-500
+- COE-501
+- COE-502
+- COE-503
+- COE-505
+- COE-506
+- COE-507
+- COE-508
+- COE-540
+- COE-541
+- COE-547
+- COE-548
+- COE-549
+- COE-550
 - COE-551
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

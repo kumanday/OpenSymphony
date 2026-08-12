@@ -40,11 +40,32 @@ checkout or launch identities:
   as `cwd`. Add the parent-root scope to that shared launch path; do not add a
   parent-only harness backend or reuse mutable tracker paths as checkout
   handles.
+- `crates/opensymphony-cli/src/memory.rs::{MemoryScopeGrant,
+  MemoryScopeGrantRegistry}` and
+  `resolve_code_graph_overlay_with_grant` now enforce run/attempt-aware leaf
+  authorization and single-checkout live-overlay ownership. This task may carry
+  the generation-bound integration-checkout identities required by a later
+  parent grant, but OSYM-891 owns the parent grant and multi-overlay policy.
 
 The remaining work is the repository-neutral parent root, contained
 integration worktrees, and multi-checkout launch envelope. It does not include
 another leaf clone, recovery, quarantine, prompt-instruction, or conversation
 lifecycle.
+
+## Adjacent Task Boundaries
+
+- OSYM-889 supplies parent eligibility, hierarchy generation, and the leases
+  that authorize reuse. This task consumes those records without redesigning
+  their state machine.
+- This task owns parent-root layout, generation-bound checkout handles,
+  shared-object integration worktrees, prompt composition, and the logical
+  multi-checkout harness envelope.
+- OSYM-891 owns controller transitions, command execution, resource receipts,
+  parent memory grants/overlays, capture, and final verification.
+- OSYM-892 owns repair branches and provider review/merge operations; OSYM-893
+  owns worktree/root deletion and tombstones; OSYM-894 and OSYM-895 own
+  projections and lifecycle validation respectively. Push review requests for
+  those behaviors to their owning tasks.
 
 ## Scope
 

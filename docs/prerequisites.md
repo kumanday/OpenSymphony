@@ -40,7 +40,12 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 
 ## Current model
 
-- COE-530 contributed: PR #193: docs(installer): document desktop installer validation (merge `7588cc7`)
+- COE-461 contributed: PR #164: Expose memory graph DTOs and endpoints (merge `762cec5`)
+- COE-464 contributed: PR #165: Derive OKF memory graph metrics and communities (merge `7d58035`)
+- COE-465 contributed: PR #166: Add shared frontend graph package (merge `21281d0`)
+- COE-467 contributed: PR #171: Add Knowledge Graph renderer (merge `1337903`)
+- COE-468 contributed: PR #169: Add Knowledge Graph inspector surface (merge `960541a`)
+- COE-469 contributed: PR #170: Wire live memory graph privacy gates (merge `11ac876`)
 
 ## Important invariants
 
@@ -57,10 +62,36 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 
 ## Recent changes
 
+- COE-461: Memory Graph DTOs And Gateway Endpoints
+- COE-464: Graph Extraction, Metrics, And Community Pipeline
+- COE-465: Shared Graph Frontend Package And Reducers
+- COE-467: Three.js Graph Renderer And Worker Layouts
+- COE-468: Concept Inspector, Search, Filters, And Accessibility Fallback
+- COE-469: Live Memory Graph Integration And Privacy Gates
+- COE-471: Graph Scale, Visual Regression, And Web/Desktop Hardening
+- COE-520: Route desktop Knowledge Graph through native gateway commands
+- COE-525: Desktop Installer Contract And Release Metadata
+- COE-526: Desktop Release Bundle Pipeline
+- COE-527: Source Build Fallback And Prerequisites
+- COE-528: App Download Install And Launch Flow
+- COE-529: Desktop Auto-Update Flow
 - COE-530: Installer Docs And End-To-End Validation
 
 ## Source refs
 
+- COE-461
+- COE-464
+- COE-465
+- COE-467
+- COE-468
+- COE-469
+- COE-471
+- COE-520
+- COE-525
+- COE-526
+- COE-527
+- COE-528
+- COE-529
 - COE-530
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

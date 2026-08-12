@@ -27,9 +27,11 @@ Build the hierarchy and lease model through these existing ownership points:
 - `crates/opensymphony-workspace/src/models.rs` already identifies a leaf
   through `CheckoutManifest::generation`,
   `WorkspaceHandle::checkout_generation`, `TerminalRuntimeEnvelope`, and
-  `RunManifest::runtime_envelope`. Hierarchy generation is a separate version
-  axis; do not conflate it with config, inventory, policy, or checkout
-  generations or introduce another checkout identity.
+  `RunManifest::runtime_envelope`. The terminal envelope now also pins run,
+  attempt, and tracker-project identity for scoped memory. Hierarchy generation
+  is a separate version axis; do not conflate it with config, inventory,
+  policy, checkout, run, or attempt generations or introduce another checkout
+  identity.
 - `crates/opensymphony-workspace/src/manager.rs` owns
   `ensure_verified_checkout`, `verify_checkout_for_retry`,
   `verify_runtime_envelope_for_retry`, `list_all_workspaces`,
@@ -60,10 +62,31 @@ Build the hierarchy and lease model through these existing ownership points:
   `retained_terminal_cleanup_keeps_openhands_conversation_active`:
   conversation archival follows authorized workspace removal, not terminal
   tracker state alone.
+- `crates/opensymphony-cli/src/memory.rs::{MemoryScopeGrant,
+  MemoryScopeGrantRegistry}` owns process-local worker credential claims and
+  revocation. It is not a durable workspace-lease store and must not be
+  generalized into one; OSYM-891 consumes its authorization primitives for
+  parent memory.
 
 Preserve `verified_checkout_is_atomic_repository_local_and_quarantines_drift`
 and the existing terminal-retention regressions. They are the leaf lifecycle
-substrate, not the hierarchy-generation or lease model this task owns.
+substrate, not the hierarchy-generation or lease model this task owns. No
+hierarchy-generation or ancestor-lease production model exists yet.
+
+## Adjacent Task Boundaries
+
+- This task owns hierarchy snapshots, eligibility, durable owner-identified
+  leases, late-event fencing, and one-time parent dispatch.
+- OSYM-890 owns the parent execution root, checkout-handle map, integration
+  worktrees, prompt, and multi-checkout launch envelope; review requests for
+  those artifacts belong there.
+- OSYM-891 owns parent controller states, integration commands, parent memory
+  grants/overlays, final verification, and higher-ancestor result propagation.
+- OSYM-892 owns repair branches, pull requests, checks, review, and merge side
+  effects. OSYM-893 owns cleanup intents, tombstones, and bottom-up deletion.
+- OSYM-894 owns operator projections and support bundles. OSYM-895 owns the
+  composed hermetic lifecycle and rollout gate. Do not add their production or
+  validation surfaces to satisfy review feedback on this slice.
 
 ## Scope
 

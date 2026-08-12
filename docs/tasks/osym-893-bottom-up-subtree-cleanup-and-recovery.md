@@ -59,6 +59,20 @@ Preserve the regressions
 issue workspace; this task adds ancestor leases, integration worktrees,
 bottom-up release, generation tombstones, and subtree cleanup intent.
 
+## Adjacent Task Boundaries
+
+- OSYM-889 owns lease creation, ownership, and hierarchy generations; OSYM-890
+  owns parent-root/worktree creation; OSYM-891 owns final verification and
+  cleanup-readiness evidence; OSYM-892 owns repair/provider completion. This
+  task consumes their terminal records and does not redefine them.
+- This task owns cleanup intent, eligibility, ordered lease release, Git-aware
+  worktree removal, hook/deletion receipts, tombstones, retries, and subtree
+  recovery.
+- OSYM-894 owns read-only cleanup/operator projections and support bundles.
+  OSYM-895 owns systematic cross-subsystem restart/fault coverage and rollout.
+  Review feedback for UI parity, release harnesses, quotas, or hosted deletion
+  belongs outside this slice.
+
 ## Scope
 
 ### In scope

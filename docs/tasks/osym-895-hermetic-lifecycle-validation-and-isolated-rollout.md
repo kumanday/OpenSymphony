@@ -53,6 +53,16 @@ Build the inherited-evidence inventory from these suites:
   `central_memory_writers_share_a_catalog_coordination_lock`,
   `memory_server_writer_gate_keeps_filesystem_lock_until_guards_drain`, and
   `memory_server_health_reports_pinned_config_generation`.
+- Scoped leaf memory and overlay authorization:
+  `crates/opensymphony-cli/src/memory.rs`,
+  `crates/opensymphony-memory/src/{query,code_graph}.rs`, and the harness
+  injection paths, especially
+  `strict_memory_context_requires_a_worker_scope_grant`,
+  `worker_memory_grant_rejects_foreign_and_unscoped_requests`,
+  `worker_memory_grant_refresh_rotates_bearer_for_claim_changes`,
+  `strict_checkout_accepts_a_run_owned_descendant_head`,
+  `terminal_capture_bindings_follow_durable_runtime_envelope`, and
+  `context_records_keep_the_base_commit_for_persisted_overlay_paths`.
 - Operator projections:
   `crates/opensymphony-cli/src/orchestrator_run/snapshot.rs`,
   `crates/opensymphony-gateway/tests/gateway.rs`, and
@@ -62,6 +72,20 @@ Treat those tests as inherited subsystem evidence. This task owns the
 cross-subsystem, three-repository lifecycle and fault matrix; compose the
 existing fixtures and add only missing multi-repository transitions rather than
 duplicating the unit matrices.
+
+## Adjacent Task Boundaries
+
+- OSYM-889 through OSYM-894 own the production hierarchy, workspace,
+  controller, provider, cleanup, schema, and client contracts. This task
+  composes and verifies those frozen contracts rather than adding replacement
+  implementations.
+- This task owns the inherited-evidence map, three-repository hermetic harness,
+  cross-subsystem restart/fault matrix, bounded disposable live scenario,
+  release evidence, rollback proof, and isolated non-production rollout.
+- Minimal correctness fixes exposed by the lifecycle gate are allowed, but new
+  lifecycle states, provider capabilities, operator fields, hosted isolation,
+  or production activation require an owning-task follow-up instead of scope
+  expansion during review.
 
 ## Scope
 

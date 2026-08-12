@@ -47,6 +47,12 @@ Extend this projection chain:
   generation, harness/model, requested execution scope, effective containment,
   conversation binding, and cleanup intent. These are authoritative projection
   inputs; do not rediscover them from tracker text or local paths.
+- `crates/opensymphony-cli/src/memory.rs::{MemoryScopeGrant,
+  MemoryScopeGrantRegistry}` now carries project set, project, work item,
+  authorized repositories, run/attempt, checkout generation, commits,
+  visibility, and capabilities for leaf authorization. The bearer and registry
+  remain internal. Project only sanitized scope, source freshness, degradation,
+  and overlay provenance from authoritative state; never project grant tokens.
 - Existing FrankenTUI projections consume the Rust control-plane model. The
   landed checkout and runtime facts do not yet have matching Rust control-plane
   fields or TypeScript/web/desktop multi-repository schemas, so those remain
@@ -61,6 +67,18 @@ and the `runtime_diagnostics_redact_*` tests. This baseline covers generic
 single-issue runtime truth, not repository binding, checkout provenance,
 parents, leases, repairs, memory sources, cleanup progress, support bundles, or
 cross-client parity.
+
+## Adjacent Task Boundaries
+
+- OSYM-889 through OSYM-893 own all hierarchy, lease, parent execution,
+  provider, verification, repair, and cleanup mutations. This task reads their
+  frozen state and events; it must not add scheduler or provider behavior to
+  make a view convenient.
+- This task owns Rust/TypeScript schemas, snapshot/event mapping, sanitized
+  support bundles, and CLI/TUI/web/desktop rendering parity.
+- OSYM-895 owns the full lifecycle fixture, systematic restart/fault matrix,
+  live rollout, and release evidence. Client contract tests belong here;
+  three-repository lifecycle orchestration and rollout automation belong there.
 
 ## Scope
 
