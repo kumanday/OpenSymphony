@@ -54,6 +54,11 @@ pub struct HierarchySnapshot {
     pub frozen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<HierarchyBlockedReason>,
+    /// The latest provider or orchestrator eligibility result. Unlike
+    /// `blocked_reason`, this is diagnostic state and does not require an
+    /// explicit hierarchy replan before the next eligibility attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_blocked_reason: Option<HierarchyBlockedReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,6 +83,7 @@ impl HierarchySnapshot {
             required_child_edges: Vec::new(),
             frozen: false,
             blocked_reason: None,
+            eligibility_blocked_reason: None,
             dispatched_generation: None,
             dispatch_intent_generation: None,
             in_flight_generation: None,
@@ -117,6 +123,7 @@ impl HierarchySnapshot {
         let previous_generation = self.generation;
         self.generation = self.generation.saturating_add(1);
         self.required_child_edges = next_edges;
+        self.eligibility_blocked_reason = None;
         if self.frozen && self.dispatched_generation == Some(previous_generation) {
             self.in_flight_generation.get_or_insert(previous_generation);
         }
@@ -150,6 +157,7 @@ impl HierarchySnapshot {
     pub fn replan(&mut self) {
         self.frozen = false;
         self.blocked_reason = None;
+        self.eligibility_blocked_reason = None;
         self.dispatched_generation = None;
         self.dispatch_intent_generation = None;
         self.in_flight_generation = None;
@@ -694,6 +702,7 @@ impl DurableOrchestratorState {
 
     pub fn descendant_resources_for(&self, parent_id: &IssueId) -> Vec<LeaseResource> {
         let owner = LeaseOwner::ancestor(parent_id);
+        let current_subtree = self.current_subtree_issue_ids(parent_id);
         let current_generation = self
             .hierarchy
             .get(parent_id)
@@ -706,6 +715,9 @@ impl DurableOrchestratorState {
                 && lease.owner == owner
                 && current_generation
                     .is_none_or(|generation| lease.hierarchy_generation == generation)
+                && current_subtree
+                    .as_ref()
+                    .is_some_and(|subtree| subtree.contains(&lease.resource.issue_id))
             {
                 resources
                     .entry(lease.resource.clone())
@@ -714,6 +726,30 @@ impl DurableOrchestratorState {
             }
         }
         resources.into_keys().collect()
+    }
+
+    fn current_subtree_issue_ids(&self, parent_id: &IssueId) -> Option<BTreeSet<IssueId>> {
+        if !self.hierarchy.contains_key(parent_id) {
+            return None;
+        }
+        let mut subtree = BTreeSet::from([parent_id.clone()]);
+        let mut pending = vec![parent_id.clone()];
+        while let Some(issue_id) = pending.pop() {
+            let Some(snapshot) = self.hierarchy.get(&issue_id) else {
+                continue;
+            };
+            for child_id in snapshot
+                .required_child_edges
+                .iter()
+                .filter(|edge| edge.required)
+                .map(|edge| edge.child_id.clone())
+            {
+                if subtree.insert(child_id.clone()) {
+                    pending.push(child_id);
+                }
+            }
+        }
+        Some(subtree)
     }
 
     pub fn release_obsolete_leaf_leases(
@@ -1168,6 +1204,7 @@ mod tests {
                     required_child_edges: Vec::new(),
                     frozen: false,
                     blocked_reason: None,
+                    eligibility_blocked_reason: None,
                     dispatched_generation: None,
                     dispatch_intent_generation: None,
                     in_flight_generation: None,
@@ -1200,7 +1237,18 @@ mod tests {
         };
         let intermediate = IssueId::new("intermediate").expect("id");
         let higher = IssueId::new("higher").expect("id");
-        let mut state = DurableOrchestratorState::default();
+        let intermediate_issue = TrackerIssue {
+            id: intermediate.to_string(),
+            identifier: "COE-INTERMEDIATE".to_owned(),
+            sub_issues: vec![child("leaf", "Done")],
+            ..parent(Vec::new())
+        };
+        let mut intermediate_snapshot = HierarchySnapshot::new(&intermediate_issue);
+        intermediate_snapshot.generation = 2;
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(intermediate.clone(), intermediate_snapshot)]),
+            ..Default::default()
+        };
         state
             .acquire_leases(vec![
                 LeaseRecord {
@@ -1253,6 +1301,56 @@ mod tests {
                             == LeaseOwner::review_for_parent(&intermediate, &resource.issue_id)
                 })
                 .all(|lease| lease.released_at == Some(4))
+        );
+    }
+
+    #[test]
+    fn descendant_resources_ignore_removed_child_subtrees() {
+        let parent_id = IssueId::new("parent").expect("parent");
+        let current_child_id = IssueId::new("current-child").expect("current child");
+        let removed_child_id = IssueId::new("removed-child").expect("removed child");
+        let repository_id = CanonicalRepositoryId::new("github:repo").expect("repository");
+        let current_resource = LeaseResource {
+            issue_id: current_child_id,
+            repository_id: repository_id.clone(),
+            checkout_generation: "current".to_owned(),
+        };
+        let removed_resource = LeaseResource {
+            issue_id: removed_child_id,
+            repository_id,
+            checkout_generation: "removed".to_owned(),
+        };
+        let snapshot = HierarchySnapshot::new(&parent(vec![child("current-child", "Done")]));
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: current_resource.clone(),
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: removed_resource,
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("ancestor resources should acquire");
+
+        assert_eq!(
+            state.descendant_resources_for(&parent_id),
+            vec![current_resource]
         );
     }
 

@@ -1081,7 +1081,7 @@ impl RuntimeTrackerBackend {
         pr_url: &str,
         repository: &CheckoutRepository,
         expected_head_branch: Option<&str>,
-    ) -> Result<GithubMergeEvidence, LinearError> {
+    ) -> Result<Option<GithubMergeEvidence>, LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
         })?;
@@ -1093,7 +1093,7 @@ impl RuntimeTrackerBackend {
         if !review_provider.eq_ignore_ascii_case("github")
             || !repository.provider.eq_ignore_ascii_case("github")
         {
-            return Ok(GithubMergeEvidence::incompatible());
+            return Ok(Some(GithubMergeEvidence::incompatible()));
         }
         if url.scheme() != "https" {
             return Err(LinearError::InvalidResponse(format!(
@@ -1127,14 +1127,14 @@ impl RuntimeTrackerBackend {
                 ))
             })?;
         if authority != configured_authority {
-            return Ok(GithubMergeEvidence::incompatible());
+            return Ok(Some(GithubMergeEvidence::incompatible()));
         }
         if let Some((configured_owner, configured_repository)) =
             github_remote_repository(&repository.remote_locator)
             && (!configured_owner.eq_ignore_ascii_case(segments[0])
                 || !configured_repository.eq_ignore_ascii_case(segments[1]))
         {
-            return Ok(GithubMergeEvidence::incompatible());
+            return Ok(Some(GithubMergeEvidence::incompatible()));
         }
         let public_github = authority == "github.com";
         let api_root = if public_github {
@@ -1154,9 +1154,14 @@ impl RuntimeTrackerBackend {
         .map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub repository identity: {error}"))
         })?;
-        let pull_request = self
+        let pull_request = match self
             .github_get_json::<GitHubPullRequest>(&endpoint, repository)
-            .await?;
+            .await
+        {
+            Ok(pull_request) => pull_request,
+            Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         // `updated_at` changes when an old PR is edited after a child is
         // reactivated. Bind eligibility to the immutable merge event instead
         // so unrelated metadata edits cannot make stale evidence look fresh.
@@ -1181,27 +1186,37 @@ impl RuntimeTrackerBackend {
             })
             && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
         let merge_method_satisfied = if compatible && pull_request.merged_at.is_some() {
-            self.github_merge_method_satisfied(
-                &api_root,
-                segments[0],
-                segments[1],
-                pull_request.merge_commit_sha.as_deref(),
-                repository,
-            )
-            .await?
+            let Some(satisfied) = self
+                .github_merge_method_satisfied(
+                    &api_root,
+                    segments[0],
+                    segments[1],
+                    pull_request.merge_commit_sha.as_deref(),
+                    repository,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            satisfied
         } else {
             false
         };
         let merge_commit_reachable = if compatible && pull_request.merged_at.is_some() {
-            self.github_merge_commit_reachable(
-                &api_root,
-                segments[0],
-                segments[1],
-                &repository.target_branch,
-                pull_request.merge_commit_sha.as_deref(),
-                repository,
-            )
-            .await?
+            let Some(reachable) = self
+                .github_merge_commit_reachable(
+                    &api_root,
+                    segments[0],
+                    segments[1],
+                    &repository.target_branch,
+                    pull_request.merge_commit_sha.as_deref(),
+                    repository,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            reachable
         } else {
             false
         };
@@ -1220,7 +1235,7 @@ impl RuntimeTrackerBackend {
         } else {
             false
         };
-        Ok(GithubMergeEvidence {
+        Ok(Some(GithubMergeEvidence {
             compatible,
             merged: compatible
                 && merge_method_satisfied
@@ -1235,7 +1250,7 @@ impl RuntimeTrackerBackend {
             merge_repository_id: Some(merge_repository_id),
             created_at: pull_request.created_at,
             provider_evidence_at,
-        })
+        }))
     }
 
     async fn github_merge_method_satisfied(
@@ -1245,35 +1260,40 @@ impl RuntimeTrackerBackend {
         repository_name: &str,
         merge_commit_sha: Option<&str>,
         repository: &CheckoutRepository,
-    ) -> Result<bool, LinearError> {
+    ) -> Result<Option<bool>, LinearError> {
         let Some(expected_method) = repository
             .merge_method
             .as_deref()
             .map(str::trim)
             .filter(|method| !method.is_empty())
         else {
-            return Ok(true);
+            return Ok(Some(true));
         };
         let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
-            return Ok(false);
+            return Ok(Some(false));
         };
         match expected_method.to_ascii_lowercase().as_str() {
             "merge" => {
                 let endpoint = format!(
                     "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}"
                 );
-                let commit = self
+                let commit = match self
                     .github_get_json::<GitHubCommit>(&endpoint, repository)
-                    .await?;
-                Ok(github_merge_method_matches(
+                    .await
+                {
+                    Ok(commit) => commit,
+                    Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                Ok(Some(github_merge_method_matches(
                     expected_method,
                     commit.parents.len(),
-                ))
+                )))
             }
             "squash" | "rebase" => Err(LinearError::InvalidResponse(format!(
                 "GitHub REST merge evidence cannot distinguish `{expected_method}` from the other single-parent merge method; configure merge_method: merge or omit merge_method"
             ))),
-            _ => Ok(false),
+            _ => Ok(Some(false)),
         }
     }
 
@@ -1285,9 +1305,9 @@ impl RuntimeTrackerBackend {
         target_branch: &str,
         merge_commit_sha: Option<&str>,
         repository: &CheckoutRepository,
-    ) -> Result<bool, LinearError> {
+    ) -> Result<Option<bool>, LinearError> {
         let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
-            return Ok(false);
+            return Ok(Some(false));
         };
         let mut endpoint = Url::parse(api_root).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub API root: {error}"))
@@ -1303,10 +1323,15 @@ impl RuntimeTrackerBackend {
                 .push("compare")
                 .push(&format!("{target_branch}...{merge_commit_sha}"));
         }
-        let comparison = self
+        let comparison = match self
             .github_get_json::<GitHubCompare>(endpoint.as_ref(), repository)
-            .await?;
-        Ok(github_compare_contains_commit(&comparison))
+            .await
+        {
+            Ok(comparison) => comparison,
+            Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(github_compare_contains_commit(&comparison)))
     }
 
     async fn github_get_json<T: DeserializeOwned>(
@@ -1548,9 +1573,9 @@ impl RuntimeTrackerBackend {
             Ok(policy) => {
                 Ok((!policy.contexts.is_empty() || !policy.checks.is_empty()).then_some(policy))
             }
-            // A branch without protection has no configured required
-            // contexts. Keep the legacy requirement of observing at least one
-            // successful run, while ignoring unrelated failed optional runs.
+            // A 404 is ambiguous: GitHub returns it for an unprotected branch
+            // and for credentials that cannot read protection settings.
+            // Required-check eligibility therefore fails closed.
             Err(LinearError::HttpStatus { status, .. })
                 if status == reqwest::StatusCode::NOT_FOUND =>
             {
@@ -1594,13 +1619,10 @@ impl RuntimeTrackerBackend {
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .filter_map(|result| match result {
-                // A deleted historical PR or merge commit is incompatible
-                // evidence, not a failure of the current candidate set.
-                Err(error) if historical_pr_candidate_not_found(&error) => None,
-                result => Some(result),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let (confirmed, commit, repository_id, provider_evidence_at) =
             select_current_github_merge_evidence(evidence);
         let commits = commit.iter().cloned().collect();

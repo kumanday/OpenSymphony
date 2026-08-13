@@ -351,6 +351,13 @@ pub trait TrackerBackend {
             .filter(|issue| requested.contains(&issue.identifier.to_ascii_uppercase()))
             .collect())
     }
+    async fn issue_by_id(&mut self, issue_id: &str) -> Result<Option<TrackerIssue>, Self::Error> {
+        Ok(self
+            .issues_by_identifiers(&[issue_id.to_owned()])
+            .await?
+            .into_iter()
+            .next())
+    }
     async fn issue_states_by_ids(
         &mut self,
         issue_ids: &[String],
@@ -740,6 +747,7 @@ where
                         blocked_reason: hierarchy
                             .blocked_reason
                             .as_ref()
+                            .or(hierarchy.eligibility_blocked_reason.as_ref())
                             .map(|reason| format!("{reason:?}")),
                     },
                 )
@@ -4678,6 +4686,9 @@ where
         let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
             return Ok(false);
         };
+        if snapshot.blocked_reason.is_some() {
+            return Ok(false);
+        }
         if snapshot.dispatch_claimed() && !allow_retry {
             return Ok(allow_retry);
         }
@@ -4713,6 +4724,13 @@ where
                     timeout = ?eligibility_timeout,
                     "parent eligibility provider lookup timed out; keeping parent blocked"
                 );
+                self.record_parent_eligibility_block(
+                    &normalized.id,
+                    HierarchyBlockedReason::UnresolvedFailure(
+                        "parent eligibility provider lookup timed out".to_owned(),
+                    ),
+                )
+                .await?;
                 return Ok(false);
             }
             Ok(Ok(evidence)) => evidence,
@@ -4722,10 +4740,27 @@ where
                     error = %error,
                     "parent eligibility provider lookup failed; keeping parent blocked"
                 );
+                self.record_parent_eligibility_block(
+                    &normalized.id,
+                    HierarchyBlockedReason::UnresolvedFailure(error.to_string()),
+                )
+                .await?;
                 return Ok(false);
             }
         };
+        let mut released_canceled_subtree_holds = false;
         for child in &mut evidence.children {
+            if !child.merge_required {
+                released_canceled_subtree_holds |= self
+                    .hierarchy_state
+                    .release_subtree_evidence_for_undispatched_parent(
+                        &child.child_id,
+                        observed_at.as_u64(),
+                    );
+                child.resource = None;
+                child.resources.clear();
+                continue;
+            }
             if self.terminal_child_failure_ids.contains(&child.child_id)
                 || self
                     .executions
@@ -4833,7 +4868,12 @@ where
                 child.resources = child.resource.clone().into_iter().collect();
             }
         }
-        if evidence.eligible_for(&snapshot).is_err() {
+        if released_canceled_subtree_holds {
+            self.persist_orchestrator_state().await?;
+        }
+        if let Err(reason) = evidence.eligible_for(&snapshot) {
+            self.record_parent_eligibility_block(&normalized.id, reason)
+                .await?;
             return Ok(false);
         }
         if evidence.children.iter().any(|child| {
@@ -4865,8 +4905,15 @@ where
                 })
             })
         }) {
+            self.record_parent_eligibility_block(
+                &normalized.id,
+                HierarchyBlockedReason::MissingCheckoutEvidence,
+            )
+            .await?;
             return Ok(false);
         }
+
+        self.clear_parent_eligibility_block(&normalized.id).await?;
 
         let mut next_state = self.hierarchy_state.clone();
         let Some(next_snapshot) = next_state.hierarchy.get_mut(&normalized.id) else {
@@ -4917,6 +4964,82 @@ where
                     .map(|outcome| outcome.started_at)
             })
             .is_some_and(|started_at| evidence_at < started_at)
+    }
+
+    async fn record_parent_eligibility_block(
+        &mut self,
+        parent_id: &IssueId,
+        reason: HierarchyBlockedReason,
+    ) -> Result<(), SchedulerError> {
+        let changed = self
+            .hierarchy_state
+            .hierarchy
+            .get_mut(parent_id)
+            .is_some_and(|snapshot| {
+                if snapshot.blocked_reason.is_some()
+                    || snapshot.eligibility_blocked_reason.as_ref() == Some(&reason)
+                {
+                    false
+                } else {
+                    snapshot.eligibility_blocked_reason = Some(reason);
+                    true
+                }
+            });
+        if changed {
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_parent_eligibility_block(
+        &mut self,
+        parent_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        let changed = self
+            .hierarchy_state
+            .hierarchy
+            .get_mut(parent_id)
+            .is_some_and(|snapshot| snapshot.eligibility_blocked_reason.take().is_some());
+        if changed {
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
+    }
+
+    async fn hydrate_parent_hierarchy_for_terminal_child(
+        &mut self,
+        issue: &NormalizedIssue,
+    ) -> Result<(), SchedulerError> {
+        let Some(parent_id) = issue.parent_id.as_ref() else {
+            return Ok(());
+        };
+        if self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            return Ok(());
+        }
+        let parent = self
+            .tracker
+            .issue_by_id(parent_id.as_str())
+            .await
+            .map_err(|error| SchedulerError::Tracker {
+                detail: format!("failed to hydrate terminal child parent {parent_id}: {error}"),
+            })?
+            .ok_or_else(|| SchedulerError::Tracker {
+                detail: format!("terminal child parent {parent_id} was not found"),
+            })?;
+        if self.reconcile_hierarchy_issue(&parent)? {
+            self.hierarchy_state_dirty = true;
+            self.persist_orchestrator_state().await?;
+        }
+        if self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            Ok(())
+        } else {
+            Err(SchedulerError::Tracker {
+                detail: format!(
+                    "terminal child {issue_id} parent {parent_id} did not contain the child edge",
+                    issue_id = issue.id
+                ),
+            })
+        }
     }
 
     fn parent_eligibility_work_units(&self, parent_id: &IssueId) -> usize {
@@ -5119,6 +5242,8 @@ where
         issue: &NormalizedIssue,
         workspace: &WorkspaceRecord,
     ) -> Result<bool, SchedulerError> {
+        self.hydrate_parent_hierarchy_for_terminal_child(issue)
+            .await?;
         if !self.hierarchy_state.has_ancestor_edge(&issue.id) {
             return Ok(false);
         }

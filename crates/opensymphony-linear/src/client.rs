@@ -407,7 +407,7 @@ impl LinearClient {
                 continue;
             };
             let issue = normalize_issue(self.expand_issue(issue).await?)?;
-            if issue.identifier.eq_ignore_ascii_case(identifier) {
+            if issue.identifier.eq_ignore_ascii_case(identifier) || issue.id == *identifier {
                 issues.push(issue);
             } else {
                 return Err(LinearError::InvalidResponse(format!(
