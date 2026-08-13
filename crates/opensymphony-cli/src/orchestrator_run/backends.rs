@@ -1166,6 +1166,19 @@ impl RuntimeTrackerBackend {
         } else {
             false
         };
+        let merge_commit_reachable = if compatible && pull_request.merged_at.is_some() {
+            self.github_merge_commit_reachable(
+                &api_root,
+                segments[0],
+                segments[1],
+                &repository.target_branch,
+                pull_request.merge_commit_sha.as_deref(),
+                repository,
+            )
+            .await?
+        } else {
+            false
+        };
         let policy_satisfied = if compatible && pull_request.merged_at.is_some() {
             merge_method_satisfied
                 && self
@@ -1185,6 +1198,7 @@ impl RuntimeTrackerBackend {
             compatible,
             merged: compatible
                 && merge_method_satisfied
+                && merge_commit_reachable
                 && policy_satisfied
                 && pull_request.merged_at.is_some()
                 && pull_request
@@ -1236,6 +1250,38 @@ impl RuntimeTrackerBackend {
         }
     }
 
+    async fn github_merge_commit_reachable(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        target_branch: &str,
+        merge_commit_sha: Option<&str>,
+        repository: &CheckoutRepository,
+    ) -> Result<bool, LinearError> {
+        let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
+            return Ok(false);
+        };
+        let mut endpoint = Url::parse(api_root).map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub API root: {error}"))
+        })?;
+        {
+            let mut segments = endpoint.path_segments_mut().map_err(|_| {
+                LinearError::InvalidResponse("GitHub API root cannot be a base URL".to_owned())
+            })?;
+            segments
+                .push("repos")
+                .push(owner)
+                .push(repository_name)
+                .push("compare")
+                .push(&format!("{target_branch}...{merge_commit_sha}"));
+        }
+        let comparison = self
+            .github_get_json::<GitHubCompare>(endpoint.as_ref(), repository)
+            .await?;
+        Ok(github_compare_contains_commit(&comparison))
+    }
+
     async fn github_get_json<T: DeserializeOwned>(
         &self,
         endpoint: &str,
@@ -1246,13 +1292,23 @@ impl RuntimeTrackerBackend {
             .get(endpoint)
             .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json");
-        let configured_token = repository
-            .review_credential_env
-            .as_deref()
-            .and_then(|name| env::var(name).ok())
-            .filter(|token| !token.trim().is_empty());
-        if let Some(token) = configured_token.as_deref().or(self.github_token.as_deref()) {
-            request = request.bearer_auth(token);
+        let configured_token = match repository.review_credential_env.as_deref() {
+            Some(name) => {
+                let token = env::var(name).map_err(|_| {
+                    LinearError::InvalidConfiguration(format!(
+                        "configured GitHub review credential variable `{name}` is not set"
+                    ))
+                })?;
+                (!token.trim().is_empty()).then_some(token).ok_or_else(|| {
+                    LinearError::InvalidConfiguration(format!(
+                        "configured GitHub review credential variable `{name}` is empty"
+                    ))
+                })?
+            }
+            None => self.github_token.clone().unwrap_or_default(),
+        };
+        if !configured_token.is_empty() {
+            request = request.bearer_auth(configured_token);
         }
         let response = request
             .send()
@@ -1496,13 +1552,16 @@ impl RuntimeTrackerBackend {
         } else {
             issue.pr_urls.clone()
         };
-        let mut evidence = Vec::with_capacity(pull_requests.len());
-        for pr_url in pull_requests {
-            evidence.push(
+        let evidence = stream::iter(pull_requests)
+            .map(|pr_url| async move {
                 self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
-                    .await?,
-            );
-        }
+                    .await
+            })
+            .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         let (confirmed, commit, repository_id) = select_current_github_merge_evidence(evidence);
         let commits = commit.iter().cloned().collect();
         let repository_ids = repository_id.iter().cloned().collect();
@@ -1697,6 +1756,14 @@ fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bo
     }
 }
 
+fn github_compare_contains_commit(comparison: &GitHubCompare) -> bool {
+    comparison.ahead_by == 0
+        && matches!(
+            comparison.status.to_ascii_lowercase().as_str(),
+            "behind" | "identical"
+        )
+}
+
 fn required_check_evidence_satisfied(
     check_runs: &[GitHubCheckRun],
     commit_statuses: &[GitHubCommitStatus],
@@ -1762,6 +1829,13 @@ struct GitHubPullRequest {
 struct GitHubCommit {
     #[serde(default)]
     parents: Vec<GitHubCommitParent>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCompare {
+    status: String,
+    #[serde(default)]
+    ahead_by: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11171,6 +11245,26 @@ Run the scheduler.
         assert!(!github_merge_method_matches("merge", 1));
         assert!(!github_merge_method_matches("squash", 1));
         assert!(!github_merge_method_matches("rebase", 1));
+    }
+
+    #[test]
+    fn github_compare_rejects_force_pushed_or_diverged_target() {
+        assert!(github_compare_contains_commit(&GitHubCompare {
+            status: "behind".to_owned(),
+            ahead_by: 0,
+        }));
+        assert!(github_compare_contains_commit(&GitHubCompare {
+            status: "identical".to_owned(),
+            ahead_by: 0,
+        }));
+        assert!(!github_compare_contains_commit(&GitHubCompare {
+            status: "ahead".to_owned(),
+            ahead_by: 1,
+        }));
+        assert!(!github_compare_contains_commit(&GitHubCompare {
+            status: "diverged".to_owned(),
+            ahead_by: 0,
+        }));
     }
 
     #[test]
