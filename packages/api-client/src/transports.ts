@@ -375,6 +375,16 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     });
   }
 
+  async replanParent(parentId: string): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `replan-${parentId}-${crypto.randomUUID()}`,
+      action_kind: "replan",
+      target_entity: { entity_kind: "issue", entity_id: parentId },
+      idempotency_key: `replan-${parentId}`,
+    });
+  }
+
   async retryRun(runId: string): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },

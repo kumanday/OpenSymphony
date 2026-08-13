@@ -1479,9 +1479,7 @@ where
             for child_id in &current_child_ids {
                 self.hierarchy_state
                     .run_hierarchy_generations
-                    .entry(child_id.clone())
-                    .and_modify(|current| *current = (*current).max(generation))
-                    .or_insert(generation);
+                    .insert(child_id.clone(), generation);
             }
             return Ok(true);
         }
@@ -3266,6 +3264,18 @@ where
                 }
             }
 
+            // A terminal child can be reactivated while an ancestor is
+            // integrating its retained checkout. Keep the ancestor's lease
+            // as the fencing authority and wait for that parent to finish;
+            // dispatching the child here would let it mutate the protected
+            // checkout underneath the in-flight integration.
+            if self
+                .hierarchy_state
+                .has_active_dispatched_ancestor(&issue_id)
+            {
+                continue;
+            }
+
             if let Some(hierarchy_generation) = self
                 .hierarchy_state
                 .hierarchy
@@ -3277,7 +3287,7 @@ where
                         .any(|edge| edge.required && edge.child_id == issue_id)
                 })
                 .map(|snapshot| snapshot.generation)
-                .max()
+                .next()
             {
                 let previous_state = self.hierarchy_state.clone();
                 self.hierarchy_state
@@ -4702,7 +4712,7 @@ where
                             .any(|edge| edge.required && edge.child_id == issue_id)
                     })
                     .map(|snapshot| snapshot.generation)
-                    .max()
+                    .next()
             })
             .unwrap_or_default();
         if self.hierarchy_state.leases.iter().any(|lease| {

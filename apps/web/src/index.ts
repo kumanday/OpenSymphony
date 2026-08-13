@@ -115,6 +115,10 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.cancelRun(runId);
   }
 
+  replanParent(parentId: string): Promise<ActionReceipt> {
+    return this.inner.replanParent(parentId);
+  }
+
   retryRun(runId: string): Promise<ActionReceipt> {
     return this.inner.retryRun(runId);
   }

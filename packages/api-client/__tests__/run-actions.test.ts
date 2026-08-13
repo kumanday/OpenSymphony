@@ -63,6 +63,12 @@ describe("MockGatewayTransport action methods", () => {
     expect(result.status).toBe("accepted");
   });
 
+  it("replanParent returns a receipt for a hierarchy parent", async () => {
+    const result = await transport.replanParent("parent-1");
+    assertReceiptShape(result);
+    expect(result.correlation_id).toContain("replan-parent-1-");
+  });
+
   it("retryRun returns a receipt with expected events and deterministic idempotency key", async () => {
     const result = await transport.retryRun(runDetail.run_id);
     assertReceiptShape(result);
@@ -157,6 +163,18 @@ describe("HttpGatewayTransport action integration", () => {
     const body = JSON.parse(requestInit.body as string);
     expect(body.action_kind).toBe("retry");
     expect(body.idempotency_key).toBe("retry-run-2");
+  });
+
+  it("replanParent POSTs a replan action for an issue", async () => {
+    const fetchSpy = mockFetch(receipt);
+    const transport = new HttpGatewayTransport({ baseUri });
+    await transport.replanParent("parent-1");
+
+    const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.action_kind).toBe("replan");
+    expect(body.target_entity).toEqual({ entity_kind: "issue", entity_id: "parent-1" });
+    expect(body.idempotency_key).toBe("replan-parent-1");
   });
 
   it("approvalDecision POSTs the decision and explanation", async () => {

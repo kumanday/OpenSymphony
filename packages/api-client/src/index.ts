@@ -113,6 +113,7 @@ export interface GatewayTransport {
 export interface ActionCapableTransport extends GatewayTransport {
   dispatchAction(action: ActionDispatch): Promise<ActionReceipt>;
   cancelRun(runId: string): Promise<ActionReceipt>;
+  replanParent(parentId: string): Promise<ActionReceipt>;
   retryRun(runId: string): Promise<ActionReceipt>;
   resumeRun(runId: string): Promise<ActionReceipt>;
   rehydrateRun(runId: string): Promise<ActionReceipt>;

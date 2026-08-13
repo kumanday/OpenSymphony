@@ -725,6 +725,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             hierarchy_generation: snapshot.generation,
             orchestrator_terminal: true,
             provider_merge_confirmed: true,
+            merge_required: true,
             merge_result_commit: Some("merge-commit".to_owned()),
             merge_result_commits: Vec::new(),
             merge_repository_id: None,

@@ -957,8 +957,23 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_repository_id,
                 merge_repository_ids,
                 merge_result_commits,
+                merge_required,
             ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
-                self.direct_merge_evidence(child, repository).await?
+                let (
+                    provider_merge_confirmed,
+                    merge_result_commit,
+                    merge_repository_id,
+                    merge_repository_ids,
+                    merge_result_commits,
+                ) = self.direct_merge_evidence(child, repository).await?;
+                (
+                    provider_merge_confirmed,
+                    merge_result_commit,
+                    merge_repository_id,
+                    merge_repository_ids,
+                    merge_result_commits,
+                    true,
+                )
             } else {
                 self.descendant_merge_evidence(child).await?
             };
@@ -969,6 +984,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 // own durable terminal outcome for the child execution.
                 orchestrator_terminal: false,
                 provider_merge_confirmed,
+                merge_required,
                 merge_result_commit,
                 merge_result_commits,
                 merge_repository_id,
@@ -1311,15 +1327,12 @@ impl RuntimeTrackerBackend {
                     repository,
                 )
                 .await?;
+            let required_contexts = self
+                .github_required_check_contexts(api_root, owner, repository_name, repository)
+                .await?;
             if total_count == 0
                 || check_runs.len() < total_count
-                || check_runs.iter().any(|check| {
-                    !check.status.eq_ignore_ascii_case("completed")
-                        || !check
-                            .conclusion
-                            .as_deref()
-                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-                })
+                || !required_check_runs_satisfied(&check_runs, required_contexts.as_ref())
             {
                 return Ok(false);
             }
@@ -1385,6 +1398,38 @@ impl RuntimeTrackerBackend {
         }
     }
 
+    async fn github_required_check_contexts(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Option<BTreeSet<String>>, LinearError> {
+        let endpoint = format!(
+            "{api_root}/repos/{owner}/{repository_name}/branches/{}/protection/required_status_checks",
+            repository.target_branch
+        );
+        match self
+            .github_get_json::<GitHubRequiredStatusChecks>(&endpoint, repository)
+            .await
+        {
+            Ok(policy) => {
+                let mut contexts = policy.contexts.into_iter().collect::<BTreeSet<_>>();
+                contexts.extend(policy.checks.into_iter().map(|check| check.context));
+                Ok((!contexts.is_empty()).then_some(contexts))
+            }
+            // A branch without protection has no configured required
+            // contexts. Keep the legacy requirement of observing at least one
+            // successful run, while ignoring unrelated failed optional runs.
+            Err(LinearError::HttpStatus { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn direct_merge_evidence(
         &self,
         issue: &TrackerIssue,
@@ -1427,6 +1472,7 @@ impl RuntimeTrackerBackend {
             Option<CanonicalRepositoryId>,
             Vec<CanonicalRepositoryId>,
             Vec<String>,
+            bool,
         ),
         LinearError,
     > {
@@ -1446,7 +1492,7 @@ impl RuntimeTrackerBackend {
                 if self.active_states.contains(&child_state)
                     || !self.terminal_states.contains(&child_state)
                 {
-                    return Ok((false, None, None, Vec::new(), Vec::new()));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
                 }
                 if self.terminal_states.contains(&child_state) && child_state.contains("cancel") {
                     continue;
@@ -1469,14 +1515,14 @@ impl RuntimeTrackerBackend {
                 let (confirmed, commit, child_repository_id, _child_repository_ids, child_commits) =
                     result?;
                 if !confirmed {
-                    return Ok((false, None, None, Vec::new(), Vec::new()));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
                 }
                 if let Some(repository_id) = child_repository_id {
                     repository_ids.insert(repository_id);
                 }
                 commits.extend(child_commits);
                 if commit.is_none() {
-                    return Ok((false, None, None, Vec::new(), Vec::new()));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
                 }
             }
         }
@@ -1485,11 +1531,12 @@ impl RuntimeTrackerBackend {
             .then(|| repository_ids.iter().next().cloned())
             .flatten();
         Ok((
-            saw_leaf && !commits.is_empty(),
+            !saw_leaf || !commits.is_empty(),
             commit,
             repository_id,
             repository_ids.into_iter().collect(),
             commits,
+            saw_leaf,
         ))
     }
 }
@@ -1571,6 +1618,40 @@ fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bo
     }
 }
 
+fn required_check_runs_satisfied(
+    check_runs: &[GitHubCheckRun],
+    required_contexts: Option<&BTreeSet<String>>,
+) -> bool {
+    match required_contexts {
+        Some(required_contexts) => {
+            let required_runs = check_runs
+                .iter()
+                .filter(|check| {
+                    check
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| required_contexts.contains(name))
+                })
+                .collect::<Vec<_>>();
+            !required_runs.is_empty()
+                && required_runs.iter().all(|check| {
+                    check.status.eq_ignore_ascii_case("completed")
+                        && check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                })
+        }
+        None => check_runs.iter().any(|check| {
+            check.status.eq_ignore_ascii_case("completed")
+                && check
+                    .conclusion
+                    .as_deref()
+                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+        }),
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
     created_at: String,
@@ -1617,9 +1698,24 @@ struct GitHubCheckRuns {
 
 #[derive(Debug, serde::Deserialize)]
 struct GitHubCheckRun {
+    #[serde(default)]
+    name: Option<String>,
     status: String,
     #[serde(default)]
     conclusion: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRequiredStatusChecks {
+    #[serde(default)]
+    contexts: Vec<String>,
+    #[serde(default)]
+    checks: Vec<GitHubRequiredStatusCheck>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRequiredStatusCheck {
+    context: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -10955,6 +11051,28 @@ Run the scheduler.
         assert!(!github_merge_method_matches("merge", 1));
         assert!(!github_merge_method_matches("squash", 1));
         assert!(!github_merge_method_matches("rebase", 1));
+    }
+
+    #[test]
+    fn required_check_evidence_ignores_optional_failed_runs() {
+        let checks = vec![
+            GitHubCheckRun {
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+            },
+            GitHubCheckRun {
+                name: Some("optional".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("failure".to_owned()),
+            },
+        ];
+        let required = BTreeSet::from(["required".to_owned()]);
+        assert!(required_check_runs_satisfied(&checks, Some(&required)));
+        assert!(required_check_runs_satisfied(&checks, None));
+
+        let missing = BTreeSet::from(["missing".to_owned()]);
+        assert!(!required_check_runs_satisfied(&checks, Some(&missing)));
     }
 
     #[test]

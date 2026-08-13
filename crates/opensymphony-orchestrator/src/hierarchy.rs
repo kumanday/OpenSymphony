@@ -299,6 +299,11 @@ pub struct ChildEligibilityEvidence {
     pub hierarchy_generation: u64,
     pub orchestrator_terminal: bool,
     pub provider_merge_confirmed: bool,
+    /// Repository-neutral descendants with only canceled leaves have no
+    /// provider merge to prove. Keep that resolved edge distinct from a
+    /// missing merge commit on a repository-backed child.
+    #[serde(default = "default_merge_required", skip_serializing_if = "is_true")]
+    pub merge_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_result_commit: Option<String>,
     /// Direct or descendant merge commits recorded by the provider. The
@@ -342,6 +347,7 @@ impl ParentEligibilityEvidence {
                     hierarchy_generation: generation,
                     orchestrator_terminal: false,
                     provider_merge_confirmed: false,
+                    merge_required: true,
                     merge_result_commit: None,
                     merge_result_commits: Vec::new(),
                     merge_repository_id: None,
@@ -365,6 +371,7 @@ impl ParentEligibilityEvidence {
                     hierarchy_generation: snapshot.generation,
                     orchestrator_terminal: false,
                     provider_merge_confirmed: false,
+                    merge_required: true,
                     merge_result_commit: None,
                     merge_result_commits: Vec::new(),
                     merge_repository_id: None,
@@ -404,8 +411,23 @@ impl ParentEligibilityEvidence {
                     "child orchestrator outcome is not terminal".to_owned(),
                 ));
             }
+            if let Some(failure) = &child.unresolved_failure {
+                return Err(HierarchyBlockedReason::UnresolvedFailure(failure.clone()));
+            }
             if !child.provider_merge_confirmed {
                 return Err(HierarchyBlockedReason::MissingMergeEvidence);
+            }
+            if !child.merge_required {
+                if child.merge_result_commit.is_some()
+                    || !child.merge_result_commits.is_empty()
+                    || child.merge_repository_id.is_some()
+                    || !child.merge_repository_ids.is_empty()
+                    || child.resource.is_some()
+                    || !child.resources.is_empty()
+                {
+                    return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
+                }
+                continue;
             }
             if child
                 .merge_result_commit
@@ -438,9 +460,6 @@ impl ParentEligibilityEvidence {
                     .is_some_and(|resource| resource.issue_id != child.child_id)
             {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
-            }
-            if let Some(failure) = &child.unresolved_failure {
-                return Err(HierarchyBlockedReason::UnresolvedFailure(failure.clone()));
             }
         }
         Ok(())
@@ -775,27 +794,19 @@ impl DurableOrchestratorState {
     }
 
     fn compact_lease_history(&mut self) {
-        let mut latest_inactive = BTreeSet::new();
-        for lease in self.leases.iter().rev() {
-            if !lease.active() {
-                latest_inactive.insert((
-                    lease.kind.clone(),
-                    lease.resource.clone(),
-                    lease.owner.clone(),
-                ));
-            }
-        }
         let mut compacted = Vec::new();
-        for lease in self.leases.drain(..) {
+        let mut seen_inactive = BTreeSet::new();
+        for lease in self.leases.drain(..).rev() {
             let key = (
                 lease.kind.clone(),
                 lease.resource.clone(),
                 lease.owner.clone(),
             );
-            if lease.active() || latest_inactive.remove(&key) {
+            if lease.active() || seen_inactive.insert(key) {
                 compacted.push(lease);
             }
         }
+        compacted.reverse();
 
         let inactive_count = compacted.iter().filter(|lease| !lease.active()).count();
         if inactive_count > MAX_INACTIVE_LEASE_HISTORY {
@@ -855,6 +866,29 @@ impl DurableOrchestratorState {
                     .any(|edge| edge.required && &edge.child_id == child_id)
         })
     }
+
+    pub fn has_active_dispatched_ancestor(&self, child_id: &IssueId) -> bool {
+        self.hierarchy.iter().any(|(parent_id, snapshot)| {
+            snapshot.dispatch_claimed()
+                && snapshot
+                    .required_child_edges
+                    .iter()
+                    .any(|edge| edge.required && &edge.child_id == child_id)
+                && self.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == LeaseKind::AncestorIntegration
+                        && lease.owner == LeaseOwner::ancestor(parent_id)
+                })
+        })
+    }
+}
+
+fn default_merge_required() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[cfg(test)]
@@ -1123,6 +1157,7 @@ mod tests {
                 hierarchy_generation: snapshot.generation,
                 orchestrator_terminal: true,
                 provider_merge_confirmed: true,
+                merge_required: true,
                 merge_result_commit: Some("abc123".to_owned()),
                 merge_result_commits: Vec::new(),
                 merge_repository_id: None,
@@ -1156,6 +1191,7 @@ mod tests {
                 hierarchy_generation: snapshot.generation,
                 orchestrator_terminal: true,
                 provider_merge_confirmed: true,
+                merge_required: true,
                 merge_result_commit: None,
                 merge_result_commits: vec!["descendant-merge".to_owned()],
                 merge_repository_id: None,
@@ -1172,6 +1208,31 @@ mod tests {
             evidence.eligible_for(&snapshot),
             Err(HierarchyBlockedReason::MissingCheckoutEvidence)
         );
+    }
+
+    #[test]
+    fn canceled_repository_neutral_subtree_is_resolved_without_merge_evidence() {
+        let parent = parent(vec![child("nested-parent", "Done")]);
+        let snapshot = HierarchySnapshot::new(&parent);
+        let evidence = ParentEligibilityEvidence {
+            hierarchy_generation: snapshot.generation,
+            children: vec![ChildEligibilityEvidence {
+                child_id: IssueId::new("nested-parent").expect("id"),
+                hierarchy_generation: snapshot.generation,
+                orchestrator_terminal: true,
+                provider_merge_confirmed: true,
+                merge_required: false,
+                merge_result_commit: None,
+                merge_result_commits: Vec::new(),
+                merge_repository_id: None,
+                merge_repository_ids: Vec::new(),
+                resource: None,
+                resources: Vec::new(),
+                unresolved_failure: None,
+            }],
+        };
+
+        assert!(evidence.eligible_for(&snapshot).is_ok());
     }
 
     #[test]
@@ -1214,6 +1275,39 @@ mod tests {
             1
         );
         assert_eq!(state.leases[1].owner, LeaseOwner::ancestor(&second_parent));
+    }
+
+    #[test]
+    fn dispatched_ancestor_fence_ends_when_its_lease_is_released() {
+        let parent_id = IssueId::new("parent").expect("parent id");
+        let child_id = IssueId::new("child").expect("child id");
+        let parent = parent(vec![child("child", "Done")]);
+        let mut snapshot = HierarchySnapshot::new(&parent);
+        snapshot.mark_dispatched();
+        let resource = LeaseResource {
+            issue_id: child_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![LeaseRecord {
+                kind: LeaseKind::AncestorIntegration,
+                resource,
+                owner: LeaseOwner::ancestor(&parent_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }])
+            .expect("ancestor lease should acquire");
+
+        assert!(state.has_active_dispatched_ancestor(&child_id));
+        state.release_owner(&LeaseOwner::ancestor(&parent_id), 2);
+        assert!(!state.has_active_dispatched_ancestor(&child_id));
     }
 
     #[test]
@@ -1320,7 +1414,42 @@ mod tests {
 
     #[test]
     fn inactive_lease_history_is_deduplicated_and_bounded() {
-        let mut state = DurableOrchestratorState::default();
+        let issue_id = IssueId::new("reused-child").expect("issue id");
+        let resource = LeaseResource {
+            issue_id: issue_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:reused-repo").expect("repository id"),
+            checkout_generation: "checkout-reused".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            leases: vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&issue_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: Some(2),
+                },
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource,
+                    owner: LeaseOwner::leaf_worker(&issue_id),
+                    hierarchy_generation: 2,
+                    acquired_at: 3,
+                    expires_at: None,
+                    released_at: Some(4),
+                },
+            ],
+            ..Default::default()
+        };
+        state
+            .acquire_leases(Vec::new())
+            .expect("compaction should succeed");
+        assert_eq!(state.leases.len(), 1);
+        assert_eq!(state.leases[0].hierarchy_generation, 2);
+        assert_eq!(state.leases[0].released_at, Some(4));
+
         for index in 0..(MAX_INACTIVE_LEASE_HISTORY + 32) {
             let issue_id = IssueId::new(format!("child-{index}")).expect("issue id");
             let lease = LeaseRecord {
