@@ -928,16 +928,29 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 .ok_or_else(|| LinearError::MissingIssueIds {
                     issue_ids: vec![edge.child_identifier.as_str().to_owned()],
                 })?;
-            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) = match (
-                child.pr_url.as_deref(),
-                self.checkout_policy_for_issue(child),
-            ) {
-                (Some(pr_url), Some(repository)) => {
-                    self.github_merge_evidence(pr_url, repository).await?
-                }
-                (None, _) => (false, None, None),
-                (Some(_), None) => (false, None, None),
-            };
+            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) =
+                match self.checkout_policy_for_issue(child) {
+                    Some(repository) => {
+                        let pull_requests = if child.pr_urls.is_empty() {
+                            child.pr_url.iter().cloned().collect::<Vec<_>>()
+                        } else {
+                            child.pr_urls.clone()
+                        };
+                        let mut evidence = Vec::with_capacity(pull_requests.len());
+                        for pr_url in pull_requests {
+                            evidence.push(
+                                self.github_merge_evidence(
+                                    &pr_url,
+                                    repository,
+                                    child.branch_name.as_deref(),
+                                )
+                                .await?,
+                            );
+                        }
+                        select_current_github_merge_evidence(evidence)
+                    }
+                    None => (false, None, None),
+                };
             evidence.push(ChildEligibilityEvidence {
                 child_id: edge.child_id.clone(),
                 hierarchy_generation: hierarchy.generation,
@@ -1015,12 +1028,13 @@ impl RuntimeTrackerBackend {
         &self,
         pr_url: &str,
         repository: &CheckoutRepository,
-    ) -> Result<(bool, Option<String>, Option<CanonicalRepositoryId>), LinearError> {
+        expected_head_branch: Option<&str>,
+    ) -> Result<GithubMergeEvidence, LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
         })?;
         if !repository.provider.eq_ignore_ascii_case("github") {
-            return Ok((false, None, None));
+            return Ok(GithubMergeEvidence::incompatible());
         }
         if url.scheme() != "https" {
             return Err(LinearError::InvalidResponse(format!(
@@ -1054,7 +1068,7 @@ impl RuntimeTrackerBackend {
                 ))
             })?;
         if authority != configured_authority {
-            return Ok((false, None, None));
+            return Ok(GithubMergeEvidence::incompatible());
         }
         let public_github = authority == "github.com";
         let endpoint = if public_github {
@@ -1103,29 +1117,33 @@ impl RuntimeTrackerBackend {
             .json::<GitHubPullRequest>()
             .await
             .map_err(|error| LinearError::Request(Box::new(error)))?;
-        Ok((
-            pull_request.merged_at.is_some()
+        let compatible = pull_request.base.ref_name == repository.target_branch
+            && pull_request
+                .base
+                .repo
+                .full_name
+                .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
+            && repository.provider_id.as_deref().is_none_or(|provider_id| {
+                pull_request
+                    .base
+                    .repo
+                    .native_ids()
+                    .iter()
+                    .any(|candidate| candidate == provider_id)
+            })
+            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
+        Ok(GithubMergeEvidence {
+            compatible,
+            merged: compatible
+                && pull_request.merged_at.is_some()
                 && pull_request
                     .merge_commit_sha
                     .as_deref()
-                    .is_some_and(|commit| !commit.trim().is_empty())
-                && pull_request.base.ref_name == repository.target_branch
-                && pull_request
-                    .base
-                    .repo
-                    .full_name
-                    .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
-                && repository.provider_id.as_deref().is_none_or(|provider_id| {
-                    pull_request
-                        .base
-                        .repo
-                        .native_ids()
-                        .iter()
-                        .any(|candidate| candidate == provider_id)
-                }),
-            pull_request.merge_commit_sha,
-            Some(merge_repository_id),
-        ))
+                    .is_some_and(|commit| !commit.trim().is_empty()),
+            merge_commit_sha: pull_request.merge_commit_sha,
+            merge_repository_id: Some(merge_repository_id),
+            created_at: pull_request.created_at,
+        })
     }
 }
 
@@ -1167,9 +1185,11 @@ fn normalize_github_authority(authority: &str) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
+    created_at: String,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
+    head: GitHubPullRequestHead,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1177,6 +1197,49 @@ struct GitHubPullRequestBase {
     #[serde(rename = "ref")]
     ref_name: String,
     repo: GitHubRepository,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestHead {
+    #[serde(rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Debug)]
+struct GithubMergeEvidence {
+    compatible: bool,
+    merged: bool,
+    merge_commit_sha: Option<String>,
+    merge_repository_id: Option<CanonicalRepositoryId>,
+    created_at: String,
+}
+
+impl GithubMergeEvidence {
+    fn incompatible() -> Self {
+        Self {
+            compatible: false,
+            merged: false,
+            merge_commit_sha: None,
+            merge_repository_id: None,
+            created_at: String::new(),
+        }
+    }
+}
+
+fn select_current_github_merge_evidence(
+    candidates: Vec<GithubMergeEvidence>,
+) -> (bool, Option<String>, Option<CanonicalRepositoryId>) {
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.compatible)
+        .max_by(|left, right| left.created_at.cmp(&right.created_at))
+        .map_or((false, None, None), |candidate| {
+            (
+                candidate.merged,
+                candidate.merge_commit_sha,
+                candidate.merge_repository_id,
+            )
+        })
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -6226,6 +6289,7 @@ fn normalized_issue_from_manifest(
         },
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: None,
         labels: Vec::new(),
         project_id: None,
@@ -10394,6 +10458,45 @@ Run the scheduler.
         );
     }
 
+    #[test]
+    fn current_merge_evidence_rejects_stale_merged_pr_when_replacement_is_newer() {
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("old-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: false,
+                merge_commit_sha: None,
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+            },
+        ]);
+        assert_eq!(selected, (false, None, None));
+
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("old-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("current-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+            },
+        ]);
+        assert_eq!(selected, (true, Some("current-merge".to_owned()), None));
+    }
+
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
         sample_workflow_with_prompt(
             base_dir,
@@ -10431,6 +10534,7 @@ Run the scheduler.
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: Vec::new(),
             project_id: None,
@@ -11000,6 +11104,7 @@ exit 64
             state_kind: tracker_issue_state_kind_from_category(&issue.state.category),
             branch_name: issue.branch_name.clone(),
             pr_url: issue.pr_url.clone(),
+            pr_urls: issue.pr_urls.clone(),
             labels: issue.labels.clone(),
             project_id: issue.project_id.clone(),
             project_slug: issue.project_slug.clone(),

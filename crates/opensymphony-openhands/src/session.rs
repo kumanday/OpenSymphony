@@ -4934,6 +4934,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: vec!["area:memory".to_string()],
             project_id: None,

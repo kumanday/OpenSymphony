@@ -12,6 +12,7 @@ use super::graphql::{
 
 pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, LinearError> {
     let state = normalize_state(node.state);
+    let pr_urls = normalize_pr_urls(node.attachments.nodes);
     Ok(TrackerIssue {
         id: node.id,
         identifier: node.identifier,
@@ -22,7 +23,8 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         state: state.name,
         state_kind: state.kind,
         branch_name: normalize_branch_name(node.branch_name),
-        pr_url: normalize_pr_url(node.attachments.nodes),
+        pr_url: pr_urls.first().cloned(),
+        pr_urls,
         labels: normalize_labels(node.labels.nodes),
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug: node.project.as_ref().map(|project| project.slug_id.clone()),
@@ -96,7 +98,7 @@ fn normalize_branch_name(branch_name: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Option<String> {
+fn normalize_pr_urls(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Vec<String> {
     attachments
         .into_iter()
         .filter(|attachment| {
@@ -107,7 +109,8 @@ fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> O
                 .unwrap_or(false)
         })
         .map(|attachment| attachment.url)
-        .find(|url| is_canonical_github_pr_url(url))
+        .filter(|url| is_canonical_github_pr_url(url))
+        .collect()
 }
 
 fn is_canonical_github_pr_url(url: &str) -> bool {
@@ -224,7 +227,8 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_canonical_github_pr_url, normalize_priority};
+    use super::super::graphql::LinearAttachmentNode;
+    use super::{is_canonical_github_pr_url, normalize_pr_urls, normalize_priority};
 
     #[test]
     fn priority_zero_becomes_none() {
@@ -273,5 +277,24 @@ mod tests {
         assert!(!is_canonical_github_pr_url(
             "http://github.enterprise.example/kumanday/OpenSymphony/pull/155"
         ));
+    }
+
+    #[test]
+    fn canonical_pull_request_normalization_retains_all_attachments() {
+        let urls = normalize_pr_urls(vec![
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/pull/12".to_owned(),
+                source_type: Some("github".to_owned()),
+            },
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/pull/34".to_owned(),
+                source_type: Some("github".to_owned()),
+            },
+        ]);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://github.com/kumanday/OpenSymphony/pull/12");
+        assert_eq!(urls[1], "https://github.com/kumanday/OpenSymphony/pull/34");
     }
 }

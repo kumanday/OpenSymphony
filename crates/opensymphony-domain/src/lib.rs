@@ -139,6 +139,7 @@ mod tests {
                 "leonardogonzalez/coe-260-domain-model-and-orchestrator-state-machine".to_owned(),
             ),
             pr_url: None,
+            pr_urls: Vec::new(),
             url: Some(
                 "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
                     .to_owned(),

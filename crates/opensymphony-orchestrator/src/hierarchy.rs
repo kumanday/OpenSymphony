@@ -605,6 +605,7 @@ mod tests {
             state_kind: crate::opensymphony_domain::TrackerIssueStateKind::Started,
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             labels: Vec::new(),
             project_id: None,
             project_slug: None,
