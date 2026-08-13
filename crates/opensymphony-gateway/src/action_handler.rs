@@ -301,6 +301,19 @@ fn validate_replan(
     let Some(issue) = issue else {
         return reject(action, action_id, "target issue not found in snapshot");
     };
+    let has_hierarchy_generation = action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("hierarchy_generation"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some();
+    if !has_hierarchy_generation {
+        return reject(
+            action,
+            action_id,
+            "replan requires a numeric hierarchy_generation payload",
+        );
+    }
     accepted(
         action,
         action_id,

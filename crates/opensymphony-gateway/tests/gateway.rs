@@ -5984,6 +5984,32 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         body.action_id
     );
 
+    let generationless_replan = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr_replan_missing_generation".to_string(),
+        action_kind: ActionKind::Replan,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Issue,
+            entity_id: "COE-255".to_string(),
+        },
+        payload: None,
+        idempotency_key: None,
+    };
+    let response = client
+        .post(&url)
+        .json(&generationless_replan)
+        .send()
+        .await
+        .expect("generation-less replan should respond");
+    assert_eq!(response.status(), 400);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    assert!(
+        body.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("hierarchy_generation"))
+    );
+
     // Duplicate idempotency key → rejected receipt
     let response = client
         .post(&url)

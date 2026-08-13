@@ -900,6 +900,15 @@ impl DurableOrchestratorState {
             return false;
         }
 
+        let retained_child_ids = self
+            .hierarchy
+            .iter()
+            .filter(|(parent_id, _)| !subtree.contains(*parent_id))
+            .flat_map(|(_, snapshot)| snapshot.required_child_edges.iter())
+            .filter(|edge| edge.required)
+            .map(|edge| edge.child_id.clone())
+            .collect::<BTreeSet<_>>();
+
         let mut review_prefixes = removed_child_ids
             .iter()
             .map(|child_id| format!("review:{parent_id}:{child_id}"))
@@ -917,7 +926,10 @@ impl DurableOrchestratorState {
                 continue;
             }
             let owned_by_removed_subtree = match lease.kind {
-                LeaseKind::LeafWorker => subtree.contains(&lease.resource.issue_id),
+                LeaseKind::LeafWorker => {
+                    subtree.contains(&lease.resource.issue_id)
+                        && !retained_child_ids.contains(&lease.resource.issue_id)
+                }
                 LeaseKind::AncestorIntegration => subtree
                     .iter()
                     .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id)),
@@ -1398,6 +1410,49 @@ mod tests {
 
         state.release_obsolete_leaf_leases(std::slice::from_ref(&resource.issue_id), 2);
         assert_eq!(state.leases[0].released_at, Some(2));
+    }
+
+    #[test]
+    fn removed_subtree_preserves_leaf_lease_reparented_to_another_hierarchy() {
+        let parent_a = IssueId::new("parent-a").expect("parent a");
+        let parent_b = IssueId::new("parent-b").expect("parent b");
+        let child_id = IssueId::new("child").expect("child");
+        let resource = LeaseResource {
+            issue_id: child_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([
+                (
+                    parent_a.clone(),
+                    HierarchySnapshot::new(&parent(vec![child("child", "Done")])),
+                ),
+                (
+                    parent_b,
+                    HierarchySnapshot::new(&parent(vec![child("child", "Done")])),
+                ),
+            ]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![LeaseRecord {
+                kind: LeaseKind::LeafWorker,
+                resource,
+                owner: LeaseOwner::leaf_worker(&child_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }])
+            .expect("leaf lease should acquire");
+
+        assert!(!state.release_removed_subtree_leases(
+            &parent_a,
+            std::slice::from_ref(&child_id),
+            2,
+        ));
+        assert!(state.leases[0].active());
     }
 
     #[test]
