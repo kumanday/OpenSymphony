@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     select,
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, timeout},
 };
 use tracing::{debug, warn};
 
@@ -42,6 +42,7 @@ const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
 const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
+const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
     let Some(workspace) = execution.workspace() else {
@@ -1189,14 +1190,30 @@ where
                 .insert(normalized.id.clone(), HierarchySnapshot::new(tracker_issue));
             return Ok(true);
         }
-        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id)
-            && !matches!(
-                snapshot.reconcile(&tracker_issue.sub_issues),
-                super::HierarchyReconciliation::Unchanged
-            )
-        {
-            self.parent_eligibility_checked_at.remove(&normalized.id);
-            return Ok(true);
+        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
+            let previous_child_ids = snapshot
+                .required_child_edges
+                .iter()
+                .filter(|edge| edge.required)
+                .map(|edge| edge.child_id.clone())
+                .collect::<BTreeSet<_>>();
+            let reconciliation = snapshot.reconcile(&tracker_issue.sub_issues);
+            if !matches!(reconciliation, super::HierarchyReconciliation::Unchanged) {
+                self.parent_eligibility_checked_at.remove(&normalized.id);
+                let current_child_ids = snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<BTreeSet<_>>();
+                let removed_child_ids = previous_child_ids
+                    .difference(&current_child_ids)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.hierarchy_state
+                    .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
+                return Ok(true);
+            }
         }
         Ok(false)
     }
@@ -3840,7 +3857,13 @@ where
         released_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
         let mut next_state = self.hierarchy_state.clone();
-        if !next_state.release_parent_leases(parent_id, released_at.as_u64()) {
+        let has_higher_parent = next_state.has_ancestor_edge(parent_id);
+        let released = if has_higher_parent {
+            next_state.release_parent_leases_preserving_ancestor(parent_id, released_at.as_u64())
+        } else {
+            next_state.release_parent_leases(parent_id, released_at.as_u64())
+        };
+        if !released {
             return Ok(());
         }
         let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
@@ -3972,13 +3995,22 @@ where
         }
         self.parent_eligibility_checked_at
             .insert(normalized.id.clone(), observed_at);
-        let mut evidence = match self
-            .tracker
-            .parent_eligibility(tracker_issue, &snapshot)
-            .await
+        let mut evidence = match timeout(
+            PARENT_ELIGIBILITY_TIMEOUT,
+            self.tracker.parent_eligibility(tracker_issue, &snapshot),
+        )
+        .await
         {
-            Ok(evidence) => evidence,
-            Err(error) => {
+            Err(_) => {
+                warn!(
+                    parent = %normalized.identifier,
+                    timeout = ?PARENT_ELIGIBILITY_TIMEOUT,
+                    "parent eligibility provider lookup timed out; keeping parent blocked"
+                );
+                return Ok(false);
+            }
+            Ok(Ok(evidence)) => evidence,
+            Ok(Err(error)) => {
                 warn!(
                     parent = %normalized.identifier,
                     error = %error,
@@ -4058,6 +4090,14 @@ where
         }
         if evidence.children.iter().any(|child| {
             child.resources().into_iter().any(|resource| {
+                if self.hierarchy_state.hierarchy.contains_key(&child.child_id) {
+                    return !self.hierarchy_state.leases.iter().any(|lease| {
+                        lease.active()
+                            && lease.kind == super::LeaseKind::AncestorIntegration
+                            && lease.owner == super::LeaseOwner::ancestor(&child.child_id)
+                            && lease.resource == *resource
+                    });
+                }
                 let expected_owner = super::LeaseOwner::leaf_worker(&resource.issue_id);
                 !self.hierarchy_state.leases.iter().any(|lease| {
                     lease.active()
@@ -4100,6 +4140,13 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
+        let nested_child_ids = evidence
+            .children
+            .iter()
+            .filter(|child| next_state.hierarchy.contains_key(&child.child_id))
+            .map(|child| child.child_id.clone())
+            .collect::<Vec<_>>();
+        next_state.release_ancestor_leases_for_children(&nested_child_ids, observed_at.as_u64());
         let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
         if let Err(error) = self.persist_orchestrator_state().await {
             self.hierarchy_state = previous_state;

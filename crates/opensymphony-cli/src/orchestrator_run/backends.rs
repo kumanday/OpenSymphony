@@ -928,29 +928,16 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 .ok_or_else(|| LinearError::MissingIssueIds {
                     issue_ids: vec![edge.child_identifier.as_str().to_owned()],
                 })?;
-            let (provider_merge_confirmed, merge_result_commit, merge_repository_id) =
-                match self.checkout_policy_for_issue(child) {
-                    Some(repository) => {
-                        let pull_requests = if child.pr_urls.is_empty() {
-                            child.pr_url.iter().cloned().collect::<Vec<_>>()
-                        } else {
-                            child.pr_urls.clone()
-                        };
-                        let mut evidence = Vec::with_capacity(pull_requests.len());
-                        for pr_url in pull_requests {
-                            evidence.push(
-                                self.github_merge_evidence(
-                                    &pr_url,
-                                    repository,
-                                    child.branch_name.as_deref(),
-                                )
-                                .await?,
-                            );
-                        }
-                        select_current_github_merge_evidence(evidence)
-                    }
-                    None => (false, None, None),
-                };
+            let (
+                provider_merge_confirmed,
+                merge_result_commit,
+                merge_repository_id,
+                merge_result_commits,
+            ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
+                self.direct_merge_evidence(child, repository).await?
+            } else {
+                self.descendant_merge_evidence(child).await?
+            };
             evidence.push(ChildEligibilityEvidence {
                 child_id: edge.child_id.clone(),
                 hierarchy_generation: hierarchy.generation,
@@ -959,6 +946,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 orchestrator_terminal: false,
                 provider_merge_confirmed,
                 merge_result_commit,
+                merge_result_commits,
                 merge_repository_id,
                 resource: None,
                 resources: Vec::new(),
@@ -1008,6 +996,9 @@ impl TrackerBackend for RuntimeTrackerBackend {
 
 impl RuntimeTrackerBackend {
     fn checkout_policy_for_issue(&self, issue: &TrackerIssue) -> Option<&CheckoutRepository> {
+        if !issue.sub_issues.is_empty() {
+            return None;
+        }
         if let Some(routing) = self.repository_routing.as_ref() {
             let binding = routing.resolve(
                 &issue.labels,
@@ -1098,7 +1089,12 @@ impl RuntimeTrackerBackend {
             .get(endpoint)
             .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json");
-        if let Some(token) = self.github_token.as_deref() {
+        let configured_token = repository
+            .credential_env
+            .as_deref()
+            .and_then(|name| env::var(name).ok())
+            .filter(|token| !token.trim().is_empty());
+        if let Some(token) = configured_token.as_deref().or(self.github_token.as_deref()) {
             request = request.bearer_auth(token);
         }
         let response = request
@@ -1144,6 +1140,78 @@ impl RuntimeTrackerBackend {
             merge_repository_id: Some(merge_repository_id),
             created_at: pull_request.created_at,
         })
+    }
+
+    async fn direct_merge_evidence(
+        &self,
+        issue: &TrackerIssue,
+        repository: &CheckoutRepository,
+    ) -> Result<
+        (
+            bool,
+            Option<String>,
+            Option<CanonicalRepositoryId>,
+            Vec<String>,
+        ),
+        LinearError,
+    > {
+        let pull_requests = if issue.pr_urls.is_empty() {
+            issue.pr_url.iter().cloned().collect::<Vec<_>>()
+        } else {
+            issue.pr_urls.clone()
+        };
+        let mut evidence = Vec::with_capacity(pull_requests.len());
+        for pr_url in pull_requests {
+            evidence.push(
+                self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
+                    .await?,
+            );
+        }
+        let (confirmed, commit, repository_id) = select_current_github_merge_evidence(evidence);
+        let commits = commit.iter().cloned().collect();
+        Ok((confirmed, commit, repository_id, commits))
+    }
+
+    async fn descendant_merge_evidence(
+        &self,
+        parent: &TrackerIssue,
+    ) -> Result<
+        (
+            bool,
+            Option<String>,
+            Option<CanonicalRepositoryId>,
+            Vec<String>,
+        ),
+        LinearError,
+    > {
+        let mut pending = parent.sub_issues.clone();
+        let mut commits = Vec::new();
+        let mut saw_leaf = false;
+        while !pending.is_empty() {
+            let identifiers = pending
+                .drain(..)
+                .map(|child| child.identifier)
+                .collect::<Vec<_>>();
+            let children = self.client.issues_by_identifiers(&identifiers).await?;
+            for child in children {
+                if let Some(repository) = self.checkout_policy_for_issue(&child) {
+                    saw_leaf = true;
+                    let (confirmed, commit, _repository_id, child_commits) =
+                        self.direct_merge_evidence(&child, repository).await?;
+                    if !confirmed {
+                        return Ok((false, None, None, Vec::new()));
+                    }
+                    commits.extend(child_commits);
+                    if commit.is_none() {
+                        return Ok((false, None, None, Vec::new()));
+                    }
+                } else {
+                    pending.extend(child.sub_issues);
+                }
+            }
+        }
+        let commit = commits.first().cloned();
+        Ok((saw_leaf && !commits.is_empty(), commit, None, commits))
     }
 }
 
