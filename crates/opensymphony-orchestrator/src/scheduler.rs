@@ -45,14 +45,15 @@ const MERGING_STATE: &str = "merging";
 const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 // A repository-neutral child can fan out into several leaf merge-evidence
 // requests. The runtime provider evaluates those leaves eight at a time, so
-// reserve one base timeout for each possible provider batch per direct edge.
+// reserve one base timeout for each provider batch in the descendant subtree.
 const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
 
-fn parent_eligibility_timeout(required_child_count: usize) -> Duration {
-    let work_units = required_child_count
+fn parent_eligibility_timeout(provider_work_units: usize) -> Duration {
+    let batches = provider_work_units
         .max(1)
-        .saturating_mul(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY);
-    let multiplier = u32::try_from(work_units).unwrap_or(u32::MAX);
+        .saturating_add(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY - 1)
+        / PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY;
+    let multiplier = u32::try_from(batches).unwrap_or(u32::MAX);
     PARENT_ELIGIBILITY_TIMEOUT.saturating_mul(multiplier)
 }
 
@@ -984,8 +985,9 @@ where
         {
             Ok(issues) => issues,
             Err(error) => {
-                warn!(target, error = %error, "discarding unrecoverable parent replan target");
-                return Ok(false);
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
             }
         };
         let Some(issue) = issues.into_iter().find(|issue| {
@@ -1448,32 +1450,21 @@ where
                         .filter(|edge| edge.required)
                         .map(|edge| edge.child_id.clone())
                         .collect::<BTreeSet<_>>();
-                    let retained_child_ids = previous_child_ids
-                        .intersection(&current_child_ids)
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
                     let removed_child_ids = previous_child_ids
                         .difference(&current_child_ids)
                         .cloned()
                         .collect::<Vec<_>>();
-                    Some((
-                        snapshot.generation,
-                        current_child_ids,
-                        retained_child_ids,
-                        removed_child_ids,
-                    ))
+                    Some((snapshot.generation, current_child_ids, removed_child_ids))
                 } else {
                     None
                 }
             } else {
                 None
             };
-        if let Some((generation, current_child_ids, retained_child_ids, removed_child_ids)) =
-            reconciliation
-        {
+        if let Some((generation, current_child_ids, removed_child_ids)) = reconciliation {
             self.parent_eligibility_checked_at.remove(&normalized.id);
             self.hierarchy_state
-                .rebind_leaf_leases(&retained_child_ids, generation);
+                .rebind_leaf_leases(&current_child_ids, generation);
             self.hierarchy_state
                 .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
             for child_id in &current_child_ids {
@@ -4400,7 +4391,8 @@ where
         }
         self.parent_eligibility_checked_at
             .insert(normalized.id.clone(), observed_at);
-        let eligibility_timeout = parent_eligibility_timeout(snapshot.required_child_edges.len());
+        let eligibility_timeout =
+            parent_eligibility_timeout(self.parent_eligibility_work_units(&normalized.id));
         let mut evidence = match timeout(
             eligibility_timeout,
             self.tracker.parent_eligibility(tracker_issue, &snapshot),
@@ -4554,6 +4546,43 @@ where
         Ok(true)
     }
 
+    fn parent_eligibility_work_units(&self, parent_id: &IssueId) -> usize {
+        self.hierarchy_provider_work_units(parent_id, &mut HashSet::new())
+    }
+
+    fn hierarchy_provider_work_units(
+        &self,
+        issue_id: &IssueId,
+        visiting: &mut HashSet<IssueId>,
+    ) -> usize {
+        if !visiting.insert(issue_id.clone()) {
+            return 1;
+        }
+        let child_ids = self
+            .hierarchy_state
+            .hierarchy
+            .get(issue_id)
+            .map(|snapshot| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let work_units = if child_ids.is_empty() {
+            1
+        } else {
+            child_ids
+                .iter()
+                .map(|child_id| self.hierarchy_provider_work_units(child_id, visiting))
+                .sum()
+        };
+        visiting.remove(issue_id);
+        work_units.max(1)
+    }
+
     async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
         let Some((retry, workspace)) = self.executions.get(issue_id).and_then(|execution| {
             execution
@@ -4672,7 +4701,7 @@ where
         issue: &NormalizedIssue,
         workspace: &WorkspaceRecord,
     ) -> Result<bool, SchedulerError> {
-        if !self.hierarchy_state.has_ancestor_edge(&issue.id)
+        if (issue.parent_id.is_none() && !self.hierarchy_state.has_ancestor_edge(&issue.id))
             || self.hierarchy_state.has_dispatched_ancestor(&issue.id)
         {
             return Ok(false);
@@ -4714,7 +4743,10 @@ where
                     .map(|snapshot| snapshot.generation)
                     .next()
             })
-            .unwrap_or_default();
+            // A terminal child can finish before its parent enters the
+            // scheduler's configured scan. Seed the first snapshot generation
+            // so retained evidence can be consumed when that parent arrives.
+            .unwrap_or(1);
         if self.hierarchy_state.leases.iter().any(|lease| {
             lease.active()
                 && lease.kind == super::LeaseKind::LeafWorker
@@ -5566,6 +5598,19 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn parent_eligibility_timeout_scales_by_provider_batches() {
+        assert_eq!(parent_eligibility_timeout(1), Duration::from_secs(30));
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY + 1),
+            Duration::from_secs(60)
+        );
     }
 
     #[test]

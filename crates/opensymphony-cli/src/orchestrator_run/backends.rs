@@ -1725,8 +1725,15 @@ fn required_check_evidence_satisfied(
                             .as_deref()
                             .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
                         && match required.app_id {
-                            Some(app_id) => check.app.as_ref().is_some_and(|app| app.id == app_id),
-                            None => true,
+                            Some(app_id) if app_id >= 0 => check.app.as_ref().is_some_and(|app| {
+                                i64::try_from(app.id)
+                                    .is_ok_and(|check_app_id| check_app_id == app_id)
+                            }),
+                            // GitHub represents an any-App required check with
+                            // the signed sentinel -1. Do not constrain the
+                            // check run's App identity in that case.
+                            Some(-1) | None => true,
+                            Some(_) => false,
                         }
                 })
             });
@@ -1814,7 +1821,7 @@ struct GitHubRequiredStatusChecks {
 struct GitHubRequiredStatusCheck {
     context: String,
     #[serde(default)]
-    app_id: Option<u64>,
+    app_id: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11276,6 +11283,19 @@ Run the scheduler.
             &successful_required_app,
             &[],
             Some(&required),
+        ));
+
+        let any_app = GitHubRequiredStatusChecks {
+            contexts: Vec::new(),
+            checks: vec![GitHubRequiredStatusCheck {
+                context: "protected".to_owned(),
+                app_id: Some(-1),
+            }],
+        };
+        assert!(required_check_evidence_satisfied(
+            &successful_other_app,
+            &[],
+            Some(&any_app),
         ));
     }
 

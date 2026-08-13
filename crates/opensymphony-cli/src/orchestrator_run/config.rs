@@ -1341,6 +1341,32 @@ fn resolve_central_config(
         }
     }
     validate_active_repository_aliases(&config, &active_repositories)?;
+    for repository_id in &active_repositories {
+        let repository = config.repositories.get(repository_id).ok_or_else(|| {
+            CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}"),
+            }
+        })?;
+        let review_profile = config
+            .review_profiles
+            .get(&repository.review_profile)
+            .ok_or_else(|| CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.review_profile"),
+            })?;
+        if review_profile.provider.eq_ignore_ascii_case("github") {
+            let credential = config
+                .credentials
+                .get(&review_profile.credential)
+                .ok_or_else(|| CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}.credential", repository.review_profile),
+                })?;
+            if credential.kind != "environment" || credential.variable.is_none() {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}.credential", repository.review_profile),
+                });
+            }
+        }
+    }
 
     let legacy_repository_instruction_path = if mode == CentralRoutingMode::LegacySingle {
         let repository = config
@@ -2888,10 +2914,13 @@ credentials:
     variable: LINEAR_API_KEY
   github-ssh:
     kind: ssh-agent
+  github-review:
+    kind: environment
+    variable: GITHUB_TOKEN
 review_profiles:
   github-standard:
     provider: github
-    credential: github-ssh
+    credential: github-review
     required_checks: true
     required_review: true
     merge_method: merge
@@ -3881,6 +3910,24 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("tracker credentials without a variable should fail");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_non_environment_github_review_credentials() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "    credential: github-review",
+            "    credential: github-ssh",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("GitHub review credentials must resolve to an environment token");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.credential"
+        ));
     }
 
     #[test]

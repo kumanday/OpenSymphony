@@ -869,6 +869,27 @@ async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_
 }
 
 #[tokio::test]
+async fn replan_parent_target_preserves_tracker_failures_for_retry() {
+    let tracker = FakeTracker {
+        detail_errors: VecDeque::from([FakeError::rate_limited(Duration::from_secs(5))]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    let result = scheduler.replan_parent_target("COE-REPLAN", ts(100)).await;
+    assert!(matches!(
+        result,
+        Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { detail })
+            if detail == "rate limited"
+    ));
+}
+
+#[tokio::test]
 async fn launch_failure_persists_retry_metadata_before_returning_error() {
     let tracker = FakeTracker {
         active: vec![tracker_issue("lin-267", "COE-267", "In Progress", 0)],

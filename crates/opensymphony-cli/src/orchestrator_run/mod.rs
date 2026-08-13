@@ -1443,10 +1443,8 @@ where
             scheduler
                 .interrupt_operator_cancel(target, observed_at)
                 .await?;
-        } else if let Some(target) = gateway_replan_target(&event)
-            && let Err(error) = scheduler.replan_parent_target(target, observed_at).await
-        {
-            warn!(target, error = %error, "parent replan event was not applied");
+        } else if let Some(target) = gateway_replan_target(&event) {
+            scheduler.replan_parent_target(target, observed_at).await?;
         }
         *cursor = sequence;
     }
