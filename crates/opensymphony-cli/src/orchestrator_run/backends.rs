@@ -1137,7 +1137,7 @@ impl RuntimeTrackerBackend {
             .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json");
         let configured_token = repository
-            .credential_env
+            .review_credential_env
             .as_deref()
             .and_then(|name| env::var(name).ok())
             .filter(|token| !token.trim().is_empty());
@@ -1206,14 +1206,18 @@ impl RuntimeTrackerBackend {
             else {
                 return Ok(false);
             };
-            let endpoint = format!(
-                "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}/check-runs"
-            );
-            let checks = self
-                .github_get_json::<GitHubCheckRuns>(&endpoint, repository)
+            let (total_count, check_runs) = self
+                .github_check_runs(
+                    api_root,
+                    owner,
+                    repository_name,
+                    merge_commit_sha,
+                    repository,
+                )
                 .await?;
-            if checks.total_count == 0
-                || checks.check_runs.iter().any(|check| {
+            if total_count == 0
+                || check_runs.len() < total_count
+                || check_runs.iter().any(|check| {
                     !check.status.eq_ignore_ascii_case("completed")
                         || !check
                             .conclusion
@@ -1225,6 +1229,38 @@ impl RuntimeTrackerBackend {
             }
         }
         Ok(true)
+    }
+
+    async fn github_check_runs(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        merge_commit_sha: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<(usize, Vec<GitHubCheckRun>), LinearError> {
+        let mut page = 1;
+        let mut total_count = None;
+        let mut check_runs = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}/check-runs?per_page=100&page={page}"
+            );
+            let response = self
+                .github_get_json::<GitHubCheckRuns>(&endpoint, repository)
+                .await?;
+            total_count.get_or_insert(response.total_count);
+            let page_count = response.check_runs.len();
+            check_runs.extend(response.check_runs);
+            let expected = total_count.unwrap_or_default();
+            if check_runs.len() >= expected {
+                return Ok((expected, check_runs));
+            }
+            if page_count == 0 || page >= 1000 {
+                return Ok((expected, check_runs));
+            }
+            page += 1;
+        }
     }
 
     async fn direct_merge_evidence(

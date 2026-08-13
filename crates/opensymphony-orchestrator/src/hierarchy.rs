@@ -601,6 +601,17 @@ impl DurableOrchestratorState {
         }
     }
 
+    pub fn rebind_leaf_leases(&mut self, child_ids: &BTreeSet<IssueId>, generation: u64) {
+        for lease in &mut self.leases {
+            if lease.active()
+                && lease.kind == LeaseKind::LeafWorker
+                && child_ids.contains(&lease.resource.issue_id)
+            {
+                lease.hierarchy_generation = generation;
+            }
+        }
+    }
+
     pub fn release_ancestor_leases_for_children(
         &mut self,
         child_ids: &[IssueId],

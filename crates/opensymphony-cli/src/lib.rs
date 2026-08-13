@@ -2957,6 +2957,7 @@ mod tests {
                 credential_kind: "ssh-agent".to_owned(),
                 credential_reference: None,
                 credential_env: None,
+                review_credential_env: None,
                 instructions_path: PathBuf::from("AGENTS.md"),
                 policy_generation: "scheduler-policy".to_owned(),
                 review_profile: "default".to_owned(),

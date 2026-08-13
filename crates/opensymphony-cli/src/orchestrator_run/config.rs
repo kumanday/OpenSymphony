@@ -1586,6 +1586,10 @@ fn build_repository_checkouts(
                     field: format!("review_profiles.{}", repository.review_profile),
                 }
             })?);
+        let review_credential_env = config
+            .credentials
+            .get(&review_profile.credential)
+            .and_then(|credential| credential.variable.clone());
         let checkout = CheckoutRepository {
             provider: repository.remote.provider.clone(),
             provider_id: repository.remote.provider_id.clone(),
@@ -1602,6 +1606,7 @@ fn build_repository_checkouts(
                 .get(&repository.credential)
                 .and_then(|credential| credential.reference.clone()),
             credential_env,
+            review_credential_env,
             instructions_path: PathBuf::from(&repository.instructions.path),
             policy_generation: policy_generation.clone(),
             review_profile: repository.review_profile.clone(),

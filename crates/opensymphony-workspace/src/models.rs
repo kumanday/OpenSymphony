@@ -23,6 +23,8 @@ pub struct CheckoutRepository {
     pub credential_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_credential_env: Option<String>,
     pub instructions_path: PathBuf,
     #[serde(default)]
     pub policy_generation: String,

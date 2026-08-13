@@ -3044,6 +3044,7 @@ impl WorkspaceManager {
             return Ok(None);
         }
         let handle = self.orchestrator_state_handle();
+        self.validate_workspace_handle(&handle).await?;
         self.load_manifest(&handle, &self.orchestrator_state_path())
             .await
     }
@@ -5234,6 +5235,7 @@ mod tests {
             credential_kind: "ssh-agent".to_owned(),
             credential_reference: None,
             credential_env: None,
+            review_credential_env: None,
             instructions_path: PathBuf::from(".git/hooks/local-instructions.md"),
             policy_generation: String::new(),
             review_profile: String::new(),

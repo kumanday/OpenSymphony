@@ -1201,30 +1201,44 @@ where
                 .insert(normalized.id.clone(), HierarchySnapshot::new(tracker_issue));
             return Ok(true);
         }
-        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
-            let previous_child_ids = snapshot
-                .required_child_edges
-                .iter()
-                .filter(|edge| edge.required)
-                .map(|edge| edge.child_id.clone())
-                .collect::<BTreeSet<_>>();
-            let reconciliation = snapshot.reconcile(&tracker_issue.sub_issues);
-            if !matches!(reconciliation, super::HierarchyReconciliation::Unchanged) {
-                self.parent_eligibility_checked_at.remove(&normalized.id);
-                let current_child_ids = snapshot
+        let reconciliation =
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
+                let previous_child_ids = snapshot
                     .required_child_edges
                     .iter()
                     .filter(|edge| edge.required)
                     .map(|edge| edge.child_id.clone())
                     .collect::<BTreeSet<_>>();
-                let removed_child_ids = previous_child_ids
-                    .difference(&current_child_ids)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                self.hierarchy_state
-                    .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
-                return Ok(true);
-            }
+                let reconciliation = snapshot.reconcile(&tracker_issue.sub_issues);
+                if !matches!(reconciliation, super::HierarchyReconciliation::Unchanged) {
+                    let current_child_ids = snapshot
+                        .required_child_edges
+                        .iter()
+                        .filter(|edge| edge.required)
+                        .map(|edge| edge.child_id.clone())
+                        .collect::<BTreeSet<_>>();
+                    let retained_child_ids = previous_child_ids
+                        .intersection(&current_child_ids)
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let removed_child_ids = previous_child_ids
+                        .difference(&current_child_ids)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    Some((snapshot.generation, retained_child_ids, removed_child_ids))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some((generation, retained_child_ids, removed_child_ids)) = reconciliation {
+            self.parent_eligibility_checked_at.remove(&normalized.id);
+            self.hierarchy_state
+                .rebind_leaf_leases(&retained_child_ids, generation);
+            self.hierarchy_state
+                .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
+            return Ok(true);
         }
         Ok(false)
     }
@@ -1772,7 +1786,17 @@ where
                     self.pending_recovery = Some(retry_records);
                     return Err(error);
                 }
-                if self.workspace_has_active_lease(&record.workspace).await? {
+                let workspace_has_active_lease =
+                    match self.workspace_has_active_lease(&record.workspace).await {
+                        Ok(has_active_lease) => has_active_lease,
+                        Err(error) => {
+                            retry_records.push(record);
+                            retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                            self.pending_recovery = Some(retry_records);
+                            return Err(error);
+                        }
+                    };
+                if workspace_has_active_lease {
                     let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
                     execution.attach_workspace(record.workspace.clone())?;
                     self.insert_execution(
@@ -2950,6 +2974,10 @@ where
                 self.hierarchy_state_dirty = true;
                 self.persist_orchestrator_state().await?;
             }
+            // Keep the known execution hydrated with the same detailed issue
+            // that just drove hierarchy reconciliation. The later known-
+            // candidate pass must not reintroduce an older child-edge list.
+            self.refresh_execution_issue(&issue_id, normalized.clone())?;
 
             if !normalized.sub_issues.is_empty() {
                 let parent_retry = self
