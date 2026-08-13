@@ -1586,6 +1586,7 @@ where
                         })
                     && !self.hierarchy_state.leases.iter().any(|lease| {
                         lease.active()
+                            && normalized.parent_id.is_none()
                             && (lease.owner == super::LeaseOwner::ancestor(&normalized.id)
                                 || (lease.kind == super::LeaseKind::Review
                                     && lease.owner.id.starts_with(&format!(
@@ -1613,7 +1614,7 @@ where
                     &tracker_issue.sub_issues,
                     &self.config.terminal_states,
                 );
-                if !matches!(reconciliation, super::HierarchyReconciliation::Unchanged) {
+                if !matches!(&reconciliation, super::HierarchyReconciliation::Unchanged) {
                     let current_child_ids = snapshot
                         .required_child_edges
                         .iter()
@@ -1624,24 +1625,35 @@ where
                         .difference(&current_child_ids)
                         .cloned()
                         .collect::<Vec<_>>();
-                    Some((snapshot.generation, current_child_ids, removed_child_ids))
+                    Some((
+                        snapshot.generation,
+                        current_child_ids,
+                        removed_child_ids,
+                        matches!(
+                            &reconciliation,
+                            super::HierarchyReconciliation::GenerationAdvanced { .. }
+                        ),
+                    ))
                 } else {
                     None
                 }
             } else {
                 None
             };
-        if let Some((generation, current_child_ids, removed_child_ids)) = reconciliation {
+        if let Some((generation, current_child_ids, removed_child_ids, rebind_running_children)) =
+            reconciliation
+        {
             self.parent_eligibility_checked_at.remove(&normalized.id);
             let retained_child_ids = current_child_ids
                 .iter()
                 .filter(|child_id| {
-                    !self.executions.get(*child_id).is_some_and(|execution| {
-                        matches!(
-                            execution.status(),
-                            SchedulerStatus::Claimed | SchedulerStatus::Running
-                        )
-                    })
+                    rebind_running_children
+                        || !self.executions.get(*child_id).is_some_and(|execution| {
+                            matches!(
+                                execution.status(),
+                                SchedulerStatus::Claimed | SchedulerStatus::Running
+                            )
+                        })
                 })
                 .cloned()
                 .collect::<BTreeSet<_>>();
