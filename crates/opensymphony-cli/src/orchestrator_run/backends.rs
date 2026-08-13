@@ -1329,10 +1329,10 @@ impl RuntimeTrackerBackend {
                     repository,
                 )
                 .await?;
-            let required_contexts = self
+            let required_checks = self
                 .github_required_check_contexts(api_root, owner, repository_name, repository)
                 .await?;
-            let commit_statuses = if required_contexts.is_some() {
+            let commit_statuses = if required_checks.is_some() {
                 self.github_commit_statuses(
                     api_root,
                     owner,
@@ -1345,11 +1345,11 @@ impl RuntimeTrackerBackend {
                 Vec::new()
             };
             if check_runs.len() < total_count
-                || (total_count == 0 && required_contexts.is_none())
+                || (total_count == 0 && required_checks.is_none())
                 || !required_check_evidence_satisfied(
                     &check_runs,
                     &commit_statuses,
-                    required_contexts.as_ref(),
+                    required_checks.as_ref(),
                 )
             {
                 return Ok(false);
@@ -1451,7 +1451,7 @@ impl RuntimeTrackerBackend {
         owner: &str,
         repository_name: &str,
         repository: &CheckoutRepository,
-    ) -> Result<Option<BTreeSet<String>>, LinearError> {
+    ) -> Result<Option<GitHubRequiredStatusChecks>, LinearError> {
         let endpoint = github_required_status_checks_endpoint(
             api_root,
             owner,
@@ -1463,9 +1463,7 @@ impl RuntimeTrackerBackend {
             .await
         {
             Ok(policy) => {
-                let mut contexts = policy.contexts.into_iter().collect::<BTreeSet<_>>();
-                contexts.extend(policy.checks.into_iter().map(|check| check.context));
-                Ok((!contexts.is_empty()).then_some(contexts))
+                Ok((!policy.contexts.is_empty() || !policy.checks.is_empty()).then_some(policy))
             }
             // A branch without protection has no configured required
             // contexts. Keep the legacy requirement of observing at least one
@@ -1702,21 +1700,38 @@ fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bo
 fn required_check_evidence_satisfied(
     check_runs: &[GitHubCheckRun],
     commit_statuses: &[GitHubCommitStatus],
-    required_contexts: Option<&BTreeSet<String>>,
+    required_checks: Option<&GitHubRequiredStatusChecks>,
 ) -> bool {
-    match required_contexts {
-        Some(required_contexts) => required_contexts.iter().all(|context| {
-            check_runs.iter().any(|check| {
-                check.name.as_deref() == Some(context)
-                    && check.status.eq_ignore_ascii_case("completed")
-                    && check
-                        .conclusion
-                        .as_deref()
-                        .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-            }) || commit_statuses.iter().any(|status| {
-                status.context == *context && status.state.eq_ignore_ascii_case("success")
-            })
-        }),
+    match required_checks {
+        Some(required_checks) => {
+            let legacy_contexts_satisfied = required_checks.contexts.iter().all(|context| {
+                check_runs.iter().any(|check| {
+                    check.name.as_deref() == Some(context)
+                        && check.status.eq_ignore_ascii_case("completed")
+                        && check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                }) || commit_statuses.iter().any(|status| {
+                    status.context == *context && status.state.eq_ignore_ascii_case("success")
+                })
+            });
+            let app_bound_checks_satisfied = required_checks.checks.iter().all(|required| {
+                check_runs.iter().any(|check| {
+                    check.name.as_deref() == Some(required.context.as_str())
+                        && check.status.eq_ignore_ascii_case("completed")
+                        && check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                        && match required.app_id {
+                            Some(app_id) => check.app.as_ref().is_some_and(|app| app.id == app_id),
+                            None => true,
+                        }
+                })
+            });
+            legacy_contexts_satisfied && app_bound_checks_satisfied
+        }
         None => check_runs.iter().any(|check| {
             check.status.eq_ignore_ascii_case("completed")
                 && check
@@ -1778,6 +1793,13 @@ struct GitHubCheckRun {
     status: String,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(default)]
+    app: Option<GitHubCheckRunApp>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCheckRunApp {
+    id: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1791,6 +1813,8 @@ struct GitHubRequiredStatusChecks {
 #[derive(Debug, serde::Deserialize)]
 struct GitHubRequiredStatusCheck {
     context: String,
+    #[serde(default)]
+    app_id: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11165,14 +11189,19 @@ Run the scheduler.
                 name: Some("required".to_owned()),
                 status: "completed".to_owned(),
                 conclusion: Some("success".to_owned()),
+                app: None,
             },
             GitHubCheckRun {
                 name: Some("optional".to_owned()),
                 status: "completed".to_owned(),
                 conclusion: Some("failure".to_owned()),
+                app: None,
             },
         ];
-        let required = BTreeSet::from(["required".to_owned()]);
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned()],
+            checks: Vec::new(),
+        };
         assert!(required_check_evidence_satisfied(
             &checks,
             &[],
@@ -11180,13 +11209,19 @@ Run the scheduler.
         ));
         assert!(required_check_evidence_satisfied(&checks, &[], None));
 
-        let missing = BTreeSet::from(["missing".to_owned()]);
+        let missing = GitHubRequiredStatusChecks {
+            contexts: vec!["missing".to_owned()],
+            checks: Vec::new(),
+        };
         assert!(!required_check_evidence_satisfied(
             &checks,
             &[],
             Some(&missing)
         ));
-        let all_required = BTreeSet::from(["required".to_owned(), "lint".to_owned()]);
+        let all_required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned(), "lint".to_owned()],
+            checks: Vec::new(),
+        };
         assert!(!required_check_evidence_satisfied(
             &checks,
             &[],
@@ -11199,6 +11234,48 @@ Run the scheduler.
                 state: "success".to_owned(),
             }],
             Some(&all_required),
+        ));
+    }
+
+    #[test]
+    fn app_bound_required_checks_reject_other_apps_and_classic_statuses() {
+        let required = GitHubRequiredStatusChecks {
+            contexts: Vec::new(),
+            checks: vec![GitHubRequiredStatusCheck {
+                context: "protected".to_owned(),
+                app_id: Some(42),
+            }],
+        };
+        let successful_other_app = vec![GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 7 }),
+        }];
+        assert!(!required_check_evidence_satisfied(
+            &successful_other_app,
+            &[],
+            Some(&required),
+        ));
+        assert!(!required_check_evidence_satisfied(
+            &[],
+            &[GitHubCommitStatus {
+                context: "protected".to_owned(),
+                state: "success".to_owned(),
+            }],
+            Some(&required),
+        ));
+
+        let successful_required_app = vec![GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 42 }),
+        }];
+        assert!(required_check_evidence_satisfied(
+            &successful_required_app,
+            &[],
+            Some(&required),
         ));
     }
 

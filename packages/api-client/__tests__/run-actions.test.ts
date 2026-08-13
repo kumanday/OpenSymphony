@@ -168,13 +168,30 @@ describe("HttpGatewayTransport action integration", () => {
   it("replanParent POSTs a replan action for an issue", async () => {
     const fetchSpy = mockFetch(receipt);
     const transport = new HttpGatewayTransport({ baseUri });
-    await transport.replanParent("parent-1");
+    await transport.replanParent("parent-1", "generation-7");
 
     const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(requestInit.body as string);
     expect(body.action_kind).toBe("replan");
     expect(body.target_entity).toEqual({ entity_kind: "issue", entity_id: "parent-1" });
-    expect(body.idempotency_key).toBe("replan-parent-1");
+    expect(body.idempotency_key).toBe("replan-parent-1-generation-7");
+  });
+
+  it("replanParent gives each new operation a key while allowing request retries", async () => {
+    const fetchSpy = mockFetch(receipt);
+    const transport = new HttpGatewayTransport({ baseUri });
+    await transport.replanParent("parent-1", "generation-7");
+    await transport.replanParent("parent-1", "generation-7");
+    await transport.replanParent("parent-1", "generation-8");
+
+    const keys = fetchSpy.mock.calls.map((call) =>
+      JSON.parse((call[1] as RequestInit).body as string).idempotency_key,
+    );
+    expect(keys).toEqual([
+      "replan-parent-1-generation-7",
+      "replan-parent-1-generation-7",
+      "replan-parent-1-generation-8",
+    ]);
   });
 
   it("approvalDecision POSTs the decision and explanation", async () => {
