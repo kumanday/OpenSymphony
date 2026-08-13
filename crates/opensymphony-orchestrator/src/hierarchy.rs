@@ -167,6 +167,17 @@ impl HierarchySnapshot {
         self.dispatch_intent_generation == Some(self.generation)
     }
 
+    pub fn restore_in_flight_dispatch(&mut self) -> bool {
+        let Some(generation) = self.dispatch_intent_generation else {
+            return false;
+        };
+        if self.in_flight_generation == Some(generation) {
+            return false;
+        }
+        self.in_flight_generation = Some(generation);
+        true
+    }
+
     pub fn mark_dispatched(&mut self) {
         self.dispatched_generation = Some(self.generation);
         self.dispatch_intent_generation = None;
@@ -1044,6 +1055,17 @@ mod tests {
 
         snapshot.replan();
         assert!(!snapshot.has_dispatched_execution_fence());
+    }
+
+    #[test]
+    fn dispatch_intent_restores_a_recovered_in_flight_fence() {
+        let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
+        snapshot.freeze().expect("initial scope should freeze");
+        snapshot.mark_dispatch_intent();
+
+        assert!(snapshot.restore_in_flight_dispatch());
+        assert!(snapshot.has_dispatched_execution_fence());
+        assert!(!snapshot.restore_in_flight_dispatch());
     }
 
     #[test]

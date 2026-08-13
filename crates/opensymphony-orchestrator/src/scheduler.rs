@@ -1575,10 +1575,24 @@ where
             .is_some_and(|snapshot| {
                 snapshot.dispatch_claimed()
                     && normalized.state.category == IssueStateCategory::Active
-                    && self
+                    && !self
                         .executions
                         .get(&normalized.id)
-                        .is_some_and(|execution| execution.status() == SchedulerStatus::Released)
+                        .is_some_and(|execution| {
+                            matches!(
+                                execution.status(),
+                                SchedulerStatus::Claimed | SchedulerStatus::Running
+                            )
+                        })
+                    && !self.hierarchy_state.leases.iter().any(|lease| {
+                        lease.active()
+                            && (lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                                || (lease.kind == super::LeaseKind::Review
+                                    && lease.owner.id.starts_with(&format!(
+                                        "review:{normalized_id}:",
+                                        normalized_id = normalized.id
+                                    ))))
+                    })
             });
         let reconciliation =
             if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
@@ -1679,6 +1693,21 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let recovered_in_flight_parent_ids = self
+            .pending_recovery
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|record| record.had_in_flight_run && record.recovered_run.is_some())
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        for parent_id in &recovered_in_flight_parent_ids {
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id)
+                && snapshot.dispatch_intended()
+            {
+                self.hierarchy_state_dirty |= snapshot.restore_in_flight_dispatch();
+            }
+        }
         let hierarchy_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?;
         let terminal_hierarchy_changed =
             self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
@@ -1733,6 +1762,15 @@ where
             .filter(|record| record.had_in_flight_run)
             .map(|record| record.issue.id.clone())
             .collect::<HashSet<_>>();
+        let terminal_recovered_in_flight_parent_ids = records
+            .iter()
+            .filter(|record| {
+                record.had_in_flight_run
+                    && record.recovered_run.is_some()
+                    && tracker_snapshot.contains_terminal(record.issue.id.as_str())
+            })
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
         let intended_parent_ids = self
             .hierarchy_state
             .hierarchy
@@ -1761,10 +1799,14 @@ where
                 if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
                     snapshot.mark_dispatched();
                 }
-                self.hierarchy_state
-                    .release_leaf_leases_for_parent(&parent_id, observed_at.as_u64());
-                self.hierarchy_state
-                    .release_ancestor_leases_for_children(&nested_child_ids, observed_at.as_u64());
+                if !terminal_recovered_in_flight_parent_ids.contains(&parent_id) {
+                    self.hierarchy_state
+                        .release_leaf_leases_for_parent(&parent_id, observed_at.as_u64());
+                    self.hierarchy_state.release_ancestor_leases_for_children(
+                        &nested_child_ids,
+                        observed_at.as_u64(),
+                    );
+                }
             } else {
                 if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
                     snapshot.clear_dispatch_intent();
@@ -2216,6 +2258,36 @@ where
                     {
                         retry_records.push(record);
                         continue;
+                    }
+                    if record.had_in_flight_run
+                        && self.hierarchy_state.hierarchy.contains_key(&issue_id)
+                    {
+                        let nested_child_ids = self
+                            .hierarchy_state
+                            .hierarchy
+                            .get(&issue_id)
+                            .map(|snapshot| {
+                                snapshot
+                                    .required_child_edges
+                                    .iter()
+                                    .filter(|edge| {
+                                        edge.required
+                                            && self
+                                                .hierarchy_state
+                                                .hierarchy
+                                                .contains_key(&edge.child_id)
+                                    })
+                                    .map(|edge| edge.child_id.clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        self.hierarchy_state
+                            .release_leaf_leases_for_parent(&issue_id, observed_at.as_u64());
+                        self.hierarchy_state.release_ancestor_leases_for_children(
+                            &nested_child_ids,
+                            observed_at.as_u64(),
+                        );
+                        self.persist_orchestrator_state().await?;
                     }
                 }
                 if let Err(error) = self
@@ -4863,10 +4935,14 @@ where
         let work_units = if child_ids.is_empty() {
             1
         } else {
-            child_ids
+            let descendant_work_units = child_ids
                 .iter()
                 .map(|child_id| self.hierarchy_provider_work_units(child_id, visiting))
-                .sum()
+                .sum::<usize>();
+            let has_nested_parent = child_ids
+                .iter()
+                .any(|child_id| self.hierarchy_state.hierarchy.contains_key(child_id));
+            descendant_work_units + usize::from(has_nested_parent)
         };
         visiting.remove(issue_id);
         work_units.max(1)
@@ -5958,6 +6034,10 @@ mod tests {
         assert_eq!(
             parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY + 1),
             Duration::from_secs(60)
+        );
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY * 2 + 1),
+            Duration::from_secs(90)
         );
     }
 
