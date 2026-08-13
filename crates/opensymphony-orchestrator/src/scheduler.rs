@@ -3531,6 +3531,18 @@ where
                 continue;
             }
 
+            // Check the ancestor fence before parent eligibility can persist a
+            // dispatch intent and acquire leases. A nested parent may be
+            // reactivated while a higher parent is integrating retained
+            // evidence; leaving the intent behind would make the nested
+            // parent permanently undispatchable after the higher lease ends.
+            if self
+                .hierarchy_state
+                .has_active_dispatched_ancestor(&issue_id)
+            {
+                continue;
+            }
+
             if !normalized.sub_issues.is_empty() {
                 let parent_retry = self
                     .executions
@@ -3547,18 +3559,6 @@ where
                 {
                     continue;
                 }
-            }
-
-            // A terminal child can be reactivated while an ancestor is
-            // integrating its retained checkout. Keep the ancestor's lease
-            // as the fencing authority and wait for that parent to finish;
-            // dispatching the child here would let it mutate the protected
-            // checkout underneath the in-flight integration.
-            if self
-                .hierarchy_state
-                .has_active_dispatched_ancestor(&issue_id)
-            {
-                continue;
             }
 
             if let Some(hierarchy_generation) = self
@@ -5323,6 +5323,12 @@ where
         if let Some(parent_id) = issue.parent_id.as_ref()
             && self.parent_is_terminal_and_undispatched(parent_id).await
         {
+            if self
+                .hierarchy_state
+                .release_subtree_evidence_for_undispatched_parent(parent_id, current_epoch_millis())
+            {
+                self.persist_orchestrator_state().await?;
+            }
             return Ok(false);
         }
         let Some(resource) = self

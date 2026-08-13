@@ -1924,7 +1924,7 @@ fn required_check_evidence_satisfied(
                         && check
                             .conclusion
                             .as_deref()
-                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                            .is_some_and(is_passing_check_conclusion)
                 }) || latest_statuses
                     .get(context)
                     .is_some_and(|status| status.state.eq_ignore_ascii_case("success"))
@@ -1936,7 +1936,7 @@ fn required_check_evidence_satisfied(
                         && check
                             .conclusion
                             .as_deref()
-                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                            .is_some_and(is_passing_check_conclusion)
                         && match required.app_id {
                             Some(app_id) if app_id >= 0 => check.app.as_ref().is_some_and(|app| {
                                 i64::try_from(app.id)
@@ -1957,9 +1957,16 @@ fn required_check_evidence_satisfied(
                 && check
                     .conclusion
                     .as_deref()
-                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                    .is_some_and(is_passing_check_conclusion)
         }),
     }
+}
+
+fn is_passing_check_conclusion(conclusion: &str) -> bool {
+    matches!(
+        conclusion.to_ascii_lowercase().as_str(),
+        "success" | "neutral" | "skipped"
+    )
 }
 
 fn latest_commit_statuses<'a>(
@@ -11550,6 +11557,27 @@ Run the scheduler.
             }],
             Some(&all_required),
         ));
+    }
+
+    #[test]
+    fn required_check_evidence_accepts_neutral_and_skipped_runs() {
+        for conclusion in ["neutral", "skipped"] {
+            let checks = vec![GitHubCheckRun {
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some(conclusion.to_owned()),
+                app: None,
+            }];
+            let required = GitHubRequiredStatusChecks {
+                contexts: vec!["required".to_owned()],
+                checks: Vec::new(),
+            };
+
+            assert!(
+                required_check_evidence_satisfied(&checks, &[], Some(&required)),
+                "{conclusion} should satisfy a completed required check"
+            );
+        }
     }
 
     #[test]

@@ -808,6 +808,98 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
 }
 
 #[tokio::test]
+async fn active_ancestor_fence_is_checked_before_nested_parent_eligibility() {
+    let root_id = IssueId::new("root-fence").expect("root id");
+    let nested_id = IssueId::new("nested-fence").expect("nested id");
+    let canceled_child_id = IssueId::new("canceled-fence").expect("child id");
+    let mut root = tracker_issue("root-fence", "COE-FENCE-ROOT", "In Progress", 0);
+    root.sub_issues = vec![TrackerIssueRef {
+        id: nested_id.to_string(),
+        identifier: "COE-FENCE-NESTED".to_owned(),
+        title: Some("Nested parent".to_owned()),
+        url: None,
+        state: "In Progress".to_owned(),
+        state_kind: TrackerIssueStateKind::Started,
+    }];
+    let mut nested = tracker_issue("nested-fence", "COE-FENCE-NESTED", "In Progress", 1);
+    nested.parent_id = Some(root_id.to_string());
+    nested.sub_issues = vec![TrackerIssueRef {
+        id: canceled_child_id.to_string(),
+        identifier: "COE-FENCE-CANCELED".to_owned(),
+        title: Some("Canceled child".to_owned()),
+        url: None,
+        state: "Canceled".to_owned(),
+        state_kind: TrackerIssueStateKind::Canceled,
+    }];
+
+    let mut root_snapshot = HierarchySnapshot::new(&root);
+    root_snapshot.mark_dispatched();
+    let nested_snapshot = HierarchySnapshot::new(&nested);
+    let resource = LeaseResource {
+        issue_id: nested_id.clone(),
+        repository_id: CanonicalRepositoryId::new("github:fence-repo").expect("repository id"),
+        checkout_generation: "checkout-fence".to_owned(),
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([
+            (root_id.clone(), root_snapshot),
+            (nested_id.clone(), nested_snapshot.clone()),
+        ]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::AncestorIntegration,
+            resource,
+            owner: LeaseOwner::ancestor(&root_id),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        ..Default::default()
+    };
+    let tracker = FakeTracker {
+        active: vec![root, nested],
+        parent_evidence: Some(ParentEligibilityEvidence {
+            hierarchy_generation: nested_snapshot.generation,
+            children: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("ancestor fence should defer nested parent");
+
+    assert!(scheduler.worker().launches.is_empty());
+    let persisted =
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("state should remain durable"),
+        )
+        .expect("state should decode");
+    assert!(!persisted.hierarchy[&nested_id].dispatch_intended());
+    assert!(
+        !persisted
+            .leases
+            .iter()
+            .any(|lease| { lease.active() && lease.owner == LeaseOwner::ancestor(&nested_id) })
+    );
+}
+
+#[tokio::test]
 async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_leases() {
     let parent_id = IssueId::new("parent-replan").expect("parent id");
     let mut parent = tracker_issue("parent-replan", "COE-REPLAN", "In Progress", 0);
