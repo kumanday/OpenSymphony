@@ -878,6 +878,7 @@ impl DurableOrchestratorState {
         &mut self,
         parent_id: &IssueId,
         removed_child_ids: &[IssueId],
+        reachable_child_ids: Option<&BTreeSet<IssueId>>,
         released_at: u64,
     ) -> bool {
         let mut subtree = BTreeSet::new();
@@ -903,7 +904,9 @@ impl DurableOrchestratorState {
         let retained_child_ids = self
             .hierarchy
             .iter()
-            .filter(|(parent_id, _)| !subtree.contains(*parent_id))
+            .filter(|(candidate_parent_id, _)| {
+                *candidate_parent_id != parent_id && !subtree.contains(*candidate_parent_id)
+            })
             .flat_map(|(_, snapshot)| snapshot.required_child_edges.iter())
             .filter(|edge| edge.required)
             .map(|edge| edge.child_id.clone())
@@ -921,6 +924,10 @@ impl DurableOrchestratorState {
         );
 
         let mut released = false;
+        let still_reachable = |issue_id: &IssueId| {
+            retained_child_ids.contains(issue_id)
+                || reachable_child_ids.is_some_and(|ids| ids.contains(issue_id))
+        };
         for lease in &mut self.leases {
             if !lease.active() {
                 continue;
@@ -928,11 +935,11 @@ impl DurableOrchestratorState {
             let owned_by_removed_subtree = match lease.kind {
                 LeaseKind::LeafWorker => {
                     subtree.contains(&lease.resource.issue_id)
-                        && !retained_child_ids.contains(&lease.resource.issue_id)
+                        && !still_reachable(&lease.resource.issue_id)
                 }
-                LeaseKind::AncestorIntegration => subtree
-                    .iter()
-                    .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id)),
+                LeaseKind::AncestorIntegration => subtree.iter().any(|issue_id| {
+                    lease.owner == LeaseOwner::ancestor(issue_id) && !still_reachable(issue_id)
+                }),
                 LeaseKind::Review => review_prefixes.iter().any(|prefix| {
                     lease.owner.id == *prefix || lease.owner.id.starts_with(&format!("{prefix}:"))
                 }),
@@ -1436,23 +1443,35 @@ mod tests {
             ..Default::default()
         };
         state
-            .acquire_leases(vec![LeaseRecord {
-                kind: LeaseKind::LeafWorker,
-                resource,
-                owner: LeaseOwner::leaf_worker(&child_id),
-                hierarchy_generation: 1,
-                acquired_at: 1,
-                expires_at: None,
-                released_at: None,
-            }])
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource,
+                    owner: LeaseOwner::ancestor(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
             .expect("leaf lease should acquire");
 
         assert!(!state.release_removed_subtree_leases(
             &parent_a,
             std::slice::from_ref(&child_id),
+            None,
             2,
         ));
-        assert!(state.leases[0].active());
+        assert!(state.leases.iter().all(LeaseRecord::active));
     }
 
     #[test]
@@ -1528,6 +1547,7 @@ mod tests {
         assert!(state.release_removed_subtree_leases(
             &parent_id,
             std::slice::from_ref(&nested_id),
+            None,
             2,
         ));
         assert!(

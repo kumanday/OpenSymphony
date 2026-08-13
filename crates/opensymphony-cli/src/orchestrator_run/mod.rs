@@ -1445,10 +1445,19 @@ where
                 .interrupt_operator_cancel(target, observed_at)
                 .await?;
         } else if let Some((target, accepted_generation)) = gateway_replan_request(&event) {
-            let changed = scheduler
+            let outcome = match scheduler
                 .replan_parent_target(target, accepted_generation, observed_at)
-                .await?;
-            let outcome = gateway_replan_outcome_event(&event, changed);
+                .await
+            {
+                Ok(changed) => Ok(changed),
+                Err(SchedulerError::Workspace { detail })
+                    if detail.starts_with("cannot replan hierarchy parent ") =>
+                {
+                    Err(detail)
+                }
+                Err(error) => return Err(error),
+            };
+            let outcome = gateway_replan_outcome_event(&event, outcome);
             journal
                 .append(outcome)
                 .await
@@ -1487,14 +1496,24 @@ fn gateway_replan_request(event: &EventRecord) -> Option<(&str, u64)> {
     Some((target, accepted_generation))
 }
 
-fn gateway_replan_outcome_event(dispatch: &EventRecord, changed: bool) -> EventRecord {
-    let status = if changed { "completed" } else { "rejected" };
-    let reason = (!changed).then_some("target is not blocked by HierarchyChanged");
+fn gateway_replan_outcome_event(
+    dispatch: &EventRecord,
+    outcome: Result<bool, String>,
+) -> EventRecord {
+    let (completed, reason) = match outcome {
+        Ok(true) => (true, None),
+        Ok(false) => (
+            false,
+            Some("target is not blocked by HierarchyChanged".to_owned()),
+        ),
+        Err(reason) => (false, Some(reason)),
+    };
+    let status = if completed { "completed" } else { "rejected" };
     EventRecord::builder()
         .actor(EventActor::system("orchestrator"))
         .correlation_id_opt(dispatch.correlation_id.clone())
         .entity_refs(dispatch.entity_refs.clone())
-        .kind(if changed {
+        .kind(if completed {
             EventKind::GatewayActionCompleted {
                 action: "replan".to_owned(),
             }
@@ -1502,14 +1521,14 @@ fn gateway_replan_outcome_event(dispatch: &EventRecord, changed: bool) -> EventR
             EventKind::GatewayActionFailed {
                 action: "replan".to_owned(),
                 reason: reason
-                    .expect("a rejected replan must carry a reason")
-                    .to_owned(),
+                    .clone()
+                    .expect("a rejected replan must carry a reason"),
             }
         })
-        .summary(if changed {
+        .summary(if completed {
             "Hierarchy replan completed"
         } else {
-            "Hierarchy replan rejected: target is not blocked by HierarchyChanged"
+            "Hierarchy replan rejected"
         })
         .payload(json!({
             "action_id": dispatch.payload.as_ref().and_then(|payload| payload.get("action_id")),
@@ -1901,7 +1920,7 @@ mod tests {
             }))
             .build();
 
-        let completed = gateway_replan_outcome_event(&dispatch, true);
+        let completed = gateway_replan_outcome_event(&dispatch, Ok(true));
         assert!(matches!(
             completed.kind,
             EventKind::GatewayActionCompleted { ref action } if action == "replan"
@@ -1911,7 +1930,7 @@ mod tests {
             "completed"
         );
 
-        let rejected = gateway_replan_outcome_event(&dispatch, false);
+        let rejected = gateway_replan_outcome_event(&dispatch, Ok(false));
         assert!(matches!(
             rejected.kind,
             EventKind::GatewayActionFailed { ref action, .. } if action == "replan"
@@ -1923,6 +1942,21 @@ mod tests {
         assert_eq!(
             rejected.payload.as_ref().expect("rejection payload")["reason"],
             "target is not blocked by HierarchyChanged"
+        );
+
+        let fenced = gateway_replan_outcome_event(
+            &dispatch,
+            Err("cannot replan hierarchy parent COE-552 while execution is running".to_owned()),
+        );
+        assert!(matches!(
+            fenced.kind,
+            EventKind::GatewayActionFailed { ref action, ref reason }
+                if action == "replan"
+                    && reason == "cannot replan hierarchy parent COE-552 while execution is running"
+        ));
+        assert_eq!(
+            fenced.payload.as_ref().expect("fenced payload")["reason"],
+            "cannot replan hierarchy parent COE-552 while execution is running"
         );
     }
 
