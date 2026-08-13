@@ -545,6 +545,10 @@ pub struct DurableOrchestratorState {
     pub leases: Vec<LeaseRecord>,
     #[serde(default)]
     pub run_hierarchy_generations: BTreeMap<IssueId, u64>,
+    /// Durable run-start boundaries used to fence provider evidence after
+    /// recovery, when the in-memory execution history is not yet hydrated.
+    #[serde(default)]
+    pub run_started_at_by_issue: BTreeMap<IssueId, TimestampMs>,
 }
 
 impl Default for DurableOrchestratorState {
@@ -554,6 +558,7 @@ impl Default for DurableOrchestratorState {
             hierarchy: BTreeMap::new(),
             leases: Vec::new(),
             run_hierarchy_generations: BTreeMap::new(),
+            run_started_at_by_issue: BTreeMap::new(),
         }
     }
 }

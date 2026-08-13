@@ -384,6 +384,12 @@ pub trait WorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(BTreeMap::new())
+    }
+
     async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
         Ok(None)
     }
@@ -3585,6 +3591,11 @@ where
                             Some(start_request.route.harness_kind),
                         ),
                     );
+                    let run_start_changed = self
+                        .hierarchy_state
+                        .run_started_at_by_issue
+                        .insert(issue_id.clone(), observed_at)
+                        .is_none_or(|previous| previous != observed_at);
                     if !execution.issue().sub_issues.is_empty()
                         && self.hierarchy_state.hierarchy.contains_key(&issue_id)
                     {
@@ -3622,6 +3633,15 @@ where
                             self.hierarchy_state_dirty = true;
                             first_error = Some(error);
                         }
+                    }
+                    if run_start_changed
+                        && (execution.issue().sub_issues.is_empty()
+                            || !self.hierarchy_state.hierarchy.contains_key(&issue_id))
+                        && let Err(error) = self.persist_orchestrator_state().await
+                        && first_error.is_none()
+                    {
+                        self.hierarchy_state_dirty = true;
+                        first_error = Some(error);
                     }
                     if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
                         if first_error.is_none() {
@@ -4573,18 +4593,11 @@ where
             let direct_provider_evidence_is_stale =
                 child.provider_evidence_at.is_some_and(|evidence_at| {
                     !self.hierarchy_state.hierarchy.contains_key(&child.child_id)
-                        && self
-                            .executions
-                            .get(&child.child_id)
-                            .and_then(|execution| execution.last_worker_outcome())
-                            .is_some_and(|outcome| evidence_at < outcome.started_at)
+                        && self.child_run_started_after(&child.child_id, evidence_at)
                 });
             let descendant_provider_evidence_is_stale =
                 child.provider_evidence_by_issue.iter().any(|boundary| {
-                    self.executions
-                        .get(&boundary.issue_id)
-                        .and_then(|execution| execution.last_worker_outcome())
-                        .is_some_and(|outcome| boundary.evidence_at < outcome.started_at)
+                    self.child_run_started_after(&boundary.issue_id, boundary.evidence_at)
                 });
             if child.provider_merge_confirmed
                 && (direct_provider_evidence_is_stale || descendant_provider_evidence_is_stale)
@@ -4601,6 +4614,38 @@ where
                 if !descendant_resources.is_empty() {
                     child.resource = descendant_resources.first().cloned();
                     child.resources = descendant_resources;
+                } else if allow_retry {
+                    let parent_owner = super::LeaseOwner::ancestor(&normalized.id);
+                    let retry_resources = self
+                        .hierarchy_state
+                        .leases
+                        .iter()
+                        .filter(|lease| {
+                            lease.active()
+                                && lease.kind == super::LeaseKind::AncestorIntegration
+                                && lease.owner == parent_owner
+                                && lease.hierarchy_generation == snapshot.generation
+                        })
+                        .map(|lease| lease.resource.clone())
+                        .collect::<Vec<_>>();
+                    if retry_resources.is_empty() {
+                        let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
+                        child.resource = self
+                            .hierarchy_state
+                            .leases
+                            .iter()
+                            .find(|lease| {
+                                lease.active()
+                                    && lease.kind == super::LeaseKind::LeafWorker
+                                    && lease.hierarchy_generation == snapshot.generation
+                                    && lease.owner == expected_owner
+                                    && lease.resource.issue_id == child.child_id
+                            })
+                            .map(|lease| lease.resource.clone());
+                    } else {
+                        child.resource = retry_resources.first().cloned();
+                        child.resources = retry_resources;
+                    }
                 } else {
                     let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
                     child.resource = self
@@ -4626,6 +4671,17 @@ where
         }
         if evidence.children.iter().any(|child| {
             child.resources().into_iter().any(|resource| {
+                if allow_retry
+                    && self.hierarchy_state.leases.iter().any(|lease| {
+                        lease.active()
+                            && lease.kind == super::LeaseKind::AncestorIntegration
+                            && lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                            && lease.hierarchy_generation == snapshot.generation
+                            && lease.resource == *resource
+                    })
+                {
+                    return false;
+                }
                 if self.hierarchy_state.hierarchy.contains_key(&child.child_id) {
                     return !self.hierarchy_state.leases.iter().any(|lease| {
                         lease.active()
@@ -4682,6 +4738,20 @@ where
             return Err(error);
         }
         Ok(true)
+    }
+
+    fn child_run_started_after(&self, issue_id: &IssueId, evidence_at: TimestampMs) -> bool {
+        self.hierarchy_state
+            .run_started_at_by_issue
+            .get(issue_id)
+            .copied()
+            .or_else(|| {
+                self.executions
+                    .get(issue_id)
+                    .and_then(|execution| execution.last_worker_outcome())
+                    .map(|outcome| outcome.started_at)
+            })
+            .is_some_and(|started_at| evidence_at < started_at)
     }
 
     fn parent_eligibility_work_units(&self, parent_id: &IssueId) -> usize {
@@ -4783,6 +4853,19 @@ where
                 detail: error.to_string(),
             }
         })?;
+        let recovered_run_started_at =
+            self.workspace
+                .recovered_run_started_at()
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+        if !recovered_run_started_at.is_empty() {
+            self.hierarchy_state
+                .run_started_at_by_issue
+                .extend(recovered_run_started_at);
+            self.persist_orchestrator_state().await?;
+        }
         let retry_exhaustion =
             self.workspace
                 .recover_retry_exhaustion()

@@ -930,6 +930,9 @@ pub struct RunManifest {
     pub interrupt_reason: Option<String>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
+    /// Durable boundary for fencing provider evidence after a run restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
@@ -958,6 +961,7 @@ impl RunManifest {
             interrupt_reason: None,
             status: RunStatus::Preparing,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),

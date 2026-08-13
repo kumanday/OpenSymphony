@@ -1552,6 +1552,7 @@ impl IssueSessionRunner {
                 )
                 .await?;
             run_manifest.status = RunStatus::Running;
+            run_manifest.started_at.get_or_insert_with(Utc::now);
             run_manifest.status_detail = Some(format!(
                 "recovered {} prompt trigger for conversation {}",
                 active_session.prompt_kind.as_str(),
@@ -2420,6 +2421,7 @@ impl IssueSessionRunner {
         }
 
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(Utc::now);
         run_manifest.status_detail = Some(format!(
             "{} prompt sent to conversation {}",
             active_session.prompt_kind.as_str(),

@@ -167,6 +167,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
+    recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
     codex_bin: String,
     retain_failed: bool,
     retry_state_root: PathBuf,
@@ -2175,6 +2176,7 @@ impl RuntimeWorkspaceBackend {
                 .map(|state| normalized_state_name(state))
                 .collect(),
             terminal_cleanup_paths: HashSet::new(),
+            recovered_run_started_at: BTreeMap::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             retain_failed,
             retry_state_root,
@@ -2447,8 +2449,15 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         let mut recoveries = Vec::new();
+        self.recovered_run_started_at.clear();
         for (handle, manifest) in self.manager.list_all_workspaces().await? {
             let mut run_manifest = self.manager.load_run_manifest(&handle).await?;
+            if let Some(run) = run_manifest.as_ref() {
+                self.recovered_run_started_at.insert(
+                    IssueId::new(run.issue_id.clone())?,
+                    datetime_to_timestamp_ms(run.started_at.unwrap_or(run.created_at)),
+                );
+            }
             let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
                 matches!(
                     run.status,
@@ -2533,6 +2542,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             });
         }
         Ok(recoveries)
+    }
+
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(self.recovered_run_started_at.clone())
     }
 
     async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
@@ -4804,6 +4819,7 @@ async fn try_run_codex_stdio_issue(
         })
     {
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         run_manifest.status_detail = Some("reattaching to an active Codex turn".to_owned());
         run_manifest.updated_at = chrono::Utc::now();
         workspace_manager
@@ -6762,6 +6778,7 @@ async fn persist_codex_run_started(
     prompt_kind: IssueSessionPromptKind,
 ) -> Result<(), String> {
     run_manifest.status = RunStatus::Running;
+    run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
     run_manifest.status_detail = Some(format!(
         "{} prompt sent to Codex conversation {conversation_id}",
         prompt_kind.as_str()
@@ -7547,6 +7564,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -7620,6 +7638,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -7701,6 +7720,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -9310,6 +9330,7 @@ mod tests {
             .await
             .expect("run should start");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -10160,6 +10181,7 @@ mod tests {
             .await
             .expect("initial run should be persisted");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -10497,6 +10519,7 @@ mod tests {
             .expect("run manifest should load")
             .expect("run manifest should exist");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
