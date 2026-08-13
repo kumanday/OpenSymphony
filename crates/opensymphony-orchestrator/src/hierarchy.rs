@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const HIERARCHY_STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_INACTIVE_LEASE_HISTORY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HierarchyChildEdge {
@@ -192,7 +193,7 @@ pub struct LeaseResource {
     pub checkout_generation: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LeaseOwner {
     pub id: String,
     pub kind: String,
@@ -242,7 +243,7 @@ impl LeaseOwner {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseKind {
     LeafWorker,
@@ -538,6 +539,7 @@ impl DurableOrchestratorState {
             next.push(requested);
         }
         self.leases = next;
+        self.compact_lease_history();
         Ok(())
     }
 
@@ -561,6 +563,7 @@ impl DurableOrchestratorState {
             }
         }
         *self = next;
+        self.compact_lease_history();
         Ok(())
     }
 
@@ -570,6 +573,7 @@ impl DurableOrchestratorState {
                 lease.released_at = Some(released_at);
             }
         }
+        self.compact_lease_history();
     }
 
     pub fn release_parent_leases(&mut self, parent_id: &IssueId, released_at: u64) -> bool {
@@ -606,6 +610,7 @@ impl DurableOrchestratorState {
                 released = true;
             }
         }
+        self.compact_lease_history();
         released
     }
 
@@ -654,6 +659,7 @@ impl DurableOrchestratorState {
                 lease.released_at = Some(released_at);
             }
         }
+        self.compact_lease_history();
     }
 
     pub fn rebind_leaf_leases(&mut self, child_ids: &BTreeSet<IssueId>, generation: u64) {
@@ -682,6 +688,7 @@ impl DurableOrchestratorState {
                 lease.released_at = Some(released_at);
             }
         }
+        self.compact_lease_history();
     }
 
     pub fn release_subtree_evidence_for_undispatched_parent(
@@ -739,6 +746,7 @@ impl DurableOrchestratorState {
                 released = true;
             }
         }
+        self.compact_lease_history();
         released
     }
 
@@ -762,6 +770,64 @@ impl DurableOrchestratorState {
             {
                 lease.released_at = Some(released_at);
             }
+        }
+        self.compact_lease_history();
+    }
+
+    fn compact_lease_history(&mut self) {
+        let mut latest_inactive = BTreeSet::new();
+        for lease in self.leases.iter().rev() {
+            if !lease.active() {
+                latest_inactive.insert((
+                    lease.kind.clone(),
+                    lease.resource.clone(),
+                    lease.owner.clone(),
+                ));
+            }
+        }
+        let mut compacted = Vec::new();
+        for lease in self.leases.drain(..) {
+            let key = (
+                lease.kind.clone(),
+                lease.resource.clone(),
+                lease.owner.clone(),
+            );
+            if lease.active() || latest_inactive.remove(&key) {
+                compacted.push(lease);
+            }
+        }
+
+        let inactive_count = compacted.iter().filter(|lease| !lease.active()).count();
+        if inactive_count > MAX_INACTIVE_LEASE_HISTORY {
+            let drop_count = inactive_count - MAX_INACTIVE_LEASE_HISTORY;
+            let mut candidates = compacted
+                .iter()
+                .enumerate()
+                .filter(|(_, lease)| !lease.active())
+                .map(|(index, lease)| {
+                    (
+                        index,
+                        lease
+                            .released_at
+                            .or(lease.expires_at)
+                            .unwrap_or(lease.acquired_at),
+                    )
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(_, timestamp)| *timestamp);
+            let drop_indices = candidates
+                .into_iter()
+                .take(drop_count)
+                .map(|(index, _)| index)
+                .collect::<BTreeSet<_>>();
+            self.leases = compacted
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !drop_indices.contains(index))
+                .map(|(_, lease)| lease)
+                .collect();
+        } else {
+            self.leases = compacted;
         }
     }
 
@@ -1250,5 +1316,34 @@ mod tests {
         };
         assert!(lease.active_at(9));
         assert!(!lease.active_at(10));
+    }
+
+    #[test]
+    fn inactive_lease_history_is_deduplicated_and_bounded() {
+        let mut state = DurableOrchestratorState::default();
+        for index in 0..(MAX_INACTIVE_LEASE_HISTORY + 32) {
+            let issue_id = IssueId::new(format!("child-{index}")).expect("issue id");
+            let lease = LeaseRecord {
+                kind: LeaseKind::LeafWorker,
+                resource: LeaseResource {
+                    issue_id: issue_id.clone(),
+                    repository_id: CanonicalRepositoryId::new(format!("github:repo-{index}"))
+                        .expect("repository id"),
+                    checkout_generation: format!("checkout-{index}"),
+                },
+                owner: LeaseOwner::leaf_worker(&issue_id),
+                hierarchy_generation: 1,
+                acquired_at: index as u64,
+                expires_at: None,
+                released_at: None,
+            };
+            state
+                .acquire_leases(vec![lease])
+                .expect("lease should acquire");
+            state.release_owner(&LeaseOwner::leaf_worker(&issue_id), index as u64 + 1);
+        }
+
+        assert_eq!(state.leases.len(), MAX_INACTIVE_LEASE_HISTORY);
+        assert!(state.leases.iter().all(|lease| !lease.active()));
     }
 }

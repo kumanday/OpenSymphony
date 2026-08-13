@@ -1157,7 +1157,7 @@ impl RuntimeTrackerBackend {
                         segments[1],
                         segments[3],
                         repository,
-                        pull_request.merge_commit_sha.as_deref(),
+                        pull_request.head.sha.as_deref(),
                     )
                     .await?
         } else {
@@ -1261,7 +1261,7 @@ impl RuntimeTrackerBackend {
         repository_name: &str,
         pull_number: &str,
         repository: &CheckoutRepository,
-        merge_commit_sha: Option<&str>,
+        check_commit_sha: Option<&str>,
     ) -> Result<bool, LinearError> {
         if repository.required_review {
             let reviews = self
@@ -1298,7 +1298,7 @@ impl RuntimeTrackerBackend {
             }
         }
         if repository.required_checks {
-            let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+            let Some(check_commit_sha) = check_commit_sha.filter(|sha| !sha.trim().is_empty())
             else {
                 return Ok(false);
             };
@@ -1307,7 +1307,7 @@ impl RuntimeTrackerBackend {
                     api_root,
                     owner,
                     repository_name,
-                    merge_commit_sha,
+                    check_commit_sha,
                     repository,
                 )
                 .await?;
@@ -1633,6 +1633,8 @@ struct GitHubPullRequestBase {
 struct GitHubPullRequestHead {
     #[serde(rename = "ref")]
     ref_name: String,
+    #[serde(default)]
+    sha: Option<String>,
 }
 
 #[derive(Debug)]

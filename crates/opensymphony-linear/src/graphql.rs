@@ -282,7 +282,7 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
 "#;
 
 pub(super) const ISSUE_CHILDREN_QUERY: &str = r#"
-query IssueChildren($issueId: ID!, $first: Int!, $after: String) {
+query IssueChildren($issueId: String!, $first: Int!, $after: String) {
   issue(id: $issueId) {
     id
     children(includeArchived: true, first: $first, after: $after) {
