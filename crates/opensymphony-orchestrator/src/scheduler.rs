@@ -1401,11 +1401,11 @@ where
         &mut self,
         tracker_snapshot: &TrackerSnapshot,
     ) -> Result<bool, SchedulerError> {
-        let reachable_child_ids = self.required_child_ids_in_tracker_snapshot(tracker_snapshot);
+        let reachable_child_edges = self.required_child_edges_in_tracker_snapshot(tracker_snapshot);
         let mut durable_state_changed = false;
         for tracker_issue in &tracker_snapshot.active {
             durable_state_changed |=
-                self.reconcile_hierarchy_issue(tracker_issue, Some(&reachable_child_ids))?;
+                self.reconcile_hierarchy_issue(tracker_issue, Some(&reachable_child_edges))?;
         }
         self.hierarchy_state_dirty |= durable_state_changed;
         Ok(durable_state_changed)
@@ -1442,28 +1442,44 @@ where
         if issues.is_empty() {
             return Ok(false);
         }
-        let reachable_child_ids = self.required_child_ids_in_tracker_snapshot(tracker_snapshot);
+        let reachable_child_edges = self.required_child_edges_in_tracker_snapshot(tracker_snapshot);
         let mut changed = false;
         for issue in issues {
-            changed |= self.reconcile_hierarchy_issue(&issue, Some(&reachable_child_ids))?;
+            changed |= self.reconcile_hierarchy_issue(&issue, Some(&reachable_child_edges))?;
         }
         Ok(changed)
     }
 
-    fn required_child_ids_in_tracker_snapshot(
+    fn required_child_edges_in_tracker_snapshot(
         &self,
         tracker_snapshot: &TrackerSnapshot,
-    ) -> BTreeSet<IssueId> {
-        tracker_snapshot
+    ) -> BTreeSet<(IssueId, IssueId)> {
+        let mut edges = BTreeSet::new();
+        for issue in tracker_snapshot
             .active
             .iter()
             .chain(tracker_snapshot.terminal.iter())
-            .flat_map(|issue| {
-                HierarchySnapshot::new_with_canceled_states(issue, &self.config.terminal_states)
+        {
+            let Ok(issue_id) = IssueId::new(issue.id.clone()) else {
+                continue;
+            };
+            let snapshot =
+                HierarchySnapshot::new_with_canceled_states(issue, &self.config.terminal_states);
+            edges.extend(
+                snapshot
                     .required_child_edges
-            })
-            .map(|edge| edge.child_id)
-            .collect()
+                    .into_iter()
+                    .map(|edge| (issue_id.clone(), edge.child_id)),
+            );
+            if let Some(parent_id) = issue
+                .parent_id
+                .as_deref()
+                .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())
+            {
+                edges.insert((parent_id, issue_id));
+            }
+        }
+        edges
     }
 
     async fn fence_hierarchy_changed_runs(
@@ -1524,7 +1540,7 @@ where
     fn reconcile_hierarchy_issue(
         &mut self,
         tracker_issue: &TrackerIssue,
-        reachable_child_ids: Option<&BTreeSet<IssueId>>,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<bool, SchedulerError> {
         let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
         let terminal_failure_resolved =
@@ -1563,7 +1579,7 @@ where
                 self.hierarchy_state.release_removed_subtree_leases(
                     &normalized.id,
                     &removed_child_ids,
-                    reachable_child_ids,
+                    reachable_child_edges,
                     current_epoch_millis(),
                 );
                 self.hierarchy_state
@@ -1710,7 +1726,7 @@ where
             self.hierarchy_state.release_removed_subtree_leases(
                 &normalized.id,
                 &removed_child_ids,
-                reachable_child_ids,
+                reachable_child_edges,
                 current_epoch_millis(),
             );
             self.hierarchy_state

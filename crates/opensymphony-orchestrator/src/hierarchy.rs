@@ -878,7 +878,7 @@ impl DurableOrchestratorState {
         &mut self,
         parent_id: &IssueId,
         removed_child_ids: &[IssueId],
-        reachable_child_ids: Option<&BTreeSet<IssueId>>,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
         released_at: u64,
     ) -> bool {
         let mut subtree = BTreeSet::new();
@@ -926,7 +926,15 @@ impl DurableOrchestratorState {
         let mut released = false;
         let still_reachable = |issue_id: &IssueId| {
             retained_child_ids.contains(issue_id)
-                || reachable_child_ids.is_some_and(|ids| ids.contains(issue_id))
+                || reachable_child_edges.is_some_and(|edges| {
+                    edges
+                        .iter()
+                        .any(|(candidate_parent_id, candidate_child_id)| {
+                            candidate_child_id == issue_id
+                                && candidate_parent_id != parent_id
+                                && !subtree.contains(candidate_parent_id)
+                        })
+                })
         };
         for lease in &mut self.leases {
             if !lease.active() {
@@ -1469,6 +1477,56 @@ mod tests {
             &parent_a,
             std::slice::from_ref(&child_id),
             None,
+            2,
+        ));
+        assert!(state.leases.iter().all(LeaseRecord::active));
+    }
+
+    #[test]
+    fn removed_subtree_preserves_lease_reparented_to_unmaterialized_parent() {
+        let parent_a = IssueId::new("parent-a").expect("parent a");
+        let parent_b = IssueId::new("parent-b").expect("parent b");
+        let child_id = IssueId::new("child").expect("child");
+        let resource = LeaseResource {
+            issue_id: child_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(
+                parent_a.clone(),
+                HierarchySnapshot::new(&parent(vec![child("child", "Done")])),
+            )]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource,
+                    owner: LeaseOwner::ancestor(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("leases should acquire");
+        let reachable_child_edges = BTreeSet::from([(parent_b, child_id.clone())]);
+
+        assert!(!state.release_removed_subtree_leases(
+            &parent_a,
+            std::slice::from_ref(&child_id),
+            Some(&reachable_child_edges),
             2,
         ));
         assert!(state.leases.iter().all(LeaseRecord::active));

@@ -1128,6 +1128,12 @@ impl RuntimeTrackerBackend {
                 "invalid GitHub pull request path: {pr_url}"
             )));
         }
+        let pull_number = segments[3].parse::<u64>().map_err(|error| {
+            LinearError::InvalidResponse(format!(
+                "invalid GitHub pull request number `{}`: {error}",
+                segments[3]
+            ))
+        })?;
         let authority = github_url_authority(&url).ok_or_else(|| {
             LinearError::InvalidResponse(format!(
                 "GitHub pull request URL has no supported authority: {pr_url}"
@@ -1263,6 +1269,7 @@ impl RuntimeTrackerBackend {
             merge_commit_sha: pull_request.merge_commit_sha,
             merge_repository_id: Some(merge_repository_id),
             created_at: pull_request.created_at,
+            pull_number,
             provider_evidence_at,
         }))
     }
@@ -2130,6 +2137,7 @@ struct GithubMergeEvidence {
     merge_commit_sha: Option<String>,
     merge_repository_id: Option<CanonicalRepositoryId>,
     created_at: String,
+    pull_number: u64,
     provider_evidence_at: Option<TimestampMs>,
 }
 
@@ -2141,6 +2149,7 @@ impl GithubMergeEvidence {
             merge_commit_sha: None,
             merge_repository_id: None,
             created_at: String::new(),
+            pull_number: 0,
             provider_evidence_at: None,
         }
     }
@@ -2157,7 +2166,11 @@ fn select_current_github_merge_evidence(
     candidates
         .into_iter()
         .filter(|candidate| candidate.compatible)
-        .max_by(|left, right| left.created_at.cmp(&right.created_at))
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.pull_number.cmp(&right.pull_number))
+        })
         .map_or((false, None, None, None), |candidate| {
             (
                 candidate.merged,
@@ -11444,6 +11457,7 @@ Run the scheduler.
                 merge_commit_sha: Some("old-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-12T00:00:00Z".to_owned(),
+                pull_number: 12,
                 provider_evidence_at: None,
             },
             GithubMergeEvidence {
@@ -11452,6 +11466,7 @@ Run the scheduler.
                 merge_commit_sha: None,
                 merge_repository_id: None,
                 created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
                 provider_evidence_at: None,
             },
         ]);
@@ -11464,6 +11479,7 @@ Run the scheduler.
                 merge_commit_sha: Some("old-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-12T00:00:00Z".to_owned(),
+                pull_number: 12,
                 provider_evidence_at: None,
             },
             GithubMergeEvidence {
@@ -11472,6 +11488,7 @@ Run the scheduler.
                 merge_commit_sha: Some("current-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
                 provider_evidence_at: None,
             },
         ]);
@@ -11479,6 +11496,28 @@ Run the scheduler.
             selected,
             (true, Some("current-merge".to_owned()), None, None)
         );
+
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("lower-number-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 12,
+                provider_evidence_at: None,
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: false,
+                merge_commit_sha: None,
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
+                provider_evidence_at: None,
+            },
+        ]);
+        assert_eq!(selected, (false, None, None, None));
     }
 
     #[test]
