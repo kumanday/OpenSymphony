@@ -42,6 +42,7 @@ use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environm
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde::Deserialize;
+use serde_json::json;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -1444,7 +1445,14 @@ where
                 .interrupt_operator_cancel(target, observed_at)
                 .await?;
         } else if let Some(target) = gateway_replan_target(&event) {
-            scheduler.replan_parent_target(target, observed_at).await?;
+            let changed = scheduler.replan_parent_target(target, observed_at).await?;
+            let outcome = gateway_replan_outcome_event(&event, changed);
+            journal
+                .append(outcome)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: format!("failed to record replan outcome: {error:?}"),
+                })?;
         }
         *cursor = sequence;
     }
@@ -1473,6 +1481,41 @@ fn gateway_replan_target(event: &EventRecord) -> Option<&str> {
         return None;
     }
     payload["target_entity"]["id"].as_str()
+}
+
+fn gateway_replan_outcome_event(dispatch: &EventRecord, changed: bool) -> EventRecord {
+    let status = if changed { "completed" } else { "rejected" };
+    let reason = (!changed).then_some("target is not blocked by HierarchyChanged");
+    EventRecord::builder()
+        .actor(EventActor::system("orchestrator"))
+        .correlation_id_opt(dispatch.correlation_id.clone())
+        .entity_refs(dispatch.entity_refs.clone())
+        .kind(if changed {
+            EventKind::GatewayActionCompleted {
+                action: "replan".to_owned(),
+            }
+        } else {
+            EventKind::GatewayActionFailed {
+                action: "replan".to_owned(),
+                reason: reason
+                    .expect("a rejected replan must carry a reason")
+                    .to_owned(),
+            }
+        })
+        .summary(if changed {
+            "Hierarchy replan completed"
+        } else {
+            "Hierarchy replan rejected: target is not blocked by HierarchyChanged"
+        })
+        .payload(json!({
+            "action_id": dispatch.payload.as_ref().and_then(|payload| payload.get("action_id")),
+            "action_kind": "replan",
+            "correlation_id": dispatch.correlation_id,
+            "status": status,
+            "target_entity": dispatch.payload.as_ref().and_then(|payload| payload.get("target_entity")),
+            "reason": reason,
+        }))
+        .build()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1839,6 +1882,44 @@ mod tests {
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn gateway_replan_outcome_records_completed_or_rejected_result() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "action_id": "replan-action",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+
+        let completed = gateway_replan_outcome_event(&dispatch, true);
+        assert!(matches!(
+            completed.kind,
+            EventKind::GatewayActionCompleted { ref action } if action == "replan"
+        ));
+        assert_eq!(
+            completed.payload.as_ref().expect("completion payload")["status"],
+            "completed"
+        );
+
+        let rejected = gateway_replan_outcome_event(&dispatch, false);
+        assert!(matches!(
+            rejected.kind,
+            EventKind::GatewayActionFailed { ref action, .. } if action == "replan"
+        ));
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["status"],
+            "rejected"
+        );
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["reason"],
+            "target is not blocked by HierarchyChanged"
+        );
     }
 
     #[test]

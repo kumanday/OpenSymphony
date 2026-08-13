@@ -1637,6 +1637,31 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        // Recovery manifests intentionally do not persist a second hierarchy
+        // identity. Hydrate the parent edge from the provider's full issue
+        // detail before terminal cleanup can release an intermediate parent's
+        // ancestor leases; the higher ancestor may be outside the active
+        // project scan while the intermediate issue is terminal.
+        let recovered_parent_ids = tracker_snapshot
+            .active
+            .iter()
+            .chain(tracker_snapshot.terminal.iter())
+            .filter_map(|issue| {
+                let issue_id = IssueId::new(issue.id.clone()).ok()?;
+                let parent_id = issue
+                    .parent_id
+                    .as_deref()
+                    .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())?;
+                Some((issue_id, parent_id))
+            })
+            .collect::<HashMap<_, _>>();
+        for record in &mut records {
+            if record.issue.parent_id.is_none()
+                && let Some(parent_id) = recovered_parent_ids.get(&record.issue.id)
+            {
+                record.issue.parent_id = Some(parent_id.clone());
+            }
+        }
         let mut dispatch_transition_changed = false;
         let in_flight_issue_ids = records
             .iter()

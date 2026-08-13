@@ -1447,12 +1447,21 @@ fn reject_checkout_credential_env_reuse(
     let mut checkout_variables = config
         .repositories
         .values()
-        .filter_map(|repository| {
-            config
-                .credentials
-                .get(&repository.credential)
-                .and_then(|credential| credential.variable.as_deref())
-                .map(str::to_owned)
+        .flat_map(|repository| {
+            [
+                config
+                    .credentials
+                    .get(&repository.credential)
+                    .and_then(|credential| credential.variable.as_deref()),
+                config
+                    .review_profiles
+                    .get(&repository.review_profile)
+                    .and_then(|profile| config.credentials.get(&profile.credential))
+                    .and_then(|credential| credential.variable.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
         })
         .collect::<BTreeSet<_>>();
     if config.repositories.values().any(|repository| {
@@ -3246,6 +3255,26 @@ scheduler:
                     if actual == field
             ));
         }
+    }
+
+    #[test]
+    fn central_config_rejects_review_credential_reuse_by_runtime_env() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("    variable: GITHUB_TOKEN", "    variable: LLM_API_KEY");
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("review credentials must not reuse runtime environment variables");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "openhands.implicit_llm_env"
+        ));
     }
 
     #[test]
