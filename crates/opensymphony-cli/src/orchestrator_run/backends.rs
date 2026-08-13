@@ -1027,7 +1027,14 @@ impl RuntimeTrackerBackend {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
         })?;
-        if !repository.provider.eq_ignore_ascii_case("github") {
+        let review_provider = if repository.review_provider.trim().is_empty() {
+            repository.provider.as_str()
+        } else {
+            repository.review_provider.as_str()
+        };
+        if !review_provider.eq_ignore_ascii_case("github")
+            || !repository.provider.eq_ignore_ascii_case("github")
+        {
             return Ok(GithubMergeEvidence::incompatible());
         }
         if url.scheme() != "https" {

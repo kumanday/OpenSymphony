@@ -1357,6 +1357,13 @@ where
                 .rebind_leaf_leases(&retained_child_ids, generation);
             self.hierarchy_state
                 .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
+            for child_id in &retained_child_ids {
+                self.hierarchy_state
+                    .run_hierarchy_generations
+                    .entry(child_id.clone())
+                    .and_modify(|current| *current = (*current).max(generation))
+                    .or_insert(generation);
+            }
             return Ok(true);
         }
         Ok(false)
@@ -4085,10 +4092,19 @@ where
     ) -> Result<(), SchedulerError> {
         let mut next_state = self.hierarchy_state.clone();
         let has_higher_parent = next_state.has_ancestor_edge(parent_id);
+        let undispatched_root = !has_higher_parent
+            && next_state
+                .hierarchy
+                .get(parent_id)
+                .is_some_and(|snapshot| !snapshot.dispatch_claimed());
+        if undispatched_root {
+            next_state
+                .release_subtree_evidence_for_undispatched_parent(parent_id, released_at.as_u64());
+        }
         let released = if has_higher_parent {
             next_state.release_parent_leases_preserving_ancestor(parent_id, released_at.as_u64())
         } else {
-            next_state.release_parent_leases(parent_id, released_at.as_u64())
+            next_state.release_parent_leases(parent_id, released_at.as_u64()) || undispatched_root
         };
         if !released {
             return Ok(());

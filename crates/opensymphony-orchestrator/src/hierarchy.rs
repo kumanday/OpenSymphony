@@ -684,6 +684,64 @@ impl DurableOrchestratorState {
         }
     }
 
+    pub fn release_subtree_evidence_for_undispatched_parent(
+        &mut self,
+        parent_id: &IssueId,
+        released_at: u64,
+    ) -> bool {
+        let mut subtree = BTreeSet::new();
+        let mut pending = self
+            .hierarchy
+            .get(parent_id)
+            .into_iter()
+            .flat_map(|snapshot| snapshot.required_child_edges.iter())
+            .filter(|edge| edge.required)
+            .map(|edge| edge.child_id.clone())
+            .collect::<Vec<_>>();
+        while let Some(issue_id) = pending.pop() {
+            if !subtree.insert(issue_id.clone()) {
+                continue;
+            }
+            if let Some(snapshot) = self.hierarchy.get(&issue_id) {
+                pending.extend(
+                    snapshot
+                        .required_child_edges
+                        .iter()
+                        .filter(|edge| edge.required)
+                        .map(|edge| edge.child_id.clone()),
+                );
+            }
+        }
+
+        let review_prefixes = self
+            .hierarchy
+            .keys()
+            .filter(|issue_id| subtree.contains(*issue_id))
+            .map(|issue_id| format!("review:{issue_id}:"))
+            .collect::<Vec<_>>();
+        let mut released = false;
+        for lease in &mut self.leases {
+            if !lease.active() {
+                continue;
+            }
+            let owned_by_subtree = match lease.kind {
+                LeaseKind::LeafWorker => subtree.contains(&lease.resource.issue_id),
+                LeaseKind::AncestorIntegration => subtree
+                    .iter()
+                    .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id)),
+                LeaseKind::Review => review_prefixes
+                    .iter()
+                    .any(|prefix| lease.owner.id.starts_with(prefix)),
+                LeaseKind::Repair | LeaseKind::DiagnosticHold => false,
+            };
+            if owned_by_subtree {
+                lease.released_at = Some(released_at);
+                released = true;
+            }
+        }
+        released
+    }
+
     pub fn release_leaf_leases_for_parent(&mut self, parent_id: &IssueId, released_at: u64) {
         let ancestor_owner = LeaseOwner::ancestor(parent_id);
         let resources = self
@@ -1090,6 +1148,71 @@ mod tests {
             1
         );
         assert_eq!(state.leases[1].owner, LeaseOwner::ancestor(&second_parent));
+    }
+
+    #[test]
+    fn undispatched_root_release_clears_nested_child_evidence() {
+        let root = parent(vec![child("nested-parent", "Done")]);
+        let nested = TrackerIssue {
+            id: "nested-parent".to_owned(),
+            identifier: "COE-2".to_owned(),
+            sub_issues: vec![child("leaf", "Done")],
+            ..parent(Vec::new())
+        };
+        let root_id = IssueId::new("parent").expect("root");
+        let nested_id = IssueId::new("nested-parent").expect("nested");
+        let leaf_id = IssueId::new("leaf").expect("leaf");
+        let resource = LeaseResource {
+            issue_id: leaf_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([
+                (root_id.clone(), HierarchySnapshot::new(&root)),
+                (nested_id.clone(), HierarchySnapshot::new(&nested)),
+            ]),
+            ..DurableOrchestratorState::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&leaf_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&nested_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::Review,
+                    resource,
+                    owner: LeaseOwner::review_for_parent(&nested_id, &leaf_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 3,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("nested evidence leases should acquire");
+
+        assert!(state.release_subtree_evidence_for_undispatched_parent(&root_id, 4));
+        assert!(
+            state
+                .leases
+                .iter()
+                .all(|lease| lease.released_at == Some(4))
+        );
     }
 
     #[test]
