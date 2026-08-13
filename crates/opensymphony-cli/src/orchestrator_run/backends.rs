@@ -1590,6 +1590,16 @@ impl RuntimeTrackerBackend {
             .collect::<Vec<_>>()
             .await
             .into_iter()
+            .filter_map(|result| match result {
+                // A deleted historical PR or merge commit is incompatible
+                // evidence, not a failure of the current candidate set.
+                Err(LinearError::HttpStatus { status, .. })
+                    if status == reqwest::StatusCode::NOT_FOUND =>
+                {
+                    None
+                }
+                result => Some(result),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let (confirmed, commit, repository_id, provider_evidence_at) =
             select_current_github_merge_evidence(evidence);

@@ -1013,6 +1013,7 @@ where
         target: &str,
         observed_at: TimestampMs,
     ) -> Result<bool, SchedulerError> {
+        self.load_recovery_state().await?;
         let lookup_target = self
             .executions
             .values()
@@ -1046,7 +1047,42 @@ where
         }) else {
             return Ok(false);
         };
-        let issue_id = IssueId::new(issue.id)?;
+        let issue_id = IssueId::new(issue.id.clone())?;
+        let Some(expected_generation) = self
+            .hierarchy_state
+            .hierarchy
+            .get(&issue_id)
+            .filter(|snapshot| {
+                snapshot.blocked_reason == Some(HierarchyBlockedReason::HierarchyChanged)
+            })
+            .map(|snapshot| snapshot.generation)
+        else {
+            return Ok(false);
+        };
+
+        // Refresh the child edges before clearing the durable block. If the
+        // accepted snapshot changed while the action was in flight, preserve
+        // the new HierarchyChanged fence instead of silently accepting scope
+        // the operator did not explicitly replan.
+        let previous_state = self.hierarchy_state.clone();
+        self.reconcile_hierarchy_issue(&issue)?;
+        let current_generation = self
+            .hierarchy_state
+            .hierarchy
+            .get(&issue_id)
+            .map(|snapshot| snapshot.generation);
+        if self.hierarchy_state != previous_state {
+            self.persist_orchestrator_state().await?;
+        }
+        if current_generation != Some(expected_generation) {
+            warn!(
+                parent = %lookup_target,
+                expected_generation,
+                current_generation = ?current_generation,
+                "rejecting replan for a hierarchy generation that changed before execution"
+            );
+            return Ok(false);
+        }
         self.replan_parent(&issue_id, observed_at).await
     }
 
@@ -1364,7 +1400,7 @@ where
                 .hierarchy_state
                 .hierarchy
                 .get(&issue_id)
-                .is_none_or(|snapshot| !snapshot.dispatch_claimed())
+                .is_none_or(|snapshot| !snapshot.has_dispatched_execution_fence())
             {
                 self.terminal_undispatched_parent_ids.insert(issue_id);
             } else {
@@ -1496,7 +1532,7 @@ where
                 &self.config.terminal_states,
             );
             let terminal_undispatched = normalized.state.category == IssueStateCategory::Terminal
-                && !snapshot.dispatch_claimed();
+                && !snapshot.has_dispatched_execution_fence();
             if terminal_undispatched {
                 self.terminal_undispatched_parent_ids
                     .insert(normalized.id.clone());
@@ -1518,7 +1554,7 @@ where
                 .hierarchy_state
                 .hierarchy
                 .get(&normalized.id)
-                .is_some_and(|snapshot| !snapshot.dispatch_claimed());
+                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
         if terminal_undispatched {
             self.terminal_undispatched_parent_ids
                 .insert(normalized.id.clone());
@@ -4405,7 +4441,7 @@ where
             && next_state
                 .hierarchy
                 .get(parent_id)
-                .is_some_and(|snapshot| !snapshot.dispatch_claimed());
+                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
         if undispatched_root {
             next_state
                 .release_subtree_evidence_for_undispatched_parent(parent_id, released_at.as_u64());
@@ -4682,23 +4718,30 @@ where
                         })
                         .map(|lease| lease.resource.clone())
                         .collect::<Vec<_>>();
+                    let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
+                    let leaf_resource = self
+                        .hierarchy_state
+                        .leases
+                        .iter()
+                        .find(|lease| {
+                            lease.active()
+                                && lease.kind == super::LeaseKind::LeafWorker
+                                && lease.hierarchy_generation == snapshot.generation
+                                && lease.owner == expected_owner
+                                && lease.resource.issue_id == child.child_id
+                        })
+                        .map(|lease| lease.resource.clone());
                     if retry_resources.is_empty() {
-                        let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
-                        child.resource = self
-                            .hierarchy_state
-                            .leases
-                            .iter()
-                            .find(|lease| {
-                                lease.active()
-                                    && lease.kind == super::LeaseKind::LeafWorker
-                                    && lease.hierarchy_generation == snapshot.generation
-                                    && lease.owner == expected_owner
-                                    && lease.resource.issue_id == child.child_id
-                            })
-                            .map(|lease| lease.resource.clone());
+                        child.resource = leaf_resource;
                     } else {
-                        child.resource = retry_resources.first().cloned();
-                        child.resources = retry_resources;
+                        let mut resources = retry_resources;
+                        if let Some(leaf_resource) = leaf_resource
+                            && !resources.contains(&leaf_resource)
+                        {
+                            resources.push(leaf_resource);
+                        }
+                        child.resource = resources.first().cloned();
+                        child.resources = resources;
                     }
                 }
             }
@@ -4972,11 +5015,11 @@ where
                     == IssueStateCategory::Terminal
         });
         let undispatched = parent_terminal
-            && !self
+            && self
                 .hierarchy_state
                 .hierarchy
                 .get(parent_id)
-                .is_some_and(HierarchySnapshot::dispatch_claimed);
+                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
         if !undispatched {
             self.terminal_undispatched_parent_ids.remove(parent_id);
         }
