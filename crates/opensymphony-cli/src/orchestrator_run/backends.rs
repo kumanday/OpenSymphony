@@ -1143,8 +1143,11 @@ impl RuntimeTrackerBackend {
         let pull_request = self
             .github_get_json::<GitHubPullRequest>(&endpoint, repository)
             .await?;
+        // `updated_at` changes when an old PR is edited after a child is
+        // reactivated. Bind eligibility to the immutable merge event instead
+        // so unrelated metadata edits cannot make stale evidence look fresh.
         let provider_evidence_at = pull_request
-            .updated_at
+            .merged_at
             .as_deref()
             .or(Some(pull_request.created_at.as_str()))
             .and_then(github_timestamp_ms);
@@ -1811,6 +1814,7 @@ fn required_check_evidence_satisfied(
 ) -> bool {
     match required_checks {
         Some(required_checks) => {
+            let latest_statuses = latest_commit_statuses(commit_statuses);
             let legacy_contexts_satisfied = required_checks.contexts.iter().all(|context| {
                 check_runs.iter().any(|check| {
                     check.name.as_deref() == Some(context)
@@ -1819,9 +1823,9 @@ fn required_check_evidence_satisfied(
                             .conclusion
                             .as_deref()
                             .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-                }) || commit_statuses.iter().any(|status| {
-                    status.context == *context && status.state.eq_ignore_ascii_case("success")
-                })
+                }) || latest_statuses
+                    .get(context)
+                    .is_some_and(|status| status.state.eq_ignore_ascii_case("success"))
             });
             let app_bound_checks_satisfied = required_checks.checks.iter().all(|required| {
                 check_runs.iter().any(|check| {
@@ -1856,11 +1860,34 @@ fn required_check_evidence_satisfied(
     }
 }
 
+fn latest_commit_statuses<'a>(
+    commit_statuses: &'a [GitHubCommitStatus],
+) -> BTreeMap<String, &'a GitHubCommitStatus> {
+    let mut latest: BTreeMap<String, &'a GitHubCommitStatus> = BTreeMap::new();
+    for status in commit_statuses {
+        let timestamp = status
+            .updated_at
+            .as_deref()
+            .or(status.created_at.as_deref())
+            .unwrap_or_default();
+        let replace = latest.get(status.context.as_str()).is_none_or(|current| {
+            let current_timestamp = current
+                .updated_at
+                .as_deref()
+                .or(current.created_at.as_deref())
+                .unwrap_or_default();
+            timestamp >= current_timestamp
+        });
+        if replace {
+            latest.insert(status.context.clone(), status);
+        }
+    }
+    latest
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
     created_at: String,
-    #[serde(default)]
-    updated_at: Option<String>,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
@@ -1952,6 +1979,10 @@ struct GitHubCommitStatuses {
 struct GitHubCommitStatus {
     context: String,
     state: String,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11390,6 +11421,8 @@ Run the scheduler.
             &[GitHubCommitStatus {
                 context: "lint".to_owned(),
                 state: "success".to_owned(),
+                created_at: None,
+                updated_at: None,
             }],
             Some(&all_required),
         ));
@@ -11420,6 +11453,8 @@ Run the scheduler.
             &[GitHubCommitStatus {
                 context: "protected".to_owned(),
                 state: "success".to_owned(),
+                created_at: None,
+                updated_at: None,
             }],
             Some(&required),
         ));
@@ -11447,6 +11482,34 @@ Run the scheduler.
             &successful_other_app,
             &[],
             Some(&any_app),
+        ));
+    }
+
+    #[test]
+    fn required_status_context_uses_the_newest_commit_status() {
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["lint".to_owned()],
+            checks: Vec::new(),
+        };
+        let statuses = vec![
+            GitHubCommitStatus {
+                context: "lint".to_owned(),
+                state: "success".to_owned(),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                updated_at: Some("2026-08-13T07:00:00Z".to_owned()),
+            },
+            GitHubCommitStatus {
+                context: "lint".to_owned(),
+                state: "failure".to_owned(),
+                created_at: Some("2026-08-13T07:01:00Z".to_owned()),
+                updated_at: Some("2026-08-13T07:01:00Z".to_owned()),
+            },
+        ];
+
+        assert!(!required_check_evidence_satisfied(
+            &[],
+            &statuses,
+            Some(&required),
         ));
     }
 

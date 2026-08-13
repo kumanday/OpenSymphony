@@ -1482,18 +1482,26 @@ where
                     &normalized.id,
                     current_epoch_millis(),
                 );
-        let reconciliation =
-            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
-                if snapshot.dispatch_claimed()
+        let reactivated_parent = self
+            .hierarchy_state
+            .hierarchy
+            .get(&normalized.id)
+            .is_some_and(|snapshot| {
+                snapshot.dispatch_claimed()
                     && normalized.state.category == IssueStateCategory::Active
                     && self
                         .executions
                         .get(&normalized.id)
                         .is_some_and(|execution| execution.status() == SchedulerStatus::Released)
-                    && snapshot.blocked_reason.is_none()
-                {
+            });
+        let reconciliation =
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
+                if reactivated_parent {
+                    // Reconcile the detailed child edges before making a
+                    // previously terminal parent dispatchable again. A
+                    // changed scope must advance the generation that the new
+                    // run will use.
                     snapshot.replan();
-                    return Ok(true);
                 }
                 let previous_child_ids = snapshot
                     .required_child_edges
@@ -1550,7 +1558,7 @@ where
             }
             return Ok(true);
         }
-        Ok(released_terminal_parent_evidence)
+        Ok(released_terminal_parent_evidence || reactivated_parent)
     }
 
     fn set_linear_cooldown_from_tracker_error(
@@ -4533,6 +4541,7 @@ where
                         });
             }
             if child.provider_merge_confirmed
+                && !self.hierarchy_state.hierarchy.contains_key(&child.child_id)
                 && self
                     .executions
                     .get(&child.child_id)
@@ -4888,7 +4897,6 @@ where
             if lease.active()
                 && lease.kind == super::LeaseKind::LeafWorker
                 && lease.owner == leaf_owner
-                && lease.resource == resource
             {
                 lease.released_at = Some(acquired_at);
             }
