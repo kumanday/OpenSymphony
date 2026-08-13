@@ -793,6 +793,7 @@ impl DurableOrchestratorState {
             .filter(|issue_id| subtree.contains(*issue_id))
             .map(|issue_id| format!("review:{issue_id}:"))
             .collect::<Vec<_>>();
+        let parent_ancestor_owner = LeaseOwner::ancestor(parent_id);
         let mut released = false;
         for lease in &mut self.leases {
             if !lease.active() {
@@ -800,9 +801,12 @@ impl DurableOrchestratorState {
             }
             let owned_by_subtree = match lease.kind {
                 LeaseKind::LeafWorker => subtree.contains(&lease.resource.issue_id),
-                LeaseKind::AncestorIntegration => subtree
-                    .iter()
-                    .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id)),
+                LeaseKind::AncestorIntegration => {
+                    lease.owner == parent_ancestor_owner
+                        || subtree
+                            .iter()
+                            .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id))
+                }
                 LeaseKind::Review => review_prefixes
                     .iter()
                     .any(|prefix| lease.owner.id.starts_with(prefix)),
@@ -815,6 +819,18 @@ impl DurableOrchestratorState {
         }
         self.compact_lease_history();
         released
+    }
+
+    pub fn rebind_ancestor_leases(&mut self, parent_id: &IssueId, generation: u64) {
+        let owner = LeaseOwner::ancestor(parent_id);
+        for lease in &mut self.leases {
+            if lease.active()
+                && lease.kind == LeaseKind::AncestorIntegration
+                && lease.owner == owner
+            {
+                lease.hierarchy_generation = generation;
+            }
+        }
     }
 
     pub fn release_leaf_leases_for_parent(&mut self, parent_id: &IssueId, released_at: u64) {
@@ -1502,6 +1518,20 @@ mod tests {
                     expires_at: None,
                     released_at: None,
                 },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: LeaseResource {
+                        issue_id: leaf_id.clone(),
+                        repository_id: CanonicalRepositoryId::new("github:repo")
+                            .expect("repository"),
+                        checkout_generation: "checkout-1".to_owned(),
+                    },
+                    owner: LeaseOwner::ancestor(&root_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 4,
+                    expires_at: None,
+                    released_at: None,
+                },
             ])
             .expect("nested evidence leases should acquire");
 
@@ -1512,6 +1542,33 @@ mod tests {
                 .iter()
                 .all(|lease| lease.released_at == Some(4))
         );
+    }
+
+    #[test]
+    fn ancestor_leases_rebind_to_an_explicit_replan_generation() {
+        let parent_id = IssueId::new("parent").expect("parent");
+        let resource = LeaseResource {
+            issue_id: IssueId::new("leaf").expect("leaf"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState::default();
+        state
+            .acquire_leases(vec![LeaseRecord {
+                kind: LeaseKind::AncestorIntegration,
+                resource,
+                owner: LeaseOwner::ancestor(&parent_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }])
+            .expect("parent lease should acquire");
+
+        state.rebind_ancestor_leases(&parent_id, 2);
+
+        assert_eq!(state.leases[0].hierarchy_generation, 2);
+        assert!(state.leases[0].active());
     }
 
     #[test]

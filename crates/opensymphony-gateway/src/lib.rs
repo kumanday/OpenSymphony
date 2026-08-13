@@ -4531,10 +4531,13 @@ fn build_runtime_overlay(
             ));
 
     let blocker_summary = if issue.blocked {
-        issue
-            .repository_binding
-            .as_ref()
-            .map(repository_binding_diagnostic)
+        hierarchy_blocker_diagnostic(issue)
+            .or_else(|| {
+                issue
+                    .repository_binding
+                    .as_ref()
+                    .map(repository_binding_diagnostic)
+            })
             .or_else(|| Some("Blocked by dependency".into()))
     } else {
         None
@@ -4558,6 +4561,15 @@ fn build_runtime_overlay(
         validation_status: None,
         blocker_summary,
     }
+}
+
+fn hierarchy_blocker_diagnostic(issue: &ControlPlaneIssueSnapshot) -> Option<String> {
+    issue.hierarchy_blocked_reason.as_ref().map(|reason| {
+        format!(
+            "Hierarchy blocked: {reason} (generation {})",
+            issue.hierarchy_generation.unwrap_or_default()
+        )
+    })
 }
 
 fn repository_binding_diagnostic(outcome: &RepositoryBindingOutcome) -> String {
@@ -4777,10 +4789,13 @@ async fn get_run_detail(
             codex_thread_id: issue.codex_thread_id.clone(),
             summary: None,
             blocker: issue.blocked.then(|| {
-                issue
-                    .repository_binding
-                    .as_ref()
-                    .map(repository_binding_diagnostic)
+                hierarchy_blocker_diagnostic(issue)
+                    .or_else(|| {
+                        issue
+                            .repository_binding
+                            .as_ref()
+                            .map(repository_binding_diagnostic)
+                    })
                     .unwrap_or_else(|| "Blocked by dependency".into())
             }),
             error: None,
@@ -6366,6 +6381,8 @@ exit 2
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: if flags.harness {

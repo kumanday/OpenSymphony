@@ -42,8 +42,9 @@ pub use runtime::{
     StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
-    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
-    RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals, WorkerAttemptSnapshot,
+    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, HierarchyStateSnapshot, IssueSnapshot,
+    OrchestratorSnapshot, RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals,
+    WorkerAttemptSnapshot,
 };
 pub use state_machine::{
     IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,

@@ -63,7 +63,14 @@ pub(super) fn map_snapshot(
         issues: snapshot
             .issues
             .iter()
-            .map(|issue| map_issue(issue, terminal_states, generated_at))
+            .map(|issue| {
+                map_issue(
+                    issue,
+                    terminal_states,
+                    generated_at,
+                    snapshot.hierarchy.get(issue.issue.id.as_str()),
+                )
+            })
             .collect(),
         recent_events: recent_events.iter().cloned().collect(),
     }
@@ -92,6 +99,7 @@ fn map_issue(
     issue: &crate::opensymphony_domain::IssueSnapshot,
     terminal_states: &HashSet<String>,
     generated_at: DateTime<Utc>,
+    hierarchy: Option<&crate::opensymphony_domain::HierarchyStateSnapshot>,
 ) -> IssueSnapshot {
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
@@ -173,6 +181,7 @@ fn map_issue(
     let repository_binding_blocked = repository_binding
         .as_ref()
         .is_some_and(|binding| binding.resolved_binding().is_none());
+    let hierarchy_blocked = hierarchy.and_then(|state| state.blocked_reason.clone());
 
     IssueSnapshot {
         identifier: issue.issue.identifier.to_string(),
@@ -253,6 +262,7 @@ fn map_issue(
         max_turns: worker.map(|worker| worker.max_turns).unwrap_or(0),
         runtime_seconds,
         blocked: repository_binding_blocked
+            || hierarchy_blocked.is_some()
             || issue.issue.blocked_by.iter().any(|blocker| {
                 blocker
                     .state
@@ -266,6 +276,8 @@ fn map_issue(
                     .iter()
                     .any(|sub_issue| !is_terminal_state(terminal_states, &sub_issue.state))),
         repository_binding,
+        hierarchy_generation: hierarchy.map(|state| state.generation),
+        hierarchy_blocked_reason: hierarchy_blocked,
         blocked_by: issue
             .issue
             .blocked_by
@@ -571,7 +583,7 @@ tracker:
             )
             .collect();
 
-        let snapshot = OrchestratorSnapshot::new(
+        let mut snapshot = OrchestratorSnapshot::new(
             ts(2_000),
             DaemonSnapshot::new(
                 HealthStatus::Healthy,
@@ -661,6 +673,13 @@ tracker:
                 recent_worker_outcomes: Vec::new(),
             }],
         );
+        snapshot.hierarchy.insert(
+            "lin_352".to_owned(),
+            crate::opensymphony_domain::HierarchyStateSnapshot {
+                generation: 3,
+                blocked_reason: Some("HierarchyChanged".to_owned()),
+            },
+        );
 
         let mapped = map_snapshot(
             &snapshot,
@@ -704,6 +723,12 @@ tracker:
             Some("OpenSymphony")
         );
         assert_eq!(mapped.issues[0].workspace_label.as_deref(), Some("COE-352"));
+        assert!(mapped.issues[0].blocked);
+        assert_eq!(mapped.issues[0].hierarchy_generation, Some(3));
+        assert_eq!(
+            mapped.issues[0].hierarchy_blocked_reason.as_deref(),
+            Some("HierarchyChanged")
+        );
     }
 
     #[test]

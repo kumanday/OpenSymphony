@@ -332,6 +332,14 @@ impl FakeError {
             retry_after: Some(retry_after),
         }
     }
+
+    fn not_found() -> Self {
+        Self {
+            message: "issue not found".to_string(),
+            category: Some(TrackerErrorCategory::NotFound),
+            retry_after: None,
+        }
+    }
 }
 
 impl std::fmt::Display for FakeError {
@@ -829,7 +837,7 @@ async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_
             checkout_generation: "checkout-1".to_owned(),
         },
         owner: LeaseOwner::ancestor(&parent_id),
-        hierarchy_generation: 1,
+        hierarchy_generation: 2,
         acquired_at: 1,
         expires_at: None,
         released_at: None,
@@ -889,6 +897,27 @@ async fn replan_parent_target_preserves_tracker_failures_for_retry() {
         Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { detail })
             if detail == "rate limited"
     ));
+}
+
+#[tokio::test]
+async fn replan_parent_target_rejects_a_disappeared_issue_without_aborting_dispatch() {
+    let tracker = FakeTracker {
+        detail_errors: VecDeque::from([FakeError::not_found()]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    assert!(
+        !scheduler
+            .replan_parent_target("COE-MISSING", ts(100))
+            .await
+            .expect("missing replan targets are recorded as rejected outcomes")
+    );
 }
 
 #[tokio::test]

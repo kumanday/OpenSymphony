@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::{
     ConversationMetadata, HarnessInterruptState, IssueExecution, NormalizedIssue, ReleaseReason,
@@ -205,6 +206,13 @@ pub struct IssueSnapshot {
     pub recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HierarchyStateSnapshot {
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
 impl From<&IssueExecution> for IssueSnapshot {
     fn from(execution: &IssueExecution) -> Self {
         Self {
@@ -225,6 +233,8 @@ pub struct OrchestratorSnapshot {
     pub generated_at: TimestampMs,
     pub daemon: DaemonSnapshot,
     pub issues: Vec<IssueSnapshot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hierarchy: BTreeMap<String, HierarchyStateSnapshot>,
 }
 
 impl OrchestratorSnapshot {
@@ -250,6 +260,7 @@ impl OrchestratorSnapshot {
                 ..daemon
             },
             issues,
+            hierarchy: BTreeMap::new(),
         }
     }
 }

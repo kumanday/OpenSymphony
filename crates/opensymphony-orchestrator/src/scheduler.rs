@@ -727,7 +727,25 @@ where
             },
         );
 
-        OrchestratorSnapshot::new(generated_at, daemon, issues)
+        let mut snapshot = OrchestratorSnapshot::new(generated_at, daemon, issues);
+        snapshot.hierarchy = self
+            .hierarchy_state
+            .hierarchy
+            .iter()
+            .map(|(issue_id, hierarchy)| {
+                (
+                    issue_id.as_str().to_owned(),
+                    crate::opensymphony_domain::HierarchyStateSnapshot {
+                        generation: hierarchy.generation,
+                        blocked_reason: hierarchy
+                            .blocked_reason
+                            .as_ref()
+                            .map(|reason| format!("{reason:?}")),
+                    },
+                )
+            })
+            .collect();
+        snapshot
     }
 
     pub async fn bootstrap(
@@ -969,8 +987,15 @@ where
         }
 
         let previous_state = self.hierarchy_state.clone();
-        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
+        let generation = if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
             snapshot.replan();
+            Some(snapshot.generation)
+        } else {
+            None
+        };
+        if let Some(generation) = generation {
+            self.hierarchy_state
+                .rebind_ancestor_leases(parent_id, generation);
         }
         self.parent_eligibility_checked_at.remove(parent_id);
         if let Err(error) = self.persist_orchestrator_state().await {
@@ -1007,6 +1032,10 @@ where
         {
             Ok(issues) => issues,
             Err(error) => {
+                if T::error_category(&error) == Some(TrackerErrorCategory::NotFound) {
+                    warn!(target = %lookup_target, "replan target disappeared before execution");
+                    return Ok(false);
+                }
                 return Err(SchedulerError::Tracker {
                     detail: error.to_string(),
                 });
@@ -4639,7 +4668,7 @@ where
                 if !descendant_resources.is_empty() {
                     child.resource = descendant_resources.first().cloned();
                     child.resources = descendant_resources;
-                } else if allow_retry {
+                } else {
                     let parent_owner = super::LeaseOwner::ancestor(&normalized.id);
                     let retry_resources = self
                         .hierarchy_state
@@ -4671,20 +4700,6 @@ where
                         child.resource = retry_resources.first().cloned();
                         child.resources = retry_resources;
                     }
-                } else {
-                    let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
-                    child.resource = self
-                        .hierarchy_state
-                        .leases
-                        .iter()
-                        .find(|lease| {
-                            lease.active()
-                                && lease.kind == super::LeaseKind::LeafWorker
-                                && lease.hierarchy_generation == snapshot.generation
-                                && lease.owner == expected_owner
-                                && lease.resource.issue_id == child.child_id
-                        })
-                        .map(|lease| lease.resource.clone());
                 }
             }
             if child.resources.is_empty() {
@@ -4696,15 +4711,13 @@ where
         }
         if evidence.children.iter().any(|child| {
             child.resources().into_iter().any(|resource| {
-                if allow_retry
-                    && self.hierarchy_state.leases.iter().any(|lease| {
-                        lease.active()
-                            && lease.kind == super::LeaseKind::AncestorIntegration
-                            && lease.owner == super::LeaseOwner::ancestor(&normalized.id)
-                            && lease.hierarchy_generation == snapshot.generation
-                            && lease.resource == *resource
-                    })
-                {
+                if self.hierarchy_state.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == super::LeaseKind::AncestorIntegration
+                        && lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                        && lease.hierarchy_generation == snapshot.generation
+                        && lease.resource == *resource
+                }) {
                     return false;
                 }
                 if self.hierarchy_state.hierarchy.contains_key(&child.child_id) {
