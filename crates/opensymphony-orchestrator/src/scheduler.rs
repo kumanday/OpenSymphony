@@ -978,8 +978,8 @@ where
             .map(|(index, issue)| (issue.id.clone(), index))
             .collect();
         let terminal_state_by_id = terminal
-            .into_iter()
-            .map(|issue| (issue.id, issue.state))
+            .iter()
+            .map(|issue| (issue.id.clone(), issue.state.clone()))
             .collect();
 
         let state_by_id = if lookup_ids.is_empty() {
@@ -1010,6 +1010,7 @@ where
             terminal_state_by_id,
             state_by_id,
             active,
+            terminal,
         }))
     }
 
@@ -1055,6 +1056,7 @@ where
                 .into_iter()
                 .map(|snapshot| (snapshot.id.clone(), snapshot))
                 .collect(),
+            terminal: Vec::new(),
         };
         self.reconcile_tracker_state(&tracker_snapshot, observed_at)
             .await
@@ -1080,10 +1082,11 @@ where
             active: Vec::new(),
             active_index: HashMap::new(),
             terminal_state_by_id: terminal
-                .into_iter()
-                .map(|issue| (issue.id, issue.state))
+                .iter()
+                .map(|issue| (issue.id.clone(), issue.state.clone()))
                 .collect(),
             state_by_id: HashMap::new(),
+            terminal,
         };
         self.reconcile_tracker_state(&tracker_snapshot, observed_at)
             .await
@@ -1153,6 +1156,71 @@ where
         Ok(durable_state_changed)
     }
 
+    fn reconcile_terminal_hierarchy_snapshots(
+        &mut self,
+        tracker_snapshot: &TrackerSnapshot,
+    ) -> Result<bool, SchedulerError> {
+        let issues = tracker_snapshot
+            .terminal
+            .iter()
+            .filter(|issue| {
+                IssueId::new(issue.id.clone())
+                    .is_ok_and(|issue_id| self.hierarchy_state.hierarchy.contains_key(&issue_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if issues.is_empty() {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for issue in issues {
+            changed |= self.reconcile_hierarchy_issue(&issue)?;
+        }
+        Ok(changed)
+    }
+
+    async fn fence_hierarchy_changed_runs(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let issue_ids = self
+            .hierarchy_state
+            .hierarchy
+            .iter()
+            .filter(|(_, snapshot)| {
+                snapshot.blocked_reason == Some(HierarchyBlockedReason::HierarchyChanged)
+            })
+            .filter_map(|(issue_id, _)| {
+                self.executions.get(issue_id).and_then(|execution| {
+                    matches!(
+                        execution.status(),
+                        SchedulerStatus::Claimed | SchedulerStatus::Running
+                    )
+                    .then(|| issue_id.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        for issue_id in issue_ids {
+            let Some(issue) = self
+                .executions
+                .get(&issue_id)
+                .map(|execution| execution.issue().clone())
+            else {
+                continue;
+            };
+            self.release_issue(
+                issue_id.clone(),
+                issue,
+                observed_at,
+                ReleaseReason::TrackerInactive,
+                false,
+                Some(WorkerAbortReason::TrackerInactive),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     fn reconcile_hierarchy_issue(
         &mut self,
         tracker_issue: &TrackerIssue,
@@ -1203,6 +1271,16 @@ where
         }
         let reconciliation =
             if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
+                if snapshot.dispatch_claimed()
+                    && self
+                        .executions
+                        .get(&normalized.id)
+                        .is_some_and(|execution| execution.status() == SchedulerStatus::Released)
+                    && snapshot.blocked_reason.is_none()
+                {
+                    snapshot.replan();
+                    return Ok(true);
+                }
                 let previous_child_ids = snapshot
                     .required_child_edges
                     .iter()
@@ -1275,7 +1353,12 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        if self.reconcile_hierarchy_snapshots(tracker_snapshot)? || self.hierarchy_state_dirty {
+        let terminal_hierarchy_changed =
+            self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
+        if self.reconcile_hierarchy_snapshots(tracker_snapshot)?
+            || terminal_hierarchy_changed
+            || self.hierarchy_state_dirty
+        {
             self.persist_orchestrator_state().await?;
         }
         if self.recovered {
@@ -1310,11 +1393,29 @@ where
             .collect::<Vec<_>>();
         for parent_id in intended_parent_ids {
             if in_flight_issue_ids.contains(&parent_id) {
+                let nested_child_ids = self
+                    .hierarchy_state
+                    .hierarchy
+                    .get(&parent_id)
+                    .map(|snapshot| {
+                        snapshot
+                            .required_child_edges
+                            .iter()
+                            .filter(|edge| {
+                                edge.required
+                                    && self.hierarchy_state.hierarchy.contains_key(&edge.child_id)
+                            })
+                            .map(|edge| edge.child_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
                     snapshot.mark_dispatched();
                 }
                 self.hierarchy_state
                     .release_leaf_leases_for_parent(&parent_id, observed_at.as_u64());
+                self.hierarchy_state
+                    .release_ancestor_leases_for_children(&nested_child_ids, observed_at.as_u64());
             } else {
                 if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
                     snapshot.clear_dispatch_intent();
@@ -1883,7 +1984,11 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        let durable_state_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?;
+        let terminal_hierarchy_changed =
+            self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
+        let durable_state_changed =
+            self.reconcile_hierarchy_snapshots(tracker_snapshot)? || terminal_hierarchy_changed;
+        self.fence_hierarchy_changed_runs(observed_at).await?;
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
             let retry_cleanup_workspace = self
@@ -4574,6 +4679,7 @@ struct TrackerSnapshot {
     active: Vec<TrackerIssue>,
     active_index: HashMap<String, usize>,
     terminal_state_by_id: HashMap<String, String>,
+    terminal: Vec<TrackerIssue>,
     state_by_id: HashMap<String, TrackerIssueStateSnapshot>,
 }
 

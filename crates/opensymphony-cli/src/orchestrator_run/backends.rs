@@ -1172,10 +1172,8 @@ impl RuntimeTrackerBackend {
         merge_commit_sha: Option<&str>,
     ) -> Result<bool, LinearError> {
         if repository.required_review {
-            let endpoint =
-                format!("{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/reviews");
             let reviews = self
-                .github_get_json::<Vec<GitHubPullRequestReview>>(&endpoint, repository)
+                .github_reviews(api_root, owner, repository_name, pull_number, repository)
                 .await?;
             let mut latest_by_reviewer = BTreeMap::<String, (String, String)>::new();
             for review in reviews {
@@ -1229,6 +1227,32 @@ impl RuntimeTrackerBackend {
             }
         }
         Ok(true)
+    }
+
+    async fn github_reviews(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        pull_number: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubPullRequestReview>, LinearError> {
+        let mut page = 1;
+        let mut reviews = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/reviews?per_page=100&page={page}"
+            );
+            let page_reviews = self
+                .github_get_json::<Vec<GitHubPullRequestReview>>(&endpoint, repository)
+                .await?;
+            let page_count = page_reviews.len();
+            reviews.extend(page_reviews);
+            if page_count == 0 || page_count < 100 || page >= 1000 {
+                return Ok(reviews);
+            }
+            page += 1;
+        }
     }
 
     async fn github_check_runs(
