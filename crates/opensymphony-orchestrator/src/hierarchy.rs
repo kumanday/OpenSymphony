@@ -728,6 +728,35 @@ impl DurableOrchestratorState {
         resources.into_keys().collect()
     }
 
+    pub fn prune_obsolete_run_boundaries(
+        &mut self,
+        retained_issue_ids: &BTreeSet<IssueId>,
+    ) -> bool {
+        let mut live_issue_ids = retained_issue_ids.clone();
+        live_issue_ids.extend(self.hierarchy.keys().cloned());
+        live_issue_ids.extend(self.hierarchy.values().flat_map(|snapshot| {
+            snapshot
+                .required_child_edges
+                .iter()
+                .map(|edge| edge.child_id.clone())
+        }));
+        live_issue_ids.extend(
+            self.leases
+                .iter()
+                .filter(|lease| lease.active())
+                .map(|lease| lease.resource.issue_id.clone()),
+        );
+
+        let previous_run_hierarchy_len = self.run_hierarchy_generations.len();
+        let previous_run_started_len = self.run_started_at_by_issue.len();
+        self.run_hierarchy_generations
+            .retain(|issue_id, _| live_issue_ids.contains(issue_id));
+        self.run_started_at_by_issue
+            .retain(|issue_id, _| live_issue_ids.contains(issue_id));
+        previous_run_hierarchy_len != self.run_hierarchy_generations.len()
+            || previous_run_started_len != self.run_started_at_by_issue.len()
+    }
+
     fn current_subtree_issue_ids(&self, parent_id: &IssueId) -> Option<BTreeSet<IssueId>> {
         if !self.hierarchy.contains_key(parent_id) {
             return None;
@@ -1226,6 +1255,27 @@ mod tests {
 
         state.release_obsolete_leaf_leases(std::slice::from_ref(&resource.issue_id), 2);
         assert_eq!(state.leases[0].released_at, Some(2));
+    }
+
+    #[test]
+    fn obsolete_run_boundaries_are_pruned_after_hierarchy_and_lease_release() {
+        let retained = IssueId::new("retained").expect("retained");
+        let obsolete = IssueId::new("obsolete").expect("obsolete");
+        let mut state = DurableOrchestratorState {
+            run_hierarchy_generations: BTreeMap::from([(obsolete.clone(), 1)]),
+            run_started_at_by_issue: BTreeMap::from([
+                (retained.clone(), TimestampMs::new(10)),
+                (obsolete, TimestampMs::new(20)),
+            ]),
+            ..Default::default()
+        };
+
+        assert!(state.prune_obsolete_run_boundaries(&BTreeSet::from([retained.clone()])));
+        assert_eq!(
+            state.run_started_at_by_issue,
+            BTreeMap::from([(retained, TimestampMs::new(10))])
+        );
+        assert!(state.run_hierarchy_generations.is_empty());
     }
 
     #[test]

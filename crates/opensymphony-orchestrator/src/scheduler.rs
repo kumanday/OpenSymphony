@@ -4824,19 +4824,9 @@ where
                     child.resource = descendant_resources.first().cloned();
                     child.resources = descendant_resources;
                 } else {
-                    let parent_owner = super::LeaseOwner::ancestor(&normalized.id);
                     let retry_resources = self
                         .hierarchy_state
-                        .leases
-                        .iter()
-                        .filter(|lease| {
-                            lease.active()
-                                && lease.kind == super::LeaseKind::AncestorIntegration
-                                && lease.owner == parent_owner
-                                && lease.hierarchy_generation == snapshot.generation
-                        })
-                        .map(|lease| lease.resource.clone())
-                        .collect::<Vec<_>>();
+                        .descendant_resources_for(&normalized.id);
                     let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
                     let leaf_resource = self
                         .hierarchy_state
@@ -5183,6 +5173,22 @@ where
     }
 
     async fn persist_orchestrator_state(&mut self) -> Result<(), SchedulerError> {
+        let retained_issue_ids = self
+            .executions
+            .iter()
+            .filter(|(_, execution)| {
+                execution.workspace().is_some()
+                    || matches!(
+                        execution.status(),
+                        SchedulerStatus::Claimed
+                            | SchedulerStatus::Running
+                            | SchedulerStatus::RetryQueued
+                    )
+            })
+            .map(|(issue_id, _)| issue_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.hierarchy_state
+            .prune_obsolete_run_boundaries(&retained_issue_ids);
         let state = serde_json::to_value(&self.hierarchy_state).map_err(|error| {
             SchedulerError::Workspace {
                 detail: format!("failed to encode durable hierarchy state: {error}"),
