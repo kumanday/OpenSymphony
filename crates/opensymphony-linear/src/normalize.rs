@@ -163,15 +163,24 @@ fn normalize_parent_id(parent: Option<&LinearParentNode>) -> Option<String> {
 fn normalize_parent(parent: Option<LinearParentNode>) -> Option<TrackerIssueRef> {
     let parent = parent?;
     let identifier = parent.identifier?;
+    let state = parent.state.map(|state| {
+        (
+            state.name,
+            TrackerIssueStateKind::from_tracker_type(state.kind),
+        )
+    });
     Some(TrackerIssueRef {
         id: parent.id,
         identifier,
         title: parent.title,
         url: parent.url,
-        state: parent
-            .state
-            .map(|state| state.name)
+        state: state
+            .as_ref()
+            .map(|state| state.0.clone())
             .unwrap_or_else(|| "unknown".to_string()),
+        state_kind: state
+            .map(|state| state.1)
+            .unwrap_or_else(|| TrackerIssueStateKind::Unknown("unknown".to_owned())),
     })
 }
 
@@ -187,12 +196,16 @@ fn normalize_project_milestone(
 fn normalize_sub_issues(children: Vec<LinearChildNode>) -> Vec<TrackerIssueRef> {
     let mut sub_issues = children
         .into_iter()
-        .map(|child| TrackerIssueRef {
-            id: child.id,
-            identifier: child.identifier,
-            title: child.title,
-            url: child.url,
-            state: child.state.name,
+        .map(|child| {
+            let state = child.state;
+            TrackerIssueRef {
+                id: child.id,
+                identifier: child.identifier,
+                title: child.title,
+                url: child.url,
+                state: state.name,
+                state_kind: TrackerIssueStateKind::from_tracker_type(state.kind),
+            }
         })
         .collect::<Vec<_>>();
     sub_issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));

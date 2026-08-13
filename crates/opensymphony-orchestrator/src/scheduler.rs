@@ -5408,6 +5408,7 @@ fn tracker_issue_from_normalized(issue: &NormalizedIssue) -> TrackerIssue {
                 title: None,
                 url: None,
                 state: child.state.clone(),
+                state_kind: tracker_state_kind_from_name(&child.state),
             })
             .collect(),
         created_at: timestamp_to_datetime(issue.created_at),

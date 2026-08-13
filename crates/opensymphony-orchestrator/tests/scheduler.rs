@@ -698,6 +698,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         title: Some("Child".to_owned()),
         url: None,
         state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
     }];
     let snapshot = HierarchySnapshot::new(&parent);
     let resource = LeaseResource {
@@ -806,6 +807,7 @@ async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_
         title: Some("Child".to_owned()),
         url: None,
         state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
     }];
     let mut snapshot = HierarchySnapshot::new(&parent);
     snapshot.freeze().expect("snapshot should freeze");
@@ -815,6 +817,7 @@ async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_
         title: Some("Replacement child".to_owned()),
         url: None,
         state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
     }]);
     let retained_lease = LeaseRecord {
         kind: LeaseKind::AncestorIntegration,
@@ -5516,6 +5519,7 @@ async fn unlabeled_parent_remains_repository_neutral() {
         title: Some("Child".to_string()),
         url: Some("https://linear.app/trilogy-ai-coe/issue/COE-548-CHILD".to_string()),
         state: "Done".to_string(),
+        state_kind: TrackerIssueStateKind::Completed,
     }];
     let tracker = FakeTracker {
         active: vec![issue],

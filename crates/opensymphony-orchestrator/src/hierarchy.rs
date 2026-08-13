@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, IssueIdentifier, TrackerIssue, TrackerIssueRef,
+    TrackerIssueStateKind,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,7 +24,7 @@ impl From<&TrackerIssueRef> for HierarchyChildEdge {
             child_id: IssueId::new(child.id.clone()).expect("tracker child ids are validated"),
             child_identifier: IssueIdentifier::new(child.identifier.clone())
                 .expect("tracker child identifiers are validated"),
-            required: true,
+            required: !matches!(&child.state_kind, TrackerIssueStateKind::Canceled),
         }
     }
 }
@@ -174,12 +175,13 @@ fn child_edges(
             child_id: IssueId::new(child.id.clone()).expect("tracker child ids are validated"),
             child_identifier: IssueIdentifier::new(child.identifier.clone())
                 .expect("tracker child identifiers are validated"),
-            required: !canceled_states.iter().any(|configured_state| {
-                configured_state.to_ascii_lowercase().contains("cancel")
-                    && configured_state
-                        .trim()
-                        .eq_ignore_ascii_case(child.state.trim())
-            }),
+            required: !matches!(&child.state_kind, TrackerIssueStateKind::Canceled)
+                && !canceled_states.iter().any(|configured_state| {
+                    configured_state.to_ascii_lowercase().contains("cancel")
+                        && configured_state
+                            .trim()
+                            .eq_ignore_ascii_case(child.state.trim())
+                }),
         })
         .collect::<Vec<_>>();
     edges.sort_by(|left, right| left.child_id.cmp(&right.child_id));
@@ -868,18 +870,32 @@ impl DurableOrchestratorState {
     }
 
     pub fn has_active_dispatched_ancestor(&self, child_id: &IssueId) -> bool {
-        self.hierarchy.iter().any(|(parent_id, snapshot)| {
-            snapshot.dispatch_claimed()
-                && snapshot
+        let mut descendants = vec![child_id.clone()];
+        let mut visited = BTreeSet::from([child_id.clone()]);
+        while let Some(descendant_id) = descendants.pop() {
+            for (parent_id, snapshot) in &self.hierarchy {
+                if !snapshot
                     .required_child_edges
                     .iter()
-                    .any(|edge| edge.required && &edge.child_id == child_id)
-                && self.leases.iter().any(|lease| {
-                    lease.active()
-                        && lease.kind == LeaseKind::AncestorIntegration
-                        && lease.owner == LeaseOwner::ancestor(parent_id)
-                })
-        })
+                    .any(|edge| edge.required && edge.child_id == descendant_id)
+                {
+                    continue;
+                }
+                if snapshot.dispatch_claimed()
+                    && self.leases.iter().any(|lease| {
+                        lease.active()
+                            && lease.kind == LeaseKind::AncestorIntegration
+                            && lease.owner == LeaseOwner::ancestor(parent_id)
+                    })
+                {
+                    return true;
+                }
+                if visited.insert(parent_id.clone()) {
+                    descendants.push(parent_id.clone());
+                }
+            }
+        }
+        false
     }
 }
 
@@ -902,6 +918,7 @@ mod tests {
             title: None,
             url: None,
             state: state.to_owned(),
+            state_kind: TrackerIssueStateKind::from_tracker_name(state),
         }
     }
 
@@ -914,7 +931,7 @@ mod tests {
             description: None,
             priority: None,
             state: "In Progress".to_owned(),
-            state_kind: crate::opensymphony_domain::TrackerIssueStateKind::Started,
+            state_kind: TrackerIssueStateKind::Started,
             branch_name: None,
             pr_url: None,
             pr_urls: Vec::new(),
@@ -958,6 +975,15 @@ mod tests {
         assert_eq!(snapshot.required_child_edges.len(), 2);
         assert!(!snapshot.required_child_edges[0].required);
         assert!(snapshot.required_child_edges[1].required);
+    }
+
+    #[test]
+    fn tracker_canceled_kind_makes_custom_terminal_state_non_required() {
+        let mut duplicate = child("duplicate", "Duplicate");
+        duplicate.state_kind = TrackerIssueStateKind::Canceled;
+        let snapshot = HierarchySnapshot::new(&parent(vec![duplicate]));
+
+        assert!(!snapshot.required_child_edges[0].required);
     }
 
     #[test]
@@ -1308,6 +1334,47 @@ mod tests {
         assert!(state.has_active_dispatched_ancestor(&child_id));
         state.release_owner(&LeaseOwner::ancestor(&parent_id), 2);
         assert!(!state.has_active_dispatched_ancestor(&child_id));
+    }
+
+    #[test]
+    fn active_dispatched_ancestor_fence_walks_nested_hierarchy() {
+        let root_id = IssueId::new("root").expect("root id");
+        let nested_id = IssueId::new("nested").expect("nested id");
+        let leaf_id = IssueId::new("leaf").expect("leaf id");
+        let root = parent(vec![child("nested", "Done")]);
+        let nested = TrackerIssue {
+            id: "nested".to_owned(),
+            identifier: "COE-2".to_owned(),
+            sub_issues: vec![child("leaf", "Done")],
+            ..parent(Vec::new())
+        };
+        let mut root_snapshot = HierarchySnapshot::new(&root);
+        root_snapshot.mark_dispatched();
+        let resource = LeaseResource {
+            issue_id: leaf_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([
+                (root_id.clone(), root_snapshot),
+                (nested_id, HierarchySnapshot::new(&nested)),
+            ]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![LeaseRecord {
+                kind: LeaseKind::AncestorIntegration,
+                resource,
+                owner: LeaseOwner::ancestor(&root_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }])
+            .expect("root ancestor lease should acquire");
+
+        assert!(state.has_active_dispatched_ancestor(&leaf_id));
     }
 
     #[test]

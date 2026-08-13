@@ -974,6 +974,8 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     merge_result_commits,
                     true,
                 )
+            } else if child.sub_issues.is_empty() {
+                (false, None, None, Vec::new(), Vec::new(), true)
             } else {
                 self.descendant_merge_evidence(child).await?
             };
@@ -1330,9 +1332,25 @@ impl RuntimeTrackerBackend {
             let required_contexts = self
                 .github_required_check_contexts(api_root, owner, repository_name, repository)
                 .await?;
-            if total_count == 0
-                || check_runs.len() < total_count
-                || !required_check_runs_satisfied(&check_runs, required_contexts.as_ref())
+            let commit_statuses = if required_contexts.is_some() {
+                self.github_commit_statuses(
+                    api_root,
+                    owner,
+                    repository_name,
+                    check_commit_sha,
+                    repository,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            if check_runs.len() < total_count
+                || (total_count == 0 && required_contexts.is_none())
+                || !required_check_evidence_satisfied(
+                    &check_runs,
+                    &commit_statuses,
+                    required_contexts.as_ref(),
+                )
             {
                 return Ok(false);
             }
@@ -1398,6 +1416,35 @@ impl RuntimeTrackerBackend {
         }
     }
 
+    async fn github_commit_statuses(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        commit_sha: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubCommitStatus>, LinearError> {
+        let mut page = 1;
+        let mut total_count = None;
+        let mut statuses = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/commits/{commit_sha}/status?per_page=100&page={page}"
+            );
+            let response = self
+                .github_get_json::<GitHubCommitStatuses>(&endpoint, repository)
+                .await?;
+            total_count.get_or_insert(response.total_count);
+            let page_count = response.statuses.len();
+            statuses.extend(response.statuses);
+            let expected = total_count.unwrap_or_default();
+            if statuses.len() >= expected || page_count == 0 || page >= 1000 {
+                return Ok(statuses);
+            }
+            page += 1;
+        }
+    }
+
     async fn github_required_check_contexts(
         &self,
         api_root: &str,
@@ -1405,10 +1452,12 @@ impl RuntimeTrackerBackend {
         repository_name: &str,
         repository: &CheckoutRepository,
     ) -> Result<Option<BTreeSet<String>>, LinearError> {
-        let endpoint = format!(
-            "{api_root}/repos/{owner}/{repository_name}/branches/{}/protection/required_status_checks",
-            repository.target_branch
-        );
+        let endpoint = github_required_status_checks_endpoint(
+            api_root,
+            owner,
+            repository_name,
+            &repository.target_branch,
+        )?;
         match self
             .github_get_json::<GitHubRequiredStatusChecks>(&endpoint, repository)
             .await
@@ -1494,12 +1543,19 @@ impl RuntimeTrackerBackend {
                 {
                     return Ok((false, None, None, Vec::new(), Vec::new(), true));
                 }
-                if self.terminal_states.contains(&child_state) && child_state.contains("cancel") {
+                if matches!(
+                    child.state_kind,
+                    crate::opensymphony_domain::TrackerIssueStateKind::Canceled
+                ) || (self.terminal_states.contains(&child_state)
+                    && child_state.contains("cancel"))
+                {
                     continue;
                 }
                 if let Some(repository) = self.checkout_policy_for_issue(&child) {
                     saw_leaf = true;
                     leaf_children.push((child, repository.clone()));
+                } else if child.sub_issues.is_empty() {
+                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
                 } else {
                     pending.extend(child.sub_issues);
                 }
@@ -1611,6 +1667,31 @@ fn normalize_github_authority(authority: &str) -> String {
     }
 }
 
+fn github_required_status_checks_endpoint(
+    api_root: &str,
+    owner: &str,
+    repository_name: &str,
+    target_branch: &str,
+) -> Result<String, LinearError> {
+    let mut endpoint = Url::parse(api_root).map_err(|error| {
+        LinearError::InvalidResponse(format!("invalid GitHub API root: {error}"))
+    })?;
+    {
+        let mut segments = endpoint.path_segments_mut().map_err(|_| {
+            LinearError::InvalidResponse("GitHub API root cannot be a base URL".to_owned())
+        })?;
+        segments
+            .push("repos")
+            .push(owner)
+            .push(repository_name)
+            .push("branches")
+            .push(target_branch)
+            .push("protection")
+            .push("required_status_checks");
+    }
+    Ok(endpoint.to_string())
+}
+
 fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bool {
     match expected_method.trim().to_ascii_lowercase().as_str() {
         "merge" => parent_count > 1,
@@ -1618,30 +1699,24 @@ fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bo
     }
 }
 
-fn required_check_runs_satisfied(
+fn required_check_evidence_satisfied(
     check_runs: &[GitHubCheckRun],
+    commit_statuses: &[GitHubCommitStatus],
     required_contexts: Option<&BTreeSet<String>>,
 ) -> bool {
     match required_contexts {
-        Some(required_contexts) => {
-            let required_runs = check_runs
-                .iter()
-                .filter(|check| {
-                    check
-                        .name
-                        .as_ref()
-                        .is_some_and(|name| required_contexts.contains(name))
-                })
-                .collect::<Vec<_>>();
-            !required_runs.is_empty()
-                && required_runs.iter().all(|check| {
-                    check.status.eq_ignore_ascii_case("completed")
-                        && check
-                            .conclusion
-                            .as_deref()
-                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-                })
-        }
+        Some(required_contexts) => required_contexts.iter().all(|context| {
+            check_runs.iter().any(|check| {
+                check.name.as_deref() == Some(context)
+                    && check.status.eq_ignore_ascii_case("completed")
+                    && check
+                        .conclusion
+                        .as_deref()
+                        .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+            }) || commit_statuses.iter().any(|status| {
+                status.context == *context && status.state.eq_ignore_ascii_case("success")
+            })
+        }),
         None => check_runs.iter().any(|check| {
             check.status.eq_ignore_ascii_case("completed")
                 && check
@@ -1716,6 +1791,20 @@ struct GitHubRequiredStatusChecks {
 #[derive(Debug, serde::Deserialize)]
 struct GitHubRequiredStatusCheck {
     context: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitStatuses {
+    #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
+    statuses: Vec<GitHubCommitStatus>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitStatus {
+    context: String,
+    state: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11054,6 +11143,22 @@ Run the scheduler.
     }
 
     #[test]
+    fn github_required_status_checks_endpoint_encodes_branch_segments() {
+        let endpoint = github_required_status_checks_endpoint(
+            "https://api.github.com",
+            "owner",
+            "repository",
+            "release/next",
+        )
+        .expect("GitHub endpoint should build");
+
+        assert_eq!(
+            endpoint,
+            "https://api.github.com/repos/owner/repository/branches/release%2Fnext/protection/required_status_checks"
+        );
+    }
+
+    #[test]
     fn required_check_evidence_ignores_optional_failed_runs() {
         let checks = vec![
             GitHubCheckRun {
@@ -11068,11 +11173,33 @@ Run the scheduler.
             },
         ];
         let required = BTreeSet::from(["required".to_owned()]);
-        assert!(required_check_runs_satisfied(&checks, Some(&required)));
-        assert!(required_check_runs_satisfied(&checks, None));
+        assert!(required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&required)
+        ));
+        assert!(required_check_evidence_satisfied(&checks, &[], None));
 
         let missing = BTreeSet::from(["missing".to_owned()]);
-        assert!(!required_check_runs_satisfied(&checks, Some(&missing)));
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&missing)
+        ));
+        let all_required = BTreeSet::from(["required".to_owned(), "lint".to_owned()]);
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&all_required)
+        ));
+        assert!(required_check_evidence_satisfied(
+            &checks,
+            &[GitHubCommitStatus {
+                context: "lint".to_owned(),
+                state: "success".to_owned(),
+            }],
+            Some(&all_required),
+        ));
     }
 
     #[test]

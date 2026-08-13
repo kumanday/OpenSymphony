@@ -39,6 +39,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
         title
         state {
           name
+          type
         }
       }
       projectMilestone {
@@ -64,6 +65,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
           title
           state {
             name
+            type
           }
         }
         pageInfo {
@@ -140,6 +142,7 @@ query IssueSummariesByState($projectSlug: String!, $stateNames: [String!], $incl
           title
           state {
             name
+            type
           }
         }
         pageInfo {
@@ -212,6 +215,7 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
         title
         state {
           name
+          type
         }
       }
       projectMilestone {
@@ -237,6 +241,7 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
           title
           state {
             name
+            type
           }
         }
         pageInfo {
@@ -293,6 +298,7 @@ query IssueChildren($issueId: String!, $first: Int!, $after: String) {
         title
         state {
           name
+          type
         }
       }
       pageInfo {
@@ -502,6 +508,7 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
       title
       state {
         name
+        type
       }
     }
     projectMilestone {
@@ -527,6 +534,7 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
           title
           state {
             name
+            type
           }
         }
         pageInfo {
@@ -1271,6 +1279,9 @@ pub(super) struct LinearChildNode {
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearIssueRefState {
     pub name: String,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

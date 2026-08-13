@@ -114,6 +114,7 @@ mod tests {
             title: None,
             url: None,
             state: state.to_string(),
+            state_kind: TrackerIssueStateKind::from_tracker_name(state),
         }
     }
 
