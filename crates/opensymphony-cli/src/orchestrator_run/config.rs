@@ -1089,10 +1089,13 @@ fn resolve_central_config(
         }
         if let Some(merge_method) = profile.merge_method.as_deref() {
             let merge_method = required_literal(merge_method, "review_profiles.merge_method")?;
-            if !matches!(
+            let known_method = matches!(
                 merge_method.to_ascii_lowercase().as_str(),
                 "merge" | "squash" | "rebase"
-            ) {
+            );
+            let unsupported_github_method = profile.provider.eq_ignore_ascii_case("github")
+                && !merge_method.eq_ignore_ascii_case("merge");
+            if !known_method || unsupported_github_method {
                 return Err(CentralConfigError::InvalidReference {
                     field: format!("review_profiles.{profile_id}.merge_method"),
                 });
@@ -2891,7 +2894,7 @@ review_profiles:
     credential: github-ssh
     required_checks: true
     required_review: true
-    merge_method: squash
+    merge_method: merge
 workspace:
   root: {root}/workspace
 memory:

@@ -305,7 +305,7 @@ query IssueChildren($issueId: ID!, $first: Int!, $after: String) {
 "#;
 
 pub(super) const ISSUE_ATTACHMENTS_QUERY: &str = r#"
-query IssueAttachments($issueId: ID!, $first: Int!, $after: String) {
+query IssueAttachments($issueId: String!, $first: Int!, $after: String) {
   issue(id: $issueId) {
     id
     attachments(first: $first, after: $after) {

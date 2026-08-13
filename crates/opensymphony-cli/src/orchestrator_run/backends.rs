@@ -903,12 +903,16 @@ fn runtime_checkout_env_remove(
 }
 
 fn checkout_env_remove_variables(
-    variables: BTreeSet<String>,
+    mut variables: BTreeSet<String>,
     _local_server_env: &BTreeMap<String, String>,
 ) -> BTreeSet<String> {
     // A local-server override must never reintroduce a checkout credential,
     // including when its value was resolved from that same environment
     // variable (for example `${GITHUB_TOKEN}`).
+    // The tracker backend may use this ambient fallback for provider reads;
+    // it must never cross the worker boundary when it was not explicitly
+    // configured as a worker credential.
+    variables.insert("GITHUB_TOKEN".to_owned());
     variables
 }
 
@@ -1087,6 +1091,13 @@ impl RuntimeTrackerBackend {
                 ))
             })?;
         if authority != configured_authority {
+            return Ok(GithubMergeEvidence::incompatible());
+        }
+        if let Some((configured_owner, configured_repository)) =
+            github_remote_repository(&repository.remote_locator)
+            && (!configured_owner.eq_ignore_ascii_case(segments[0])
+                || !configured_repository.eq_ignore_ascii_case(segments[1]))
+        {
             return Ok(GithubMergeEvidence::incompatible());
         }
         let public_github = authority == "github.com";
@@ -1512,6 +1523,37 @@ fn github_remote_authority(locator: &str) -> Option<String> {
         return Some(normalize_github_authority(authority));
     }
     None
+}
+
+fn github_remote_repository(locator: &str) -> Option<(String, String)> {
+    let locator = locator.trim();
+    let path = if let Ok(url) = Url::parse(locator) {
+        url.path().to_owned()
+    } else if let Some((_, path)) = locator
+        .strip_prefix("git@")
+        .and_then(|value| value.split_once(':'))
+    {
+        path.to_owned()
+    } else if let Some((_, path)) = locator
+        .strip_prefix("ssh@")
+        .and_then(|value| value.split_once(':'))
+    {
+        path.to_owned()
+    } else {
+        locator.to_owned()
+    };
+    let mut segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_end_matches(".git"))
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return None;
+    }
+    let repository = segments.pop()?.to_owned();
+    let owner = segments.pop()?.to_owned();
+    Some((owner, repository))
 }
 
 fn normalize_github_authority(authority: &str) -> String {
@@ -9806,7 +9848,27 @@ mod tests {
 
         assert_eq!(
             env_remove,
-            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()])
+            BTreeSet::from([
+                "GITHUB_TOKEN".to_owned(),
+                "NODE_ENV".to_owned(),
+                "CHECKOUT_TOKEN".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn github_remote_repository_matches_supported_locator_shapes() {
+        assert_eq!(
+            github_remote_repository("https://github.com/owner/repo.git"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_remote_repository("git@github.enterprise.example:owner/repo"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_remote_repository("github.enterprise.example/owner/repo"),
+            Some(("owner".to_owned(), "repo".to_owned()))
         );
     }
 

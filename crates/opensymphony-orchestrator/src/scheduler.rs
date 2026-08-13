@@ -967,17 +967,30 @@ where
         target: &str,
         observed_at: TimestampMs,
     ) -> Result<bool, SchedulerError> {
-        let issues = self
+        let lookup_target = self
+            .executions
+            .values()
+            .find(|execution| {
+                execution
+                    .conversation()
+                    .is_some_and(|conversation| conversation.conversation_id.as_str() == target)
+            })
+            .map(|execution| execution.issue().identifier.as_str().to_owned())
+            .unwrap_or_else(|| target.to_owned());
+        let issues = match self
             .tracker
-            .issues_by_identifiers(&[target.to_owned()])
+            .issues_by_identifiers(std::slice::from_ref(&lookup_target))
             .await
-            .map_err(|error| SchedulerError::Tracker {
-                detail: error.to_string(),
-            })?;
-        let Some(issue) = issues
-            .into_iter()
-            .find(|issue| issue.identifier.eq_ignore_ascii_case(target) || issue.id == target)
-        else {
+        {
+            Ok(issues) => issues,
+            Err(error) => {
+                warn!(target, error = %error, "discarding unrecoverable parent replan target");
+                return Ok(false);
+            }
+        };
+        let Some(issue) = issues.into_iter().find(|issue| {
+            issue.identifier.eq_ignore_ascii_case(&lookup_target) || issue.id == lookup_target
+        }) else {
             return Ok(false);
         };
         let issue_id = IssueId::new(issue.id)?;
@@ -3175,9 +3188,6 @@ where
             }
 
             let normalized = normalize_tracker_issue(&tracker_issue, &self.config)?;
-            if normalized.sub_issues.is_empty() && self.parent_issue_ids.contains(&normalized.id) {
-                continue;
-            }
             let issue_id = normalized.id.clone();
             let should_dispatch = match self.executions.get(&issue_id) {
                 Some(execution) => match execution.status() {
@@ -3233,6 +3243,10 @@ where
             // that just drove hierarchy reconciliation. The later known-
             // candidate pass must not reintroduce an older child-edge list.
             self.refresh_execution_issue(&issue_id, normalized.clone())?;
+
+            if normalized.sub_issues.is_empty() && self.parent_issue_ids.contains(&normalized.id) {
+                continue;
+            }
 
             if !normalized.sub_issues.is_empty() {
                 let parent_retry = self
