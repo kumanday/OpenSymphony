@@ -1323,14 +1323,9 @@ impl RuntimeTrackerBackend {
                 .push("compare")
                 .push(&format!("{target_branch}...{merge_commit_sha}"));
         }
-        let comparison = match self
+        let comparison = self
             .github_get_json::<GitHubCompare>(endpoint.as_ref(), repository)
-            .await
-        {
-            Ok(comparison) => comparison,
-            Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
+            .await?;
         Ok(Some(github_compare_contains_commit(&comparison)))
     }
 

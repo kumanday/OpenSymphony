@@ -907,12 +907,14 @@ impl DurableOrchestratorState {
             }
         }
 
-        let review_prefixes = self
-            .hierarchy
-            .keys()
-            .filter(|issue_id| subtree.contains(*issue_id))
-            .map(|issue_id| format!("review:{issue_id}:"))
-            .collect::<Vec<_>>();
+        let mut review_prefixes = vec![format!("review:{parent_id}:")];
+        review_prefixes.extend(
+            self.hierarchy
+                .keys()
+                .filter(|issue_id| subtree.contains(*issue_id))
+                .map(|issue_id| format!("review:{issue_id}:"))
+                .collect::<Vec<_>>(),
+        );
         let parent_ancestor_owner = LeaseOwner::ancestor(parent_id);
         let mut released = false;
         for lease in &mut self.leases {
@@ -1791,6 +1793,20 @@ mod tests {
                     released_at: None,
                 },
                 LeaseRecord {
+                    kind: LeaseKind::Review,
+                    resource: LeaseResource {
+                        issue_id: leaf_id.clone(),
+                        repository_id: CanonicalRepositoryId::new("github:repo")
+                            .expect("repository"),
+                        checkout_generation: "checkout-1".to_owned(),
+                    },
+                    owner: LeaseOwner::review_for_parent(&root_id, &leaf_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 3,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
                     kind: LeaseKind::AncestorIntegration,
                     resource: LeaseResource {
                         issue_id: leaf_id.clone(),
@@ -1800,7 +1816,7 @@ mod tests {
                     },
                     owner: LeaseOwner::ancestor(&root_id),
                     hierarchy_generation: 1,
-                    acquired_at: 4,
+                    acquired_at: 5,
                     expires_at: None,
                     released_at: None,
                 },
