@@ -377,6 +377,7 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
 
   async replanParent(
     parentId: string,
+    hierarchyGeneration: number,
     operationId = crypto.randomUUID(),
   ): Promise<ActionReceipt> {
     return this.dispatchAction({
@@ -384,6 +385,7 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
       correlation_id: `replan-${parentId}-${crypto.randomUUID()}`,
       action_kind: "replan",
       target_entity: { entity_kind: "issue", entity_id: parentId },
+      payload: { hierarchy_generation: hierarchyGeneration },
       idempotency_key: `replan-${parentId}-${operationId}`,
     });
   }

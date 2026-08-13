@@ -64,7 +64,7 @@ describe("MockGatewayTransport action methods", () => {
   });
 
   it("replanParent returns a receipt for a hierarchy parent", async () => {
-    const result = await transport.replanParent("parent-1");
+    const result = await transport.replanParent("parent-1", 7);
     assertReceiptShape(result);
     expect(result.correlation_id).toContain("replan-parent-1-");
   });
@@ -168,21 +168,22 @@ describe("HttpGatewayTransport action integration", () => {
   it("replanParent POSTs a replan action for an issue", async () => {
     const fetchSpy = mockFetch(receipt);
     const transport = new HttpGatewayTransport({ baseUri });
-    await transport.replanParent("parent-1", "generation-7");
+    await transport.replanParent("parent-1", 7, "generation-7");
 
     const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(requestInit.body as string);
     expect(body.action_kind).toBe("replan");
     expect(body.target_entity).toEqual({ entity_kind: "issue", entity_id: "parent-1" });
+    expect(body.payload).toEqual({ hierarchy_generation: 7 });
     expect(body.idempotency_key).toBe("replan-parent-1-generation-7");
   });
 
   it("replanParent gives each new operation a key while allowing request retries", async () => {
     const fetchSpy = mockFetch(receipt);
     const transport = new HttpGatewayTransport({ baseUri });
-    await transport.replanParent("parent-1", "generation-7");
-    await transport.replanParent("parent-1", "generation-7");
-    await transport.replanParent("parent-1", "generation-8");
+    await transport.replanParent("parent-1", 7, "generation-7");
+    await transport.replanParent("parent-1", 7, "generation-7");
+    await transport.replanParent("parent-1", 8, "generation-8");
 
     const keys = fetchSpy.mock.calls.map((call) =>
       JSON.parse((call[1] as RequestInit).body as string).idempotency_key,

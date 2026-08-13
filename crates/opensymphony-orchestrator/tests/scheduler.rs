@@ -662,6 +662,7 @@ impl WorkerBackend for FakeWorker {
             Some(result) => result,
             None => Ok(WorkerLaunch {
                 conversation: conversation(&request.run.worker_id),
+                started_at: None,
             }),
         }
     }
@@ -983,7 +984,9 @@ async fn replan_parent_target_preserves_tracker_failures_for_retry() {
         scheduler_config(),
     );
 
-    let result = scheduler.replan_parent_target("COE-REPLAN", ts(100)).await;
+    let result = scheduler
+        .replan_parent_target("COE-REPLAN", 1, ts(100))
+        .await;
     assert!(matches!(
         result,
         Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { detail })
@@ -1006,7 +1009,7 @@ async fn replan_parent_target_rejects_a_disappeared_issue_without_aborting_dispa
 
     assert!(
         !scheduler
-            .replan_parent_target("COE-MISSING", ts(100))
+            .replan_parent_target("COE-MISSING", 1, ts(100))
             .await
             .expect("missing replan targets are recorded as rejected outcomes")
     );

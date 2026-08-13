@@ -116,7 +116,10 @@ pub(super) enum CliWorkerError {
 
 #[derive(Debug)]
 enum LaunchReport {
-    Conversation(Box<ConversationMetadata>),
+    Conversation {
+        conversation: Box<ConversationMetadata>,
+        started_at: Option<TimestampMs>,
+    },
     Failed(String),
 }
 
@@ -271,8 +274,19 @@ impl WorkpadCommentSource for LinearWorkpadCommentSource {
 
 impl IssueSessionObserver for SchedulerObserver {
     fn on_launch(&mut self, conversation: &ConversationMetadata) {
+        self.on_launch_with_started_at(conversation, None);
+    }
+
+    fn on_launch_with_started_at(
+        &mut self,
+        conversation: &ConversationMetadata,
+        started_at: Option<TimestampMs>,
+    ) {
         if let Some(sender) = self.launch_tx.take() {
-            let _ = sender.send(LaunchReport::Conversation(Box::new(conversation.clone())));
+            let _ = sender.send(LaunchReport::Conversation {
+                conversation: Box::new(conversation.clone()),
+                started_at,
+            });
         }
     }
 
@@ -4088,9 +4102,10 @@ impl RuntimeWorkerBackend {
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
-                    let _ = sender.send(LaunchReport::Conversation(Box::new(
-                        dry_run_conversation_metadata(&run, &route),
-                    )));
+                    let _ = sender.send(LaunchReport::Conversation {
+                        conversation: Box::new(dry_run_conversation_metadata(&run, &route)),
+                        started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+                    });
                 }
                 let finish_error = finish_route_dry_run_workspace_run(
                     &workspace_manager,
@@ -4290,9 +4305,15 @@ impl RuntimeWorkerBackend {
         >,
     ) -> Result<WorkerLaunch, CliWorkerError> {
         match result {
-            Ok(Ok(LaunchReport::Conversation(conversation))) => {
+            Ok(Ok(LaunchReport::Conversation {
+                conversation,
+                started_at,
+            })) => {
                 let conversation = annotate_route_decision(*conversation, worker_id, route);
-                Ok(WorkerLaunch { conversation })
+                Ok(WorkerLaunch {
+                    conversation,
+                    started_at,
+                })
             }
             Ok(Ok(LaunchReport::Failed(detail))) => {
                 if let Some(task) = self.take_tracked_task(worker_id) {
@@ -5224,9 +5245,10 @@ async fn try_run_codex_stdio_issue(
             },
         )?;
         if let Some(sender) = launch_tx.take() {
-            let _ = sender.send(LaunchReport::Conversation(Box::new(
-                codex_conversation_metadata(conversation_id.clone(), route),
-            )));
+            let _ = sender.send(LaunchReport::Conversation {
+                conversation: Box::new(codex_conversation_metadata(conversation_id.clone(), route)),
+                started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+            });
             if let Some(grants) = fresh_conversation_grants.as_ref() {
                 grants.acknowledge_fresh_conversation(fresh_conversation_issue);
             }
@@ -5389,9 +5411,10 @@ async fn try_run_codex_stdio_issue(
         },
     )?;
     if let Some(sender) = launch_tx.take() {
-        let _ = sender.send(LaunchReport::Conversation(Box::new(
-            codex_conversation_metadata(conversation_id.clone(), route),
-        )));
+        let _ = sender.send(LaunchReport::Conversation {
+            conversation: Box::new(codex_conversation_metadata(conversation_id.clone(), route)),
+            started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+        });
         if let Some(grants) = fresh_conversation_grants.as_ref() {
             grants.acknowledge_fresh_conversation(fresh_conversation_issue);
         }
@@ -8239,7 +8262,7 @@ mod tests {
             .await
             .expect("launch report should be sent before terminal completion");
         match launch {
-            LaunchReport::Conversation(conversation) => {
+            LaunchReport::Conversation { conversation, .. } => {
                 assert_eq!(conversation.conversation_id.as_str(), "fake-thread");
                 assert_eq!(conversation.stream_state, RuntimeStreamState::Closed);
             }
@@ -9152,7 +9175,7 @@ mod tests {
         assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(_)
+            LaunchReport::Conversation { .. }
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
         assert!(
@@ -9249,7 +9272,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -9345,7 +9368,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -9446,7 +9469,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Cancelled);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -9524,7 +9547,7 @@ mod tests {
             .expect("launch sender should stay alive");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
 
@@ -9646,7 +9669,7 @@ mod tests {
             .expect("launch sender should stay alive");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
 
@@ -9743,7 +9766,7 @@ mod tests {
             .expect("launch report should be sent before terminal completion");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         assert!(
@@ -9825,7 +9848,7 @@ mod tests {
         let launch = launch_rx.await.expect("launch report should still be sent");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         assert!(

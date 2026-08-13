@@ -262,6 +262,9 @@ impl HarnessRouteDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLaunch {
     pub conversation: ConversationMetadata,
+    /// Timestamp persisted by the worker path when the run actually began.
+    /// This is the boundary used to fence provider evidence for this run.
+    pub started_at: Option<TimestampMs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1019,6 +1022,7 @@ where
     pub async fn replan_parent_target(
         &mut self,
         target: &str,
+        accepted_generation: u64,
         observed_at: TimestampMs,
     ) -> Result<bool, SchedulerError> {
         self.load_recovery_state().await?;
@@ -1067,6 +1071,15 @@ where
         else {
             return Ok(false);
         };
+        if expected_generation != accepted_generation {
+            warn!(
+                parent = %lookup_target,
+                accepted_generation,
+                current_generation = expected_generation,
+                "rejecting replan for a stale accepted hierarchy generation"
+            );
+            return Ok(false);
+        }
 
         // Refresh the child edges before clearing the durable block. If the
         // accepted snapshot changed while the action was in flight, preserve
@@ -1527,6 +1540,11 @@ where
                     .filter(|edge| edge.required)
                     .map(|edge| edge.child_id.clone())
                     .collect::<Vec<_>>();
+                self.hierarchy_state.release_removed_subtree_leases(
+                    &normalized.id,
+                    &removed_child_ids,
+                    current_epoch_millis(),
+                );
                 self.hierarchy_state
                     .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
                 return Ok(true);
@@ -1582,6 +1600,7 @@ where
             .get(&normalized.id)
             .is_some_and(|snapshot| {
                 snapshot.dispatch_claimed()
+                    && !snapshot.has_in_flight_dispatch()
                     && normalized.state.category == IssueStateCategory::Active
                     && !self
                         .executions
@@ -1667,6 +1686,11 @@ where
                 .collect::<BTreeSet<_>>();
             self.hierarchy_state
                 .rebind_leaf_leases(&retained_child_ids, generation);
+            self.hierarchy_state.release_removed_subtree_leases(
+                &normalized.id,
+                &removed_child_ids,
+                current_epoch_millis(),
+            );
             self.hierarchy_state
                 .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
             for child_id in &current_child_ids {
@@ -1722,10 +1746,8 @@ where
             .map(|record| record.issue.id.clone())
             .collect::<HashSet<_>>();
         for parent_id in &recovered_in_flight_parent_ids {
-            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id)
-                && snapshot.dispatch_intended()
-            {
-                self.hierarchy_state_dirty |= snapshot.restore_in_flight_dispatch();
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
+                self.hierarchy_state_dirty |= snapshot.restore_recovered_dispatch_fence();
             }
         }
         let hierarchy_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?;
@@ -3763,6 +3785,7 @@ where
             match result {
                 Ok(launch) => {
                     self.recovered_memory_issue_ids.remove(&issue_id);
+                    let started_at = launch.started_at.unwrap_or(observed_at);
                     execution = execution.start_running(
                         observed_at,
                         effective_stall_timeout(self.config.stall_timeout_ms),
@@ -3779,8 +3802,8 @@ where
                     let run_start_changed = self
                         .hierarchy_state
                         .run_started_at_by_issue
-                        .insert(issue_id.clone(), observed_at)
-                        .is_none_or(|previous| previous != observed_at);
+                        .insert(issue_id.clone(), started_at)
+                        .is_none_or(|previous| previous != started_at);
                     self.hierarchy_state
                         .terminal_orchestrator_issues
                         .remove(&issue_id);

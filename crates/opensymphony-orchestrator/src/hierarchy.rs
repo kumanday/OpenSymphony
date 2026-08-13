@@ -179,6 +179,24 @@ impl HierarchySnapshot {
         let Some(generation) = self.dispatch_intent_generation else {
             return false;
         };
+        self.restore_in_flight_dispatch_for_generation(generation)
+    }
+
+    /// Restore the execution fence for a recovered run before tracker
+    /// reconciliation. A normally launched run has already replaced its
+    /// dispatch intent with the durable claim, so recovery must accept either
+    /// marker as evidence that the generation is in flight.
+    pub fn restore_recovered_dispatch_fence(&mut self) -> bool {
+        let Some(generation) = self
+            .dispatch_intent_generation
+            .or(self.dispatched_generation)
+        else {
+            return false;
+        };
+        self.restore_in_flight_dispatch_for_generation(generation)
+    }
+
+    fn restore_in_flight_dispatch_for_generation(&mut self, generation: u64) -> bool {
         if self.in_flight_generation == Some(generation) {
             return false;
         }
@@ -198,6 +216,10 @@ impl HierarchySnapshot {
 
     pub fn has_dispatched_execution_fence(&self) -> bool {
         self.dispatch_claimed() || self.in_flight_generation.is_some()
+    }
+
+    pub fn has_in_flight_dispatch(&self) -> bool {
+        self.in_flight_generation.is_some()
     }
 
     pub fn clear_in_flight_dispatch(&mut self) -> bool {
@@ -849,6 +871,70 @@ impl DurableOrchestratorState {
         self.compact_lease_history();
     }
 
+    /// Release evidence owned by child subtrees removed from a parent's
+    /// frozen scope. Owners are intentionally scoped to the removed subtree;
+    /// leases held by the still-retained parent or siblings remain active.
+    pub fn release_removed_subtree_leases(
+        &mut self,
+        parent_id: &IssueId,
+        removed_child_ids: &[IssueId],
+        released_at: u64,
+    ) -> bool {
+        let mut subtree = BTreeSet::new();
+        let mut pending = removed_child_ids.to_vec();
+        while let Some(issue_id) = pending.pop() {
+            if !subtree.insert(issue_id.clone()) {
+                continue;
+            }
+            if let Some(snapshot) = self.hierarchy.get(&issue_id) {
+                pending.extend(
+                    snapshot
+                        .required_child_edges
+                        .iter()
+                        .filter(|edge| edge.required)
+                        .map(|edge| edge.child_id.clone()),
+                );
+            }
+        }
+        if subtree.is_empty() {
+            return false;
+        }
+
+        let mut review_prefixes = removed_child_ids
+            .iter()
+            .map(|child_id| format!("review:{parent_id}:{child_id}"))
+            .collect::<Vec<_>>();
+        review_prefixes.extend(
+            self.hierarchy
+                .keys()
+                .filter(|issue_id| subtree.contains(*issue_id))
+                .map(|issue_id| format!("review:{issue_id}")),
+        );
+
+        let mut released = false;
+        for lease in &mut self.leases {
+            if !lease.active() {
+                continue;
+            }
+            let owned_by_removed_subtree = match lease.kind {
+                LeaseKind::LeafWorker => subtree.contains(&lease.resource.issue_id),
+                LeaseKind::AncestorIntegration => subtree
+                    .iter()
+                    .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id)),
+                LeaseKind::Review => review_prefixes.iter().any(|prefix| {
+                    lease.owner.id == *prefix || lease.owner.id.starts_with(&format!("{prefix}:"))
+                }),
+                LeaseKind::Repair | LeaseKind::DiagnosticHold => false,
+            };
+            if owned_by_removed_subtree {
+                lease.released_at = Some(released_at);
+                released = true;
+            }
+        }
+        self.compact_lease_history();
+        released
+    }
+
     pub fn rebind_leaf_leases(&mut self, child_ids: &BTreeSet<IssueId>, generation: u64) {
         for lease in &mut self.leases {
             if lease.active()
@@ -1180,6 +1266,17 @@ mod tests {
     }
 
     #[test]
+    fn dispatched_generation_restores_a_recovered_in_flight_fence() {
+        let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
+        snapshot.freeze().expect("initial scope should freeze");
+        snapshot.mark_dispatched();
+
+        assert!(snapshot.restore_recovered_dispatch_fence());
+        assert!(snapshot.has_in_flight_dispatch());
+        assert!(!snapshot.restore_recovered_dispatch_fence());
+    }
+
+    #[test]
     fn configured_canceled_children_are_non_required_edges() {
         let snapshot = HierarchySnapshot::new_with_canceled_states(
             &parent(vec![child("child-a", "Canceled"), child("child-b", "Done")]),
@@ -1301,6 +1398,89 @@ mod tests {
 
         state.release_obsolete_leaf_leases(std::slice::from_ref(&resource.issue_id), 2);
         assert_eq!(state.leases[0].released_at, Some(2));
+    }
+
+    #[test]
+    fn removed_nested_subtree_releases_its_ancestor_and_review_owners() {
+        let parent_id = IssueId::new("parent").expect("parent");
+        let nested_id = IssueId::new("nested").expect("nested");
+        let leaf_id = IssueId::new("leaf").expect("leaf");
+        let mut nested_issue = parent(vec![child("leaf", "Done")]);
+        nested_issue.id = nested_id.to_string();
+        let state_parent = parent(vec![child("nested", "Done")]);
+        let resource = |issue_id: &IssueId| LeaseResource {
+            issue_id: issue_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([
+                (parent_id.clone(), HierarchySnapshot::new(&state_parent)),
+                (nested_id.clone(), HierarchySnapshot::new(&nested_issue)),
+            ]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource(&leaf_id),
+                    owner: LeaseOwner::leaf_worker(&leaf_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource(&leaf_id),
+                    owner: LeaseOwner::ancestor(&nested_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::Review,
+                    resource: resource(&nested_id),
+                    owner: LeaseOwner::review_for_parent(&parent_id, &nested_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::Review,
+                    resource: resource(&leaf_id),
+                    owner: LeaseOwner::review_for_parent(&nested_id, &leaf_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource(&nested_id),
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("nested leases should acquire");
+
+        assert!(state.release_removed_subtree_leases(
+            &parent_id,
+            std::slice::from_ref(&nested_id),
+            2,
+        ));
+        assert!(
+            state.leases[..4]
+                .iter()
+                .all(|lease| lease.released_at == Some(2))
+        );
+        assert!(state.leases[4].active());
     }
 
     #[test]

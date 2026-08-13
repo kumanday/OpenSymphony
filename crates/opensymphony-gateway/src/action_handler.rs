@@ -620,6 +620,7 @@ fn build_audit_event(
                 "kind": format!("{:?}", action.target_entity.entity_kind).to_lowercase(),
                 "id": action.target_entity.entity_id,
             },
+            "payload": action.payload,
         }))
         .build()
 }

@@ -1444,8 +1444,10 @@ where
             scheduler
                 .interrupt_operator_cancel(target, observed_at)
                 .await?;
-        } else if let Some(target) = gateway_replan_target(&event) {
-            let changed = scheduler.replan_parent_target(target, observed_at).await?;
+        } else if let Some((target, accepted_generation)) = gateway_replan_request(&event) {
+            let changed = scheduler
+                .replan_parent_target(target, accepted_generation, observed_at)
+                .await?;
             let outcome = gateway_replan_outcome_event(&event, changed);
             journal
                 .append(outcome)
@@ -1471,7 +1473,7 @@ fn gateway_cancel_target(event: &EventRecord) -> Option<&str> {
     payload["target_entity"]["id"].as_str()
 }
 
-fn gateway_replan_target(event: &EventRecord) -> Option<&str> {
+fn gateway_replan_request(event: &EventRecord) -> Option<(&str, u64)> {
     match &event.kind {
         EventKind::GatewayActionDispatched { action } if action == "replan" => {}
         _ => return None,
@@ -1480,7 +1482,9 @@ fn gateway_replan_target(event: &EventRecord) -> Option<&str> {
     if payload["status"] != "accepted" {
         return None;
     }
-    payload["target_entity"]["id"].as_str()
+    let target = payload["target_entity"]["id"].as_str()?;
+    let accepted_generation = payload["payload"]["hierarchy_generation"].as_u64()?;
+    Some((target, accepted_generation))
 }
 
 fn gateway_replan_outcome_event(dispatch: &EventRecord, changed: bool) -> EventRecord {
@@ -1920,6 +1924,35 @@ mod tests {
             rejected.payload.as_ref().expect("rejection payload")["reason"],
             "target is not blocked by HierarchyChanged"
         );
+    }
+
+    #[test]
+    fn gateway_replan_request_requires_the_displayed_hierarchy_generation() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+                "payload": { "hierarchy_generation": 7 },
+            }))
+            .build();
+
+        assert_eq!(gateway_replan_request(&dispatch), Some(("COE-552", 7)));
+
+        let missing_generation = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+        assert_eq!(gateway_replan_request(&missing_generation), None);
     }
 
     #[test]
