@@ -1088,7 +1088,15 @@ fn resolve_central_config(
             });
         }
         if let Some(merge_method) = profile.merge_method.as_deref() {
-            required_literal(merge_method, "review_profiles.merge_method")?;
+            let merge_method = required_literal(merge_method, "review_profiles.merge_method")?;
+            if !matches!(
+                merge_method.to_ascii_lowercase().as_str(),
+                "merge" | "squash" | "rebase"
+            ) {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{profile_id}.merge_method"),
+                });
+            }
         }
         let _ = (profile.required_checks, profile.required_review);
     }
@@ -1614,6 +1622,7 @@ fn build_repository_checkouts(
             review_policy_generation,
             required_checks: review_profile.required_checks,
             required_review: review_profile.required_review,
+            merge_method: review_profile.merge_method.clone(),
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())

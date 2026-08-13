@@ -124,6 +124,7 @@ pub(super) struct RuntimeTrackerBackend {
     github_token: Option<String>,
     repository_checkouts: BTreeMap<String, CheckoutRepository>,
     repository_routing: Option<RepositoryRouting>,
+    active_states: HashSet<String>,
     terminal_states: HashSet<String>,
 }
 
@@ -344,6 +345,13 @@ pub(super) fn build_tracker_backend(
             .filter(|token| !token.trim().is_empty()),
         repository_checkouts,
         repository_routing,
+        active_states: workflow
+            .config
+            .tracker
+            .active_states
+            .iter()
+            .map(|state| normalized_state_name(state))
+            .collect(),
         terminal_states: workflow
             .config
             .tracker
@@ -1115,22 +1123,38 @@ impl RuntimeTrackerBackend {
                     .any(|candidate| candidate == provider_id)
             })
             && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
-        let policy_satisfied = if compatible && pull_request.merged_at.is_some() {
-            self.github_merge_policy_satisfied(
+        let merge_method_satisfied = if compatible && pull_request.merged_at.is_some() {
+            self.github_merge_method_satisfied(
                 &api_root,
                 segments[0],
                 segments[1],
-                segments[3],
-                repository,
                 pull_request.merge_commit_sha.as_deref(),
+                &pull_request,
+                repository,
             )
             .await?
+        } else {
+            false
+        };
+        let policy_satisfied = if compatible && pull_request.merged_at.is_some() {
+            merge_method_satisfied
+                && self
+                    .github_merge_policy_satisfied(
+                        &api_root,
+                        segments[0],
+                        segments[1],
+                        segments[3],
+                        repository,
+                        pull_request.merge_commit_sha.as_deref(),
+                    )
+                    .await?
         } else {
             false
         };
         Ok(GithubMergeEvidence {
             compatible,
             merged: compatible
+                && merge_method_satisfied
                 && policy_satisfied
                 && pull_request.merged_at.is_some()
                 && pull_request
@@ -1141,6 +1165,54 @@ impl RuntimeTrackerBackend {
             merge_repository_id: Some(merge_repository_id),
             created_at: pull_request.created_at,
         })
+    }
+
+    async fn github_merge_method_satisfied(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        merge_commit_sha: Option<&str>,
+        pull_request: &GitHubPullRequest,
+        repository: &CheckoutRepository,
+    ) -> Result<bool, LinearError> {
+        let Some(expected_method) = repository
+            .merge_method
+            .as_deref()
+            .map(str::trim)
+            .filter(|method| !method.is_empty())
+        else {
+            return Ok(true);
+        };
+        let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
+            return Ok(false);
+        };
+        match expected_method.to_ascii_lowercase().as_str() {
+            "squash" => Ok(github_merge_method_matches(
+                expected_method,
+                merge_commit_sha,
+                pull_request.squash_merge_commit_sha.as_deref(),
+                1,
+            )),
+            "merge" | "rebase" => {
+                if pull_request.squash_merge_commit_sha.is_some() {
+                    return Ok(false);
+                }
+                let endpoint = format!(
+                    "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}"
+                );
+                let commit = self
+                    .github_get_json::<GitHubCommit>(&endpoint, repository)
+                    .await?;
+                Ok(github_merge_method_matches(
+                    expected_method,
+                    merge_commit_sha,
+                    pull_request.squash_merge_commit_sha.as_deref(),
+                    commit.parents.len(),
+                ))
+            }
+            _ => Ok(false),
+        }
     }
 
     async fn github_get_json<T: DeserializeOwned>(
@@ -1367,6 +1439,11 @@ impl RuntimeTrackerBackend {
             let children = self.client.issues_by_identifiers(&identifiers).await?;
             for child in children {
                 let child_state = normalized_state_name(&child.state);
+                if self.active_states.contains(&child_state)
+                    || !self.terminal_states.contains(&child_state)
+                {
+                    return Ok((false, None, None, Vec::new(), Vec::new()));
+                }
                 if self.terminal_states.contains(&child_state) && child_state.contains("cancel") {
                     continue;
                 }
@@ -1433,6 +1510,9 @@ fn github_remote_authority(locator: &str) -> Option<String> {
     if locator.split('/').count() == 2 {
         return Some("github.com".to_owned());
     }
+    if let [authority, _owner, _repository] = locator.split('/').collect::<Vec<_>>().as_slice() {
+        return Some(normalize_github_authority(authority));
+    }
     None
 }
 
@@ -1444,13 +1524,41 @@ fn normalize_github_authority(authority: &str) -> String {
     }
 }
 
+fn github_merge_method_matches(
+    expected_method: &str,
+    merge_commit_sha: &str,
+    squash_merge_commit_sha: Option<&str>,
+    parent_count: usize,
+) -> bool {
+    match expected_method.trim().to_ascii_lowercase().as_str() {
+        "squash" => squash_merge_commit_sha.is_some_and(|sha| sha == merge_commit_sha),
+        "merge" => squash_merge_commit_sha.is_none() && parent_count > 1,
+        "rebase" => squash_merge_commit_sha.is_none() && parent_count <= 1,
+        _ => false,
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
     created_at: String,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
+    #[serde(default)]
+    squash_merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
     head: GitHubPullRequestHead,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommit {
+    #[serde(default)]
+    parents: Vec<GitHubCommitParent>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitParent {
+    #[allow(dead_code)]
+    sha: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -10786,6 +10894,53 @@ Run the scheduler.
             },
         ]);
         assert_eq!(selected, (true, Some("current-merge".to_owned()), None));
+    }
+
+    #[test]
+    fn github_merge_evidence_matches_configured_merge_method() {
+        assert!(github_merge_method_matches(
+            "squash",
+            "squash-commit",
+            Some("squash-commit"),
+            1,
+        ));
+        assert!(!github_merge_method_matches(
+            "squash",
+            "merge-commit",
+            None,
+            2,
+        ));
+        assert!(github_merge_method_matches(
+            "merge",
+            "merge-commit",
+            None,
+            2
+        ));
+        assert!(!github_merge_method_matches("merge", "commit", None, 1));
+        assert!(github_merge_method_matches(
+            "rebase",
+            "rebased-commit",
+            None,
+            1
+        ));
+        assert!(!github_merge_method_matches(
+            "rebase",
+            "squash-commit",
+            Some("squash-commit"),
+            1,
+        ));
+    }
+
+    #[test]
+    fn github_remote_authority_accepts_schemeless_enterprise_locator() {
+        assert_eq!(
+            github_remote_authority("github.enterprise.example/owner/repo"),
+            Some("github.enterprise.example".to_owned())
+        );
+        assert_eq!(
+            github_remote_authority("owner/repo"),
+            Some("github.com".to_owned())
+        );
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {

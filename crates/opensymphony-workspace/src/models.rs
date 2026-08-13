@@ -37,6 +37,8 @@ pub struct CheckoutRepository {
     pub required_checks: bool,
     #[serde(default)]
     pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";

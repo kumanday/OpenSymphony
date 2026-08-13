@@ -5243,6 +5243,7 @@ mod tests {
             review_policy_generation: String::new(),
             required_checks: false,
             required_review: false,
+            merge_method: None,
         };
 
         let error = manager

@@ -2965,6 +2965,7 @@ mod tests {
                 review_policy_generation: "review-policy".to_owned(),
                 required_checks: false,
                 required_review: false,
+                merge_method: None,
             },
         )]);
 
