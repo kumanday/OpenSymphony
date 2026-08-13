@@ -57,6 +57,9 @@ pub fn checkout_credential_environment_variables(
         if let Some(variable) = repository.credential_env.as_ref() {
             variables.insert(variable.clone());
         }
+        if let Some(variable) = repository.review_credential_env.as_ref() {
+            variables.insert(variable.clone());
+        }
         if repository.credential_kind == "ssh-agent" {
             variables.insert(SSH_AUTH_SOCK_ENV.to_owned());
         }

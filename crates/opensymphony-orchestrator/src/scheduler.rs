@@ -743,12 +743,10 @@ where
             ) {
             if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
                 self.record_full_detail_refresh(observed_at);
+                let hierarchy_changed = self.reconcile_hierarchy_snapshots(&tracker_snapshot)?;
                 let terminal_hierarchy_changed =
                     self.reconcile_terminal_hierarchy_snapshots(&tracker_snapshot)?;
-                if self.reconcile_hierarchy_snapshots(&tracker_snapshot)?
-                    || terminal_hierarchy_changed
-                    || self.hierarchy_state_dirty
-                {
+                if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
                     self.persist_orchestrator_state().await?;
                 }
                 self.fence_hierarchy_changed_runs(observed_at).await?;
@@ -1344,20 +1342,27 @@ where
                         .difference(&current_child_ids)
                         .cloned()
                         .collect::<Vec<_>>();
-                    Some((snapshot.generation, retained_child_ids, removed_child_ids))
+                    Some((
+                        snapshot.generation,
+                        current_child_ids,
+                        retained_child_ids,
+                        removed_child_ids,
+                    ))
                 } else {
                     None
                 }
             } else {
                 None
             };
-        if let Some((generation, retained_child_ids, removed_child_ids)) = reconciliation {
+        if let Some((generation, current_child_ids, retained_child_ids, removed_child_ids)) =
+            reconciliation
+        {
             self.parent_eligibility_checked_at.remove(&normalized.id);
             self.hierarchy_state
                 .rebind_leaf_leases(&retained_child_ids, generation);
             self.hierarchy_state
                 .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
-            for child_id in &retained_child_ids {
+            for child_id in &current_child_ids {
                 self.hierarchy_state
                     .run_hierarchy_generations
                     .entry(child_id.clone())
@@ -1401,12 +1406,10 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let hierarchy_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?;
         let terminal_hierarchy_changed =
             self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
-        if self.reconcile_hierarchy_snapshots(tracker_snapshot)?
-            || terminal_hierarchy_changed
-            || self.hierarchy_state_dirty
-        {
+        if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
             self.persist_orchestrator_state().await?;
         }
         if self.recovered {
@@ -2032,10 +2035,8 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        let terminal_hierarchy_changed =
-            self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
-        let durable_state_changed =
-            self.reconcile_hierarchy_snapshots(tracker_snapshot)? || terminal_hierarchy_changed;
+        let durable_state_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?
+            || self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
         self.fence_hierarchy_changed_runs(observed_at).await?;
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;

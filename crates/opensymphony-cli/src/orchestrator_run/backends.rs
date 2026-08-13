@@ -124,6 +124,7 @@ pub(super) struct RuntimeTrackerBackend {
     github_token: Option<String>,
     repository_checkouts: BTreeMap<String, CheckoutRepository>,
     repository_routing: Option<RepositoryRouting>,
+    terminal_states: HashSet<String>,
 }
 
 const GITHUB_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -343,6 +344,13 @@ pub(super) fn build_tracker_backend(
             .filter(|token| !token.trim().is_empty()),
         repository_checkouts,
         repository_routing,
+        terminal_states: workflow
+            .config
+            .tracker
+            .terminal_states
+            .iter()
+            .map(|state| normalized_state_name(state))
+            .collect(),
     })
 }
 
@@ -1191,6 +1199,12 @@ impl RuntimeTrackerBackend {
                     .and_then(|user| user.login)
                     .unwrap_or_else(|| format!("review-{}", latest_by_reviewer.len()));
                 let submitted_at = review.submitted_at.unwrap_or_default();
+                if !matches!(
+                    review.state.to_ascii_lowercase().as_str(),
+                    "approved" | "changes_requested" | "dismissed"
+                ) {
+                    continue;
+                }
                 if latest_by_reviewer
                     .get(&reviewer)
                     .is_none_or(|(_, timestamp)| *timestamp < submitted_at)
@@ -1352,6 +1366,10 @@ impl RuntimeTrackerBackend {
                 .collect::<Vec<_>>();
             let children = self.client.issues_by_identifiers(&identifiers).await?;
             for child in children {
+                let child_state = normalized_state_name(&child.state);
+                if self.terminal_states.contains(&child_state) && child_state.contains("cancel") {
+                    continue;
+                }
                 if let Some(repository) = self.checkout_policy_for_issue(&child) {
                     saw_leaf = true;
                     let (
