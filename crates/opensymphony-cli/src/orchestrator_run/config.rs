@@ -1353,7 +1353,12 @@ fn resolve_central_config(
             .ok_or_else(|| CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.review_profile"),
             })?;
-        if !review_profile.provider.eq_ignore_ascii_case("github") {
+        let github_merge_evidence_required =
+            repository.remote.provider.eq_ignore_ascii_case("github")
+                || review_profile.required_checks
+                || review_profile.required_review;
+        if github_merge_evidence_required && !review_profile.provider.eq_ignore_ascii_case("github")
+        {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("review_profiles.{}.provider", repository.review_profile),
             });
