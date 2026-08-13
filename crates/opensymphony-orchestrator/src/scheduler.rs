@@ -986,9 +986,11 @@ where
             .executions
             .values()
             .find(|execution| {
-                execution
-                    .conversation()
-                    .is_some_and(|conversation| conversation.conversation_id.as_str() == target)
+                execution.conversation().is_some_and(|conversation| {
+                    let conversation_id = conversation.conversation_id.as_str();
+                    conversation_id.eq_ignore_ascii_case(target)
+                        || conversation_id_suffix(conversation_id).eq_ignore_ascii_case(target)
+                })
             })
             .map(|execution| execution.issue().identifier.as_str().to_owned())
             .unwrap_or_else(|| target.to_owned());
@@ -1357,6 +1359,7 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let mut cleared_in_flight_fence = false;
         let issue_ids = self
             .hierarchy_state
             .hierarchy
@@ -1391,6 +1394,18 @@ where
                 Some(WorkerAbortReason::TrackerInactive),
             )
             .await?;
+            if self
+                .executions
+                .get(&issue_id)
+                .is_some_and(|execution| execution.status() == SchedulerStatus::Released)
+                && let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id)
+            {
+                cleared_in_flight_fence |= snapshot.clear_in_flight_dispatch();
+            }
+        }
+        if cleared_in_flight_fence {
+            self.hierarchy_state_dirty = true;
+            self.persist_orchestrator_state().await?;
         }
         Ok(())
     }
@@ -2108,7 +2123,11 @@ where
                     }
                 }
                 if let Err(error) = self
-                    .release_parent_leases_after_finalization(&issue_id, observed_at)
+                    .release_parent_leases_after_finalization(
+                        &issue_id,
+                        record.issue.parent_id.as_ref(),
+                        observed_at,
+                    )
                     .await
                 {
                     retry_records.push(record);
@@ -3981,7 +4000,11 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
         ) && let Err(error) = self
-            .release_parent_leases_after_finalization(&issue_id, observed_at)
+            .release_parent_leases_after_finalization(
+                &issue_id,
+                execution.issue().parent_id.as_ref(),
+                observed_at,
+            )
             .await
         {
             self.insert_execution(issue_id, execution);
@@ -4227,8 +4250,12 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
         ) {
-            self.release_parent_leases_after_finalization(&execution.issue().id, observed_at)
-                .await?;
+            self.release_parent_leases_after_finalization(
+                &execution.issue().id,
+                execution.issue().parent_id.as_ref(),
+                observed_at,
+            )
+            .await?;
         }
         if reason == ReleaseReason::RetryExhausted {
             let normal_retry_count = execution
@@ -4294,10 +4321,12 @@ where
     async fn release_parent_leases_after_finalization(
         &mut self,
         parent_id: &IssueId,
+        higher_parent_id: Option<&IssueId>,
         released_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
         let mut next_state = self.hierarchy_state.clone();
-        let has_higher_parent = next_state.has_ancestor_edge(parent_id);
+        let has_higher_parent =
+            higher_parent_id.is_some() || next_state.has_ancestor_edge(parent_id);
         let undispatched_root = !has_higher_parent
             && next_state
                 .hierarchy
@@ -4833,7 +4862,10 @@ where
         if issue.parent_id.is_none() && !self.hierarchy_state.has_ancestor_edge(&issue.id) {
             return Ok(false);
         }
-        if self.hierarchy_state.has_dispatched_ancestor(&issue.id) {
+        if self
+            .hierarchy_state
+            .has_active_dispatched_ancestor(&issue.id)
+        {
             return Ok(false);
         }
         if let Some(parent_id) = issue.parent_id.as_ref()
@@ -5701,9 +5733,19 @@ fn current_epoch_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn conversation_id_suffix(value: &str) -> &str {
+    value.get(value.len().saturating_sub(8)..).unwrap_or(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_suffix_matches_gateway_alias_shape() {
+        assert_eq!(conversation_id_suffix("conv-123456789"), "23456789");
+        assert_eq!(conversation_id_suffix("short"), "short");
+    }
 
     fn issue_with_project(project_id: Option<&str>, project_slug: Option<&str>) -> NormalizedIssue {
         NormalizedIssue {

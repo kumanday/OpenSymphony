@@ -58,6 +58,12 @@ pub struct HierarchySnapshot {
     pub dispatched_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_intent_generation: Option<u64>,
+    /// The generation of a worker that was already dispatched when a frozen
+    /// scope changed. Keep this fence until the scheduler observes the old
+    /// execution stopped; clearing `dispatched_generation` alone would let a
+    /// descendant mutate a checkout under the still-running worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight_generation: Option<u64>,
 }
 
 impl HierarchySnapshot {
@@ -74,6 +80,7 @@ impl HierarchySnapshot {
             blocked_reason: None,
             dispatched_generation: None,
             dispatch_intent_generation: None,
+            in_flight_generation: None,
         };
         snapshot.required_child_edges = child_edges(&parent.sub_issues, canceled_states);
         snapshot
@@ -107,8 +114,12 @@ impl HierarchySnapshot {
             return HierarchyReconciliation::Unchanged;
         }
 
+        let previous_generation = self.generation;
         self.generation = self.generation.saturating_add(1);
         self.required_child_edges = next_edges;
+        if self.frozen && self.dispatched_generation == Some(previous_generation) {
+            self.in_flight_generation.get_or_insert(previous_generation);
+        }
         self.dispatched_generation = None;
         self.dispatch_intent_generation = None;
         if self.frozen {
@@ -141,6 +152,7 @@ impl HierarchySnapshot {
         self.blocked_reason = None;
         self.dispatched_generation = None;
         self.dispatch_intent_generation = None;
+        self.in_flight_generation = None;
     }
 
     pub fn mark_dispatch_intent(&mut self) {
@@ -158,10 +170,19 @@ impl HierarchySnapshot {
     pub fn mark_dispatched(&mut self) {
         self.dispatched_generation = Some(self.generation);
         self.dispatch_intent_generation = None;
+        self.in_flight_generation = None;
     }
 
     pub fn dispatch_claimed(&self) -> bool {
         self.dispatched_generation == Some(self.generation)
+    }
+
+    pub fn has_dispatched_execution_fence(&self) -> bool {
+        self.dispatch_claimed() || self.in_flight_generation.is_some()
+    }
+
+    pub fn clear_in_flight_dispatch(&mut self) -> bool {
+        self.in_flight_generation.take().is_some()
     }
 }
 
@@ -888,7 +909,7 @@ impl DurableOrchestratorState {
                 {
                     continue;
                 }
-                if snapshot.dispatch_claimed()
+                if snapshot.has_dispatched_execution_fence()
                     && self.leases.iter().any(|lease| {
                         lease.active()
                             && lease.kind == LeaseKind::AncestorIntegration
@@ -970,6 +991,25 @@ mod tests {
         assert!(!snapshot.accepts_event(2));
         snapshot.replan();
         assert!(snapshot.accepts_event(2));
+    }
+
+    #[test]
+    fn frozen_scope_change_keeps_in_flight_dispatch_fence_until_replan() {
+        let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
+        snapshot.freeze().expect("initial scope should freeze");
+        snapshot.mark_dispatched();
+
+        assert_eq!(
+            snapshot.reconcile(&[child("child-b", "Done")]),
+            HierarchyReconciliation::BlockedForReplanning { generation: 2 }
+        );
+        assert!(!snapshot.dispatch_claimed());
+        assert!(snapshot.has_dispatched_execution_fence());
+        assert!(snapshot.clear_in_flight_dispatch());
+        assert!(!snapshot.has_dispatched_execution_fence());
+
+        snapshot.replan();
+        assert!(!snapshot.has_dispatched_execution_fence());
     }
 
     #[test]
@@ -1074,6 +1114,7 @@ mod tests {
                     blocked_reason: None,
                     dispatched_generation: None,
                     dispatch_intent_generation: None,
+                    in_flight_generation: None,
                 },
             )]),
             ..Default::default()

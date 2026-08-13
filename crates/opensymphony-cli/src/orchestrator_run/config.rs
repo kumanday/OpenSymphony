@@ -1353,17 +1353,19 @@ fn resolve_central_config(
             .ok_or_else(|| CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.review_profile"),
             })?;
-        let github_merge_evidence_required =
-            repository.remote.provider.eq_ignore_ascii_case("github")
-                || review_profile.required_checks
-                || review_profile.required_review;
+        let github_merge_evidence_required = mode == CentralRoutingMode::ProjectSet
+            || repository.remote.provider.eq_ignore_ascii_case("github")
+            || review_profile.required_checks
+            || review_profile.required_review;
         if github_merge_evidence_required && !review_profile.provider.eq_ignore_ascii_case("github")
         {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("review_profiles.{}.provider", repository.review_profile),
             });
         }
-        if review_profile.required_checks || review_profile.required_review {
+        if repository.remote.provider.eq_ignore_ascii_case("github")
+            || review_profile.provider.eq_ignore_ascii_case("github")
+        {
             let credential = config
                 .credentials
                 .get(&review_profile.credential)
@@ -3957,6 +3959,52 @@ scheduler:
             error,
             CentralConfigError::InvalidReference { field }
                 if field == "review_profiles.github-standard.provider"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_unsupported_project_set_provider_without_policy_flags() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "      provider: github\n      provider_id: repo-42",
+                "      provider: git\n      provider_id: repo-42",
+            )
+            .replace(
+                "review_profiles:\n  github-standard:\n    provider: github",
+                "review_profiles:\n  github-standard:\n    provider: gitlab",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("project-set merge providers must be supported");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.provider"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_non_environment_github_review_credentials_without_policy_flags() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "    credential: github-review",
+                "    credential: github-ssh",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("GitHub merge evidence still needs an API credential");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.credential"
         ));
     }
 
