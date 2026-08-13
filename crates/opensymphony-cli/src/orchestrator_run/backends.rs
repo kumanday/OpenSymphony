@@ -1554,7 +1554,11 @@ impl RuntimeTrackerBackend {
             Err(LinearError::HttpStatus { status, .. })
                 if status == reqwest::StatusCode::NOT_FOUND =>
             {
-                Ok(None)
+                Err(LinearError::HttpStatus {
+                    status,
+                    body: "GitHub branch protection lookup was not authorized or unavailable: /protection/required_status_checks".to_owned(),
+                    retry_after: None,
+                })
             }
             Err(error) => Err(error),
         }
@@ -1593,11 +1597,7 @@ impl RuntimeTrackerBackend {
             .filter_map(|result| match result {
                 // A deleted historical PR or merge commit is incompatible
                 // evidence, not a failure of the current candidate set.
-                Err(LinearError::HttpStatus { status, .. })
-                    if status == reqwest::StatusCode::NOT_FOUND =>
-                {
-                    None
-                }
+                Err(error) if historical_pr_candidate_not_found(&error) => None,
                 result => Some(result),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1762,6 +1762,16 @@ impl RuntimeTrackerBackend {
             saw_leaf,
             provider_evidence_by_issue,
         ))
+    }
+}
+
+fn historical_pr_candidate_not_found(error: &LinearError) -> bool {
+    match error {
+        LinearError::HttpStatus { status, body, .. } => {
+            *status == reqwest::StatusCode::NOT_FOUND
+                && !body.contains("/protection/required_status_checks")
+        }
+        _ => false,
     }
 }
 
@@ -11580,6 +11590,23 @@ Run the scheduler.
             &[],
             Some(&any_app),
         ));
+    }
+
+    #[test]
+    fn historical_pr_404_filter_does_not_hide_protection_404() {
+        let historical = LinearError::HttpStatus {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: "GitHub API lookup failed for /pulls/7".to_owned(),
+            retry_after: None,
+        };
+        let protection = LinearError::HttpStatus {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: "GitHub API lookup failed for /protection/required_status_checks".to_owned(),
+            retry_after: None,
+        };
+
+        assert!(historical_pr_candidate_not_found(&historical));
+        assert!(!historical_pr_candidate_not_found(&protection));
     }
 
     #[test]

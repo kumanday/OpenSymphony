@@ -5119,7 +5119,7 @@ where
         issue: &NormalizedIssue,
         workspace: &WorkspaceRecord,
     ) -> Result<bool, SchedulerError> {
-        if issue.parent_id.is_none() && !self.hierarchy_state.has_ancestor_edge(&issue.id) {
+        if !self.hierarchy_state.has_ancestor_edge(&issue.id) {
             return Ok(false);
         }
         if self
