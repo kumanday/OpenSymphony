@@ -568,6 +568,10 @@ pub struct DurableOrchestratorState {
     /// recovery, when the in-memory execution history is not yet hydrated.
     #[serde(default)]
     pub run_started_at_by_issue: BTreeMap<IssueId, TimestampMs>,
+    /// Successful orchestrator outcomes that remain relevant to higher
+    /// parents after the completed workspace has been cleaned up.
+    #[serde(default)]
+    pub terminal_orchestrator_issues: BTreeSet<IssueId>,
 }
 
 impl Default for DurableOrchestratorState {
@@ -578,6 +582,7 @@ impl Default for DurableOrchestratorState {
             leases: Vec::new(),
             run_hierarchy_generations: BTreeMap::new(),
             run_started_at_by_issue: BTreeMap::new(),
+            terminal_orchestrator_issues: BTreeSet::new(),
         }
     }
 }
@@ -708,11 +713,42 @@ impl DurableOrchestratorState {
             .get(parent_id)
             .map(|snapshot| snapshot.generation)
             .or_else(|| self.run_hierarchy_generations.get(parent_id).copied());
+        self.resources_for_ancestor_owner(&owner, current_generation, current_subtree)
+    }
+
+    pub fn ancestor_resources_for_child(
+        &self,
+        parent_id: &IssueId,
+        child_id: &IssueId,
+    ) -> Vec<LeaseResource> {
+        let Some(snapshot) = self.hierarchy.get(parent_id) else {
+            return Vec::new();
+        };
+        if !snapshot
+            .required_child_edges
+            .iter()
+            .any(|edge| edge.required && edge.child_id == *child_id)
+        {
+            return Vec::new();
+        }
+        self.resources_for_ancestor_owner(
+            &LeaseOwner::ancestor(parent_id),
+            Some(snapshot.generation),
+            Some(self.subtree_issue_ids(child_id)),
+        )
+    }
+
+    fn resources_for_ancestor_owner(
+        &self,
+        owner: &LeaseOwner,
+        current_generation: Option<u64>,
+        current_subtree: Option<BTreeSet<IssueId>>,
+    ) -> Vec<LeaseResource> {
         let mut resources = BTreeMap::<LeaseResource, u64>::new();
         for lease in &self.leases {
             if lease.active()
                 && lease.kind == LeaseKind::AncestorIntegration
-                && lease.owner == owner
+                && &lease.owner == owner
                 && current_generation
                     .is_none_or(|generation| lease.hierarchy_generation == generation)
                 && current_subtree
@@ -749,18 +785,26 @@ impl DurableOrchestratorState {
 
         let previous_run_hierarchy_len = self.run_hierarchy_generations.len();
         let previous_run_started_len = self.run_started_at_by_issue.len();
+        let previous_terminal_outcomes_len = self.terminal_orchestrator_issues.len();
         self.run_hierarchy_generations
             .retain(|issue_id, _| live_issue_ids.contains(issue_id));
         self.run_started_at_by_issue
             .retain(|issue_id, _| live_issue_ids.contains(issue_id));
+        self.terminal_orchestrator_issues
+            .retain(|issue_id| live_issue_ids.contains(issue_id));
         previous_run_hierarchy_len != self.run_hierarchy_generations.len()
             || previous_run_started_len != self.run_started_at_by_issue.len()
+            || previous_terminal_outcomes_len != self.terminal_orchestrator_issues.len()
     }
 
     fn current_subtree_issue_ids(&self, parent_id: &IssueId) -> Option<BTreeSet<IssueId>> {
         if !self.hierarchy.contains_key(parent_id) {
             return None;
         }
+        Some(self.subtree_issue_ids(parent_id))
+    }
+
+    fn subtree_issue_ids(&self, parent_id: &IssueId) -> BTreeSet<IssueId> {
         let mut subtree = BTreeSet::from([parent_id.clone()]);
         let mut pending = vec![parent_id.clone()];
         while let Some(issue_id) = pending.pop() {
@@ -778,7 +822,7 @@ impl DurableOrchestratorState {
                 }
             }
         }
-        Some(subtree)
+        subtree
     }
 
     pub fn release_obsolete_leaf_leases(
@@ -1265,17 +1309,22 @@ mod tests {
             run_hierarchy_generations: BTreeMap::from([(obsolete.clone(), 1)]),
             run_started_at_by_issue: BTreeMap::from([
                 (retained.clone(), TimestampMs::new(10)),
-                (obsolete, TimestampMs::new(20)),
+                (obsolete.clone(), TimestampMs::new(20)),
             ]),
+            terminal_orchestrator_issues: BTreeSet::from([retained.clone(), obsolete]),
             ..Default::default()
         };
 
         assert!(state.prune_obsolete_run_boundaries(&BTreeSet::from([retained.clone()])));
         assert_eq!(
             state.run_started_at_by_issue,
-            BTreeMap::from([(retained, TimestampMs::new(10))])
+            BTreeMap::from([(retained.clone(), TimestampMs::new(10))])
         );
         assert!(state.run_hierarchy_generations.is_empty());
+        assert_eq!(
+            state.terminal_orchestrator_issues,
+            BTreeSet::from([retained])
+        );
     }
 
     #[test]
@@ -1401,6 +1450,59 @@ mod tests {
         assert_eq!(
             state.descendant_resources_for(&parent_id),
             vec![current_resource]
+        );
+    }
+
+    #[test]
+    fn ancestor_resources_for_child_ignore_sibling_resources() {
+        let parent_id = IssueId::new("parent").expect("parent");
+        let first_child_id = IssueId::new("first-child").expect("first child");
+        let second_child_id = IssueId::new("second-child").expect("second child");
+        let repository_id = CanonicalRepositoryId::new("github:repo").expect("repository");
+        let first_resource = LeaseResource {
+            issue_id: first_child_id.clone(),
+            repository_id: repository_id.clone(),
+            checkout_generation: "first".to_owned(),
+        };
+        let second_resource = LeaseResource {
+            issue_id: second_child_id.clone(),
+            repository_id,
+            checkout_generation: "second".to_owned(),
+        };
+        let snapshot = HierarchySnapshot::new(&parent(vec![
+            child("first-child", "Done"),
+            child("second-child", "Done"),
+        ]));
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: first_resource.clone(),
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: second_resource,
+                    owner: LeaseOwner::ancestor(&parent_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 2,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("ancestor resources should acquire");
+
+        assert_eq!(
+            state.ancestor_resources_for_child(&parent_id, &first_child_id),
+            vec![first_resource]
         );
     }
 

@@ -2262,6 +2262,9 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
+                if record.successful_run && !record.had_in_flight_run {
+                    self.record_terminal_orchestrator_success(&issue_id).await?;
+                }
                 if let Some(recovered_run) = record.recovered_run.as_ref() {
                     // A tracker terminal state does not prove that a run which
                     // was in flight at restart has stopped. Fence and stop the
@@ -3778,6 +3781,9 @@ where
                         .run_started_at_by_issue
                         .insert(issue_id.clone(), observed_at)
                         .is_none_or(|previous| previous != observed_at);
+                    self.hierarchy_state
+                        .terminal_orchestrator_issues
+                        .remove(&issue_id);
                     if !execution.issue().sub_issues.is_empty()
                         && self.hierarchy_state.hierarchy.contains_key(&issue_id)
                     {
@@ -4194,6 +4200,14 @@ where
         } else {
             reason
         };
+        let successful_terminal_outcome = reason == ReleaseReason::Completed
+            || (reason == ReleaseReason::TrackerTerminal
+                && execution
+                    .last_worker_outcome()
+                    .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
+        if successful_terminal_outcome {
+            self.record_terminal_orchestrator_success(&issue_id).await?;
+        }
         if cleanup_terminal && let Err(error) = self.retain_terminal_child_lease(&execution).await {
             self.insert_execution(issue_id, execution);
             return Err(error);
@@ -4448,6 +4462,15 @@ where
         if cleanup_terminal {
             self.retain_terminal_child_lease(&execution).await?;
         }
+        let successful_terminal_outcome = reason == ReleaseReason::Completed
+            || (reason == ReleaseReason::TrackerTerminal
+                && outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
+        if successful_terminal_outcome {
+            self.record_terminal_orchestrator_success(&execution.issue().id)
+                .await?;
+        }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
@@ -4518,6 +4541,20 @@ where
             }
         }
         Ok(execution)
+    }
+
+    async fn record_terminal_orchestrator_success(
+        &mut self,
+        issue_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        if self
+            .hierarchy_state
+            .terminal_orchestrator_issues
+            .insert(issue_id.clone())
+        {
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
     }
 
     async fn release_parent_leases_after_finalization(
@@ -4750,7 +4787,30 @@ where
         };
         let mut released_canceled_subtree_holds = false;
         for child in &mut evidence.children {
+            let child_execution_is_not_terminal =
+                self.executions
+                    .get(&child.child_id)
+                    .is_some_and(|execution| {
+                        matches!(
+                            execution.status(),
+                            SchedulerStatus::Claimed
+                                | SchedulerStatus::Running
+                                | SchedulerStatus::RetryQueued
+                        )
+                    });
+            let child_orchestrator_terminal = child.orchestrator_terminal
+                || self
+                    .hierarchy_state
+                    .terminal_orchestrator_issues
+                    .contains(&child.child_id);
             if !child.merge_required {
+                if child_execution_is_not_terminal || !child_orchestrator_terminal {
+                    child.orchestrator_terminal = false;
+                    child.unresolved_failure =
+                        Some("child orchestrator outcome is not durably terminal".to_owned());
+                    continue;
+                }
+                child.orchestrator_terminal = true;
                 released_canceled_subtree_holds |= self
                     .hierarchy_state
                     .release_subtree_evidence_for_undispatched_parent(
@@ -4785,8 +4845,9 @@ where
                 continue;
             }
             if !child.orchestrator_terminal {
-                child.orchestrator_terminal =
-                    self.executions
+                child.orchestrator_terminal = child_orchestrator_terminal
+                    || self
+                        .executions
                         .get(&child.child_id)
                         .is_some_and(|execution| {
                             matches!(
@@ -4826,7 +4887,7 @@ where
                 } else {
                     let retry_resources = self
                         .hierarchy_state
-                        .descendant_resources_for(&normalized.id);
+                        .ancestor_resources_for_child(&normalized.id, &child.child_id);
                     let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
                     let leaf_resource = self
                         .hierarchy_state
