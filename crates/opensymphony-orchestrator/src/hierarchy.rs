@@ -317,6 +317,12 @@ pub enum LeaseError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderEvidenceBoundary {
+    pub issue_id: IssueId,
+    pub evidence_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildEligibilityEvidence {
     pub child_id: IssueId,
     pub hierarchy_generation: u64,
@@ -345,6 +351,11 @@ pub struct ChildEligibilityEvidence {
     /// previously merged PR on the same branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_evidence_at: Option<TimestampMs>,
+    /// Provider evidence for every repository-backed descendant leaf. The
+    /// aggregate timestamp remains for compatibility, while nested parents
+    /// need each leaf boundary to fence reactivated descendants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_evidence_by_issue: Vec<ProviderEvidenceBoundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<LeaseResource>,
     /// Repository-neutral child parents contribute the retained descendant
@@ -381,6 +392,7 @@ impl ParentEligibilityEvidence {
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
                     provider_evidence_at: None,
+                    provider_evidence_by_issue: Vec::new(),
                     resource: None,
                     resources: Vec::new(),
                     unresolved_failure: None,
@@ -406,6 +418,7 @@ impl ParentEligibilityEvidence {
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
                     provider_evidence_at: None,
+                    provider_evidence_by_issue: Vec::new(),
                     resource: None,
                     resources: Vec::new(),
                     unresolved_failure: None,
@@ -1237,6 +1250,7 @@ mod tests {
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,
+                provider_evidence_by_issue: Vec::new(),
                 resource: Some(resource.clone()),
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -1272,6 +1286,7 @@ mod tests {
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,
+                provider_evidence_by_issue: Vec::new(),
                 resource: None,
                 resources: vec![resource],
                 unresolved_failure: None,
@@ -1303,6 +1318,7 @@ mod tests {
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,
+                provider_evidence_by_issue: Vec::new(),
                 resource: None,
                 resources: Vec::new(),
                 unresolved_failure: None,

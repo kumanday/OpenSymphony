@@ -40,8 +40,8 @@ use crate::opensymphony_openhands::{
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
-    ParentEligibilityEvidence, RecoveredRun, RecoveryRecord, RetryExhaustionRecord,
-    RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    ParentEligibilityEvidence, ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord,
+    RetryExhaustionRecord, RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend,
 };
@@ -959,6 +959,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_result_commits,
                 provider_evidence_at,
                 merge_required,
+                provider_evidence_by_issue,
             ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
                 let (
                     provider_merge_confirmed,
@@ -967,6 +968,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     merge_repository_ids,
                     merge_result_commits,
                     provider_evidence_at,
+                    provider_evidence_by_issue,
                 ) = self.direct_merge_evidence(child, repository).await?;
                 (
                     provider_merge_confirmed,
@@ -976,9 +978,19 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     merge_result_commits,
                     provider_evidence_at,
                     true,
+                    provider_evidence_by_issue,
                 )
             } else if child.sub_issues.is_empty() {
-                (false, None, None, Vec::new(), Vec::new(), None, true)
+                (
+                    false,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    true,
+                    Vec::new(),
+                )
             } else {
                 self.descendant_merge_evidence(child).await?
             };
@@ -995,6 +1007,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_repository_id,
                 merge_repository_ids,
                 provider_evidence_at,
+                provider_evidence_by_issue,
                 resource: None,
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -1558,6 +1571,7 @@ impl RuntimeTrackerBackend {
             Vec<CanonicalRepositoryId>,
             Vec<String>,
             Option<TimestampMs>,
+            Vec<ProviderEvidenceBoundary>,
         ),
         LinearError,
     > {
@@ -1580,6 +1594,14 @@ impl RuntimeTrackerBackend {
             select_current_github_merge_evidence(evidence);
         let commits = commit.iter().cloned().collect();
         let repository_ids = repository_id.iter().cloned().collect();
+        let provider_evidence_by_issue = provider_evidence_at
+            .map(|evidence_at| {
+                vec![ProviderEvidenceBoundary {
+                    issue_id: IssueId::new(issue.id.clone()).expect("tracker ids are validated"),
+                    evidence_at,
+                }]
+            })
+            .unwrap_or_default();
         Ok((
             confirmed,
             commit,
@@ -1587,6 +1609,7 @@ impl RuntimeTrackerBackend {
             repository_ids,
             commits,
             provider_evidence_at,
+            provider_evidence_by_issue,
         ))
     }
 
@@ -1602,6 +1625,7 @@ impl RuntimeTrackerBackend {
             Vec<String>,
             Option<TimestampMs>,
             bool,
+            Vec<ProviderEvidenceBoundary>,
         ),
         LinearError,
     > {
@@ -1609,6 +1633,7 @@ impl RuntimeTrackerBackend {
         let mut commits = Vec::new();
         let mut repository_ids = BTreeSet::new();
         let mut provider_evidence_at: Option<TimestampMs> = None;
+        let mut provider_evidence_by_issue = Vec::new();
         let mut saw_leaf = false;
         while !pending.is_empty() {
             let identifiers = pending
@@ -1622,7 +1647,16 @@ impl RuntimeTrackerBackend {
                 if self.active_states.contains(&child_state)
                     || !self.terminal_states.contains(&child_state)
                 {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
                 }
                 if matches!(
                     child.state_kind,
@@ -1636,7 +1670,16 @@ impl RuntimeTrackerBackend {
                     saw_leaf = true;
                     leaf_children.push((child, repository.clone()));
                 } else if child.sub_issues.is_empty() {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
                 } else {
                     pending.extend(child.sub_issues);
                 }
@@ -1656,21 +1699,41 @@ impl RuntimeTrackerBackend {
                     _child_repository_ids,
                     child_commits,
                     child_evidence_at,
+                    child_evidence_by_issue,
                 ) = result?;
                 if !confirmed {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
                 }
                 if let Some(repository_id) = child_repository_id {
                     repository_ids.insert(repository_id);
                 }
                 commits.extend(child_commits);
+                provider_evidence_by_issue.extend(child_evidence_by_issue);
                 provider_evidence_at = match (provider_evidence_at, child_evidence_at) {
                     (Some(current), Some(candidate)) => Some(current.min(candidate)),
                     (None, candidate) => candidate,
                     (current, None) => current,
                 };
                 if commit.is_none() {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -1686,6 +1749,7 @@ impl RuntimeTrackerBackend {
             commits,
             provider_evidence_at,
             saw_leaf,
+            provider_evidence_by_issue,
         ))
     }
 }

@@ -732,6 +732,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             merge_repository_id: None,
             merge_repository_ids: Vec::new(),
             provider_evidence_at: None,
+            provider_evidence_by_issue: Vec::new(),
             resource: Some(resource),
             resources: Vec::new(),
             unresolved_failure: None,

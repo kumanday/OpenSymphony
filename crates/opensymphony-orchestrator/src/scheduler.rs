@@ -4484,21 +4484,22 @@ where
         let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
             return Ok(false);
         };
-        if snapshot.dispatch_claimed() {
+        if snapshot.dispatch_claimed() && !allow_retry {
             return Ok(allow_retry);
         }
-        if snapshot.dispatch_intended() {
+        if snapshot.dispatch_intended() && !allow_retry {
             return Ok(false);
         }
-        if self
-            .parent_eligibility_checked_at
-            .get(&normalized.id)
-            .is_some_and(|checked_at| {
-                checked_at
-                    .as_u64()
-                    .saturating_add(DISPATCH_DISCOVERY_INTERVAL_MS)
-                    > observed_at.as_u64()
-            })
+        if !allow_retry
+            && self
+                .parent_eligibility_checked_at
+                .get(&normalized.id)
+                .is_some_and(|checked_at| {
+                    checked_at
+                        .as_u64()
+                        .saturating_add(DISPATCH_DISCOVERY_INTERVAL_MS)
+                        > observed_at.as_u64()
+                })
         {
             return Ok(false);
         }
@@ -4569,17 +4570,24 @@ where
                             )
                         });
             }
+            let direct_provider_evidence_is_stale =
+                child.provider_evidence_at.is_some_and(|evidence_at| {
+                    !self.hierarchy_state.hierarchy.contains_key(&child.child_id)
+                        && self
+                            .executions
+                            .get(&child.child_id)
+                            .and_then(|execution| execution.last_worker_outcome())
+                            .is_some_and(|outcome| evidence_at < outcome.started_at)
+                });
+            let descendant_provider_evidence_is_stale =
+                child.provider_evidence_by_issue.iter().any(|boundary| {
+                    self.executions
+                        .get(&boundary.issue_id)
+                        .and_then(|execution| execution.last_worker_outcome())
+                        .is_some_and(|outcome| boundary.evidence_at < outcome.started_at)
+                });
             if child.provider_merge_confirmed
-                && !self.hierarchy_state.hierarchy.contains_key(&child.child_id)
-                && self
-                    .executions
-                    .get(&child.child_id)
-                    .and_then(|execution| execution.last_worker_outcome())
-                    .is_some_and(|outcome| {
-                        child
-                            .provider_evidence_at
-                            .is_some_and(|evidence_at| evidence_at < outcome.started_at)
-                    })
+                && (direct_provider_evidence_is_stale || descendant_provider_evidence_is_stale)
             {
                 child.orchestrator_terminal = false;
                 child.unresolved_failure =

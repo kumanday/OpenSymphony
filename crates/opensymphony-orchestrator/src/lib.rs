@@ -18,7 +18,7 @@ pub use crate::opensymphony_domain::{
 pub use hierarchy::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchyBlockedReason, HierarchyChildEdge,
     HierarchyReconciliation, HierarchySnapshot, LeaseError, LeaseKind, LeaseOwner, LeaseRecord,
-    LeaseResource, ParentEligibilityEvidence,
+    LeaseResource, ParentEligibilityEvidence, ProviderEvidenceBoundary,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,
