@@ -44,6 +44,11 @@ const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
 const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn parent_eligibility_timeout(required_child_count: usize) -> Duration {
+    let multiplier = u32::try_from(required_child_count.max(1)).unwrap_or(u32::MAX);
+    PARENT_ELIGIBILITY_TIMEOUT.saturating_mul(multiplier)
+}
+
 fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
     let Some(workspace) = execution.workspace() else {
         return false;
@@ -563,6 +568,7 @@ pub struct Scheduler<T, W, M> {
     durable_state_loaded: bool,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
+    pending_finished_updates: BTreeMap<IssueId, (IssueExecution, WorkerOutcomeRecord)>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     pending_retry_recovery: Option<Vec<RetryPendingRecord>>,
@@ -606,6 +612,7 @@ where
             durable_state_loaded: false,
             pending_retry_persistence: BTreeMap::new(),
             pending_retry_exhaustion_persistence: BTreeMap::new(),
+            pending_finished_updates: BTreeMap::new(),
             pending_recovery: None,
             pending_retry_exhaustion: None,
             pending_retry_recovery: None,
@@ -733,6 +740,7 @@ where
         self.load_recovery_state().await?;
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
+        self.flush_pending_finished_updates().await?;
 
         self.expire_linear_cooldown(observed_at);
         let pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
@@ -757,6 +765,18 @@ where
         } else {
             None
         };
+
+        if !self.linear_cooldown_active(observed_at)
+            && pre_update_full_snapshot.is_none()
+            && due(
+                self.last_running_state_refresh_at,
+                RUNNING_STATE_REFRESH_INTERVAL_MS,
+                observed_at,
+            )
+            && self.has_reconcilable_executions()
+        {
+            self.refresh_running_issue_states(observed_at).await?;
+        }
 
         let updates = self
             .worker
@@ -797,14 +817,6 @@ where
                 observed_at,
             ) {
                 self.refresh_terminal_issues(observed_at).await?;
-            }
-            if due(
-                self.last_running_state_refresh_at,
-                RUNNING_STATE_REFRESH_INTERVAL_MS,
-                observed_at,
-            ) && self.has_reconcilable_executions()
-            {
-                self.refresh_running_issue_states(observed_at).await?;
             }
             if due(
                 self.last_dispatch_discovery_at,
@@ -919,6 +931,31 @@ where
             return Err(error);
         }
         Ok(true)
+    }
+
+    /// Replan a hierarchy parent addressed by the tracker identifier exposed
+    /// by the gateway action envelope. The scheduler resolves the identifier
+    /// through the tracker before mutating its durable hierarchy state.
+    pub async fn replan_parent_target(
+        &mut self,
+        target: &str,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let issues = self
+            .tracker
+            .issues_by_identifiers(&[target.to_owned()])
+            .await
+            .map_err(|error| SchedulerError::Tracker {
+                detail: error.to_string(),
+            })?;
+        let Some(issue) = issues
+            .into_iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(target) || issue.id == target)
+        else {
+            return Ok(false);
+        };
+        let issue_id = IssueId::new(issue.id)?;
+        self.replan_parent(&issue_id, observed_at).await
     }
 
     pub async fn run_until_shutdown<F>(&mut self, shutdown: F) -> Result<(), SchedulerError>
@@ -1067,26 +1104,62 @@ where
             return Ok(());
         }
 
-        let snapshots = match self.tracker.issue_states_by_ids(&issue_ids).await {
-            Ok(snapshots) => snapshots,
-            Err(error) => {
-                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
-                    return Ok(());
+        let has_running_parent = issue_ids.iter().any(|issue_id| {
+            IssueId::new(issue_id.clone())
+                .ok()
+                .is_some_and(|issue_id| self.parent_issue_ids.contains(&issue_id))
+        });
+        let active = if has_running_parent {
+            match self.tracker.candidate_issues().await {
+                Ok(active) => active,
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(());
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
                 }
-                return Err(SchedulerError::Tracker {
-                    detail: error.to_string(),
-                });
+            }
+        } else {
+            Vec::new()
+        };
+        let active_ids = active
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect::<HashSet<_>>();
+        let state_issue_ids = issue_ids
+            .into_iter()
+            .filter(|issue_id| !active_ids.contains(issue_id.as_str()))
+            .collect::<Vec<_>>();
+        let snapshots = if state_issue_ids.is_empty() {
+            Vec::new()
+        } else {
+            match self.tracker.issue_states_by_ids(&state_issue_ids).await {
+                Ok(snapshots) => snapshots,
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(());
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
+                }
             }
         };
         self.last_running_state_refresh_at = Some(observed_at);
         let tracker_snapshot = TrackerSnapshot {
-            active: Vec::new(),
-            active_index: HashMap::new(),
+            active_index: active
+                .iter()
+                .enumerate()
+                .map(|(index, issue)| (issue.id.clone(), index))
+                .collect(),
             terminal_state_by_id: HashMap::new(),
             state_by_id: snapshots
                 .into_iter()
                 .map(|snapshot| (snapshot.id.clone(), snapshot))
                 .collect(),
+            active,
             terminal: Vec::new(),
         };
         self.reconcile_tracker_state(&tracker_snapshot, observed_at)
@@ -1257,14 +1330,16 @@ where
         tracker_issue: &TrackerIssue,
     ) -> Result<bool, SchedulerError> {
         let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
-        if self.terminal_child_failure_ids.contains(&normalized.id)
-            && self.executions.get(&normalized.id).is_none_or(|execution| {
-                execution.retry().is_none()
-                    && execution.last_worker_outcome().is_none_or(|outcome| {
-                        matches!(outcome.outcome, WorkerOutcomeKind::Succeeded)
-                    })
-            })
-        {
+        let terminal_failure_resolved =
+            self.executions
+                .get(&normalized.id)
+                .is_some_and(|execution| {
+                    execution.retry().is_none()
+                        && execution.last_worker_outcome().is_some_and(|outcome| {
+                            matches!(outcome.outcome, WorkerOutcomeKind::Succeeded)
+                        })
+                });
+        if self.terminal_child_failure_ids.contains(&normalized.id) && terminal_failure_resolved {
             self.terminal_child_failure_ids.remove(&normalized.id);
         }
         let existing_snapshot = self.hierarchy_state.hierarchy.get(&normalized.id).cloned();
@@ -1276,6 +1351,7 @@ where
             });
         if !should_retain_parent_identity {
             self.parent_issue_ids.remove(&normalized.id);
+            self.terminal_child_failure_ids.remove(&normalized.id);
             self.hierarchy_state
                 .run_hierarchy_generations
                 .remove(&normalized.id);
@@ -1292,7 +1368,6 @@ where
             }
             return Ok(false);
         }
-        self.terminal_child_failure_ids.remove(&normalized.id);
         self.parent_issue_ids.insert(normalized.id.clone());
         if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
             self.hierarchy_state.hierarchy.insert(
@@ -3520,13 +3595,18 @@ where
                     };
                     let finished_at = outcome.finished_at;
                     let original_execution = execution.clone();
+                    let finished_outcome = outcome.clone();
                     let execution = match self
                         .resolve_finished_execution(execution, outcome, finished_at)
                         .await
                     {
                         Ok(execution) => execution,
                         Err(error) => {
-                            self.insert_execution(issue_id.clone(), original_execution);
+                            let mut retained_execution = original_execution;
+                            retained_execution.retain_worker_outcome(finished_outcome.clone());
+                            self.insert_execution(issue_id.clone(), retained_execution.clone());
+                            self.pending_finished_updates
+                                .insert(issue_id.clone(), (retained_execution, finished_outcome));
                             if first_error.is_none() {
                                 first_error = Some(error);
                             }
@@ -4209,6 +4289,37 @@ where
         first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
     }
 
+    async fn flush_pending_finished_updates(&mut self) -> Result<(), SchedulerError> {
+        let pending = std::mem::take(&mut self.pending_finished_updates);
+        let mut first_error = None;
+        for (issue_id, (execution, outcome)) in pending {
+            let finished_at = outcome.finished_at;
+            let retry_execution = execution.clone();
+            match self
+                .resolve_finished_execution(execution, outcome.clone(), finished_at)
+                .await
+            {
+                Ok(execution) => {
+                    self.insert_execution(issue_id.clone(), execution);
+                    if let Err(error) = self.persist_retry_if_queued(&issue_id).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                Err(error) => {
+                    self.insert_execution(issue_id.clone(), retry_execution.clone());
+                    self.pending_finished_updates
+                        .insert(issue_id.clone(), (retry_execution, outcome));
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     async fn parent_dispatch_is_eligible(
         &mut self,
         tracker_issue: &TrackerIssue,
@@ -4239,8 +4350,9 @@ where
         }
         self.parent_eligibility_checked_at
             .insert(normalized.id.clone(), observed_at);
+        let eligibility_timeout = parent_eligibility_timeout(snapshot.required_child_edges.len());
         let mut evidence = match timeout(
-            PARENT_ELIGIBILITY_TIMEOUT,
+            eligibility_timeout,
             self.tracker.parent_eligibility(tracker_issue, &snapshot),
         )
         .await
@@ -4248,7 +4360,7 @@ where
             Err(_) => {
                 warn!(
                     parent = %normalized.identifier,
-                    timeout = ?PARENT_ELIGIBILITY_TIMEOUT,
+                    timeout = ?eligibility_timeout,
                     "parent eligibility provider lookup timed out; keeping parent blocked"
                 );
                 return Ok(false);

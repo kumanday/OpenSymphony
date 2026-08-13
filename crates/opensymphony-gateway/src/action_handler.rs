@@ -150,6 +150,7 @@ impl ActionHandler {
         let validated = match action.action_kind {
             ActionKind::Retry => validate_retry(&action, issue.as_ref(), &action_id),
             ActionKind::Cancel => validate_cancel(&action, issue.as_ref(), &action_id),
+            ActionKind::Replan => validate_replan(&action, issue.as_ref(), &action_id),
             ActionKind::Rehydrate => validate_rehydrate(&action, issue.as_ref(), &action_id),
             ActionKind::Comment => validate_comment(&action, issue.as_ref(), &action_id),
             ActionKind::Pause => validate_pause(&action, issue.as_ref(), &action_id),
@@ -288,6 +289,24 @@ fn validate_cancel(
         issue,
         EventKind::GatewayActionDispatched {
             action: "cancel".into(),
+        },
+    )
+}
+
+fn validate_replan(
+    action: &ActionDispatch,
+    issue: Option<&ControlPlaneIssueSnapshot>,
+    action_id: &str,
+) -> ValidatedAction {
+    let Some(issue) = issue else {
+        return reject(action, action_id, "target issue not found in snapshot");
+    };
+    accepted(
+        action,
+        action_id,
+        issue,
+        EventKind::GatewayActionDispatched {
+            action: "replan".into(),
         },
     )
 }

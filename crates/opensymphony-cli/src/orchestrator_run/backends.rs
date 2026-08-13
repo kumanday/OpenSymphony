@@ -1129,7 +1129,6 @@ impl RuntimeTrackerBackend {
                 segments[0],
                 segments[1],
                 pull_request.merge_commit_sha.as_deref(),
-                &pull_request,
                 repository,
             )
             .await?
@@ -1173,7 +1172,6 @@ impl RuntimeTrackerBackend {
         owner: &str,
         repository_name: &str,
         merge_commit_sha: Option<&str>,
-        pull_request: &GitHubPullRequest,
         repository: &CheckoutRepository,
     ) -> Result<bool, LinearError> {
         let Some(expected_method) = repository
@@ -1188,16 +1186,7 @@ impl RuntimeTrackerBackend {
             return Ok(false);
         };
         match expected_method.to_ascii_lowercase().as_str() {
-            "squash" => Ok(github_merge_method_matches(
-                expected_method,
-                merge_commit_sha,
-                pull_request.squash_merge_commit_sha.as_deref(),
-                1,
-            )),
-            "merge" | "rebase" => {
-                if pull_request.squash_merge_commit_sha.is_some() {
-                    return Ok(false);
-                }
+            "merge" => {
                 let endpoint = format!(
                     "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}"
                 );
@@ -1206,11 +1195,12 @@ impl RuntimeTrackerBackend {
                     .await?;
                 Ok(github_merge_method_matches(
                     expected_method,
-                    merge_commit_sha,
-                    pull_request.squash_merge_commit_sha.as_deref(),
                     commit.parents.len(),
                 ))
             }
+            "squash" | "rebase" => Err(LinearError::InvalidResponse(format!(
+                "GitHub REST merge evidence cannot distinguish `{expected_method}` from the other single-parent merge method; configure merge_method: merge or omit merge_method"
+            ))),
             _ => Ok(false),
         }
     }
@@ -1524,16 +1514,9 @@ fn normalize_github_authority(authority: &str) -> String {
     }
 }
 
-fn github_merge_method_matches(
-    expected_method: &str,
-    merge_commit_sha: &str,
-    squash_merge_commit_sha: Option<&str>,
-    parent_count: usize,
-) -> bool {
+fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bool {
     match expected_method.trim().to_ascii_lowercase().as_str() {
-        "squash" => squash_merge_commit_sha.is_some_and(|sha| sha == merge_commit_sha),
-        "merge" => squash_merge_commit_sha.is_none() && parent_count > 1,
-        "rebase" => squash_merge_commit_sha.is_none() && parent_count <= 1,
+        "merge" => parent_count > 1,
         _ => false,
     }
 }
@@ -1543,8 +1526,6 @@ struct GitHubPullRequest {
     created_at: String,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
-    #[serde(default)]
-    squash_merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
     head: GitHubPullRequestHead,
 }
@@ -10898,37 +10879,10 @@ Run the scheduler.
 
     #[test]
     fn github_merge_evidence_matches_configured_merge_method() {
-        assert!(github_merge_method_matches(
-            "squash",
-            "squash-commit",
-            Some("squash-commit"),
-            1,
-        ));
-        assert!(!github_merge_method_matches(
-            "squash",
-            "merge-commit",
-            None,
-            2,
-        ));
-        assert!(github_merge_method_matches(
-            "merge",
-            "merge-commit",
-            None,
-            2
-        ));
-        assert!(!github_merge_method_matches("merge", "commit", None, 1));
-        assert!(github_merge_method_matches(
-            "rebase",
-            "rebased-commit",
-            None,
-            1
-        ));
-        assert!(!github_merge_method_matches(
-            "rebase",
-            "squash-commit",
-            Some("squash-commit"),
-            1,
-        ));
+        assert!(github_merge_method_matches("merge", 2));
+        assert!(!github_merge_method_matches("merge", 1));
+        assert!(!github_merge_method_matches("squash", 1));
+        assert!(!github_merge_method_matches("rebase", 1));
     }
 
     #[test]

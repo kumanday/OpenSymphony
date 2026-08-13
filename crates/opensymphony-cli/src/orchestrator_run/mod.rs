@@ -1439,13 +1439,13 @@ where
             continue;
         }
         let sequence = event.sequence;
-        let Some(target) = gateway_cancel_target(&event) else {
-            *cursor = sequence;
-            continue;
-        };
-        scheduler
-            .interrupt_operator_cancel(target, observed_at)
-            .await?;
+        if let Some(target) = gateway_cancel_target(&event) {
+            scheduler
+                .interrupt_operator_cancel(target, observed_at)
+                .await?;
+        } else if let Some(target) = gateway_replan_target(&event) {
+            scheduler.replan_parent_target(target, observed_at).await?;
+        }
         *cursor = sequence;
     }
     Ok(())
@@ -1454,6 +1454,18 @@ where
 fn gateway_cancel_target(event: &EventRecord) -> Option<&str> {
     match &event.kind {
         EventKind::GatewayActionDispatched { action } if action == "cancel" => {}
+        _ => return None,
+    }
+    let payload = event.payload.as_ref()?;
+    if payload["status"] != "accepted" {
+        return None;
+    }
+    payload["target_entity"]["id"].as_str()
+}
+
+fn gateway_replan_target(event: &EventRecord) -> Option<&str> {
+    match &event.kind {
+        EventKind::GatewayActionDispatched { action } if action == "replan" => {}
         _ => return None,
     }
     let payload = event.payload.as_ref()?;
