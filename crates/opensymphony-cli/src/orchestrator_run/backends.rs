@@ -957,6 +957,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_repository_id,
                 merge_repository_ids,
                 merge_result_commits,
+                provider_evidence_at,
                 merge_required,
             ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
                 let (
@@ -965,6 +966,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     merge_repository_id,
                     merge_repository_ids,
                     merge_result_commits,
+                    provider_evidence_at,
                 ) = self.direct_merge_evidence(child, repository).await?;
                 (
                     provider_merge_confirmed,
@@ -972,10 +974,11 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     merge_repository_id,
                     merge_repository_ids,
                     merge_result_commits,
+                    provider_evidence_at,
                     true,
                 )
             } else if child.sub_issues.is_empty() {
-                (false, None, None, Vec::new(), Vec::new(), true)
+                (false, None, None, Vec::new(), Vec::new(), None, true)
             } else {
                 self.descendant_merge_evidence(child).await?
             };
@@ -991,6 +994,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_result_commits,
                 merge_repository_id,
                 merge_repository_ids,
+                provider_evidence_at,
                 resource: None,
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -1139,6 +1143,11 @@ impl RuntimeTrackerBackend {
         let pull_request = self
             .github_get_json::<GitHubPullRequest>(&endpoint, repository)
             .await?;
+        let provider_evidence_at = pull_request
+            .updated_at
+            .as_deref()
+            .or(Some(pull_request.created_at.as_str()))
+            .and_then(github_timestamp_ms);
         let compatible = pull_request.base.ref_name == repository.target_branch
             && pull_request
                 .base
@@ -1208,6 +1217,7 @@ impl RuntimeTrackerBackend {
             merge_commit_sha: pull_request.merge_commit_sha,
             merge_repository_id: Some(merge_repository_id),
             created_at: pull_request.created_at,
+            provider_evidence_at,
         })
     }
 
@@ -1544,6 +1554,7 @@ impl RuntimeTrackerBackend {
             Option<CanonicalRepositoryId>,
             Vec<CanonicalRepositoryId>,
             Vec<String>,
+            Option<TimestampMs>,
         ),
         LinearError,
     > {
@@ -1562,10 +1573,18 @@ impl RuntimeTrackerBackend {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        let (confirmed, commit, repository_id) = select_current_github_merge_evidence(evidence);
+        let (confirmed, commit, repository_id, provider_evidence_at) =
+            select_current_github_merge_evidence(evidence);
         let commits = commit.iter().cloned().collect();
         let repository_ids = repository_id.iter().cloned().collect();
-        Ok((confirmed, commit, repository_id, repository_ids, commits))
+        Ok((
+            confirmed,
+            commit,
+            repository_id,
+            repository_ids,
+            commits,
+            provider_evidence_at,
+        ))
     }
 
     async fn descendant_merge_evidence(
@@ -1578,6 +1597,7 @@ impl RuntimeTrackerBackend {
             Option<CanonicalRepositoryId>,
             Vec<CanonicalRepositoryId>,
             Vec<String>,
+            Option<TimestampMs>,
             bool,
         ),
         LinearError,
@@ -1585,6 +1605,7 @@ impl RuntimeTrackerBackend {
         let mut pending = parent.sub_issues.clone();
         let mut commits = Vec::new();
         let mut repository_ids = BTreeSet::new();
+        let mut provider_evidence_at: Option<TimestampMs> = None;
         let mut saw_leaf = false;
         while !pending.is_empty() {
             let identifiers = pending
@@ -1598,7 +1619,7 @@ impl RuntimeTrackerBackend {
                 if self.active_states.contains(&child_state)
                     || !self.terminal_states.contains(&child_state)
                 {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
                 }
                 if matches!(
                     child.state_kind,
@@ -1612,7 +1633,7 @@ impl RuntimeTrackerBackend {
                     saw_leaf = true;
                     leaf_children.push((child, repository.clone()));
                 } else if child.sub_issues.is_empty() {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
                 } else {
                     pending.extend(child.sub_issues);
                 }
@@ -1625,17 +1646,28 @@ impl RuntimeTrackerBackend {
                 .collect::<Vec<_>>()
                 .await;
             for result in merge_results {
-                let (confirmed, commit, child_repository_id, _child_repository_ids, child_commits) =
-                    result?;
+                let (
+                    confirmed,
+                    commit,
+                    child_repository_id,
+                    _child_repository_ids,
+                    child_commits,
+                    child_evidence_at,
+                ) = result?;
                 if !confirmed {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
                 }
                 if let Some(repository_id) = child_repository_id {
                     repository_ids.insert(repository_id);
                 }
                 commits.extend(child_commits);
+                provider_evidence_at = match (provider_evidence_at, child_evidence_at) {
+                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                    (None, candidate) => candidate,
+                    (current, None) => current,
+                };
                 if commit.is_none() {
-                    return Ok((false, None, None, Vec::new(), Vec::new(), true));
+                    return Ok((false, None, None, Vec::new(), Vec::new(), None, true));
                 }
             }
         }
@@ -1649,6 +1681,7 @@ impl RuntimeTrackerBackend {
             repository_id,
             repository_ids.into_iter().collect(),
             commits,
+            provider_evidence_at,
             saw_leaf,
         ))
     }
@@ -1756,6 +1789,13 @@ fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bo
     }
 }
 
+fn github_timestamp_ms(value: &str) -> Option<TimestampMs> {
+    let millis = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .timestamp_millis();
+    (millis >= 0).then_some(TimestampMs::new(millis as u64))
+}
+
 fn github_compare_contains_commit(comparison: &GitHubCompare) -> bool {
     comparison.ahead_by == 0
         && matches!(
@@ -1819,6 +1859,8 @@ fn required_check_evidence_satisfied(
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
     created_at: String,
+    #[serde(default)]
+    updated_at: Option<String>,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
@@ -1934,6 +1976,7 @@ struct GithubMergeEvidence {
     merge_commit_sha: Option<String>,
     merge_repository_id: Option<CanonicalRepositoryId>,
     created_at: String,
+    provider_evidence_at: Option<TimestampMs>,
 }
 
 impl GithubMergeEvidence {
@@ -1944,22 +1987,29 @@ impl GithubMergeEvidence {
             merge_commit_sha: None,
             merge_repository_id: None,
             created_at: String::new(),
+            provider_evidence_at: None,
         }
     }
 }
 
 fn select_current_github_merge_evidence(
     candidates: Vec<GithubMergeEvidence>,
-) -> (bool, Option<String>, Option<CanonicalRepositoryId>) {
+) -> (
+    bool,
+    Option<String>,
+    Option<CanonicalRepositoryId>,
+    Option<TimestampMs>,
+) {
     candidates
         .into_iter()
         .filter(|candidate| candidate.compatible)
         .max_by(|left, right| left.created_at.cmp(&right.created_at))
-        .map_or((false, None, None), |candidate| {
+        .map_or((false, None, None, None), |candidate| {
             (
                 candidate.merged,
                 candidate.merge_commit_sha,
                 candidate.merge_repository_id,
+                candidate.provider_evidence_at,
             )
         })
 }
@@ -11209,6 +11259,7 @@ Run the scheduler.
                 merge_commit_sha: Some("old-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-12T00:00:00Z".to_owned(),
+                provider_evidence_at: None,
             },
             GithubMergeEvidence {
                 compatible: true,
@@ -11216,9 +11267,10 @@ Run the scheduler.
                 merge_commit_sha: None,
                 merge_repository_id: None,
                 created_at: "2026-08-13T00:00:00Z".to_owned(),
+                provider_evidence_at: None,
             },
         ]);
-        assert_eq!(selected, (false, None, None));
+        assert_eq!(selected, (false, None, None, None));
 
         let selected = select_current_github_merge_evidence(vec![
             GithubMergeEvidence {
@@ -11227,6 +11279,7 @@ Run the scheduler.
                 merge_commit_sha: Some("old-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-12T00:00:00Z".to_owned(),
+                provider_evidence_at: None,
             },
             GithubMergeEvidence {
                 compatible: true,
@@ -11234,9 +11287,13 @@ Run the scheduler.
                 merge_commit_sha: Some("current-merge".to_owned()),
                 merge_repository_id: None,
                 created_at: "2026-08-13T00:00:00Z".to_owned(),
+                provider_evidence_at: None,
             },
         ]);
-        assert_eq!(selected, (true, Some("current-merge".to_owned()), None));
+        assert_eq!(
+            selected,
+            (true, Some("current-merge".to_owned()), None, None)
+        );
     }
 
     #[test]

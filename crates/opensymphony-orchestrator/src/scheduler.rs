@@ -4532,6 +4532,22 @@ where
                             )
                         });
             }
+            if child.provider_merge_confirmed
+                && self
+                    .executions
+                    .get(&child.child_id)
+                    .and_then(|execution| execution.last_worker_outcome())
+                    .is_some_and(|outcome| {
+                        child
+                            .provider_evidence_at
+                            .is_some_and(|evidence_at| evidence_at < outcome.started_at)
+                    })
+            {
+                child.orchestrator_terminal = false;
+                child.unresolved_failure =
+                    Some("provider merge evidence predates the current child run".to_owned());
+                continue;
+            }
             if child.resource.is_none() {
                 let descendant_resources = self
                     .hierarchy_state
@@ -4772,17 +4788,47 @@ where
             .await
     }
 
+    async fn parent_is_terminal_and_undispatched(&mut self, parent_id: &IssueId) -> bool {
+        let parent_identifier = parent_id.as_str().to_owned();
+        let Ok(states) = self
+            .tracker
+            .issue_states_by_ids(std::slice::from_ref(&parent_identifier))
+            .await
+        else {
+            // A failed refresh must retain evidence. Cleanup can retry after
+            // the provider confirms whether the parent is still terminal.
+            return false;
+        };
+        let parent_terminal = states.iter().any(|snapshot| {
+            snapshot.id == parent_identifier
+                && state_category_from_name(&snapshot.state.name, &self.config)
+                    == IssueStateCategory::Terminal
+        });
+        let undispatched = parent_terminal
+            && !self
+                .hierarchy_state
+                .hierarchy
+                .get(parent_id)
+                .is_some_and(HierarchySnapshot::dispatch_claimed);
+        if !undispatched {
+            self.terminal_undispatched_parent_ids.remove(parent_id);
+        }
+        undispatched
+    }
+
     async fn retain_terminal_child_lease_for_workspace(
         &mut self,
         issue: &NormalizedIssue,
         workspace: &WorkspaceRecord,
     ) -> Result<bool, SchedulerError> {
-        if (issue.parent_id.is_none() && !self.hierarchy_state.has_ancestor_edge(&issue.id))
-            || issue
-                .parent_id
-                .as_ref()
-                .is_some_and(|parent_id| self.terminal_undispatched_parent_ids.contains(parent_id))
-            || self.hierarchy_state.has_dispatched_ancestor(&issue.id)
+        if issue.parent_id.is_none() && !self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            return Ok(false);
+        }
+        if self.hierarchy_state.has_dispatched_ancestor(&issue.id) {
+            return Ok(false);
+        }
+        if let Some(parent_id) = issue.parent_id.as_ref()
+            && self.parent_is_terminal_and_undispatched(parent_id).await
         {
             return Ok(false);
         }

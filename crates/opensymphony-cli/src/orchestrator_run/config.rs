@@ -1353,7 +1353,12 @@ fn resolve_central_config(
             .ok_or_else(|| CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.review_profile"),
             })?;
-        if review_profile.provider.eq_ignore_ascii_case("github") {
+        if !review_profile.provider.eq_ignore_ascii_case("github") {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("review_profiles.{}.provider", repository.review_profile),
+            });
+        }
+        {
             let credential = config
                 .credentials
                 .get(&review_profile.credential)
@@ -3487,10 +3492,7 @@ scheduler:
             scheduler_checkout.review_policy_generation
         );
 
-        let review_source = base_source.replace(
-            "review_profiles:\n  github-standard:\n    provider: github",
-            "review_profiles:\n  github-standard:\n    provider: gitlab",
-        );
+        let review_source = base_source.replace("required_review: true", "required_review: false");
         let review = resolve_central_config(&root.path().join("review.yaml"), &review_source)
             .expect("review policy edit should resolve");
         let review_checkout = review
@@ -3506,7 +3508,7 @@ scheduler:
             base_checkout.review_policy_generation,
             review_checkout.review_policy_generation
         );
-        assert_eq!(review_checkout.review_provider, "gitlab");
+        assert_eq!(review_checkout.review_provider, "github");
     }
 
     #[test]
@@ -3927,6 +3929,24 @@ scheduler:
             error,
             CentralConfigError::InvalidReference { field }
                 if field == "review_profiles.github-standard.credential"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_unsupported_active_review_provider() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "review_profiles:\n  github-standard:\n    provider: github",
+            "review_profiles:\n  github-standard:\n    provider: gitlab",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("unsupported active review provider should fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.provider"
         ));
     }
 

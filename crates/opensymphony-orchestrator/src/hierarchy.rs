@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::opensymphony_domain::{
-    CanonicalRepositoryId, IssueId, IssueIdentifier, TrackerIssue, TrackerIssueRef,
+    CanonicalRepositoryId, IssueId, IssueIdentifier, TimestampMs, TrackerIssue, TrackerIssueRef,
     TrackerIssueStateKind,
 };
 use serde::{Deserialize, Serialize};
@@ -319,6 +319,11 @@ pub struct ChildEligibilityEvidence {
     /// evidence, while nested parents may contribute several repositories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_repository_ids: Vec<CanonicalRepositoryId>,
+    /// Provider evidence must be newer than the child run that produced the
+    /// retained checkout. This prevents a reactivated child from reusing a
+    /// previously merged PR on the same branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_evidence_at: Option<TimestampMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<LeaseResource>,
     /// Repository-neutral child parents contribute the retained descendant
@@ -354,6 +359,7 @@ impl ParentEligibilityEvidence {
                     merge_result_commits: Vec::new(),
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
+                    provider_evidence_at: None,
                     resource: None,
                     resources: Vec::new(),
                     unresolved_failure: None,
@@ -378,6 +384,7 @@ impl ParentEligibilityEvidence {
                     merge_result_commits: Vec::new(),
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
+                    provider_evidence_at: None,
                     resource: None,
                     resources: Vec::new(),
                     unresolved_failure: None,
@@ -1188,6 +1195,7 @@ mod tests {
                 merge_result_commits: Vec::new(),
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
+                provider_evidence_at: None,
                 resource: Some(resource.clone()),
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -1222,6 +1230,7 @@ mod tests {
                 merge_result_commits: vec!["descendant-merge".to_owned()],
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
+                provider_evidence_at: None,
                 resource: None,
                 resources: vec![resource],
                 unresolved_failure: None,
@@ -1252,6 +1261,7 @@ mod tests {
                 merge_result_commits: Vec::new(),
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
+                provider_evidence_at: None,
                 resource: None,
                 resources: Vec::new(),
                 unresolved_failure: None,
