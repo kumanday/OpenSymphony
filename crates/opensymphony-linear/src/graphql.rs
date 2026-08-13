@@ -51,6 +51,10 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
           url
           sourceType
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -220,6 +224,10 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
           url
           sourceType
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -286,6 +294,25 @@ query IssueChildren($issueId: ID!, $first: Int!, $after: String) {
         state {
           name
         }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_ATTACHMENTS_QUERY: &str = r#"
+query IssueAttachments($issueId: ID!, $first: Int!, $after: String) {
+  issue(id: $issueId) {
+    id
+    attachments(first: $first, after: $after) {
+      nodes {
+        title
+        url
+        sourceType
       }
       pageInfo {
         hasNextPage
@@ -486,6 +513,10 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
         title
         url
         sourceType
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
       children(includeArchived: true, first: 100) {
@@ -871,6 +902,14 @@ pub(super) struct IssueChildrenVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueAttachmentsVariables {
+    pub issue_id: String,
+    pub first: usize,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueInverseRelationsVariables {
     pub issue_id: String,
     pub first: usize,
@@ -977,6 +1016,11 @@ pub(super) struct IssueByIdentifierData {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueChildrenData {
     pub issue: Option<LinearIssueChildrenNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueAttachmentsData {
+    pub issue: Option<LinearIssueAttachmentsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1177,7 +1221,10 @@ pub(super) struct LinearProjectMilestoneNode {
 
 #[derive(Debug, Deserialize, Default)]
 pub(super) struct LinearAttachmentConnection {
+    #[serde(default)]
     pub nodes: Vec<LinearAttachmentNode>,
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1202,6 +1249,12 @@ pub(super) struct LinearChildConnection {
 pub(super) struct LinearIssueChildrenNode {
     pub id: String,
     pub children: LinearChildConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueAttachmentsNode {
+    pub id: String,
+    pub attachments: LinearAttachmentConnection,
 }
 
 #[derive(Debug, Deserialize)]

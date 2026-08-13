@@ -43,9 +43,16 @@ const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
 const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+// A repository-neutral child can fan out into several leaf merge-evidence
+// requests. The runtime provider evaluates those leaves eight at a time, so
+// reserve one base timeout for each possible provider batch per direct edge.
+const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
 
 fn parent_eligibility_timeout(required_child_count: usize) -> Duration {
-    let multiplier = u32::try_from(required_child_count.max(1)).unwrap_or(u32::MAX);
+    let work_units = required_child_count
+        .max(1)
+        .saturating_mul(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY);
+    let multiplier = u32::try_from(work_units).unwrap_or(u32::MAX);
     PARENT_ELIGIBILITY_TIMEOUT.saturating_mul(multiplier)
 }
 
@@ -740,10 +747,9 @@ where
         self.load_recovery_state().await?;
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
-        self.flush_pending_finished_updates().await?;
 
         self.expire_linear_cooldown(observed_at);
-        let pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
+        let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
             && due(
                 self.last_full_detail_refresh_at,
                 FULL_DETAIL_REFRESH_INTERVAL_MS,
@@ -768,6 +774,22 @@ where
 
         if !self.linear_cooldown_active(observed_at)
             && pre_update_full_snapshot.is_none()
+            && !self.pending_finished_updates.is_empty()
+            && let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await?
+        {
+            self.record_full_detail_refresh(observed_at);
+            let hierarchy_changed = self.reconcile_hierarchy_snapshots(&tracker_snapshot)?;
+            let terminal_hierarchy_changed =
+                self.reconcile_terminal_hierarchy_snapshots(&tracker_snapshot)?;
+            if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
+                self.persist_orchestrator_state().await?;
+            }
+            self.fence_hierarchy_changed_runs(observed_at).await?;
+            pre_update_full_snapshot = Some(tracker_snapshot);
+        }
+
+        if !self.linear_cooldown_active(observed_at)
+            && pre_update_full_snapshot.is_none()
             && due(
                 self.last_running_state_refresh_at,
                 RUNNING_STATE_REFRESH_INTERVAL_MS,
@@ -776,6 +798,10 @@ where
             && self.has_reconcilable_executions()
         {
             self.refresh_running_issue_states(observed_at).await?;
+        }
+
+        if pre_update_full_snapshot.is_some() {
+            self.flush_pending_finished_updates().await?;
         }
 
         let updates = self

@@ -171,12 +171,27 @@ async fn issue_lookup_paginates_nested_children() {
                 "state": {"id": "state-active", "name": "In Progress", "type": "started"},
                 "project": null,
                 "parent": null,
+                "attachments": {
+                  "nodes": [{"url":"https://github.com/example/repo/pull/1","sourceType":"github"}],
+                  "pageInfo": {"hasNextPage": true, "endCursor": "attachment-cursor"}
+                },
                 "children": {
                   "nodes": [{"id":"child-1","identifier":"COE-2","state":{"name":"Done"}}],
                   "pageInfo": {"hasNextPage": true, "endCursor": "child-cursor"}
                 },
                 "labels": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}},
                 "inverseRelations": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+              }}
+            }"#,
+        ),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issue": {
+                "id": "parent-id",
+                "attachments": {
+                  "nodes": [{"url":"https://github.com/example/repo/pull/2","sourceType":"github"}],
+                  "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }
               }}
             }"#,
         ),
@@ -202,16 +217,24 @@ async fn issue_lookup_paginates_nested_children() {
         .expect("issue lookup should fetch all child pages");
 
     assert_eq!(issues[0].sub_issues.len(), 2);
+    assert_eq!(issues[0].pr_urls.len(), 2);
     let requests = server.recorded_requests().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(
         requests[1].body["query"]
             .as_str()
             .expect("child page query should be a string")
-            .contains("query IssueChildren")
+            .contains("query IssueAttachments")
     );
     assert_eq!(requests[1].body["variables"]["issueId"], "parent-id");
-    assert_eq!(requests[1].body["variables"]["after"], "child-cursor");
+    assert_eq!(requests[1].body["variables"]["after"], "attachment-cursor");
+    assert!(
+        requests[2].body["query"]
+            .as_str()
+            .expect("child page query should be a string")
+            .contains("query IssueChildren")
+    );
+    assert_eq!(requests[2].body["variables"]["after"], "child-cursor");
 }
 
 #[tokio::test]

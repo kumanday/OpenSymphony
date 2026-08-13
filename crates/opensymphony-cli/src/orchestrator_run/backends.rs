@@ -1,5 +1,6 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
+use futures_util::{StreamExt, stream};
 use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -72,6 +73,7 @@ use super::{
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
+const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
 const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
@@ -1427,6 +1429,7 @@ impl RuntimeTrackerBackend {
                 .map(|child| child.identifier)
                 .collect::<Vec<_>>();
             let children = self.client.issues_by_identifiers(&identifiers).await?;
+            let mut leaf_children = Vec::new();
             for child in children {
                 let child_state = normalized_state_name(&child.state);
                 if self.active_states.contains(&child_state)
@@ -1439,25 +1442,30 @@ impl RuntimeTrackerBackend {
                 }
                 if let Some(repository) = self.checkout_policy_for_issue(&child) {
                     saw_leaf = true;
-                    let (
-                        confirmed,
-                        commit,
-                        child_repository_id,
-                        _child_repository_ids,
-                        child_commits,
-                    ) = self.direct_merge_evidence(&child, repository).await?;
-                    if !confirmed {
-                        return Ok((false, None, None, Vec::new(), Vec::new()));
-                    }
-                    if let Some(repository_id) = child_repository_id {
-                        repository_ids.insert(repository_id);
-                    }
-                    commits.extend(child_commits);
-                    if commit.is_none() {
-                        return Ok((false, None, None, Vec::new(), Vec::new()));
-                    }
+                    leaf_children.push((child, repository.clone()));
                 } else {
                     pending.extend(child.sub_issues);
+                }
+            }
+            let merge_results = stream::iter(leaf_children)
+                .map(|(child, repository)| async move {
+                    self.direct_merge_evidence(&child, &repository).await
+                })
+                .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for result in merge_results {
+                let (confirmed, commit, child_repository_id, _child_repository_ids, child_commits) =
+                    result?;
+                if !confirmed {
+                    return Ok((false, None, None, Vec::new(), Vec::new()));
+                }
+                if let Some(repository_id) = child_repository_id {
+                    repository_ids.insert(repository_id);
+                }
+                commits.extend(child_commits);
+                if commit.is_none() {
+                    return Ok((false, None, None, Vec::new(), Vec::new()));
                 }
             }
         }
