@@ -60,6 +60,10 @@ pub struct HierarchySnapshot {
 
 impl HierarchySnapshot {
     pub fn new(parent: &TrackerIssue) -> Self {
+        Self::new_with_canceled_states(parent, &[])
+    }
+
+    pub fn new_with_canceled_states(parent: &TrackerIssue, canceled_states: &[String]) -> Self {
         let mut snapshot = Self {
             parent_id: IssueId::new(parent.id.clone()).expect("tracker ids are validated"),
             generation: 1,
@@ -69,12 +73,20 @@ impl HierarchySnapshot {
             dispatched_generation: None,
             dispatch_intent_generation: None,
         };
-        snapshot.required_child_edges = child_edges(&parent.sub_issues);
+        snapshot.required_child_edges = child_edges(&parent.sub_issues, canceled_states);
         snapshot
     }
 
     pub fn reconcile(&mut self, children: &[TrackerIssueRef]) -> HierarchyReconciliation {
-        let next_edges = child_edges(children);
+        self.reconcile_with_canceled_states(children, &[])
+    }
+
+    pub fn reconcile_with_canceled_states(
+        &mut self,
+        children: &[TrackerIssueRef],
+        canceled_states: &[String],
+    ) -> HierarchyReconciliation {
+        let next_edges = child_edges(children, canceled_states);
         if next_edges == self.required_child_edges {
             return HierarchyReconciliation::Unchanged;
         }
@@ -151,10 +163,23 @@ impl HierarchySnapshot {
     }
 }
 
-fn child_edges(children: &[TrackerIssueRef]) -> Vec<HierarchyChildEdge> {
+fn child_edges(
+    children: &[TrackerIssueRef],
+    canceled_states: &[String],
+) -> Vec<HierarchyChildEdge> {
     let mut edges = children
         .iter()
-        .map(HierarchyChildEdge::from)
+        .map(|child| HierarchyChildEdge {
+            child_id: IssueId::new(child.id.clone()).expect("tracker child ids are validated"),
+            child_identifier: IssueIdentifier::new(child.identifier.clone())
+                .expect("tracker child identifiers are validated"),
+            required: !canceled_states.iter().any(|configured_state| {
+                configured_state.to_ascii_lowercase().contains("cancel")
+                    && configured_state
+                        .trim()
+                        .eq_ignore_ascii_case(child.state.trim())
+            }),
+        })
         .collect::<Vec<_>>();
     edges.sort_by(|left, right| left.child_id.cmp(&right.child_id));
     edges
@@ -281,6 +306,11 @@ pub struct ChildEligibilityEvidence {
     pub merge_result_commits: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_repository_id: Option<CanonicalRepositoryId>,
+    /// Repository identities for every descendant merge commit. The
+    /// singular field remains the compatibility projection for direct child
+    /// evidence, while nested parents may contribute several repositories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_repository_ids: Vec<CanonicalRepositoryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<LeaseResource>,
     /// Repository-neutral child parents contribute the retained descendant
@@ -314,6 +344,30 @@ impl ParentEligibilityEvidence {
                     merge_result_commit: None,
                     merge_result_commits: Vec::new(),
                     merge_repository_id: None,
+                    merge_repository_ids: Vec::new(),
+                    resource: None,
+                    resources: Vec::new(),
+                    unresolved_failure: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn tracker_only_for_snapshot(snapshot: &HierarchySnapshot) -> Self {
+        Self {
+            hierarchy_generation: snapshot.generation,
+            children: snapshot
+                .required_child_edges
+                .iter()
+                .map(|edge| ChildEligibilityEvidence {
+                    child_id: edge.child_id.clone(),
+                    hierarchy_generation: snapshot.generation,
+                    orchestrator_terminal: false,
+                    provider_merge_confirmed: false,
+                    merge_result_commit: None,
+                    merge_result_commits: Vec::new(),
+                    merge_repository_id: None,
+                    merge_repository_ids: Vec::new(),
                     resource: None,
                     resources: Vec::new(),
                     unresolved_failure: None,
@@ -361,15 +415,16 @@ impl ParentEligibilityEvidence {
                 return Err(HierarchyBlockedReason::MissingTargetCommit);
             }
             let resources = child.resources();
-            if child
-                .merge_repository_id
-                .as_ref()
-                .is_some_and(|merge_repository| {
-                    !resources
-                        .iter()
-                        .any(|resource| &resource.repository_id == merge_repository)
-                })
-            {
+            let merge_repository_ids = if child.merge_repository_ids.is_empty() {
+                child.merge_repository_id.iter().collect::<Vec<_>>()
+            } else {
+                child.merge_repository_ids.iter().collect::<Vec<_>>()
+            };
+            if merge_repository_ids.iter().any(|merge_repository| {
+                !resources
+                    .iter()
+                    .any(|resource| &resource.repository_id == *merge_repository)
+            }) {
                 return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
             }
             if resources.is_empty() {
@@ -736,6 +791,18 @@ mod tests {
     }
 
     #[test]
+    fn configured_canceled_children_are_non_required_edges() {
+        let snapshot = HierarchySnapshot::new_with_canceled_states(
+            &parent(vec![child("child-a", "Canceled"), child("child-b", "Done")]),
+            &["Canceled".to_owned()],
+        );
+
+        assert_eq!(snapshot.required_child_edges.len(), 2);
+        assert!(!snapshot.required_child_edges[0].required);
+        assert!(snapshot.required_child_edges[1].required);
+    }
+
+    #[test]
     fn identifier_rename_refreshes_edge_without_advancing_generation() {
         let parent = parent(vec![child("child-a", "Done")]);
         let mut snapshot = HierarchySnapshot::new(&parent);
@@ -935,6 +1002,7 @@ mod tests {
                 merge_result_commit: Some("abc123".to_owned()),
                 merge_result_commits: Vec::new(),
                 merge_repository_id: None,
+                merge_repository_ids: Vec::new(),
                 resource: Some(resource.clone()),
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -957,7 +1025,7 @@ mod tests {
             repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
             checkout_generation: "checkout-1".to_owned(),
         };
-        let evidence = ParentEligibilityEvidence {
+        let mut evidence = ParentEligibilityEvidence {
             hierarchy_generation: snapshot.generation,
             children: vec![ChildEligibilityEvidence {
                 child_id: IssueId::new("nested-parent").expect("id"),
@@ -967,12 +1035,19 @@ mod tests {
                 merge_result_commit: None,
                 merge_result_commits: vec!["descendant-merge".to_owned()],
                 merge_repository_id: None,
+                merge_repository_ids: Vec::new(),
                 resource: None,
                 resources: vec![resource],
                 unresolved_failure: None,
             }],
         };
         assert!(evidence.eligible_for(&snapshot).is_ok());
+        evidence.children[0].merge_repository_ids =
+            vec![CanonicalRepositoryId::new("github:other-repo").expect("repository")];
+        assert_eq!(
+            evidence.eligible_for(&snapshot),
+            Err(HierarchyBlockedReason::MissingCheckoutEvidence)
+        );
     }
 
     #[test]

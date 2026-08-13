@@ -344,12 +344,11 @@ pub trait TrackerBackend {
     ) -> Result<Vec<TrackerIssueStateSnapshot>, Self::Error>;
     async fn parent_eligibility(
         &mut self,
-        parent: &TrackerIssue,
+        _parent: &TrackerIssue,
         hierarchy: &HierarchySnapshot,
     ) -> Result<ParentEligibilityEvidence, Self::Error> {
-        Ok(ParentEligibilityEvidence::tracker_only(
-            parent,
-            hierarchy.generation,
+        Ok(ParentEligibilityEvidence::tracker_only_for_snapshot(
+            hierarchy,
         ))
     }
     fn error_category(_error: &Self::Error) -> Option<TrackerErrorCategory> {
@@ -735,6 +734,32 @@ where
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
 
+        self.expire_linear_cooldown(observed_at);
+        let pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
+            && due(
+                self.last_full_detail_refresh_at,
+                FULL_DETAIL_REFRESH_INTERVAL_MS,
+                observed_at,
+            ) {
+            if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
+                self.record_full_detail_refresh(observed_at);
+                let terminal_hierarchy_changed =
+                    self.reconcile_terminal_hierarchy_snapshots(&tracker_snapshot)?;
+                if self.reconcile_hierarchy_snapshots(&tracker_snapshot)?
+                    || terminal_hierarchy_changed
+                    || self.hierarchy_state_dirty
+                {
+                    self.persist_orchestrator_state().await?;
+                }
+                self.fence_hierarchy_changed_runs(observed_at).await?;
+                Some(tracker_snapshot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let updates = self
             .worker
             .poll_updates()
@@ -744,14 +769,22 @@ where
             })?;
         self.apply_worker_updates(updates).await?;
 
-        self.expire_linear_cooldown(observed_at);
         let mut dispatch_candidates = None;
+        if let Some(tracker_snapshot) = pre_update_full_snapshot.as_ref() {
+            self.bootstrap_recovery(tracker_snapshot, observed_at)
+                .await?;
+            self.reconcile_tracker_state(tracker_snapshot, observed_at)
+                .await?;
+            dispatch_candidates = Some(DispatchCandidates::Full(tracker_snapshot.active.clone()));
+        }
         if !self.linear_cooldown_active(observed_at) {
-            if due(
-                self.last_full_detail_refresh_at,
-                FULL_DETAIL_REFRESH_INTERVAL_MS,
-                observed_at,
-            ) {
+            if pre_update_full_snapshot.is_none()
+                && due(
+                    self.last_full_detail_refresh_at,
+                    FULL_DETAIL_REFRESH_INTERVAL_MS,
+                    observed_at,
+                )
+            {
                 if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
                     self.record_full_detail_refresh(observed_at);
                     self.bootstrap_recovery(&tracker_snapshot, observed_at)
@@ -1264,14 +1297,19 @@ where
         self.terminal_child_failure_ids.remove(&normalized.id);
         self.parent_issue_ids.insert(normalized.id.clone());
         if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
-            self.hierarchy_state
-                .hierarchy
-                .insert(normalized.id.clone(), HierarchySnapshot::new(tracker_issue));
+            self.hierarchy_state.hierarchy.insert(
+                normalized.id.clone(),
+                HierarchySnapshot::new_with_canceled_states(
+                    tracker_issue,
+                    &self.config.terminal_states,
+                ),
+            );
             return Ok(true);
         }
         let reconciliation =
             if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
                 if snapshot.dispatch_claimed()
+                    && normalized.state.category == IssueStateCategory::Active
                     && self
                         .executions
                         .get(&normalized.id)
@@ -1287,7 +1325,10 @@ where
                     .filter(|edge| edge.required)
                     .map(|edge| edge.child_id.clone())
                     .collect::<BTreeSet<_>>();
-                let reconciliation = snapshot.reconcile(&tracker_issue.sub_issues);
+                let reconciliation = snapshot.reconcile_with_canceled_states(
+                    &tracker_issue.sub_issues,
+                    &self.config.terminal_states,
+                );
                 if !matches!(reconciliation, super::HierarchyReconciliation::Unchanged) {
                     let current_child_ids = snapshot
                         .required_child_edges

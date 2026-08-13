@@ -933,6 +933,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 provider_merge_confirmed,
                 merge_result_commit,
                 merge_repository_id,
+                merge_repository_ids,
                 merge_result_commits,
             ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
                 self.direct_merge_evidence(child, repository).await?
@@ -949,6 +950,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_result_commit,
                 merge_result_commits,
                 merge_repository_id,
+                merge_repository_ids,
                 resource: None,
                 resources: Vec::new(),
                 unresolved_failure: None,
@@ -1296,6 +1298,7 @@ impl RuntimeTrackerBackend {
             bool,
             Option<String>,
             Option<CanonicalRepositoryId>,
+            Vec<CanonicalRepositoryId>,
             Vec<String>,
         ),
         LinearError,
@@ -1314,7 +1317,8 @@ impl RuntimeTrackerBackend {
         }
         let (confirmed, commit, repository_id) = select_current_github_merge_evidence(evidence);
         let commits = commit.iter().cloned().collect();
-        Ok((confirmed, commit, repository_id, commits))
+        let repository_ids = repository_id.iter().cloned().collect();
+        Ok((confirmed, commit, repository_id, repository_ids, commits))
     }
 
     async fn descendant_merge_evidence(
@@ -1325,12 +1329,14 @@ impl RuntimeTrackerBackend {
             bool,
             Option<String>,
             Option<CanonicalRepositoryId>,
+            Vec<CanonicalRepositoryId>,
             Vec<String>,
         ),
         LinearError,
     > {
         let mut pending = parent.sub_issues.clone();
         let mut commits = Vec::new();
+        let mut repository_ids = BTreeSet::new();
         let mut saw_leaf = false;
         while !pending.is_empty() {
             let identifiers = pending
@@ -1341,14 +1347,22 @@ impl RuntimeTrackerBackend {
             for child in children {
                 if let Some(repository) = self.checkout_policy_for_issue(&child) {
                     saw_leaf = true;
-                    let (confirmed, commit, _repository_id, child_commits) =
-                        self.direct_merge_evidence(&child, repository).await?;
+                    let (
+                        confirmed,
+                        commit,
+                        child_repository_id,
+                        _child_repository_ids,
+                        child_commits,
+                    ) = self.direct_merge_evidence(&child, repository).await?;
                     if !confirmed {
-                        return Ok((false, None, None, Vec::new()));
+                        return Ok((false, None, None, Vec::new(), Vec::new()));
+                    }
+                    if let Some(repository_id) = child_repository_id {
+                        repository_ids.insert(repository_id);
                     }
                     commits.extend(child_commits);
                     if commit.is_none() {
-                        return Ok((false, None, None, Vec::new()));
+                        return Ok((false, None, None, Vec::new(), Vec::new()));
                     }
                 } else {
                     pending.extend(child.sub_issues);
@@ -1356,7 +1370,16 @@ impl RuntimeTrackerBackend {
             }
         }
         let commit = commits.first().cloned();
-        Ok((saw_leaf && !commits.is_empty(), commit, None, commits))
+        let repository_id = (repository_ids.len() == 1)
+            .then(|| repository_ids.iter().next().cloned())
+            .flatten();
+        Ok((
+            saw_leaf && !commits.is_empty(),
+            commit,
+            repository_id,
+            repository_ids.into_iter().collect(),
+            commits,
+        ))
     }
 }
 
