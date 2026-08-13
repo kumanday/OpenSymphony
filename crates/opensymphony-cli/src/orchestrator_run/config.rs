@@ -1607,6 +1607,8 @@ fn build_repository_checkouts(
             review_profile: repository.review_profile.clone(),
             review_provider: review_profile.provider.clone(),
             review_policy_generation,
+            required_checks: review_profile.required_checks,
+            required_review: review_profile.required_review,
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())

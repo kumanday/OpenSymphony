@@ -327,6 +327,8 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         review_profile: "local".to_owned(),
         review_provider: "local".to_owned(),
         review_policy_generation: "review-policy-1".to_owned(),
+        required_checks: false,
+        required_review: false,
     };
     let missing_policy_manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),

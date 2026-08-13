@@ -655,6 +655,16 @@ impl DurableOrchestratorState {
                 .any(|edge| edge.required && &edge.child_id == child_id)
         })
     }
+
+    pub fn has_dispatched_ancestor(&self, child_id: &IssueId) -> bool {
+        self.hierarchy.values().any(|snapshot| {
+            snapshot.dispatch_claimed()
+                && snapshot
+                    .required_child_edges
+                    .iter()
+                    .any(|edge| edge.required && &edge.child_id == child_id)
+        })
+    }
 }
 
 #[cfg(test)]

@@ -31,6 +31,10 @@ pub struct CheckoutRepository {
     pub review_provider: String,
     #[serde(default)]
     pub review_policy_generation: String,
+    #[serde(default)]
+    pub required_checks: bool,
+    #[serde(default)]
+    pub required_review: bool,
 }
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";

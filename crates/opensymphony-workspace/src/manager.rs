@@ -5239,6 +5239,8 @@ mod tests {
             review_profile: String::new(),
             review_provider: String::new(),
             review_policy_generation: String::new(),
+            required_checks: false,
+            required_review: false,
         };
 
         let error = manager

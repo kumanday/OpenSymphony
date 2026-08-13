@@ -2962,6 +2962,8 @@ mod tests {
                 review_profile: "default".to_owned(),
                 review_provider: "git".to_owned(),
                 review_policy_generation: "review-policy".to_owned(),
+                required_checks: false,
+                required_review: false,
             },
         )]);
 

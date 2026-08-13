@@ -1,5 +1,6 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
+use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, io,
@@ -1062,20 +1063,15 @@ impl RuntimeTrackerBackend {
             return Ok(GithubMergeEvidence::incompatible());
         }
         let public_github = authority == "github.com";
-        let endpoint = if public_github {
-            format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}",
-                segments[0], segments[1], segments[3]
-            )
+        let api_root = if public_github {
+            "https://api.github.com".to_owned()
         } else {
-            format!(
-                "{}/api/v3/repos/{}/{}/pulls/{}",
-                url.origin().ascii_serialization(),
-                segments[0],
-                segments[1],
-                segments[3]
-            )
+            format!("{}/api/v3", url.origin().ascii_serialization())
         };
+        let endpoint = format!(
+            "{api_root}/repos/{}/{}/pulls/{}",
+            segments[0], segments[1], segments[3]
+        );
         let merge_repository_id = CanonicalRepositoryId::from_remote(
             "github",
             repository.provider_id.as_deref(),
@@ -1084,6 +1080,57 @@ impl RuntimeTrackerBackend {
         .map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub repository identity: {error}"))
         })?;
+        let pull_request = self
+            .github_get_json::<GitHubPullRequest>(&endpoint, repository)
+            .await?;
+        let compatible = pull_request.base.ref_name == repository.target_branch
+            && pull_request
+                .base
+                .repo
+                .full_name
+                .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
+            && repository.provider_id.as_deref().is_none_or(|provider_id| {
+                pull_request
+                    .base
+                    .repo
+                    .native_ids()
+                    .iter()
+                    .any(|candidate| candidate == provider_id)
+            })
+            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
+        let policy_satisfied = if compatible && pull_request.merged_at.is_some() {
+            self.github_merge_policy_satisfied(
+                &api_root,
+                segments[0],
+                segments[1],
+                segments[3],
+                repository,
+                pull_request.merge_commit_sha.as_deref(),
+            )
+            .await?
+        } else {
+            false
+        };
+        Ok(GithubMergeEvidence {
+            compatible,
+            merged: compatible
+                && policy_satisfied
+                && pull_request.merged_at.is_some()
+                && pull_request
+                    .merge_commit_sha
+                    .as_deref()
+                    .is_some_and(|commit| !commit.trim().is_empty()),
+            merge_commit_sha: pull_request.merge_commit_sha,
+            merge_repository_id: Some(merge_repository_id),
+            created_at: pull_request.created_at,
+        })
+    }
+
+    async fn github_get_json<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<T, LinearError> {
         let mut request = self
             .github_http
             .get(endpoint)
@@ -1105,41 +1152,79 @@ impl RuntimeTrackerBackend {
         if !status.is_success() {
             return Err(LinearError::HttpStatus {
                 status,
-                body: format!("GitHub pull request lookup failed for {pr_url}"),
+                body: format!("GitHub API lookup failed for {endpoint}"),
                 retry_after: None,
             });
         }
-        let pull_request = response
-            .json::<GitHubPullRequest>()
+        response
+            .json::<T>()
             .await
-            .map_err(|error| LinearError::Request(Box::new(error)))?;
-        let compatible = pull_request.base.ref_name == repository.target_branch
-            && pull_request
-                .base
-                .repo
-                .full_name
-                .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
-            && repository.provider_id.as_deref().is_none_or(|provider_id| {
-                pull_request
-                    .base
-                    .repo
-                    .native_ids()
-                    .iter()
-                    .any(|candidate| candidate == provider_id)
-            })
-            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
-        Ok(GithubMergeEvidence {
-            compatible,
-            merged: compatible
-                && pull_request.merged_at.is_some()
-                && pull_request
-                    .merge_commit_sha
-                    .as_deref()
-                    .is_some_and(|commit| !commit.trim().is_empty()),
-            merge_commit_sha: pull_request.merge_commit_sha,
-            merge_repository_id: Some(merge_repository_id),
-            created_at: pull_request.created_at,
-        })
+            .map_err(|error| LinearError::Request(Box::new(error)))
+    }
+
+    async fn github_merge_policy_satisfied(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        pull_number: &str,
+        repository: &CheckoutRepository,
+        merge_commit_sha: Option<&str>,
+    ) -> Result<bool, LinearError> {
+        if repository.required_review {
+            let endpoint =
+                format!("{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/reviews");
+            let reviews = self
+                .github_get_json::<Vec<GitHubPullRequestReview>>(&endpoint, repository)
+                .await?;
+            let mut latest_by_reviewer = BTreeMap::<String, (String, String)>::new();
+            for review in reviews {
+                let reviewer = review
+                    .user
+                    .and_then(|user| user.login)
+                    .unwrap_or_else(|| format!("review-{}", latest_by_reviewer.len()));
+                let submitted_at = review.submitted_at.unwrap_or_default();
+                if latest_by_reviewer
+                    .get(&reviewer)
+                    .is_none_or(|(_, timestamp)| *timestamp < submitted_at)
+                {
+                    latest_by_reviewer.insert(reviewer, (review.state, submitted_at));
+                }
+            }
+            if !latest_by_reviewer
+                .values()
+                .any(|(state, _)| state.eq_ignore_ascii_case("approved"))
+                || latest_by_reviewer
+                    .values()
+                    .any(|(state, _)| state.eq_ignore_ascii_case("changes_requested"))
+            {
+                return Ok(false);
+            }
+        }
+        if repository.required_checks {
+            let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+            else {
+                return Ok(false);
+            };
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}/check-runs"
+            );
+            let checks = self
+                .github_get_json::<GitHubCheckRuns>(&endpoint, repository)
+                .await?;
+            if checks.total_count == 0
+                || checks.check_runs.iter().any(|check| {
+                    !check.status.eq_ignore_ascii_case("completed")
+                        || !check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+                })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     async fn direct_merge_evidence(
@@ -1258,6 +1343,36 @@ struct GitHubPullRequest {
     merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
     head: GitHubPullRequestHead,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestReview {
+    state: String,
+    #[serde(default)]
+    submitted_at: Option<String>,
+    #[serde(default)]
+    user: Option<GitHubReviewUser>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubReviewUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCheckRuns {
+    #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
+    check_runs: Vec<GitHubCheckRun>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCheckRun {
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

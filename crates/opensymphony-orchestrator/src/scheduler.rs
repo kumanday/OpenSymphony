@@ -1168,18 +1168,29 @@ where
         {
             self.terminal_child_failure_ids.remove(&normalized.id);
         }
+        let existing_snapshot = self.hierarchy_state.hierarchy.get(&normalized.id).cloned();
         let should_retain_parent_identity = !tracker_issue.sub_issues.is_empty()
-            || self
-                .hierarchy_state
-                .hierarchy
-                .get(&normalized.id)
-                .is_some_and(|snapshot| {
-                    !snapshot.required_child_edges.is_empty()
-                        || snapshot.frozen
-                        || snapshot.blocked_reason.is_some()
-                });
+            || existing_snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot.required_child_edges.is_empty()
+                    || snapshot.frozen
+                    || snapshot.blocked_reason.is_some()
+            });
         if !should_retain_parent_identity {
             self.parent_issue_ids.remove(&normalized.id);
+            self.hierarchy_state
+                .run_hierarchy_generations
+                .remove(&normalized.id);
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.remove(&normalized.id) {
+                let removed_child_ids = snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<Vec<_>>();
+                self.hierarchy_state
+                    .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
+                return Ok(true);
+            }
             return Ok(false);
         }
         self.terminal_child_failure_ids.remove(&normalized.id);
@@ -1423,7 +1434,7 @@ where
         }
 
         let mut retry_records = Vec::new();
-        for record in records {
+        for (record_index, record) in records.iter().cloned().enumerate() {
             let mut recovered_run = record.recovered_run.clone();
             let mut recovered_workspace = Some(record.workspace.clone());
             if let Some(recovered_run) = recovered_run.as_ref() {
@@ -1743,10 +1754,24 @@ where
                         continue;
                     }
                 }
-                self.release_parent_leases_after_finalization(&issue_id, observed_at)
-                    .await?;
-                self.retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
-                    .await?;
+                if let Err(error) = self
+                    .release_parent_leases_after_finalization(&issue_id, observed_at)
+                    .await
+                {
+                    retry_records.push(record);
+                    retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                    self.pending_recovery = Some(retry_records);
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
+                    .await
+                {
+                    retry_records.push(record);
+                    retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                    self.pending_recovery = Some(retry_records);
+                    return Err(error);
+                }
                 if self.workspace_has_active_lease(&record.workspace).await? {
                     let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
                     execution.attach_workspace(record.workspace.clone())?;
@@ -3162,14 +3187,38 @@ where
                     if !execution.issue().sub_issues.is_empty()
                         && self.hierarchy_state.hierarchy.contains_key(&issue_id)
                     {
+                        let nested_child_ids = self
+                            .hierarchy_state
+                            .hierarchy
+                            .get(&issue_id)
+                            .map(|snapshot| {
+                                snapshot
+                                    .required_child_edges
+                                    .iter()
+                                    .filter(|edge| {
+                                        edge.required
+                                            && self
+                                                .hierarchy_state
+                                                .hierarchy
+                                                .contains_key(&edge.child_id)
+                                    })
+                                    .map(|edge| edge.child_id.clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
                         if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id) {
                             snapshot.mark_dispatched();
                         }
                         self.hierarchy_state
                             .release_leaf_leases_for_parent(&issue_id, observed_at.as_u64());
+                        self.hierarchy_state.release_ancestor_leases_for_children(
+                            &nested_child_ids,
+                            observed_at.as_u64(),
+                        );
                         if let Err(error) = self.persist_orchestrator_state().await
                             && first_error.is_none()
                         {
+                            self.hierarchy_state_dirty = true;
                             first_error = Some(error);
                         }
                     }
@@ -3537,15 +3586,19 @@ where
         } else {
             reason
         };
-        if cleanup_terminal {
-            self.retain_terminal_child_lease(&execution).await?;
+        if cleanup_terminal && let Err(error) = self.retain_terminal_child_lease(&execution).await {
+            self.insert_execution(issue_id, execution);
+            return Err(error);
         }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
-        ) {
-            self.release_parent_leases_after_finalization(&issue_id, observed_at)
-                .await?;
+        ) && let Err(error) = self
+            .release_parent_leases_after_finalization(&issue_id, observed_at)
+            .await
+        {
+            self.insert_execution(issue_id, execution);
+            return Err(error);
         }
         let mut retry_cleanup_succeeded = retain_failed;
         if cleanup_terminal
@@ -4140,13 +4193,6 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
-        let nested_child_ids = evidence
-            .children
-            .iter()
-            .filter(|child| next_state.hierarchy.contains_key(&child.child_id))
-            .map(|child| child.child_id.clone())
-            .collect::<Vec<_>>();
-        next_state.release_ancestor_leases_for_children(&nested_child_ids, observed_at.as_u64());
         let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
         if let Err(error) = self.persist_orchestrator_state().await {
             self.hierarchy_state = previous_state;
@@ -4273,7 +4319,9 @@ where
         issue: &NormalizedIssue,
         workspace: &WorkspaceRecord,
     ) -> Result<bool, SchedulerError> {
-        if !self.hierarchy_state.has_ancestor_edge(&issue.id) {
+        if !self.hierarchy_state.has_ancestor_edge(&issue.id)
+            || self.hierarchy_state.has_dispatched_ancestor(&issue.id)
+        {
             return Ok(false);
         }
         let Some(resource) = self
@@ -4286,6 +4334,13 @@ where
         else {
             return Ok(false);
         };
+        if self.hierarchy_state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.resource == resource
+                && lease.kind != super::LeaseKind::LeafWorker
+        }) {
+            return Ok(false);
+        }
         let issue_id = issue.id.clone();
         let leaf_owner = super::LeaseOwner::leaf_worker(&issue_id);
         let hierarchy_generation = self
