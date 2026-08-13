@@ -1353,12 +1353,12 @@ fn resolve_central_config(
             .ok_or_else(|| CentralConfigError::InvalidReference {
                 field: format!("repositories.{repository_id}.review_profile"),
             })?;
-        if !review_profile.provider.eq_ignore_ascii_case("github") {
-            return Err(CentralConfigError::InvalidReference {
-                field: format!("review_profiles.{}.provider", repository.review_profile),
-            });
-        }
-        {
+        if review_profile.required_checks || review_profile.required_review {
+            if !review_profile.provider.eq_ignore_ascii_case("github") {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}.provider", repository.review_profile),
+                });
+            }
             let credential = config
                 .credentials
                 .get(&review_profile.credential)
@@ -3492,7 +3492,13 @@ scheduler:
             scheduler_checkout.review_policy_generation
         );
 
-        let review_source = base_source.replace("required_review: true", "required_review: false");
+        let review_source = base_source
+            .replace(
+                "review_profiles:\n  github-standard:\n    provider: github",
+                "review_profiles:\n  github-standard:\n    provider: gitlab",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
         let review = resolve_central_config(&root.path().join("review.yaml"), &review_source)
             .expect("review policy edit should resolve");
         let review_checkout = review
@@ -3508,7 +3514,7 @@ scheduler:
             base_checkout.review_policy_generation,
             review_checkout.review_policy_generation
         );
-        assert_eq!(review_checkout.review_provider, "github");
+        assert_eq!(review_checkout.review_provider, "gitlab");
     }
 
     #[test]
