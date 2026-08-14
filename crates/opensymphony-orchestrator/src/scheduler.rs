@@ -588,6 +588,7 @@ pub struct Scheduler<T, W, M> {
     terminal_undispatched_parent_ids: HashSet<IssueId>,
     terminal_child_failure_ids: HashSet<IssueId>,
     parent_eligibility_checked_at: BTreeMap<IssueId, TimestampMs>,
+    last_tracker_required_child_edges: Option<BTreeSet<(IssueId, IssueId)>>,
     hierarchy_state: DurableOrchestratorState,
     hierarchy_state_dirty: bool,
     durable_state_loaded: bool,
@@ -633,6 +634,7 @@ where
             terminal_undispatched_parent_ids: HashSet::new(),
             terminal_child_failure_ids: HashSet::new(),
             parent_eligibility_checked_at: BTreeMap::new(),
+            last_tracker_required_child_edges: None,
             hierarchy_state: DurableOrchestratorState::default(),
             hierarchy_state_dirty: false,
             durable_state_loaded: false,
@@ -1225,13 +1227,16 @@ where
             }
         };
 
-        Ok(Some(TrackerSnapshot {
+        let tracker_snapshot = TrackerSnapshot {
             active_index,
             terminal_state_by_id,
             state_by_id,
             active,
             terminal,
-        }))
+        };
+        self.last_tracker_required_child_edges =
+            Some(self.required_child_edges_in_tracker_snapshot(&tracker_snapshot));
+        Ok(Some(tracker_snapshot))
     }
 
     async fn refresh_running_issue_states(
@@ -4882,12 +4887,16 @@ where
                     continue;
                 }
                 child.orchestrator_terminal = true;
-                released_canceled_subtree_holds |= self
-                    .hierarchy_state
-                    .release_subtree_evidence_for_undispatched_parent(
-                        &child.child_id,
-                        observed_at.as_u64(),
-                    );
+                if let Some(reachable_child_edges) = self.last_tracker_required_child_edges.as_ref()
+                {
+                    released_canceled_subtree_holds |= self
+                        .hierarchy_state
+                        .release_subtree_evidence_for_undispatched_parent_with_reachability(
+                            &child.child_id,
+                            Some(reachable_child_edges),
+                            observed_at.as_u64(),
+                        );
+                }
                 child.resource = None;
                 child.resources.clear();
                 continue;
@@ -5274,12 +5283,6 @@ where
                 .map_err(|error| SchedulerError::Workspace {
                     detail: error.to_string(),
                 })?;
-        if !recovered_run_started_at.is_empty() {
-            self.hierarchy_state
-                .run_started_at_by_issue
-                .extend(recovered_run_started_at);
-            self.persist_orchestrator_state().await?;
-        }
         let retry_exhaustion =
             self.workspace
                 .recover_retry_exhaustion()
@@ -5298,6 +5301,14 @@ where
             .extend(recoveries.iter().map(|record| record.issue.id.clone()));
         self.recovered_memory_issue_ids
             .extend(retry_pending.iter().map(|record| record.issue.id.clone()));
+        self.recovered_memory_issue_ids
+            .extend(recovered_run_started_at.keys().cloned());
+        if !recovered_run_started_at.is_empty() {
+            self.hierarchy_state
+                .run_started_at_by_issue
+                .extend(recovered_run_started_at);
+            self.persist_orchestrator_state().await?;
+        }
         self.pending_recovery = Some(recoveries);
         self.pending_retry_exhaustion = Some(retry_exhaustion);
         self.pending_retry_recovery = Some(retry_pending);
@@ -5305,7 +5316,7 @@ where
     }
 
     async fn persist_orchestrator_state(&mut self) -> Result<(), SchedulerError> {
-        let retained_issue_ids = self
+        let mut retained_issue_ids = self
             .executions
             .iter()
             .filter(|(_, execution)| {
@@ -5319,6 +5330,7 @@ where
             })
             .map(|(issue_id, _)| issue_id.clone())
             .collect::<BTreeSet<_>>();
+        retained_issue_ids.extend(self.recovered_memory_issue_ids.iter().cloned());
         self.hierarchy_state
             .prune_obsolete_run_boundaries(&retained_issue_ids);
         let state = serde_json::to_value(&self.hierarchy_state).map_err(|error| {

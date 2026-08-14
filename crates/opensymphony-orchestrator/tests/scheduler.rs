@@ -486,6 +486,7 @@ struct FakeWorkspace {
     durable_state: Option<serde_json::Value>,
     persisted_durable_states: Vec<serde_json::Value>,
     persist_durable_state_results: VecDeque<Result<(), FakeError>>,
+    recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -515,6 +516,12 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(self.recovered_run_started_at.clone())
     }
 
     async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
@@ -810,6 +817,40 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("restart should respect the durable dispatch claim");
     assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn recovered_run_boundary_survives_initial_state_persistence() {
+    let issue_id = IssueId::new("recovered-boundary").expect("issue id should be valid");
+    let run_started_at = ts(50);
+    let workspace = FakeWorkspace {
+        recovered_run_started_at: BTreeMap::from([(issue_id.clone(), run_started_at)]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker::default(),
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .bootstrap(ts(100))
+        .await
+        .expect("recovery bootstrap should persist the recovered boundary");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("bootstrap should persist durable state"),
+    )
+    .expect("durable state should decode");
+    assert_eq!(
+        state.run_started_at_by_issue.get(&issue_id),
+        Some(&run_started_at)
+    );
 }
 
 #[tokio::test]
