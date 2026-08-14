@@ -6024,6 +6024,27 @@ async fn gateway_dispatches_action_and_returns_receipt() {
     assert_eq!(body.action_id, first_action_id);
     assert_eq!(body.correlation_id, "corr_001");
 
+    // Reusing a key for a different action must not replay the original receipt.
+    let mismatched_dispatch = ActionDispatch {
+        action_kind: ActionKind::Comment,
+        correlation_id: "corr_mismatched_key".to_owned(),
+        ..dispatch.clone()
+    };
+    let response = client
+        .post(&url)
+        .json(&mismatched_dispatch)
+        .send()
+        .await
+        .expect("mismatched idempotency key should respond");
+    assert_eq!(response.status(), 409);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    assert!(
+        body.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("different action"))
+    );
+
     // Invalid retry action (already active) → rejected receipt
     let dispatch_retry = ActionDispatch {
         schema_version: Default::default(),

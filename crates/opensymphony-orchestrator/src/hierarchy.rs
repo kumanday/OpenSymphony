@@ -498,9 +498,6 @@ impl ParentEligibilityEvidence {
             if let Some(failure) = &child.unresolved_failure {
                 return Err(HierarchyBlockedReason::UnresolvedFailure(failure.clone()));
             }
-            if !child.provider_merge_confirmed {
-                return Err(HierarchyBlockedReason::MissingMergeEvidence);
-            }
             if !child.merge_required {
                 if child.merge_result_commit.is_some()
                     || !child.merge_result_commits.is_empty()
@@ -512,6 +509,9 @@ impl ParentEligibilityEvidence {
                     return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
                 }
                 continue;
+            }
+            if !child.provider_merge_confirmed {
+                return Err(HierarchyBlockedReason::MissingMergeEvidence);
             }
             if child
                 .merge_result_commit
@@ -1959,7 +1959,7 @@ mod tests {
                 child_id: IssueId::new("nested-parent").expect("id"),
                 hierarchy_generation: snapshot.generation,
                 orchestrator_terminal: true,
-                provider_merge_confirmed: true,
+                provider_merge_confirmed: false,
                 merge_required: false,
                 merge_result_commit: None,
                 merge_result_commits: Vec::new(),

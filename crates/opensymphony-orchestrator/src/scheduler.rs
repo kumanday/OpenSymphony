@@ -1709,35 +1709,24 @@ where
                         .difference(&current_child_ids)
                         .cloned()
                         .collect::<Vec<_>>();
-                    Some((
-                        snapshot.generation,
-                        current_child_ids,
-                        removed_child_ids,
-                        matches!(
-                            &reconciliation,
-                            super::HierarchyReconciliation::GenerationAdvanced { .. }
-                        ),
-                    ))
+                    Some((snapshot.generation, current_child_ids, removed_child_ids))
                 } else {
                     None
                 }
             } else {
                 None
             };
-        if let Some((generation, current_child_ids, removed_child_ids, rebind_running_children)) =
-            reconciliation
-        {
+        if let Some((generation, current_child_ids, removed_child_ids)) = reconciliation {
             self.parent_eligibility_checked_at.remove(&normalized.id);
             let retained_child_ids = current_child_ids
                 .iter()
                 .filter(|child_id| {
-                    rebind_running_children
-                        || !self.executions.get(*child_id).is_some_and(|execution| {
-                            matches!(
-                                execution.status(),
-                                SchedulerStatus::Claimed | SchedulerStatus::Running
-                            )
-                        })
+                    !self.executions.get(*child_id).is_some_and(|execution| {
+                        matches!(
+                            execution.status(),
+                            SchedulerStatus::Claimed | SchedulerStatus::Running
+                        )
+                    })
                 })
                 .cloned()
                 .collect::<BTreeSet<_>>();
@@ -1751,12 +1740,10 @@ where
             );
             self.hierarchy_state
                 .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
-            for child_id in &current_child_ids {
-                if retained_child_ids.contains(child_id) {
-                    self.hierarchy_state
-                        .run_hierarchy_generations
-                        .insert(child_id.clone(), generation);
-                }
+            for child_id in &retained_child_ids {
+                self.hierarchy_state
+                    .run_hierarchy_generations
+                    .insert(child_id.clone(), generation);
             }
             return Ok(true);
         }

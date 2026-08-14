@@ -1973,6 +1973,7 @@ fn required_check_evidence_satisfied(
             let app_bound_checks_satisfied = required_checks.checks.iter().all(|required| {
                 latest_check_run(check_runs, |check| {
                     check.name.as_deref() == Some(required.context.as_str())
+                        && required_check_run_app_matches(check, required.app_id)
                 })
                 .is_some_and(|check| {
                     check.status.eq_ignore_ascii_case("completed")
@@ -1980,17 +1981,6 @@ fn required_check_evidence_satisfied(
                             .conclusion
                             .as_deref()
                             .is_some_and(is_passing_check_conclusion)
-                        && match required.app_id {
-                            Some(app_id) if app_id >= 0 => check.app.as_ref().is_some_and(|app| {
-                                i64::try_from(app.id)
-                                    .is_ok_and(|check_app_id| check_app_id == app_id)
-                            }),
-                            // GitHub represents an any-App required check with
-                            // the signed sentinel -1. Do not constrain the
-                            // check run's App identity in that case.
-                            Some(-1) | None => true,
-                            Some(_) => false,
-                        }
                 })
             });
             legacy_contexts_satisfied && app_bound_checks_satisfied
@@ -2002,6 +1992,18 @@ fn required_check_evidence_satisfied(
                     .as_deref()
                     .is_some_and(is_passing_check_conclusion)
         }),
+    }
+}
+
+fn required_check_run_app_matches(check: &GitHubCheckRun, app_id: Option<i64>) -> bool {
+    match app_id {
+        Some(app_id) if app_id >= 0 => check.app.as_ref().is_some_and(|app| {
+            i64::try_from(app.id).is_ok_and(|check_app_id| check_app_id == app_id)
+        }),
+        // GitHub represents an any-App required check with the signed sentinel
+        // -1. Do not constrain the check run's App identity in that case.
+        Some(-1) | None => true,
+        Some(_) => false,
     }
 }
 
@@ -11769,6 +11771,28 @@ Run the scheduler.
         }];
         assert!(required_check_evidence_satisfied(
             &successful_required_app,
+            &[],
+            Some(&required),
+        ));
+
+        let older_required_app = GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 42 }),
+            created_at: Some("2026-08-13T06:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let newer_other_app = GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 7 }),
+            created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        assert!(required_check_evidence_satisfied(
+            &[older_required_app, newer_other_app],
             &[],
             Some(&required),
         ));

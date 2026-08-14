@@ -26,7 +26,14 @@ pub struct ValidatedAction {
 pub struct ActionHandler {
     journal: InMemoryEventJournal,
     permission_checker: Option<Arc<dyn PermissionChecker>>,
-    idempotency_guard: Arc<RwLock<LruCache<String, ActionReceipt>>>,
+    idempotency_guard: Arc<RwLock<LruCache<String, IdempotencyRecord>>>,
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyRecord {
+    fingerprint: String,
+    permission: PermissionResult,
+    receipt: ActionReceipt,
 }
 
 impl Clone for ActionHandler {
@@ -95,17 +102,47 @@ impl ActionHandler {
         // lock to prevent TOCTOU races under concurrent load.
         if let Some(key) = action.idempotency_key.clone() {
             let mut guard = self.idempotency_guard.write().await;
-            if let Some(receipt) = guard.get(&key) {
-                return receipt.clone();
+            let permission = self.permission_for(&action);
+            if !permission.allowed {
+                return permission_denied_receipt(&action, permission);
             }
-            let receipt = self.dispatch_unlocked(action, snapshot).await;
+            let fingerprint = action_fingerprint(&action);
+            if let Some(record) = guard.get(&key) {
+                if record.fingerprint == fingerprint && record.permission == permission {
+                    return record.receipt.clone();
+                }
+                return ActionReceipt::rejected(
+                    Uuid::new_v4().to_string(),
+                    action.correlation_id.clone(),
+                    action.action_kind,
+                    "duplicate idempotency key: different action or authorization context",
+                )
+                .with_permission(permission);
+            }
+            let receipt = self
+                .dispatch_unlocked(action, snapshot, permission.clone())
+                .await;
             if receipt.status == ActionStatus::Accepted {
-                guard.put(key, receipt.clone());
+                guard.put(
+                    key,
+                    IdempotencyRecord {
+                        fingerprint,
+                        permission,
+                        receipt: receipt.clone(),
+                    },
+                );
             }
             return receipt;
         }
 
-        self.dispatch_unlocked(action, snapshot).await
+        let permission = self.permission_for(&action);
+        self.dispatch_unlocked(action, snapshot, permission).await
+    }
+
+    fn permission_for(&self, action: &ActionDispatch) -> PermissionResult {
+        self.permission_checker
+            .as_ref()
+            .map_or_else(PermissionResult::local, |checker| checker.check(action))
     }
 
     /// Core dispatch logic without idempotency locking.
@@ -113,24 +150,10 @@ impl ActionHandler {
         &self,
         action: ActionDispatch,
         snapshot: &SnapshotEnvelope,
+        permission: PermissionResult,
     ) -> ActionReceipt {
-        let permission = self
-            .permission_checker
-            .as_ref()
-            .map_or_else(PermissionResult::local, |checker| checker.check(&action));
-
         if !permission.allowed {
-            let mut receipt = ActionReceipt::rejected(
-                Uuid::new_v4().to_string(),
-                action.correlation_id.clone(),
-                action.action_kind,
-                format!(
-                    "permission denied: required role {}",
-                    permission.required_role
-                ),
-            );
-            receipt = receipt.with_permission(permission);
-            return receipt;
+            return permission_denied_receipt(&action, permission);
         }
 
         let issue = match action.target_entity.entity_kind {
@@ -181,6 +204,28 @@ impl ActionHandler {
     pub async fn receipt_by_id(&self, _action_id: &str) -> Option<ActionReceipt> {
         None
     }
+}
+
+fn permission_denied_receipt(
+    action: &ActionDispatch,
+    permission: PermissionResult,
+) -> ActionReceipt {
+    ActionReceipt::rejected(
+        Uuid::new_v4().to_string(),
+        action.correlation_id.clone(),
+        action.action_kind,
+        format!(
+            "permission denied: required role {}",
+            permission.required_role
+        ),
+    )
+    .with_permission(permission)
+}
+
+fn action_fingerprint(action: &ActionDispatch) -> String {
+    let mut action = action.clone();
+    action.idempotency_key = None;
+    serde_json::to_string(&action).expect("action dispatch should be serializable")
 }
 
 fn find_issue_by_id(
