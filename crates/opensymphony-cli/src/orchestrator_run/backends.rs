@@ -976,25 +976,42 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 merge_required,
                 provider_evidence_by_issue,
             ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
-                let (
-                    provider_merge_confirmed,
-                    merge_result_commit,
-                    merge_repository_id,
-                    merge_repository_ids,
-                    merge_result_commits,
-                    provider_evidence_at,
-                    provider_evidence_by_issue,
-                ) = self.direct_merge_evidence(child, repository).await?;
-                (
-                    provider_merge_confirmed,
-                    merge_result_commit,
-                    merge_repository_id,
-                    merge_repository_ids,
-                    merge_result_commits,
-                    provider_evidence_at,
-                    true,
-                    provider_evidence_by_issue,
-                )
+                if !repository.provider.eq_ignore_ascii_case("github") {
+                    // Legacy single-repository profiles may use a generic Git
+                    // checkout without a provider API for merge evidence. They
+                    // retain the legacy leaf-completion path instead of being
+                    // routed through incompatible GitHub evidence.
+                    (
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        false,
+                        Vec::new(),
+                    )
+                } else {
+                    let (
+                        provider_merge_confirmed,
+                        merge_result_commit,
+                        merge_repository_id,
+                        merge_repository_ids,
+                        merge_result_commits,
+                        provider_evidence_at,
+                        provider_evidence_by_issue,
+                    ) = self.direct_merge_evidence(child, repository).await?;
+                    (
+                        provider_merge_confirmed,
+                        merge_result_commit,
+                        merge_repository_id,
+                        merge_repository_ids,
+                        merge_result_commits,
+                        provider_evidence_at,
+                        true,
+                        provider_evidence_by_issue,
+                    )
+                }
             } else if child.sub_issues.is_empty() {
                 (
                     false,

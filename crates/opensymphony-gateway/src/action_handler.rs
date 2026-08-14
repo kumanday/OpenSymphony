@@ -26,7 +26,7 @@ pub struct ValidatedAction {
 pub struct ActionHandler {
     journal: InMemoryEventJournal,
     permission_checker: Option<Arc<dyn PermissionChecker>>,
-    idempotency_guard: Arc<RwLock<LruCache<String, ()>>>,
+    idempotency_guard: Arc<RwLock<LruCache<String, ActionReceipt>>>,
 }
 
 impl Clone for ActionHandler {
@@ -95,17 +95,12 @@ impl ActionHandler {
         // lock to prevent TOCTOU races under concurrent load.
         if let Some(key) = action.idempotency_key.clone() {
             let mut guard = self.idempotency_guard.write().await;
-            if guard.get(&key).is_some() {
-                return ActionReceipt::rejected(
-                    Uuid::new_v4().to_string(),
-                    action.correlation_id,
-                    action.action_kind,
-                    "duplicate idempotency key",
-                );
+            if let Some(receipt) = guard.get(&key) {
+                return receipt.clone();
             }
             let receipt = self.dispatch_unlocked(action, snapshot).await;
             if receipt.status == ActionStatus::Accepted {
-                guard.put(key, ());
+                guard.put(key, receipt.clone());
             }
             return receipt;
         }

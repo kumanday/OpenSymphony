@@ -823,12 +823,38 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
 async fn recovered_run_boundary_survives_initial_state_persistence() {
     let issue_id = IssueId::new("recovered-boundary").expect("issue id should be valid");
     let run_started_at = ts(50);
+    let recovered_workspace = workspace_record("COE-BOUNDARY", "/tmp/recovered/COE-BOUNDARY");
     let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("recovered-boundary", "COE-BOUNDARY", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
         recovered_run_started_at: BTreeMap::from([(issue_id.clone(), run_started_at)]),
         ..Default::default()
     };
     let mut scheduler = Scheduler::new(
-        FakeTracker::default(),
+        FakeTracker {
+            active: vec![tracker_issue(
+                "recovered-boundary",
+                "COE-BOUNDARY",
+                "In Progress",
+                0,
+            )],
+            ..Default::default()
+        },
         workspace,
         FakeWorker::default(),
         scheduler_config(),
@@ -851,6 +877,62 @@ async fn recovered_run_boundary_survives_initial_state_persistence() {
         state.run_started_at_by_issue.get(&issue_id),
         Some(&run_started_at)
     );
+}
+
+#[tokio::test]
+async fn terminal_recovery_prunes_run_boundary_after_cleanup() {
+    let issue_id = IssueId::new("terminal-recovery").expect("issue id should be valid");
+    let recovered_workspace = workspace_record("COE-TERMINAL", "/tmp/recovered/COE-TERMINAL");
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("terminal-recovery", "COE-TERMINAL", "Done"),
+            workspace: recovered_workspace,
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        recovered_run_started_at: BTreeMap::from([(issue_id.clone(), ts(50))]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![tracker_issue(
+                "terminal-recovery",
+                "COE-TERMINAL",
+                "Done",
+                0,
+            )],
+            ..Default::default()
+        },
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .bootstrap(ts(100))
+        .await
+        .expect("terminal recovery should complete cleanup");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("cleanup should persist pruned durable state"),
+    )
+    .expect("durable state should decode");
+    assert!(!state.run_started_at_by_issue.contains_key(&issue_id));
 }
 
 #[tokio::test]

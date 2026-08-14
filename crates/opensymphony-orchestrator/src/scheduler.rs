@@ -588,7 +588,6 @@ pub struct Scheduler<T, W, M> {
     terminal_undispatched_parent_ids: HashSet<IssueId>,
     terminal_child_failure_ids: HashSet<IssueId>,
     parent_eligibility_checked_at: BTreeMap<IssueId, TimestampMs>,
-    last_tracker_required_child_edges: Option<BTreeSet<(IssueId, IssueId)>>,
     hierarchy_state: DurableOrchestratorState,
     hierarchy_state_dirty: bool,
     durable_state_loaded: bool,
@@ -611,7 +610,10 @@ pub struct Scheduler<T, W, M> {
 }
 
 enum DispatchCandidates {
-    Full(Vec<TrackerIssue>),
+    Full {
+        issues: Vec<TrackerIssue>,
+        reachable_child_edges: BTreeSet<(IssueId, IssueId)>,
+    },
     Summary(Vec<TrackerIssueSummary>),
 }
 
@@ -634,7 +636,6 @@ where
             terminal_undispatched_parent_ids: HashSet::new(),
             terminal_child_failure_ids: HashSet::new(),
             parent_eligibility_checked_at: BTreeMap::new(),
-            last_tracker_required_child_edges: None,
             hierarchy_state: DurableOrchestratorState::default(),
             hierarchy_state_dirty: false,
             durable_state_loaded: false,
@@ -859,7 +860,11 @@ where
                 .await?;
             self.reconcile_tracker_state(tracker_snapshot, observed_at)
                 .await?;
-            dispatch_candidates = Some(DispatchCandidates::Full(tracker_snapshot.active.clone()));
+            dispatch_candidates = Some(DispatchCandidates::Full {
+                issues: tracker_snapshot.active.clone(),
+                reachable_child_edges: self
+                    .required_child_edges_in_tracker_snapshot(tracker_snapshot),
+            });
         }
         if !self.linear_cooldown_active(observed_at) {
             if pre_update_full_snapshot.is_none()
@@ -875,7 +880,11 @@ where
                         .await?;
                     self.reconcile_tracker_state(&tracker_snapshot, observed_at)
                         .await?;
-                    dispatch_candidates = Some(DispatchCandidates::Full(tracker_snapshot.active));
+                    dispatch_candidates = Some(DispatchCandidates::Full {
+                        reachable_child_edges: self
+                            .required_child_edges_in_tracker_snapshot(&tracker_snapshot),
+                        issues: tracker_snapshot.active,
+                    });
                 }
             } else if due(
                 self.last_terminal_refresh_at,
@@ -898,8 +907,12 @@ where
 
         if let Some(candidates) = dispatch_candidates {
             match candidates {
-                DispatchCandidates::Full(candidates) => {
-                    self.dispatch_ready_issues(&candidates, observed_at).await?;
+                DispatchCandidates::Full {
+                    issues,
+                    reachable_child_edges,
+                } => {
+                    self.dispatch_ready_issues(&issues, observed_at, Some(&reachable_child_edges))
+                        .await?;
                 }
                 DispatchCandidates::Summary(candidates) => {
                     self.dispatch_summary_candidates(&candidates, observed_at)
@@ -912,7 +925,7 @@ where
 
         let known_candidates = self.known_dispatch_candidates(observed_at);
         if !known_candidates.is_empty() {
-            self.dispatch_ready_issues(&known_candidates, observed_at)
+            self.dispatch_ready_issues(&known_candidates, observed_at, None)
                 .await?;
         }
 
@@ -1227,16 +1240,13 @@ where
             }
         };
 
-        let tracker_snapshot = TrackerSnapshot {
+        Ok(Some(TrackerSnapshot {
             active_index,
             terminal_state_by_id,
             state_by_id,
             active,
             terminal,
-        };
-        self.last_tracker_required_child_edges =
-            Some(self.required_child_edges_in_tracker_snapshot(&tracker_snapshot));
-        Ok(Some(tracker_snapshot))
+        }))
     }
 
     async fn refresh_running_issue_states(
@@ -2502,7 +2512,37 @@ where
         } else {
             self.pending_recovery = Some(retry_records);
         }
+        if self.prune_recovered_memory_issue_ids() {
+            self.persist_orchestrator_state().await?;
+        }
         Ok(())
+    }
+
+    fn prune_recovered_memory_issue_ids(&mut self) -> bool {
+        let mut retained = self
+            .pending_recovery
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        retained.extend(
+            self.pending_retry_recovery
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|record| record.issue.id.clone()),
+        );
+        retained.extend(
+            self.executions
+                .iter()
+                .filter(|(_, execution)| !matches!(execution.status(), SchedulerStatus::Released))
+                .map(|(issue_id, _)| issue_id.clone()),
+        );
+        let before = self.recovered_memory_issue_ids.len();
+        self.recovered_memory_issue_ids
+            .retain(|issue_id| retained.contains(issue_id));
+        self.recovered_memory_issue_ids.len() != before
     }
 
     async fn reconcile_tracker_state(
@@ -3514,7 +3554,8 @@ where
                 detailed.push(detailed_issue);
             }
 
-            self.dispatch_ready_issues(&detailed, observed_at).await?;
+            self.dispatch_ready_issues(&detailed, observed_at, None)
+                .await?;
             if self.worker_metadata.len()
                 >= usize::try_from(self.config.max_concurrent_agents).unwrap_or(usize::MAX)
             {
@@ -3529,6 +3570,7 @@ where
         &mut self,
         active_issues: &[TrackerIssue],
         observed_at: TimestampMs,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<(), SchedulerError> {
         let ready =
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
@@ -3632,6 +3674,7 @@ where
                         &normalized,
                         observed_at,
                         parent_retry,
+                        reachable_child_edges,
                     )
                     .await?
                 {
@@ -4795,6 +4838,7 @@ where
         normalized: &NormalizedIssue,
         observed_at: TimestampMs,
         allow_retry: bool,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<bool, SchedulerError> {
         let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
             return Ok(false);
@@ -4887,8 +4931,7 @@ where
                     continue;
                 }
                 child.orchestrator_terminal = true;
-                if let Some(reachable_child_edges) = self.last_tracker_required_child_edges.as_ref()
-                {
+                if let Some(reachable_child_edges) = reachable_child_edges {
                     released_canceled_subtree_holds |= self
                         .hierarchy_state
                         .release_subtree_evidence_for_undispatched_parent_with_reachability(

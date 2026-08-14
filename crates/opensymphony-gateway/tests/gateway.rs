@@ -5983,6 +5983,7 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         "action_id should be non-empty: {:?}",
         body.action_id
     );
+    let first_action_id = body.action_id.clone();
 
     let generationless_replan = ActionDispatch {
         schema_version: Default::default(),
@@ -6010,24 +6011,18 @@ async fn gateway_dispatches_action_and_returns_receipt() {
             .is_some_and(|reason| reason.contains("hierarchy_generation"))
     );
 
-    // Duplicate idempotency key → rejected receipt
+    // Retried idempotency key → replay of the original accepted receipt
     let response = client
         .post(&url)
         .json(&dispatch)
         .send()
         .await
         .expect("POST /api/v1/actions/dispatch should respond");
-    assert_eq!(response.status(), 409);
+    assert_eq!(response.status(), 200);
     let body: ActionReceipt = response.json().await.expect("should not be None");
-    assert_eq!(body.status, ActionStatus::Rejected);
-    assert!(
-        body.reason
-            .as_ref()
-            .expect("should not be None")
-            .contains("duplicate idempotency key"),
-        "rejected reason should mention duplicate idempotency key: {:?}",
-        body.reason
-    );
+    assert_eq!(body.status, ActionStatus::Accepted);
+    assert_eq!(body.action_id, first_action_id);
+    assert_eq!(body.correlation_id, "corr_001");
 
     // Invalid retry action (already active) → rejected receipt
     let dispatch_retry = ActionDispatch {
