@@ -392,6 +392,18 @@ pub trait WorkspaceBackend {
         observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error>;
 
+    /// Verify that a prepared parent checkout contains the merge-result
+    /// commits captured by its durable hierarchy dispatch intent. Backends
+    /// without repository-aware checkout manifests retain the legacy no-op.
+    async fn verify_workspace_contains_commits(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _commits: &[String],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
     async fn recovered_run_started_at(
@@ -3723,6 +3735,36 @@ where
                 }
             };
 
+            if let Some(required_merge_commits) = self
+                .hierarchy_state
+                .hierarchy
+                .get(&issue_id)
+                .filter(|snapshot| snapshot.dispatch_intended())
+                .map(|snapshot| snapshot.dispatch_required_merge_commits.clone())
+                .filter(|commits| !commits.is_empty())
+                && let Err(error) = self
+                    .workspace
+                    .verify_workspace_contains_commits(
+                        &normalized,
+                        &workspace,
+                        &required_merge_commits,
+                    )
+                    .await
+            {
+                let error = self
+                    .clear_parent_dispatch_intent_after_preparation_failure(
+                        &issue_id,
+                        SchedulerError::Workspace {
+                            detail: error.to_string(),
+                        },
+                    )
+                    .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+
             if let Some(normal_retry_count) = self
                 .executions
                 .get(&issue_id)
@@ -4081,9 +4123,14 @@ where
                         .rebind_finished_child_hierarchy_generation(&issue_id)
                         .await
                     {
-                        self.insert_execution(issue_id.clone(), execution.clone());
+                        // The outcome has already been applied by
+                        // resolve_finished_execution. If rebinding its
+                        // hierarchy generation cannot be durably persisted,
+                        // retry the original running execution so the next
+                        // flush applies the outcome exactly once.
+                        self.insert_execution(issue_id.clone(), original_execution.clone());
                         self.pending_finished_updates
-                            .insert(issue_id.clone(), (execution, finished_outcome));
+                            .insert(issue_id.clone(), (original_execution, finished_outcome));
                         if first_error.is_none() {
                             first_error = Some(error);
                         }
@@ -5154,6 +5201,19 @@ where
         let Some(next_snapshot) = next_state.hierarchy.get_mut(&normalized.id) else {
             return Ok(false);
         };
+        let mut required_merge_commits = BTreeSet::new();
+        for commit in evidence.children.iter().flat_map(|child| {
+            child
+                .merge_result_commit
+                .iter()
+                .chain(child.merge_result_commits.iter())
+        }) {
+            if !commit.trim().is_empty() {
+                required_merge_commits.insert(commit.clone());
+            }
+        }
+        next_snapshot.dispatch_required_merge_commits =
+            required_merge_commits.into_iter().collect();
         if next_snapshot.freeze().is_err() {
             return Ok(false);
         }

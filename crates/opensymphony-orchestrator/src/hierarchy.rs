@@ -69,6 +69,11 @@ pub struct HierarchySnapshot {
     /// descendant mutate a checkout under the still-running worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight_generation: Option<u64>,
+    /// Merge-result commits captured with a durable dispatch intent. The
+    /// scheduler verifies that the exact checkout prepared for this parent
+    /// still contains every commit before launching the worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatch_required_merge_commits: Vec<String>,
 }
 
 impl HierarchySnapshot {
@@ -87,6 +92,7 @@ impl HierarchySnapshot {
             dispatched_generation: None,
             dispatch_intent_generation: None,
             in_flight_generation: None,
+            dispatch_required_merge_commits: Vec::new(),
         };
         snapshot.required_child_edges = child_edges(&parent.sub_issues, canceled_states);
         snapshot
@@ -129,6 +135,7 @@ impl HierarchySnapshot {
         }
         self.dispatched_generation = None;
         self.dispatch_intent_generation = None;
+        self.dispatch_required_merge_commits.clear();
         if self.frozen {
             self.blocked_reason = Some(HierarchyBlockedReason::HierarchyChanged);
             HierarchyReconciliation::BlockedForReplanning {
@@ -160,6 +167,7 @@ impl HierarchySnapshot {
         self.eligibility_blocked_reason = None;
         self.dispatched_generation = None;
         self.dispatch_intent_generation = None;
+        self.dispatch_required_merge_commits.clear();
         self.in_flight_generation = None;
     }
 
@@ -169,6 +177,7 @@ impl HierarchySnapshot {
 
     pub fn clear_dispatch_intent(&mut self) {
         self.dispatch_intent_generation = None;
+        self.dispatch_required_merge_commits.clear();
     }
 
     pub fn dispatch_intended(&self) -> bool {
@@ -207,6 +216,7 @@ impl HierarchySnapshot {
     pub fn mark_dispatched(&mut self) {
         self.dispatched_generation = Some(self.generation);
         self.dispatch_intent_generation = None;
+        self.dispatch_required_merge_commits.clear();
         self.in_flight_generation = None;
     }
 
@@ -1447,6 +1457,7 @@ mod tests {
                     dispatched_generation: None,
                     dispatch_intent_generation: None,
                     in_flight_generation: None,
+                    dispatch_required_merge_commits: Vec::new(),
                 },
             )]),
             ..Default::default()

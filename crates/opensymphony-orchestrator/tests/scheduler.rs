@@ -479,6 +479,8 @@ struct FakeWorkspace {
     revoked_issue_resources: Vec<String>,
     clear_retry_pending_results: VecDeque<Result<(), FakeError>>,
     ensure_results: VecDeque<Result<(), FakeError>>,
+    verified_workspace_commits: Vec<Vec<String>>,
+    verify_workspace_commit_results: VecDeque<Result<(), FakeError>>,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
     persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
     persist_interrupt_results: VecDeque<Result<(), FakeError>>,
@@ -512,6 +514,20 @@ impl WorkspaceBackend for FakeWorkspace {
             })
             .clone();
         Ok(record)
+    }
+
+    async fn verify_workspace_contains_commits(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        required_commits: &[String],
+    ) -> Result<(), Self::Error> {
+        self.verified_workspace_commits
+            .push(required_commits.to_vec());
+        if let Some(result) = self.verify_workspace_commit_results.pop_front() {
+            result?;
+        }
+        Ok(())
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
@@ -775,6 +791,21 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("eligible parent should dispatch");
     assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.workspace().verified_workspace_commits,
+        vec![vec!["merge-commit".to_owned()]]
+    );
+    assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            state.clone(),
+        )
+        .ok()
+        .and_then(|state| state.hierarchy.get(&parent_id).cloned())
+        .is_some_and(|snapshot| {
+            snapshot.dispatch_intended()
+                && snapshot.dispatch_required_merge_commits == vec!["merge-commit".to_owned()]
+        })
+    }));
     durable_state = serde_json::from_value(
         scheduler
             .workspace()
