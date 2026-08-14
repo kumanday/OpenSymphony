@@ -1092,8 +1092,11 @@ where
             .hierarchy
             .get(&issue_id)
             .map(|snapshot| snapshot.generation);
-        if self.hierarchy_state != previous_state {
-            self.persist_orchestrator_state().await?;
+        if self.hierarchy_state != previous_state
+            && let Err(error) = self.persist_orchestrator_state().await
+        {
+            self.hierarchy_state = previous_state;
+            return Err(error);
         }
         if current_generation != Some(expected_generation) {
             warn!(
@@ -1605,8 +1608,9 @@ where
                 .insert(normalized.id.clone(), snapshot);
             if terminal_undispatched {
                 self.hierarchy_state
-                    .release_subtree_evidence_for_undispatched_parent(
+                    .release_subtree_evidence_for_undispatched_parent_with_reachability(
                         &normalized.id,
+                        reachable_child_edges,
                         current_epoch_millis(),
                     );
             }
@@ -1627,8 +1631,9 @@ where
         let released_terminal_parent_evidence = terminal_undispatched
             && self
                 .hierarchy_state
-                .release_subtree_evidence_for_undispatched_parent(
+                .release_subtree_evidence_for_undispatched_parent_with_reachability(
                     &normalized.id,
+                    reachable_child_edges,
                     current_epoch_millis(),
                 );
         let reactivated_parent = self
@@ -4627,19 +4632,12 @@ where
         let mut next_state = self.hierarchy_state.clone();
         let has_higher_parent =
             higher_parent_id.is_some() || next_state.has_ancestor_edge(parent_id);
-        let undispatched_root = !has_higher_parent
-            && next_state
-                .hierarchy
-                .get(parent_id)
-                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
-        if undispatched_root {
-            next_state
-                .release_subtree_evidence_for_undispatched_parent(parent_id, released_at.as_u64());
-        }
+        // Tracker parent links can change before the next hierarchy refresh;
+        // defer descendant release until that reachability-aware pass.
         let released = if has_higher_parent {
             next_state.release_parent_leases_preserving_ancestor(parent_id, released_at.as_u64())
         } else {
-            next_state.release_parent_leases(parent_id, released_at.as_u64()) || undispatched_root
+            next_state.release_parent_leases(parent_id, released_at.as_u64())
         };
         if !released {
             return Ok(());

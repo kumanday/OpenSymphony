@@ -485,6 +485,7 @@ struct FakeWorkspace {
     retain_failed: bool,
     durable_state: Option<serde_json::Value>,
     persisted_durable_states: Vec<serde_json::Value>,
+    persist_durable_state_results: VecDeque<Result<(), FakeError>>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -524,6 +525,9 @@ impl WorkspaceBackend for FakeWorkspace {
         &mut self,
         state: &serde_json::Value,
     ) -> Result<(), Self::Error> {
+        if let Some(result) = self.persist_durable_state_results.pop_front() {
+            result?;
+        }
         self.durable_state = Some(state.clone());
         self.persisted_durable_states.push(state.clone());
         Ok(())
@@ -992,6 +996,74 @@ async fn replan_parent_target_preserves_tracker_failures_for_retry() {
         Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { detail })
             if detail == "rate limited"
     ));
+}
+
+#[tokio::test]
+async fn replan_parent_target_restores_hierarchy_when_persistence_fails() {
+    let parent_id = IssueId::new("parent-replan").expect("parent id");
+    let child_a = TrackerIssueRef {
+        id: "child-a".to_owned(),
+        identifier: "COE-CHILD".to_owned(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    };
+    let child_b = TrackerIssueRef {
+        id: "child-b".to_owned(),
+        identifier: "COE-CHILD-2".to_owned(),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    };
+    let mut durable_parent = tracker_issue("parent-replan", "COE-REPLAN", "In Progress", 0);
+    durable_parent.sub_issues = vec![child_a.clone()];
+    let mut snapshot = HierarchySnapshot::new(&durable_parent);
+    snapshot.freeze().expect("snapshot should freeze");
+    snapshot.reconcile(std::slice::from_ref(&child_b));
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id, snapshot)]),
+        ..Default::default()
+    };
+    let current_parent = durable_parent;
+    let tracker = FakeTracker {
+        detail_issues: Some(vec![current_parent]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        persist_durable_state_results: VecDeque::from([Err(FakeError {
+            message: "hierarchy state write failed".to_owned(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    let result = scheduler
+        .replan_parent_target("COE-REPLAN", 2, ts(100))
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::opensymphony_orchestrator::SchedulerError::Workspace { detail })
+            if detail == "hierarchy state write failed"
+    ));
+    assert_eq!(scheduler.workspace().persisted_durable_states.len(), 0);
+
+    assert!(
+        !scheduler
+            .replan_parent_target("COE-REPLAN", 3, ts(101))
+            .await
+            .expect("retry should reject the unpersisted generation")
+    );
+    assert_eq!(scheduler.workspace().persisted_durable_states.len(), 0);
 }
 
 #[tokio::test]

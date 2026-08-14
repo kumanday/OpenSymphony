@@ -996,6 +996,19 @@ impl DurableOrchestratorState {
         parent_id: &IssueId,
         released_at: u64,
     ) -> bool {
+        self.release_subtree_evidence_for_undispatched_parent_with_reachability(
+            parent_id,
+            None,
+            released_at,
+        )
+    }
+
+    pub fn release_subtree_evidence_for_undispatched_parent_with_reachability(
+        &mut self,
+        parent_id: &IssueId,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
+        released_at: u64,
+    ) -> bool {
         let mut subtree = BTreeSet::new();
         let mut pending = self
             .hierarchy
@@ -1029,18 +1042,33 @@ impl DurableOrchestratorState {
                 .collect::<Vec<_>>(),
         );
         let parent_ancestor_owner = LeaseOwner::ancestor(parent_id);
+        let still_reachable = |issue_id: &IssueId| {
+            reachable_child_edges.is_some_and(|edges| {
+                edges
+                    .iter()
+                    .any(|(candidate_parent_id, candidate_child_id)| {
+                        candidate_child_id == issue_id
+                            && candidate_parent_id != parent_id
+                            && !subtree.contains(candidate_parent_id)
+                    })
+            })
+        };
         let mut released = false;
         for lease in &mut self.leases {
             if !lease.active() {
                 continue;
             }
             let owned_by_subtree = match lease.kind {
-                LeaseKind::LeafWorker => subtree.contains(&lease.resource.issue_id),
+                LeaseKind::LeafWorker => {
+                    subtree.contains(&lease.resource.issue_id)
+                        && !still_reachable(&lease.resource.issue_id)
+                }
                 LeaseKind::AncestorIntegration => {
                     lease.owner == parent_ancestor_owner
-                        || subtree
-                            .iter()
-                            .any(|issue_id| lease.owner == LeaseOwner::ancestor(issue_id))
+                        || subtree.iter().any(|issue_id| {
+                            lease.owner == LeaseOwner::ancestor(issue_id)
+                                && !still_reachable(issue_id)
+                        })
                 }
                 LeaseKind::Review => review_prefixes
                     .iter()
@@ -2143,6 +2171,80 @@ mod tests {
                 .iter()
                 .all(|lease| lease.released_at == Some(4))
         );
+    }
+
+    #[test]
+    fn undispatched_root_release_preserves_reparented_child_evidence() {
+        let parent_a = IssueId::new("parent-a").expect("parent a");
+        let parent_b = IssueId::new("parent-b").expect("parent b");
+        let child_id = IssueId::new("child").expect("child");
+        let resource = LeaseResource {
+            issue_id: child_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(
+                parent_a.clone(),
+                HierarchySnapshot::new(&parent(vec![child("child", "Done")])),
+            )]),
+            ..Default::default()
+        };
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&child_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource,
+                    owner: LeaseOwner::ancestor(&parent_a),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("leases should acquire");
+
+        let reachable_child_edges = BTreeSet::from([(parent_b, child_id.clone())]);
+        assert!(
+            state.release_subtree_evidence_for_undispatched_parent_with_reachability(
+                &parent_a,
+                Some(&reachable_child_edges),
+                2,
+            )
+        );
+        assert!(state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.kind == LeaseKind::LeafWorker
+                && lease.owner == LeaseOwner::leaf_worker(&child_id)
+        }));
+        assert!(state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.kind == LeaseKind::AncestorIntegration
+                && lease.owner == LeaseOwner::ancestor(&child_id)
+        }));
+        assert!(!state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.kind == LeaseKind::AncestorIntegration
+                && lease.owner == LeaseOwner::ancestor(&parent_a)
+        }));
     }
 
     #[test]
