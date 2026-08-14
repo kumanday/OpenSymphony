@@ -1559,7 +1559,7 @@ impl LinearClient {
             LinearError::Request(_) => true,
             LinearError::ResponseBody { .. } => true,
             LinearError::HttpStatus { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                error.is_rate_limited() || status.is_server_error()
             }
             LinearError::Graphql { .. } => error.is_rate_limited(),
             LinearError::MissingIssueIds { .. }

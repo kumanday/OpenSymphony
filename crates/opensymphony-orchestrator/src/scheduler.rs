@@ -1487,12 +1487,14 @@ where
                 snapshot
                     .required_child_edges
                     .into_iter()
+                    .filter(|edge| edge.required)
                     .map(|edge| (issue_id.clone(), edge.child_id)),
             );
-            if let Some(parent_id) = issue
-                .parent_id
-                .as_deref()
-                .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())
+            if !is_canceled_tracker_issue(issue, &self.config.terminal_states)
+                && let Some(parent_id) = issue
+                    .parent_id
+                    .as_deref()
+                    .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())
             {
                 edges.insert((parent_id, issue_id));
             }
@@ -6203,6 +6205,16 @@ fn matches_state_name(name: &str, states: &[String]) -> bool {
         .any(|state| normalized_state_name(state) == normalized)
 }
 
+fn is_canceled_tracker_issue(issue: &TrackerIssue, canceled_states: &[String]) -> bool {
+    matches!(issue.state_kind, TrackerIssueStateKind::Canceled)
+        || canceled_states.iter().any(|configured_state| {
+            configured_state.to_ascii_lowercase().contains("cancel")
+                && configured_state
+                    .trim()
+                    .eq_ignore_ascii_case(issue.state.trim())
+        })
+}
+
 fn running_state_key_for_execution(execution: &IssueExecution) -> Option<String> {
     (execution.status() == SchedulerStatus::Running)
         .then(|| normalized_state_name(&execution.issue().state.name))
@@ -6416,6 +6428,15 @@ mod tests {
     fn conversation_suffix_matches_gateway_alias_shape() {
         assert_eq!(conversation_id_suffix("conv-123456789"), "23456789");
         assert_eq!(conversation_id_suffix("short"), "short");
+    }
+
+    #[test]
+    fn canceled_tracker_children_are_not_reachable_for_lease_release() {
+        let mut issue = tracker_issue_from_normalized(&issue_with_project(None, None));
+        issue.state = "Canceled".to_owned();
+        issue.state_kind = TrackerIssueStateKind::Canceled;
+
+        assert!(is_canceled_tracker_issue(&issue, &["Canceled".to_owned()]));
     }
 
     fn issue_with_project(project_id: Option<&str>, project_slug: Option<&str>) -> NormalizedIssue {

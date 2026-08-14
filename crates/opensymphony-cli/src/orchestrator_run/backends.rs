@@ -7,7 +7,7 @@ use std::{
     env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::opensymphony_cli::{
@@ -1196,7 +1196,19 @@ impl RuntimeTrackerBackend {
             .await
         {
             Ok(pull_request) => pull_request,
-            Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
+            Err(LinearError::HttpStatus { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                // A PR lookup 404 is only historical-deletion evidence after
+                // the repository itself is confirmed readable. Otherwise the
+                // same response can mean a private repository or insufficient
+                // token scope, which must remain an operational failure.
+                let repository_endpoint =
+                    format!("{api_root}/repos/{}/{}", segments[0], segments[1]);
+                self.github_get_json::<GitHubRepository>(&repository_endpoint, repository)
+                    .await?;
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         // `updated_at` changes when an old PR is edited after a child is
@@ -1206,7 +1218,7 @@ impl RuntimeTrackerBackend {
             .merged_at
             .as_deref()
             .or(Some(pull_request.created_at.as_str()))
-            .and_then(github_timestamp_ms);
+            .and_then(github_provider_evidence_timestamp_ms);
         let compatible = pull_request.base.ref_name == repository.target_branch
             && pull_request
                 .base
@@ -1320,7 +1332,15 @@ impl RuntimeTrackerBackend {
                     .await
                 {
                     Ok(commit) => commit,
-                    Err(error) if historical_pr_candidate_not_found(&error) => return Ok(None),
+                    Err(LinearError::HttpStatus { status, .. })
+                        if status == reqwest::StatusCode::NOT_FOUND =>
+                    {
+                        let repository_endpoint =
+                            format!("{api_root}/repos/{owner}/{repository_name}");
+                        self.github_get_json::<GitHubRepository>(&repository_endpoint, repository)
+                            .await?;
+                        return Ok(None);
+                    }
                     Err(error) => return Err(error),
                 };
                 Ok(Some(github_merge_method_matches(
@@ -1400,17 +1420,34 @@ impl RuntimeTrackerBackend {
             .await
             .map_err(|error| LinearError::Request(Box::new(error)))?;
         let status = response.status();
+        let retry_after = github_retry_after(response.headers());
+        let headers_indicate_rate_limit = github_headers_indicate_rate_limit(response.headers());
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
         if !status.is_success() {
+            let rate_limited = headers_indicate_rate_limit
+                || response_body.to_ascii_lowercase().contains("rate limit")
+                || response_body
+                    .to_ascii_lowercase()
+                    .contains("secondary rate limit");
+            let body = if rate_limited {
+                format!("GitHub API rate limit response for {endpoint}: {response_body}")
+            } else {
+                format!("GitHub API lookup failed for {endpoint}: {response_body}")
+            };
             return Err(LinearError::HttpStatus {
                 status,
-                body: format!("GitHub API lookup failed for {endpoint}"),
-                retry_after: None,
+                body,
+                retry_after,
             });
         }
-        response
-            .json::<T>()
-            .await
-            .map_err(|error| LinearError::Request(Box::new(error)))
+        serde_json::from_str::<T>(&response_body).map_err(|error| {
+            LinearError::InvalidResponse(format!(
+                "GitHub API response decode failed for {endpoint}: {error}"
+            ))
+        })
     }
 
     async fn github_merge_policy_satisfied(
@@ -1426,32 +1463,13 @@ impl RuntimeTrackerBackend {
             let reviews = self
                 .github_reviews(api_root, owner, repository_name, pull_number, repository)
                 .await?;
-            let mut latest_by_reviewer = BTreeMap::<String, (String, String)>::new();
-            for review in reviews {
-                let reviewer = review
-                    .user
-                    .and_then(|user| user.login)
-                    .unwrap_or_else(|| format!("review-{}", latest_by_reviewer.len()));
-                let submitted_at = review.submitted_at.unwrap_or_default();
-                if !matches!(
-                    review.state.to_ascii_lowercase().as_str(),
-                    "approved" | "changes_requested" | "dismissed"
-                ) {
-                    continue;
-                }
-                if latest_by_reviewer
-                    .get(&reviewer)
-                    .is_none_or(|(_, timestamp)| *timestamp < submitted_at)
-                {
-                    latest_by_reviewer.insert(reviewer, (review.state, submitted_at));
-                }
-            }
+            let latest_by_reviewer = latest_github_review_states(reviews);
             if !latest_by_reviewer
                 .values()
-                .any(|(state, _)| state.eq_ignore_ascii_case("approved"))
+                .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"))
                 || latest_by_reviewer
                     .values()
-                    .any(|(state, _)| state.eq_ignore_ascii_case("changes_requested"))
+                    .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"))
             {
                 return Ok(false);
             }
@@ -1820,16 +1838,6 @@ impl RuntimeTrackerBackend {
     }
 }
 
-fn historical_pr_candidate_not_found(error: &LinearError) -> bool {
-    match error {
-        LinearError::HttpStatus { status, body, .. } => {
-            *status == reqwest::StatusCode::NOT_FOUND
-                && !body.contains("/protection/required_status_checks")
-        }
-        _ => false,
-    }
-}
-
 fn github_url_authority(url: &Url) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
     let authority = url
@@ -1939,6 +1947,42 @@ fn github_timestamp_ms(value: &str) -> Option<TimestampMs> {
         .ok()?
         .timestamp_millis();
     (millis >= 0).then_some(TimestampMs::new(millis as u64))
+}
+
+fn github_provider_evidence_timestamp_ms(value: &str) -> Option<TimestampMs> {
+    let timestamp = github_timestamp_ms(value)?;
+    // GitHub's merge and creation timestamps are normally second-precision.
+    // Store the end of that provider precision so a run that starts later in
+    // the same second is not incorrectly treated as newer than the evidence.
+    if value.contains('.') {
+        Some(timestamp)
+    } else {
+        Some(TimestampMs::new(timestamp.as_u64().saturating_add(999)))
+    }
+}
+
+fn github_headers_indicate_rate_limit(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some_and(|remaining| remaining == 0)
+}
+
+fn github_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    retry_after.or_else(|| {
+        let reset_at = headers
+            .get("x-ratelimit-reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some(Duration::from_secs(reset_at.saturating_sub(now)))
+    })
 }
 
 fn github_compare_contains_commit(comparison: &GitHubCompare) -> bool {
@@ -2090,6 +2134,8 @@ struct GitHubCommitParent {
 
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequestReview {
+    #[serde(default)]
+    id: u64,
     state: String,
     #[serde(default)]
     submitted_at: Option<String>,
@@ -2097,10 +2143,39 @@ struct GitHubPullRequestReview {
     user: Option<GitHubReviewUser>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct GitHubReviewUser {
     #[serde(default)]
     login: Option<String>,
+}
+
+fn latest_github_review_states(
+    reviews: impl IntoIterator<Item = GitHubPullRequestReview>,
+) -> BTreeMap<String, (String, String, u64)> {
+    let mut latest_by_reviewer: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
+    for review in reviews {
+        let reviewer = review
+            .user
+            .and_then(|user| user.login)
+            .unwrap_or_else(|| format!("review-{}", latest_by_reviewer.len()));
+        let submitted_at = review.submitted_at.unwrap_or_default();
+        if !matches!(
+            review.state.to_ascii_lowercase().as_str(),
+            "approved" | "changes_requested" | "dismissed"
+        ) {
+            continue;
+        }
+        if latest_by_reviewer
+            .get(&reviewer)
+            .is_none_or(|(_, timestamp, review_id)| {
+                timestamp.as_str() < submitted_at.as_str()
+                    || (timestamp == &submitted_at && *review_id <= review.id)
+            })
+        {
+            latest_by_reviewer.insert(reviewer, (review.state, submitted_at, review.id));
+        }
+    }
+    latest_by_reviewer
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2242,6 +2317,7 @@ struct GitHubRepository {
     id: Option<u64>,
     #[serde(default)]
     node_id: Option<String>,
+    #[serde(default)]
     full_name: String,
 }
 
@@ -11576,6 +11652,69 @@ Run the scheduler.
     }
 
     #[test]
+    fn latest_reviews_break_equal_timestamp_ties_with_review_id() {
+        let reviewer = Some(GitHubReviewUser {
+            login: Some("reviewer".to_owned()),
+        });
+        let latest = latest_github_review_states(vec![
+            GitHubPullRequestReview {
+                id: 22,
+                state: "changes_requested".to_owned(),
+                submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                user: reviewer.clone(),
+            },
+            GitHubPullRequestReview {
+                id: 21,
+                state: "approved".to_owned(),
+                submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                user: reviewer,
+            },
+        ]);
+
+        assert_eq!(
+            latest.get("reviewer"),
+            Some(&(
+                "changes_requested".to_owned(),
+                "2026-08-14T15:00:00Z".to_owned(),
+                22,
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_evidence_timestamp_respects_github_precision() {
+        let second_precision = github_timestamp_ms("1970-01-01T00:00:01Z").expect("timestamp");
+        assert_eq!(
+            github_provider_evidence_timestamp_ms("1970-01-01T00:00:01Z")
+                .expect("timestamp")
+                .as_u64(),
+            second_precision.as_u64() + 999
+        );
+        assert_eq!(
+            github_provider_evidence_timestamp_ms("1970-01-01T00:00:01.123Z")
+                .expect("timestamp")
+                .as_u64(),
+            1123
+        );
+    }
+
+    #[test]
+    fn github_rate_limit_headers_preserve_retry_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-remaining",
+            reqwest::header::HeaderValue::from_static("0"),
+        );
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("7"),
+        );
+
+        assert!(github_headers_indicate_rate_limit(&headers));
+        assert_eq!(github_retry_after(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
     fn github_merge_evidence_matches_configured_merge_method() {
         assert!(github_merge_method_matches("merge", 2));
         assert!(!github_merge_method_matches("merge", 1));
@@ -11813,23 +11952,6 @@ Run the scheduler.
             &[],
             Some(&any_app),
         ));
-    }
-
-    #[test]
-    fn historical_pr_404_filter_does_not_hide_protection_404() {
-        let historical = LinearError::HttpStatus {
-            status: reqwest::StatusCode::NOT_FOUND,
-            body: "GitHub API lookup failed for /pulls/7".to_owned(),
-            retry_after: None,
-        };
-        let protection = LinearError::HttpStatus {
-            status: reqwest::StatusCode::NOT_FOUND,
-            body: "GitHub API lookup failed for /protection/required_status_checks".to_owned(),
-            retry_after: None,
-        };
-
-        assert!(historical_pr_candidate_not_found(&historical));
-        assert!(!historical_pr_candidate_not_found(&protection));
     }
 
     #[test]
