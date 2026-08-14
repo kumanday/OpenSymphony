@@ -14,13 +14,13 @@ use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
     IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
     LeaseResource, NormalizedIssue, ParentEligibilityEvidence, RecoveredRun, RecoveryRecord,
-    ReleaseReason, RetryAttempt, RetryEntry, RetryExhaustionRecord, RetryPendingRecord,
-    RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs,
-    TrackerBackend, TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
-    TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
-    decide_issue_route,
+    ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry, RetryExhaustionRecord,
+    RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
+    SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
+    WorkerAbortReason, WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkspaceKey, WorkspaceRecord, decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -479,8 +479,6 @@ struct FakeWorkspace {
     revoked_issue_resources: Vec<String>,
     clear_retry_pending_results: VecDeque<Result<(), FakeError>>,
     ensure_results: VecDeque<Result<(), FakeError>>,
-    verified_workspace_commits: Vec<Vec<String>>,
-    verify_workspace_commit_results: VecDeque<Result<(), FakeError>>,
     persist_retry_pending_results: VecDeque<Result<(), FakeError>>,
     persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
     persist_interrupt_results: VecDeque<Result<(), FakeError>>,
@@ -514,20 +512,6 @@ impl WorkspaceBackend for FakeWorkspace {
             })
             .clone();
         Ok(record)
-    }
-
-    async fn verify_workspace_contains_commits(
-        &mut self,
-        _issue: &NormalizedIssue,
-        _workspace: &WorkspaceRecord,
-        required_commits: &[String],
-    ) -> Result<(), Self::Error> {
-        self.verified_workspace_commits
-            .push(required_commits.to_vec());
-        if let Some(result) = self.verify_workspace_commit_results.pop_front() {
-            result?;
-        }
-        Ok(())
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
@@ -765,11 +749,15 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             merge_required: true,
             merge_result_commit: Some("merge-commit".to_owned()),
             merge_result_commits: Vec::new(),
-            merge_repository_id: None,
-            merge_repository_ids: Vec::new(),
+            merge_result_commits_by_repository: vec![RequiredMergeCommit {
+                repository_id: Some(resource.repository_id.clone()),
+                commit: "merge-commit".to_owned(),
+            }],
+            merge_repository_id: Some(resource.repository_id.clone()),
+            merge_repository_ids: vec![resource.repository_id.clone()],
             provider_evidence_at: None,
             provider_evidence_by_issue: Vec::new(),
-            resource: Some(resource),
+            resource: Some(resource.clone()),
             resources: Vec::new(),
             unresolved_failure: None,
         }],
@@ -791,10 +779,6 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("eligible parent should dispatch");
     assert_eq!(scheduler.worker().launches.len(), 1);
-    assert_eq!(
-        scheduler.workspace().verified_workspace_commits,
-        vec![vec!["merge-commit".to_owned()]]
-    );
     assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
         serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
             state.clone(),
@@ -803,7 +787,11 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .and_then(|state| state.hierarchy.get(&parent_id).cloned())
         .is_some_and(|snapshot| {
             snapshot.dispatch_intended()
-                && snapshot.dispatch_required_merge_commits == vec!["merge-commit".to_owned()]
+                && snapshot.dispatch_required_merge_commits
+                    == vec![RequiredMergeCommit {
+                        repository_id: Some(resource.repository_id.clone()),
+                        commit: "merge-commit".to_owned(),
+                    }]
         })
     }));
     durable_state = serde_json::from_value(

@@ -5,7 +5,7 @@ use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, IssueIdentifier, TimestampMs, TrackerIssue, TrackerIssueRef,
     TrackerIssueStateKind,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 pub const HIERARCHY_STATE_SCHEMA_VERSION: u32 = 1;
@@ -69,11 +69,15 @@ pub struct HierarchySnapshot {
     /// descendant mutate a checkout under the still-running worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight_generation: Option<u64>,
-    /// Merge-result commits captured with a durable dispatch intent. The
-    /// scheduler verifies that the exact checkout prepared for this parent
-    /// still contains every commit before launching the worker.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dispatch_required_merge_commits: Vec<String>,
+    /// Merge-result commits captured with a durable dispatch intent. Keep the
+    /// canonical repository identity beside each commit so the parent
+    /// integration layer can select the matching prepared worktree.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_required_merge_commits",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub dispatch_required_merge_commits: Vec<RequiredMergeCommit>,
 }
 
 impl HierarchySnapshot {
@@ -373,6 +377,43 @@ pub struct ProviderEvidenceBoundary {
     pub evidence_at: TimestampMs,
 }
 
+/// A provider-reported merge result, retained with the repository it belongs
+/// to. Parent integration work must never verify a flattened commit list
+/// against an arbitrary repository root.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RequiredMergeCommit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<CanonicalRepositoryId>,
+    pub commit: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SerializedRequiredMergeCommit {
+    Detailed(RequiredMergeCommit),
+    Legacy(String),
+}
+
+fn deserialize_required_merge_commits<'de, D>(
+    deserializer: D,
+) -> Result<Vec<RequiredMergeCommit>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<SerializedRequiredMergeCommit>::deserialize(deserializer).map(|commits| {
+        commits
+            .into_iter()
+            .map(|commit| match commit {
+                SerializedRequiredMergeCommit::Detailed(commit) => commit,
+                SerializedRequiredMergeCommit::Legacy(commit) => RequiredMergeCommit {
+                    repository_id: None,
+                    commit,
+                },
+            })
+            .collect()
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildEligibilityEvidence {
     pub child_id: IssueId,
@@ -390,6 +431,10 @@ pub struct ChildEligibilityEvidence {
     /// singular field remains the compatibility projection for older state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_result_commits: Vec<String>,
+    /// Repository-bound merge results for nested parents and multi-repository
+    /// children. The string list above remains a compatibility projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_result_commits_by_repository: Vec<RequiredMergeCommit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_repository_id: Option<CanonicalRepositoryId>,
     /// Repository identities for every descendant merge commit. The
@@ -440,6 +485,7 @@ impl ParentEligibilityEvidence {
                     merge_required: true,
                     merge_result_commit: None,
                     merge_result_commits: Vec::new(),
+                    merge_result_commits_by_repository: Vec::new(),
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
                     provider_evidence_at: None,
@@ -466,6 +512,7 @@ impl ParentEligibilityEvidence {
                     merge_required: true,
                     merge_result_commit: None,
                     merge_result_commits: Vec::new(),
+                    merge_result_commits_by_repository: Vec::new(),
                     merge_repository_id: None,
                     merge_repository_ids: Vec::new(),
                     provider_evidence_at: None,
@@ -532,6 +579,19 @@ impl ParentEligibilityEvidence {
                 return Err(HierarchyBlockedReason::MissingTargetCommit);
             }
             let resources = child.resources();
+            if child
+                .merge_result_commits_by_repository
+                .iter()
+                .any(|commit| {
+                    commit.repository_id.as_ref().is_none_or(|repository_id| {
+                        !resources
+                            .iter()
+                            .any(|resource| &resource.repository_id == repository_id)
+                    })
+                })
+            {
+                return Err(HierarchyBlockedReason::MissingCheckoutEvidence);
+            }
             let merge_repository_ids = if child.merge_repository_ids.is_empty() {
                 child.merge_repository_id.iter().collect::<Vec<_>>()
             } else {
@@ -1313,6 +1373,32 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_merge_commit_state_preserves_repository_binding_and_reads_legacy_strings() {
+        let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
+        let repository_id = CanonicalRepositoryId::new("github:repo").expect("repository id");
+        snapshot.dispatch_required_merge_commits = vec![RequiredMergeCommit {
+            repository_id: Some(repository_id.clone()),
+            commit: "merge-commit".to_owned(),
+        }];
+        let encoded = serde_json::to_value(&snapshot).expect("snapshot should encode");
+        let decoded: HierarchySnapshot =
+            serde_json::from_value(encoded).expect("repository-bound state should decode");
+        assert_eq!(decoded, snapshot);
+
+        let mut legacy = serde_json::to_value(&snapshot).expect("snapshot should encode");
+        legacy["dispatch_required_merge_commits"] = serde_json::json!(["legacy-commit"]);
+        let decoded: HierarchySnapshot =
+            serde_json::from_value(legacy).expect("legacy state should remain recoverable");
+        assert_eq!(
+            decoded.dispatch_required_merge_commits,
+            vec![RequiredMergeCommit {
+                repository_id: None,
+                commit: "legacy-commit".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn frozen_scope_change_keeps_in_flight_dispatch_fence_until_replan() {
         let mut snapshot = HierarchySnapshot::new(&parent(vec![child("child-a", "Done")]));
         snapshot.freeze().expect("initial scope should freeze");
@@ -1906,6 +1992,7 @@ mod tests {
                 merge_required: true,
                 merge_result_commit: Some("abc123".to_owned()),
                 merge_result_commits: Vec::new(),
+                merge_result_commits_by_repository: Vec::new(),
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,
@@ -1942,6 +2029,7 @@ mod tests {
                 merge_required: true,
                 merge_result_commit: None,
                 merge_result_commits: vec!["descendant-merge".to_owned()],
+                merge_result_commits_by_repository: Vec::new(),
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,
@@ -1974,6 +2062,7 @@ mod tests {
                 merge_required: false,
                 merge_result_commit: None,
                 merge_result_commits: Vec::new(),
+                merge_result_commits_by_repository: Vec::new(),
                 merge_repository_id: None,
                 merge_repository_ids: Vec::new(),
                 provider_evidence_at: None,

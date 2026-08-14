@@ -954,43 +954,6 @@ impl WorkspaceManager {
             .await
     }
 
-    /// Verify that a retained checkout contains every merge result required by
-    /// a parent dispatch intent. The checkout manifest's current HEAD is the
-    /// exact target commit prepared for the worker; checking ancestry here
-    /// closes the race where the target branch moves after provider evidence
-    /// was collected but before workspace preparation completes.
-    pub async fn verify_checkout_contains_commits(
-        &self,
-        workspace: &WorkspaceHandle,
-        required_commits: &[String],
-    ) -> Result<CheckoutManifest, WorkspaceError> {
-        let manifest = self.verify_checkout_for_retry(workspace).await?;
-        for commit in required_commits
-            .iter()
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|commit| !commit.is_empty())
-        {
-            let contains_commit = self
-                .git_is_ancestor(
-                    workspace.workspace_path(),
-                    &["merge-base", "--is-ancestor", commit, &manifest.head],
-                )
-                .await?;
-            if !contains_commit {
-                return Err(WorkspaceError::CheckoutVerification {
-                    path: workspace.workspace_path().to_path_buf(),
-                    generation: manifest.generation.clone(),
-                    reason: format!(
-                        "prepared checkout HEAD {} does not contain required merge result {commit}",
-                        manifest.head
-                    ),
-                });
-            }
-        }
-        Ok(manifest)
-    }
-
     pub async fn checkout_allows_worker_changes(
         &self,
         workspace: &WorkspaceHandle,

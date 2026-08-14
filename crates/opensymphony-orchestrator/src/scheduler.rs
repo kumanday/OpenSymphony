@@ -392,18 +392,6 @@ pub trait WorkspaceBackend {
         observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error>;
 
-    /// Verify that a prepared parent checkout contains the merge-result
-    /// commits captured by its durable hierarchy dispatch intent. Backends
-    /// without repository-aware checkout manifests retain the legacy no-op.
-    async fn verify_workspace_contains_commits(
-        &mut self,
-        _issue: &NormalizedIssue,
-        _workspace: &WorkspaceRecord,
-        _commits: &[String],
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
     async fn recovered_run_started_at(
@@ -3735,36 +3723,6 @@ where
                 }
             };
 
-            if let Some(required_merge_commits) = self
-                .hierarchy_state
-                .hierarchy
-                .get(&issue_id)
-                .filter(|snapshot| snapshot.dispatch_intended())
-                .map(|snapshot| snapshot.dispatch_required_merge_commits.clone())
-                .filter(|commits| !commits.is_empty())
-                && let Err(error) = self
-                    .workspace
-                    .verify_workspace_contains_commits(
-                        &normalized,
-                        &workspace,
-                        &required_merge_commits,
-                    )
-                    .await
-            {
-                let error = self
-                    .clear_parent_dispatch_intent_after_preparation_failure(
-                        &issue_id,
-                        SchedulerError::Workspace {
-                            detail: error.to_string(),
-                        },
-                    )
-                    .await;
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-                continue;
-            }
-
             if let Some(normal_retry_count) = self
                 .executions
                 .get(&issue_id)
@@ -5203,13 +5161,22 @@ where
         };
         let mut required_merge_commits = BTreeSet::new();
         for commit in evidence.children.iter().flat_map(|child| {
-            child
-                .merge_result_commit
-                .iter()
-                .chain(child.merge_result_commits.iter())
+            if child.merge_result_commits_by_repository.is_empty() {
+                child
+                    .merge_result_commit
+                    .iter()
+                    .chain(child.merge_result_commits.iter())
+                    .map(|commit| super::RequiredMergeCommit {
+                        repository_id: child.merge_repository_id.clone(),
+                        commit: commit.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                child.merge_result_commits_by_repository.clone()
+            }
         }) {
-            if !commit.trim().is_empty() {
-                required_merge_commits.insert(commit.clone());
+            if !commit.commit.trim().is_empty() {
+                required_merge_commits.insert(commit);
             }
         }
         next_snapshot.dispatch_required_merge_commits =

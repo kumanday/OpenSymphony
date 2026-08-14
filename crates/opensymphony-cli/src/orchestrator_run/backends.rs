@@ -41,9 +41,9 @@ use crate::opensymphony_openhands::{
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
     ParentEligibilityEvidence, ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord,
-    RetryExhaustionRecord, RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
-    WorkspaceBackend,
+    RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -1035,7 +1035,11 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 provider_merge_confirmed,
                 merge_required,
                 merge_result_commit,
-                merge_result_commits,
+                merge_result_commits: merge_result_commits
+                    .iter()
+                    .map(|commit| commit.commit.clone())
+                    .collect(),
+                merge_result_commits_by_repository: merge_result_commits,
                 merge_repository_id,
                 merge_repository_ids,
                 provider_evidence_at,
@@ -1650,7 +1654,7 @@ impl RuntimeTrackerBackend {
             Option<String>,
             Option<CanonicalRepositoryId>,
             Vec<CanonicalRepositoryId>,
-            Vec<String>,
+            Vec<RequiredMergeCommit>,
             Option<TimestampMs>,
             Vec<ProviderEvidenceBoundary>,
         ),
@@ -1676,7 +1680,14 @@ impl RuntimeTrackerBackend {
             .collect::<Vec<_>>();
         let (confirmed, commit, repository_id, provider_evidence_at) =
             select_current_github_merge_evidence(evidence);
-        let commits = commit.iter().cloned().collect();
+        let commits = commit
+            .iter()
+            .zip(repository_id.iter())
+            .map(|(commit, repository_id)| RequiredMergeCommit {
+                repository_id: Some(repository_id.clone()),
+                commit: commit.clone(),
+            })
+            .collect();
         let repository_ids = repository_id.iter().cloned().collect();
         let provider_evidence_by_issue = provider_evidence_at
             .map(|evidence_at| {
@@ -1706,7 +1717,7 @@ impl RuntimeTrackerBackend {
             Option<String>,
             Option<CanonicalRepositoryId>,
             Vec<CanonicalRepositoryId>,
-            Vec<String>,
+            Vec<RequiredMergeCommit>,
             Option<TimestampMs>,
             bool,
             Vec<ProviderEvidenceBoundary>,
@@ -1821,7 +1832,7 @@ impl RuntimeTrackerBackend {
                 }
             }
         }
-        let commit = commits.first().cloned();
+        let commit = commits.first().map(|commit| commit.commit.clone());
         let repository_id = (repository_ids.len() == 1)
             .then(|| repository_ids.iter().next().cloned())
             .flatten();
@@ -2643,40 +2654,6 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 .last_seen_tracker_refresh_at
                 .map(datetime_to_timestamp_ms),
         })
-    }
-
-    async fn verify_workspace_contains_commits(
-        &mut self,
-        issue: &NormalizedIssue,
-        workspace: &crate::opensymphony_domain::WorkspaceRecord,
-        required_commits: &[String],
-    ) -> Result<(), Self::Error> {
-        if required_commits.is_empty() {
-            return Ok(());
-        }
-        let handle = self
-            .manager
-            .find_workspace_by_issue_reference(issue.identifier.as_str())
-            .await?
-            .ok_or_else(|| WorkspaceError::CheckoutVerification {
-                path: workspace.path.clone(),
-                generation: "unknown".to_owned(),
-                reason: "prepared workspace could not be resolved for merge-result verification"
-                    .to_owned(),
-            })?;
-        if handle.workspace_path() != workspace.path {
-            return Err(WorkspaceError::CheckoutVerification {
-                path: workspace.path.clone(),
-                generation: handle.checkout_generation().unwrap_or("unknown").to_owned(),
-                reason: "prepared workspace path changed before merge-result verification"
-                    .to_owned(),
-            }
-            .into());
-        }
-        self.manager
-            .verify_checkout_contains_commits(&handle, required_commits)
-            .await?;
-        Ok(())
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
