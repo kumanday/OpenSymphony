@@ -6024,6 +6024,23 @@ async fn gateway_dispatches_action_and_returns_receipt() {
     assert_eq!(body.action_id, first_action_id);
     assert_eq!(body.correlation_id, "corr_001");
 
+    // Retried idempotency key with a fresh correlation ID → same receipt
+    let correlation_retry = ActionDispatch {
+        correlation_id: "corr_retry".to_owned(),
+        ..dispatch.clone()
+    };
+    let response = client
+        .post(&url)
+        .json(&correlation_retry)
+        .send()
+        .await
+        .expect("correlation-only retry should respond");
+    assert_eq!(response.status(), 200);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Accepted);
+    assert_eq!(body.action_id, first_action_id);
+    assert_eq!(body.correlation_id, "corr_001");
+
     // Reusing a key for a different action must not replay the original receipt.
     let mismatched_dispatch = ActionDispatch {
         action_kind: ActionKind::Comment,

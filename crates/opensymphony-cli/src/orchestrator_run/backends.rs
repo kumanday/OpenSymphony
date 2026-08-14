@@ -2051,7 +2051,7 @@ fn latest_commit_statuses<'a>(
                 .as_deref()
                 .or(current.created_at.as_deref())
                 .unwrap_or_default();
-            timestamp >= current_timestamp
+            (timestamp, status.id) >= (current_timestamp, current.id)
         });
         if replace {
             latest.insert(status.context.clone(), status);
@@ -2160,6 +2160,8 @@ struct GitHubCommitStatuses {
 
 #[derive(Debug, serde::Deserialize)]
 struct GitHubCommitStatus {
+    #[serde(default)]
+    id: u64,
     context: String,
     state: String,
     #[serde(default)]
@@ -11667,6 +11669,7 @@ Run the scheduler.
         assert!(required_check_evidence_satisfied(
             &checks,
             &[GitHubCommitStatus {
+                id: 1,
                 context: "lint".to_owned(),
                 state: "success".to_owned(),
                 created_at: None,
@@ -11754,6 +11757,7 @@ Run the scheduler.
         assert!(!required_check_evidence_satisfied(
             &[],
             &[GitHubCommitStatus {
+                id: 1,
                 context: "protected".to_owned(),
                 state: "success".to_owned(),
                 created_at: None,
@@ -11836,16 +11840,18 @@ Run the scheduler.
         };
         let statuses = vec![
             GitHubCommitStatus {
+                id: 1,
                 context: "lint".to_owned(),
                 state: "success".to_owned(),
                 created_at: Some("2026-08-13T07:00:00Z".to_owned()),
                 updated_at: Some("2026-08-13T07:00:00Z".to_owned()),
             },
             GitHubCommitStatus {
+                id: 2,
                 context: "lint".to_owned(),
                 state: "failure".to_owned(),
-                created_at: Some("2026-08-13T07:01:00Z".to_owned()),
-                updated_at: Some("2026-08-13T07:01:00Z".to_owned()),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                updated_at: Some("2026-08-13T07:00:00Z".to_owned()),
             },
         ];
 

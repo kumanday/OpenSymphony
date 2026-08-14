@@ -225,6 +225,7 @@ fn permission_denied_receipt(
 fn action_fingerprint(action: &ActionDispatch) -> String {
     let mut action = action.clone();
     action.idempotency_key = None;
+    action.correlation_id.clear();
     serde_json::to_string(&action).expect("action dispatch should be serializable")
 }
 

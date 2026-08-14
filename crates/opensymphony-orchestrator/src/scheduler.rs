@@ -4075,6 +4075,18 @@ where
                             continue;
                         }
                     };
+                    if let Err(error) = self
+                        .rebind_finished_child_hierarchy_generation(&issue_id)
+                        .await
+                    {
+                        self.insert_execution(issue_id.clone(), execution.clone());
+                        self.pending_finished_updates
+                            .insert(issue_id.clone(), (execution, finished_outcome));
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
                     self.insert_execution(issue_id.clone(), execution);
                     if let Err(error) = self.persist_retry_if_queued(&issue_id).await
                         && first_error.is_none()
@@ -4124,6 +4136,47 @@ where
         }
 
         first_error.map_or(Ok(()), Err)
+    }
+
+    async fn rebind_finished_child_hierarchy_generation(
+        &mut self,
+        issue_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        let Some(generation) = self
+            .hierarchy_state
+            .hierarchy
+            .values()
+            .filter(|snapshot| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .any(|edge| edge.required && edge.child_id == *issue_id)
+            })
+            .map(|snapshot| snapshot.generation)
+            .next()
+        else {
+            return Ok(());
+        };
+        if self
+            .hierarchy_state
+            .run_hierarchy_generations
+            .get(issue_id)
+            .is_none_or(|current| *current == generation)
+        {
+            return Ok(());
+        }
+
+        let previous_state = self.hierarchy_state.clone();
+        self.hierarchy_state
+            .run_hierarchy_generations
+            .insert(issue_id.clone(), generation);
+        self.hierarchy_state
+            .rebind_leaf_leases(&BTreeSet::from([issue_id.clone()]), generation);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn handle_stalls(&mut self, observed_at: TimestampMs) -> Result<(), SchedulerError> {
@@ -4800,6 +4853,18 @@ where
                 .await
             {
                 Ok(execution) => {
+                    if let Err(error) = self
+                        .rebind_finished_child_hierarchy_generation(&issue_id)
+                        .await
+                    {
+                        self.insert_execution(issue_id.clone(), retry_execution.clone());
+                        self.pending_finished_updates
+                            .insert(issue_id.clone(), (retry_execution, outcome));
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
                     self.insert_execution(issue_id.clone(), execution);
                     if let Err(error) = self.persist_retry_if_queued(&issue_id).await
                         && first_error.is_none()
