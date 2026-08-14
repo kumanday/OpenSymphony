@@ -2513,6 +2513,7 @@ where
             self.pending_recovery = Some(retry_records);
         }
         if self.prune_recovered_memory_issue_ids() {
+            self.hierarchy_state_dirty = true;
             self.persist_orchestrator_state().await?;
         }
         Ok(())
@@ -4844,6 +4845,12 @@ where
             return Ok(false);
         };
         if snapshot.blocked_reason.is_some() {
+            return Ok(false);
+        }
+        // Summary discovery and known-candidate reconciliation do not carry
+        // the complete tracker edge set. Keep parents deferred until a full
+        // observation can release canceled-subtree evidence safely.
+        if reachable_child_edges.is_none() {
             return Ok(false);
         }
         if snapshot.dispatch_claimed() && !allow_retry {

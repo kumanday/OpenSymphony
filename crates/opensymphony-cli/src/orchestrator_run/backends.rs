@@ -1958,21 +1958,24 @@ fn required_check_evidence_satisfied(
         Some(required_checks) => {
             let latest_statuses = latest_commit_statuses(commit_statuses);
             let legacy_contexts_satisfied = required_checks.contexts.iter().all(|context| {
-                check_runs.iter().any(|check| {
-                    check.name.as_deref() == Some(context)
-                        && check.status.eq_ignore_ascii_case("completed")
-                        && check
-                            .conclusion
-                            .as_deref()
-                            .is_some_and(is_passing_check_conclusion)
-                }) || latest_statuses
-                    .get(context)
-                    .is_some_and(|status| status.state.eq_ignore_ascii_case("success"))
+                latest_check_run(check_runs, |check| check.name.as_deref() == Some(context))
+                    .is_some_and(|check| {
+                        check.status.eq_ignore_ascii_case("completed")
+                            && check
+                                .conclusion
+                                .as_deref()
+                                .is_some_and(is_passing_check_conclusion)
+                    })
+                    || latest_statuses
+                        .get(context)
+                        .is_some_and(|status| status.state.eq_ignore_ascii_case("success"))
             });
             let app_bound_checks_satisfied = required_checks.checks.iter().all(|required| {
-                check_runs.iter().any(|check| {
+                latest_check_run(check_runs, |check| {
                     check.name.as_deref() == Some(required.context.as_str())
-                        && check.status.eq_ignore_ascii_case("completed")
+                })
+                .is_some_and(|check| {
+                    check.status.eq_ignore_ascii_case("completed")
                         && check
                             .conclusion
                             .as_deref()
@@ -2007,6 +2010,27 @@ fn is_passing_check_conclusion(conclusion: &str) -> bool {
         conclusion.to_ascii_lowercase().as_str(),
         "success" | "neutral" | "skipped"
     )
+}
+
+fn latest_check_run<F>(check_runs: &[GitHubCheckRun], mut matches: F) -> Option<&GitHubCheckRun>
+where
+    F: FnMut(&GitHubCheckRun) -> bool,
+{
+    check_runs
+        .iter()
+        .filter(|check| matches(check))
+        .max_by_key(|check| {
+            (
+                check
+                    .created_at
+                    .as_deref()
+                    .or(check.started_at.as_deref())
+                    .or(check.completed_at.as_deref())
+                    .and_then(github_timestamp_ms)
+                    .map(TimestampMs::as_u64),
+                check.id,
+            )
+        })
 }
 
 fn latest_commit_statuses<'a>(
@@ -2085,8 +2109,10 @@ struct GitHubCheckRuns {
     check_runs: Vec<GitHubCheckRun>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 struct GitHubCheckRun {
+    #[serde(default)]
+    id: u64,
     #[serde(default)]
     name: Option<String>,
     status: String,
@@ -2094,6 +2120,12 @@ struct GitHubCheckRun {
     conclusion: Option<String>,
     #[serde(default)]
     app: Option<GitHubCheckRunApp>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11591,12 +11623,14 @@ Run the scheduler.
                 status: "completed".to_owned(),
                 conclusion: Some("success".to_owned()),
                 app: None,
+                ..Default::default()
             },
             GitHubCheckRun {
                 name: Some("optional".to_owned()),
                 status: "completed".to_owned(),
                 conclusion: Some("failure".to_owned()),
                 app: None,
+                ..Default::default()
             },
         ];
         let required = GitHubRequiredStatusChecks {
@@ -11641,6 +11675,38 @@ Run the scheduler.
     }
 
     #[test]
+    fn required_check_evidence_uses_the_latest_matching_check_run() {
+        let checks = vec![
+            GitHubCheckRun {
+                id: 10,
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                ..Default::default()
+            },
+            GitHubCheckRun {
+                id: 11,
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("failure".to_owned()),
+                created_at: Some("2026-08-13T07:01:00Z".to_owned()),
+                ..Default::default()
+            },
+        ];
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned()],
+            checks: Vec::new(),
+        };
+
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&required),
+        ));
+    }
+
+    #[test]
     fn required_check_evidence_accepts_neutral_and_skipped_runs() {
         for conclusion in ["neutral", "skipped"] {
             let checks = vec![GitHubCheckRun {
@@ -11648,6 +11714,7 @@ Run the scheduler.
                 status: "completed".to_owned(),
                 conclusion: Some(conclusion.to_owned()),
                 app: None,
+                ..Default::default()
             }];
             let required = GitHubRequiredStatusChecks {
                 contexts: vec!["required".to_owned()],
@@ -11675,6 +11742,7 @@ Run the scheduler.
             status: "completed".to_owned(),
             conclusion: Some("success".to_owned()),
             app: Some(GitHubCheckRunApp { id: 7 }),
+            ..Default::default()
         }];
         assert!(!required_check_evidence_satisfied(
             &successful_other_app,
@@ -11697,6 +11765,7 @@ Run the scheduler.
             status: "completed".to_owned(),
             conclusion: Some("success".to_owned()),
             app: Some(GitHubCheckRunApp { id: 42 }),
+            ..Default::default()
         }];
         assert!(required_check_evidence_satisfied(
             &successful_required_app,
