@@ -4958,6 +4958,7 @@ where
             }
             Ok(Ok(evidence)) => evidence,
             Ok(Err(error)) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
                 warn!(
                     parent = %normalized.identifier,
                     error = %error,

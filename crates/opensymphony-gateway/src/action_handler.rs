@@ -250,6 +250,7 @@ fn is_run_action_safe(issue: &ControlPlaneIssueSnapshot, action: RunAction) -> b
         RunAction::Cancel => safe.cancel,
         RunAction::Rehydrate => safe.rehydrate,
         RunAction::Detach => safe.detach,
+        RunAction::Replan => safe.replan,
         // Pause and Resume are validated by their own dedicated validators
         // (validate_pause and validate_resume) and are never routed here.
         // Comment, follow-up, workspace, and debug are not gated by SafeActions;
@@ -353,6 +354,28 @@ fn validate_replan(
             action,
             action_id,
             "replan requires a numeric hierarchy_generation payload",
+        );
+    }
+    if !is_run_action_safe(issue, RunAction::Replan) {
+        return reject(
+            action,
+            action_id,
+            format!(
+                "replan unsafe for issue {}; only a HierarchyChanged parent may be replanned",
+                issue.identifier
+            ),
+        );
+    }
+    let accepted_generation = action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("hierarchy_generation"))
+        .and_then(serde_json::Value::as_u64);
+    if accepted_generation != issue.hierarchy_generation {
+        return reject(
+            action,
+            action_id,
+            "replan hierarchy_generation does not match the current run contract",
         );
     }
     accepted(

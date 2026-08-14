@@ -4640,6 +4640,7 @@ async fn get_run_detail(
                     codex_thread_id: None,
                     summary: None,
                     blocker: None,
+                    hierarchy_generation: None,
                     error: Some("Run not found".into()),
                     allowed_actions: Vec::new(),
                     liveness: None,
@@ -4798,6 +4799,7 @@ async fn get_run_detail(
                     })
                     .unwrap_or_else(|| "Blocked by dependency".into())
             }),
+            hierarchy_generation: issue.hierarchy_generation,
             error: None,
             allowed_actions: allowed_actions_for_issue(issue, dispatchable),
             liveness: Some(build_liveness(issue)),
@@ -5418,6 +5420,11 @@ fn allowed_actions_for_issue(
         allowed.push(RunAction::Comment);
         allowed.push(RunAction::CreateFollowup);
     }
+    if issue.hierarchy_blocked_reason.as_deref() == Some("HierarchyChanged")
+        && issue.hierarchy_generation.is_some()
+    {
+        allowed.push(RunAction::Replan);
+    }
     // OpenWorkspace is available when there is a local workspace path.
     if !issue.workspace_path_suffix.is_empty() {
         allowed.push(RunAction::OpenWorkspace);
@@ -5464,12 +5471,15 @@ pub(crate) fn safe_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> SafeA
     // (stalled, degraded, or detached) and not already detached.
     let stream = build_liveness(issue).stream;
     let detach = !matches!(stream, RunStreamLiveness::Healthy) && !issue.detached;
+    let replan = issue.hierarchy_blocked_reason.as_deref() == Some("HierarchyChanged")
+        && issue.hierarchy_generation.is_some();
 
     SafeActions {
         retry,
         cancel,
         rehydrate,
         detach,
+        replan,
     }
 }
 
@@ -6230,6 +6240,25 @@ exit 2
         assert!(!actions.contains(&RunAction::Cancel));
         assert!(!actions.contains(&RunAction::Pause));
         assert!(!actions.contains(&RunAction::Resume));
+    }
+
+    #[test]
+    fn hierarchy_changed_parent_exposes_generation_checked_replan() {
+        let mut issue = test_issue(
+            ControlPlaneIssueRuntimeState::Idle,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        issue.blocked = true;
+        issue.hierarchy_generation = Some(7);
+        issue.hierarchy_blocked_reason = Some("HierarchyChanged".to_owned());
+
+        let actions = allowed_actions_for_issue(&issue, true);
+        assert!(actions.contains(&RunAction::Replan));
+        assert!(safe_actions_for_issue(&issue).replan);
     }
 
     #[test]

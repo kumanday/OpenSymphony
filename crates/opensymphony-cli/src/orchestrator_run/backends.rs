@@ -74,6 +74,7 @@ const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
 const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
+const MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES: usize = 32;
 const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
@@ -1660,11 +1661,7 @@ impl RuntimeTrackerBackend {
         ),
         LinearError,
     > {
-        let pull_requests = if issue.pr_urls.is_empty() {
-            issue.pr_url.iter().cloned().collect::<Vec<_>>()
-        } else {
-            issue.pr_urls.clone()
-        };
+        let pull_requests = parent_pull_request_candidates(issue);
         let evidence = stream::iter(pull_requests)
             .map(|pr_url| async move {
                 self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
@@ -2109,6 +2106,24 @@ fn latest_commit_statuses<'a>(
         }
     }
     latest
+}
+
+/// Keep historical attachment evidence bounded while prioritizing the
+/// provider's current/singular PR projection. Linear can retain every PR ever
+/// attached to an issue; allowing that list to fan out without a total bound
+/// turns one parent eligibility check into unbounded provider work.
+fn parent_pull_request_candidates(issue: &TrackerIssue) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(issue.pr_urls.len() + 1);
+    if let Some(pr_url) = issue.pr_url.as_ref() {
+        candidates.push(pr_url.clone());
+    }
+    candidates.extend(issue.pr_urls.iter().cloned());
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|url| seen.insert(url.clone()))
+        .take(MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES)
+        .collect()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -11656,6 +11671,31 @@ Run the scheduler.
             },
         ]);
         assert_eq!(selected, (false, None, None, None));
+    }
+
+    #[test]
+    fn parent_pull_request_candidates_prioritize_current_and_bound_history() {
+        let mut issue = sample_tracker_issue(&sample_issue());
+        issue.state = "Done".to_owned();
+        issue.pr_url = Some("https://github.com/kumanday/OpenSymphony/pull/999".to_owned());
+        issue.pr_urls = (1..=MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES + 10)
+            .map(|number| format!("https://github.com/kumanday/OpenSymphony/pull/{number}"))
+            .collect();
+
+        let candidates = parent_pull_request_candidates(&issue);
+        assert_eq!(
+            candidates.len(),
+            MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES
+        );
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            issue.pr_url.as_deref()
+        );
+        let current_pr = issue.pr_url.clone().expect("current PR should be present");
+        assert_eq!(
+            candidates.iter().filter(|url| *url == &current_pr).count(),
+            1
+        );
     }
 
     #[test]
