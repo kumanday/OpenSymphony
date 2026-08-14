@@ -2093,6 +2093,14 @@ where
                 // restoring the retry so the replacement is materialized by
                 // the normal dispatch path.
                 if recovered_run.is_none() && recovered_workspace.is_some() && binding_changed {
+                    self.release_stale_binding_leases(
+                        &record.issue,
+                        recovered_workspace
+                            .as_ref()
+                            .expect("metadata-only recovery workspace should be present"),
+                        observed_at,
+                    )
+                    .await?;
                     self.workspace
                         .remove_workspace(&record.workspace)
                         .await
@@ -4617,8 +4625,12 @@ where
             .hierarchy_state
             .terminal_orchestrator_issues
             .insert(issue_id.clone())
+            && let Err(error) = self.persist_orchestrator_state().await
         {
-            self.persist_orchestrator_state().await?;
+            self.hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(issue_id);
+            return Err(error);
         }
         Ok(())
     }
@@ -5481,6 +5493,34 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })
+    }
+
+    async fn release_stale_binding_leases(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+        released_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(());
+        };
+        let mut next_state = self.hierarchy_state.clone();
+        if !next_state.release_resource_leases(&resource, released_at.as_u64()) {
+            return Ok(());
+        }
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn flush_pending_retry_exhaustion_persistence(&mut self) -> Result<(), SchedulerError> {

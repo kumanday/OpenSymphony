@@ -689,6 +689,18 @@ impl DurableOrchestratorState {
         self.compact_lease_history();
     }
 
+    pub fn release_resource_leases(&mut self, resource: &LeaseResource, released_at: u64) -> bool {
+        let mut released = false;
+        for lease in &mut self.leases {
+            if lease.active() && lease.resource == *resource {
+                lease.released_at = Some(released_at);
+                released = true;
+            }
+        }
+        self.compact_lease_history();
+        released
+    }
+
     pub fn release_parent_leases(&mut self, parent_id: &IssueId, released_at: u64) -> bool {
         self.release_parent_leases_inner(parent_id, released_at, true)
     }
@@ -2004,6 +2016,42 @@ mod tests {
             1
         );
         assert_eq!(state.leases[1].owner, LeaseOwner::ancestor(&second_parent));
+    }
+
+    #[test]
+    fn stale_binding_resource_release_clears_all_owners() {
+        let issue_id = IssueId::new("child").expect("id");
+        let resource = LeaseResource {
+            issue_id: issue_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:old-repo").expect("repo"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        let mut state = DurableOrchestratorState::default();
+        state
+            .acquire_leases(vec![
+                LeaseRecord {
+                    kind: LeaseKind::LeafWorker,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::leaf_worker(&issue_id),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+                LeaseRecord {
+                    kind: LeaseKind::AncestorIntegration,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::ancestor(&IssueId::new("parent").expect("parent")),
+                    hierarchy_generation: 1,
+                    acquired_at: 1,
+                    expires_at: None,
+                    released_at: None,
+                },
+            ])
+            .expect("leases should acquire");
+
+        assert!(state.release_resource_leases(&resource, 2));
+        assert!(state.leases.iter().all(|lease| !lease.active()));
     }
 
     #[test]

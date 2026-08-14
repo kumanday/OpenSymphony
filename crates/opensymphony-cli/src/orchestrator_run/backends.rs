@@ -1823,9 +1823,11 @@ fn github_url_authority(url: &Url) -> Option<String> {
 
 fn github_remote_authority(locator: &str) -> Option<String> {
     let locator = locator.trim();
-    if let Ok(url) = Url::parse(locator)
-        && let Some(authority) = github_url_authority(&url)
-    {
+    if let Ok(url) = Url::parse(locator) {
+        let authority = github_url_authority(&url)?;
+        if matches!(url.scheme(), "ssh" | "git+ssh") && url.port() == Some(22) {
+            return Some(normalize_github_authority(url.host_str()?));
+        }
         return Some(authority);
     }
     let scp_authority = locator
@@ -11753,6 +11755,18 @@ Run the scheduler.
         assert_eq!(
             github_remote_authority("owner/repo"),
             Some("github.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn github_remote_authority_normalizes_ssh_default_port() {
+        assert_eq!(
+            github_remote_authority("ssh://git@ghe.example:22/owner/repo.git"),
+            Some("ghe.example".to_owned())
+        );
+        assert_eq!(
+            github_remote_authority("ssh://git@ghe.example:2222/owner/repo.git"),
+            Some("ghe.example:2222".to_owned())
         );
     }
 
