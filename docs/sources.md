@@ -233,12 +233,12 @@ Key takeaways carried forward:
 
 ## Current model
 
-- COE-498 contributed: PR #151: Add Rust tree-sitter code intelligence skeleton (merge `ebd27c2`)
-- COE-499 contributed: PR #167: feat(memory): use AST code intel for context (merge `2e0a092`)
-- COE-500 contributed: PR #168: feat(code-intel): add query packs for agent languages (merge `3fdc146`)
-- COE-501 contributed: PR #172: COE-501: Persist code intelligence ingest rows (merge `f75f0f6`)
-- COE-502 contributed: PR #174: Expose read-only AST MCP tools (merge `4de8d58`)
-- COE-503 contributed: PR #175: feat(code-intel): harden AST limits and docs (merge `c6241a9`)
+- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
+- COE-255 contributed: PR #4: COE-255: add control plane and FrankenTUI slice
+- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-261 contributed: PR #83: Add memory init and mapped docs sync
+- COE-262 contributed: PR #34: COE-262: Harden OpenHands REST client contract (merge `0e2be26`)
+- COE-265 contributed: PR #36: COE-265: WebSocket event stream, reconciliation, and recovery (merge `d78a8ce`)
 
 ## Important invariants
 
@@ -255,6 +255,66 @@ Key takeaways carried forward:
 
 ## Recent changes
 
+- COE-253: OpenHands Runtime Adapter
+- COE-255: Observability and FrankenTUI
+- COE-256: Validation and Local Operations
+- COE-261: Local agent-server supervisor
+- COE-262: REST client and conversation contract
+- COE-265: WebSocket event stream, reconciliation, and recovery
+- COE-266: Issue session runner
+- COE-269: Control-plane API and snapshot store
+- COE-271: FrankenTUI operator client
+- COE-272: Fake OpenHands server and protocol contract suite
+- COE-273: Live local end-to-end suite
+- COE-274: CLI packaging, doctor, and local operations docs
+- COE-275: Remote agent-server mode and auth hardening
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-287: Add opensymphony debug command for conversational session debugging
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-382: Add supply-chain and security audits to CI
+- COE-383: Decompose oversized session and TUI modules into focused submodules
+- COE-384: Expand error-path tests for Linear client and workspace hooks
+- COE-385: Resolve runtime tracking TODO in OpenHands session runner
+- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
+- COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-389: Current Gateway Inventory And Vocabulary
+- COE-390: Gateway Schemas And Stream Feasibility
+- COE-391: Gateway Module, Capabilities, And Dashboard Snapshot
+- COE-392: Task Graph, Run Detail, File, And Diff Read APIs
+- COE-393: Event Journal And Stream Broker
+- COE-395: Planning Artifact Schema And Session Service
+- COE-396: Action Receipts And Initial Run Actions
+- COE-401: Web App Entry And Deployment Modes
+- COE-406: Repository, Linear, And Research Analysis
+- COE-407: Browser Transport And Remote Stream Protocols
+- COE-408: Harness Adapter And Capability Model
+- COE-413: Implementation Plan Generator Stage
+- COE-415: Milestone, Issue, And Sub-Issue Compiler
+- COE-416: Dependency Graph And Plan Checks
+- COE-417: Planning Workspace UI
+- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-423: Model And Credential Settings
+- COE-425: OpenHands Subscription Credential Adapter
+- COE-426: Codex App-Server Prototype And Benchmarks
+- COE-428: Model Configuration UI And Routing Metadata
+- COE-429: Codex Approvals And Cross-Harness Routing
+- COE-454: OKF Bundle Schema And Legacy Capsule Mapping
+- COE-456: OKF Writer, Lint, And Migration Fixtures
+- COE-458: Catalog Reindex And Query Compatibility From OKF
+- COE-460: OKF Export, Import, And Visibility Boundaries
+- COE-463: Docs Sync And MCP Admin Parity For OKF
+- COE-473: Desktop task graph dependency and run detail parity
+- COE-475: ChatGPT OAuth For Codex Harness
+- COE-476: Codex Production Harness Enablement
+- COE-478: Harden model profile storage and validation follow-ups
+- COE-479: Codex Debug Session Resume
+- COE-480: Run Detail Metrics And Density
+- COE-481: Model Configuration Codex Subscription Follow-Up
+- COE-482: TUI Codex Token Usage Accounting
+- COE-483: Codex Event Content Summaries
+- COE-484: Desktop Live Snapshot And Run Detail Refresh
 - COE-498: Tree-sitter Provider Skeleton And Rust Parsing
 - COE-499: Memory Context AST Provider Integration
 - COE-500: Query Packs For Supported Agent Languages
@@ -275,6 +335,66 @@ Key takeaways carried forward:
 
 ## Source refs
 
+- COE-253
+- COE-255
+- COE-256
+- COE-261
+- COE-262
+- COE-265
+- COE-266
+- COE-269
+- COE-271
+- COE-272
+- COE-273
+- COE-274
+- COE-275
+- COE-280
+- COE-281
+- COE-282
+- COE-287
+- COE-294
+- COE-382
+- COE-383
+- COE-384
+- COE-385
+- COE-386
+- COE-387
+- COE-389
+- COE-390
+- COE-391
+- COE-392
+- COE-393
+- COE-395
+- COE-396
+- COE-401
+- COE-406
+- COE-407
+- COE-408
+- COE-413
+- COE-415
+- COE-416
+- COE-417
+- COE-419
+- COE-423
+- COE-425
+- COE-426
+- COE-428
+- COE-429
+- COE-454
+- COE-456
+- COE-458
+- COE-460
+- COE-463
+- COE-473
+- COE-475
+- COE-476
+- COE-478
+- COE-479
+- COE-480
+- COE-481
+- COE-482
+- COE-483
+- COE-484
 - COE-498
 - COE-499
 - COE-500

@@ -520,9 +520,12 @@ Remaining follow-up work:
 
 ## Current model
 
-- COE-505 contributed: PR #181: Add Codex stdio scheduler interrupts (merge `49871f4`)
-- COE-540 contributed: PR #206: feat(codex): reuse canonical issue threads (merge `e49e5ab`)
-- COE-541 contributed: PR #208: fix(codex): retain terminal retries and reuse lifecycle session (merge `58ee232`)
+- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
+- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
+- COE-408 contributed: PR #129: Add harness adapter capability discovery (merge `96345e3`)
+- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
+- COE-425 contributed: PR #132: feat(openhands): add subscription credential adapter (merge `93cea67`)
 
 ## Important invariants
 
@@ -539,12 +542,68 @@ Remaining follow-up work:
 
 ## Recent changes
 
+- COE-401: Web App Entry And Deployment Modes
+- COE-407: Browser Transport And Remote Stream Protocols
+- COE-408: Harness Adapter And Capability Model
+- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-423: Model And Credential Settings
+- COE-425: OpenHands Subscription Credential Adapter
+- COE-426: Codex App-Server Prototype And Benchmarks
+- COE-428: Model Configuration UI And Routing Metadata
+- COE-429: Codex Approvals And Cross-Harness Routing
+- COE-473: Desktop task graph dependency and run detail parity
+- COE-475: ChatGPT OAuth For Codex Harness
+- COE-476: Codex Production Harness Enablement
+- COE-478: Harden model profile storage and validation follow-ups
+- COE-479: Codex Debug Session Resume
+- COE-480: Run Detail Metrics And Density
+- COE-481: Model Configuration Codex Subscription Follow-Up
+- COE-482: TUI Codex Token Usage Accounting
+- COE-483: Codex Event Content Summaries
+- COE-484: Desktop Live Snapshot And Run Detail Refresh
+- COE-486: Harness Interrupt Contract And Run Diagnostics
+- COE-487: Desktop Run Detail TUI Parity
+- COE-488: Lazy Desktop Launcher Command
+- COE-489: OpenHands Agent-Server Interrupt Adapter
+- COE-490: Codex App-Server Turn Interrupt Adapter
+- COE-491: Desktop Run Detail Action Wiring And Cleanup
+- COE-492: Merging Supersedes Human Review Polling
+- COE-493: Desktop Operations Integration Hardening
+- COE-504: Linear Polling And Rate-Limit Recovery
 - COE-505: Add scheduler-side Codex stdio interrupt channel
 - COE-540: Canonical Codex Thread Reuse And Workspace Retention
 - COE-541: Durable Codex Thread Archive And Debug Recovery
 
 ## Source refs
 
+- COE-401
+- COE-407
+- COE-408
+- COE-419
+- COE-423
+- COE-425
+- COE-426
+- COE-428
+- COE-429
+- COE-473
+- COE-475
+- COE-476
+- COE-478
+- COE-479
+- COE-480
+- COE-481
+- COE-482
+- COE-483
+- COE-484
+- COE-486
+- COE-487
+- COE-488
+- COE-489
+- COE-490
+- COE-491
+- COE-492
+- COE-493
+- COE-504
 - COE-505
 - COE-540
 - COE-541

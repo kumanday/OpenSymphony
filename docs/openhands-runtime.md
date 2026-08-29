@@ -40,6 +40,7 @@ last_memory_sync: 2026-07-02T03:36:15.105926+00:00
 - COE-468: Concept Inspector, Search, Filters, And Accessibility Fallback
 - COE-469: Live Memory Graph Integration And Privacy Gates
 - COE-471: Graph Scale, Visual Regression, And Web/Desktop Hardening
+- COE-489: OpenHands Agent-Server Interrupt Adapter
 - COE-498: Tree-sitter Provider Skeleton And Rust Parsing
 - COE-499: Memory Context AST Provider Integration
 - COE-500: Query Packs For Supported Agent Languages
@@ -79,6 +80,7 @@ last_memory_sync: 2026-07-02T03:36:15.105926+00:00
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-562: Implement artifact validation and digest primitives
 
 ## Source refs
 
@@ -89,6 +91,7 @@ last_memory_sync: 2026-07-02T03:36:15.105926+00:00
 - COE-468
 - COE-469
 - COE-471
+- COE-489
 - COE-498
 - COE-499
 - COE-500
@@ -128,5 +131,6 @@ last_memory_sync: 2026-07-02T03:36:15.105926+00:00
 - COE-549
 - COE-550
 - COE-551
+- COE-562
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -81,6 +81,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-562: Implement artifact validation and digest primitives
 
 ## Source refs
 
@@ -132,5 +133,6 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-549
 - COE-550
 - COE-551
+- COE-562
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
