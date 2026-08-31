@@ -391,9 +391,9 @@ Review plugin (current) or Codex code review (see
 - Codex provider: the Codex GitHub integration reviews PRs on open and on an
   exact `@codex review` comment, applying the `## Review guidelines` guidance
   in the closest `AGENTS.md`
-- Every PR receives exactly three full-PR scans when automated review is active:
-  one automatic scan and two explicit re-triggers. Batch remediation between
-  scans; after scan 3, use exact-commit local review instead of scan 4.
+- Every PR receives exactly eight full-PR scans when automated review is active:
+  one automatic scan and seven explicit re-triggers. Batch remediation between
+  scans; after scan 8, use exact-commit local review instead of scan 9.
 - Reviews focus on correctness, security, and maintainability
 - The AI reviewer is **advisory only** and does not count as a human approval
 
@@ -424,11 +424,11 @@ With the OpenHands provider, the AI review runs automatically on:
 - PR marked ready for review
 - `review-this` label added
 
-Scans 2 and 3 are explicit: remove any existing `review-this` label and add it
+Scans 2 through 8 are explicit: remove any existing `review-this` label and add it
 again. Ordinary pushes do not trigger another scan.
 
 With the Codex provider, the initial review runs automatically on PR open;
-request scans 2 and 3 by posting a comment that is exactly `@codex review`.
+request scans 2 through 8 by posting a comment that is exactly `@codex review`.
 Never mention
 `@codex` with any other text (it starts a cloud task billed to general Codex
 usage, outside the orchestration), and never ask Codex to fix or push changes.
