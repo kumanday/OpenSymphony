@@ -2,7 +2,8 @@ name: ai-pr-review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    # Later scans are explicit label edges. Do not review every push.
+    types: [opened, ready_for_review, labeled]
 
 permissions: {}
 

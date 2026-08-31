@@ -150,9 +150,14 @@ To address AI review feedback:
    is correct), or push back (disagree with reasoning)
 3. Reply inline to the review comment explaining your action
 4. If accepting, implement the fix, commit, and push
-5. After pushing follow-up commits, re-trigger AI review per the active
-   provider: add the `review-this` label (openhands) or post a comment that is
-   exactly `@codex review` (codex)
+5. Consult the workpad review ledger. Request the next full scan only when
+   fewer than three have completed. The automatic scan is scan 1; scans 2 and 3
+   are explicit re-triggers.
+6. After scan 3, use exact-commit local review for later fixes or merge-conflict
+   resolution and never request a fourth automated scan.
+
+For an explicit OpenHands re-trigger, remove any existing `review-this` label
+and add it again. For Codex, post a comment that is exactly `@codex review`.
 
 Never ask the review bot to make code changes. In particular, never mention
 `@codex` with any text other than the exact phrase `@codex review`; other
