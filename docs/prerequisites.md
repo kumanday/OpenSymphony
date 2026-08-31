@@ -105,6 +105,7 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 - COE-528: App Download Install And Launch Flow
 - COE-529: Desktop Auto-Update Flow
 - COE-530: Installer Docs And End-To-End Validation
+- COE-563: Implement task-packet admission and freeze tooling
 
 ## Source refs
 
@@ -151,5 +152,6 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 - COE-528
 - COE-529
 - COE-530
+- COE-563
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

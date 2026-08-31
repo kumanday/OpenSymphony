@@ -332,6 +332,7 @@ Key takeaways carried forward:
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-563: Implement task-packet admission and freeze tooling
 
 ## Source refs
 
@@ -412,5 +413,6 @@ Key takeaways carried forward:
 - COE-549
 - COE-550
 - COE-551
+- COE-563
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

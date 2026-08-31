@@ -1061,6 +1061,11 @@ copy that guide into the target repository.
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-562: Implement artifact validation and digest primitives
+- COE-563: Implement task-packet admission and freeze tooling
+- COE-564: Implement verifier execution and outcome records
+- COE-565: Implement isolated workspace materialization
+- COE-566: Implement configurable run matrices and scheduling
+- COE-567: Implement run lifecycle and process-protocol primitives
 
 ## Source refs
 
@@ -1209,5 +1214,10 @@ copy that guide into the target repository.
 - COE-550
 - COE-551
 - COE-562
+- COE-563
+- COE-564
+- COE-565
+- COE-566
+- COE-567
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
