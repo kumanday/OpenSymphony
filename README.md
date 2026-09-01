@@ -555,3 +555,5 @@ and provisioned with `opensymphony install openhands`.
 - [OpenAI Symphony](https://github.com/openai/symphony) - The specification this implements
 - [OpenHands](https://github.com/OpenHands/OpenHands) - Managed local agent-server runtime
 - [Codex app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server) - Local app-server harness runtime
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kumanday/OpenSymphony)
