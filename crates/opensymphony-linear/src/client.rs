@@ -19,11 +19,13 @@ use tracing::debug;
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
-    ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
-    ISSUE_SUMMARIES_BY_STATE_QUERY, ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData,
-    IssueArchiveVariables, IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_ATTACHMENTS_QUERY,
+    ISSUE_BY_IDENTIFIER_QUERY, ISSUE_CHILDREN_QUERY, ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION,
+    ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY, ISSUE_RELATION_CREATE_MUTATION,
+    ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY, ISSUE_SUMMARIES_BY_STATE_QUERY,
+    ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
+    IssueAttachmentsData, IssueAttachmentsVariables, IssueByIdentifierData,
+    IssueByIdentifierVariables, IssueChildrenData, IssueChildrenVariables, IssueCommentsData,
     IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
     IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
     IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
@@ -405,7 +407,7 @@ impl LinearClient {
                 continue;
             };
             let issue = normalize_issue(self.expand_issue(issue).await?)?;
-            if issue.identifier.eq_ignore_ascii_case(identifier) {
+            if issue.identifier.eq_ignore_ascii_case(identifier) || issue.id == *identifier {
                 issues.push(issue);
             } else {
                 return Err(LinearError::InvalidResponse(format!(
@@ -1238,11 +1240,93 @@ impl LinearClient {
         &self,
         mut issue: LinearIssueNode,
     ) -> Result<LinearIssueNode, LinearError> {
+        issue.attachments = self
+            .load_all_attachments(&issue.id, issue.attachments)
+            .await?;
+        issue.children = self.load_all_children(&issue.id, issue.children).await?;
         issue.labels = self.load_all_labels(&issue.id, issue.labels).await?;
         issue.inverse_relations = self
             .load_all_inverse_relations(&issue.id, issue.inverse_relations)
             .await?;
         Ok(issue)
+    }
+
+    async fn load_all_attachments(
+        &self,
+        issue_id: &str,
+        mut connection: super::graphql::LinearAttachmentConnection,
+    ) -> Result<super::graphql::LinearAttachmentConnection, LinearError> {
+        let mut after = connection.page_info.end_cursor.clone();
+
+        while connection.page_info.has_next_page {
+            let cursor = after.clone().ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "Linear attachments page for issue {issue_id} indicated a next page without an end cursor"
+                ))
+            })?;
+            let variables = IssueAttachmentsVariables {
+                issue_id: issue_id.to_string(),
+                first: self.config.page_size,
+                after: Some(cursor),
+            };
+            let response: IssueAttachmentsData = self
+                .execute_graphql(ISSUE_ATTACHMENTS_QUERY, json!(variables))
+                .await?;
+            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
+                issue_ids: vec![issue_id.to_string()],
+            })?;
+            if issue.id != issue_id {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear attachments page returned mismatched issue ID {} for {}",
+                    issue.id, issue_id
+                )));
+            }
+
+            connection.nodes.extend(issue.attachments.nodes);
+            connection.page_info = issue.attachments.page_info;
+            after = connection.page_info.end_cursor.clone();
+        }
+
+        Ok(connection)
+    }
+
+    async fn load_all_children(
+        &self,
+        issue_id: &str,
+        mut connection: super::graphql::LinearChildConnection,
+    ) -> Result<super::graphql::LinearChildConnection, LinearError> {
+        let mut after = connection.page_info.end_cursor.clone();
+
+        while connection.page_info.has_next_page {
+            let cursor = after.clone().ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "Linear children page for issue {issue_id} indicated a next page without an end cursor"
+                ))
+            })?;
+            let variables = IssueChildrenVariables {
+                issue_id: issue_id.to_string(),
+                first: self.config.page_size,
+                after: Some(cursor),
+            };
+            let response: IssueChildrenData = self
+                .execute_graphql(ISSUE_CHILDREN_QUERY, json!(variables))
+                .await?;
+            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
+                issue_ids: vec![issue_id.to_string()],
+            })?;
+            if issue.id != issue_id {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear children page returned mismatched issue ID {} for {}",
+                    issue.id, issue_id
+                )));
+            }
+
+            connection.nodes.extend(issue.children.nodes);
+            connection.page_info = issue.children.page_info;
+            after = connection.page_info.end_cursor.clone();
+        }
+
+        Ok(connection)
     }
 
     async fn load_all_labels(
@@ -1475,7 +1559,7 @@ impl LinearClient {
             LinearError::Request(_) => true,
             LinearError::ResponseBody { .. } => true,
             LinearError::HttpStatus { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                error.is_rate_limited() || status.is_server_error()
             }
             LinearError::Graphql { .. } => error.is_rate_limited(),
             LinearError::MissingIssueIds { .. }

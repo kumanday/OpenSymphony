@@ -39,6 +39,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
         title
         state {
           name
+          type
         }
       }
       projectMilestone {
@@ -51,6 +52,10 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
           url
           sourceType
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -60,7 +65,12 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
           title
           state {
             name
+            type
           }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
       labels(first: $labelFirst) {
@@ -132,7 +142,12 @@ query IssueSummariesByState($projectSlug: String!, $stateNames: [String!], $incl
           title
           state {
             name
+            type
           }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
       inverseRelations(first: $relationFirst) {
@@ -200,6 +215,7 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
         title
         state {
           name
+          type
         }
       }
       projectMilestone {
@@ -212,6 +228,10 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
           url
           sourceType
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
       children(includeArchived: true, first: 100) {
         nodes {
@@ -221,7 +241,12 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
           title
           state {
             name
+            type
           }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
       labels(first: $labelFirst) {
@@ -256,6 +281,49 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_CHILDREN_QUERY: &str = r#"
+query IssueChildren($issueId: String!, $first: Int!, $after: String) {
+  issue(id: $issueId) {
+    id
+    children(includeArchived: true, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        url
+        title
+        state {
+          name
+          type
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_ATTACHMENTS_QUERY: &str = r#"
+query IssueAttachments($issueId: String!, $first: Int!, $after: String) {
+  issue(id: $issueId) {
+    id
+    attachments(first: $first, after: $after) {
+      nodes {
+        title
+        url
+        sourceType
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
     }
   }
 }
@@ -440,6 +508,7 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
       title
       state {
         name
+        type
       }
     }
     projectMilestone {
@@ -452,18 +521,27 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
         url
         sourceType
       }
-    }
-    children(includeArchived: true, first: 100) {
-      nodes {
-        id
-        identifier
-        url
-        title
-        state {
-          name
-        }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
+      children(includeArchived: true, first: 100) {
+        nodes {
+          id
+          identifier
+          url
+          title
+          state {
+            name
+            type
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     labels(first: $labelFirst) {
       nodes {
         name
@@ -824,6 +902,22 @@ pub(super) struct IssueByIdentifierVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueChildrenVariables {
+    pub issue_id: String,
+    pub first: usize,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueAttachmentsVariables {
+    pub issue_id: String,
+    pub first: usize,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueInverseRelationsVariables {
     pub issue_id: String,
     pub first: usize,
@@ -925,6 +1019,16 @@ pub(super) struct ProjectIssuesData {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueByIdentifierData {
     pub issue: Option<LinearIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueChildrenData {
+    pub issue: Option<LinearIssueChildrenNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueAttachmentsData {
+    pub issue: Option<LinearIssueAttachmentsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1125,7 +1229,10 @@ pub(super) struct LinearProjectMilestoneNode {
 
 #[derive(Debug, Deserialize, Default)]
 pub(super) struct LinearAttachmentConnection {
+    #[serde(default)]
     pub nodes: Vec<LinearAttachmentNode>,
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1140,7 +1247,22 @@ pub(super) struct LinearAttachmentNode {
 
 #[derive(Debug, Deserialize, Default)]
 pub(super) struct LinearChildConnection {
+    #[serde(default)]
     pub nodes: Vec<LinearChildNode>,
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueChildrenNode {
+    pub id: String,
+    pub children: LinearChildConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueAttachmentsNode {
+    pub id: String,
+    pub attachments: LinearAttachmentConnection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1157,6 +1279,9 @@ pub(super) struct LinearChildNode {
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearIssueRefState {
     pub name: String,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

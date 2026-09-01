@@ -156,6 +156,14 @@ pub trait WorkpadCommentSource: Send + Sync {
 pub trait IssueSessionObserver {
     fn on_launch(&mut self, _conversation: &ConversationMetadata) {}
 
+    fn on_launch_with_started_at(
+        &mut self,
+        conversation: &ConversationMetadata,
+        _started_at: Option<TimestampMs>,
+    ) {
+        self.on_launch(conversation);
+    }
+
     fn on_runtime_event(
         &mut self,
         _observed_at: TimestampMs,
@@ -1552,6 +1560,7 @@ impl IssueSessionRunner {
                 )
                 .await?;
             run_manifest.status = RunStatus::Running;
+            run_manifest.started_at.get_or_insert_with(Utc::now);
             run_manifest.status_detail = Some(format!(
                 "recovered {} prompt trigger for conversation {}",
                 active_session.prompt_kind.as_str(),
@@ -1561,10 +1570,11 @@ impl IssueSessionRunner {
                 .write_run_manifest(workspace, run_manifest)
                 .await?;
         }
-        observer.on_launch(
+        observer.on_launch_with_started_at(
             &active_session
                 .manifest
                 .to_domain_metadata(RuntimeStreamState::Ready),
+            run_manifest.started_at.map(timestamp_ms_from_datetime),
         );
         let baseline_event_ids = pre_trigger_baseline_event_ids.unwrap_or_else(|| {
             recovery_baseline_event_ids(
@@ -1626,10 +1636,11 @@ impl IssueSessionRunner {
                 .execution_status()
                 .is_some_and(turn_is_in_progress)
         {
-            observer.on_launch(
+            observer.on_launch_with_started_at(
                 &active_session
                     .manifest
                     .to_domain_metadata(RuntimeStreamState::Ready),
+                run_manifest.started_at.map(timestamp_ms_from_datetime),
             );
             launch_reported = true;
         }
@@ -2336,10 +2347,11 @@ impl IssueSessionRunner {
                 }) => {
                     had_run_conflict = true;
                     if !prepared_turn.launch_reported {
-                        observer.on_launch(
+                        observer.on_launch_with_started_at(
                             &active_session
                                 .manifest
                                 .to_domain_metadata(RuntimeStreamState::Ready),
+                            run_manifest.started_at.map(timestamp_ms_from_datetime),
                         );
                         prepared_turn.launch_reported = true;
                     }
@@ -2420,6 +2432,7 @@ impl IssueSessionRunner {
         }
 
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(Utc::now);
         run_manifest.status_detail = Some(format!(
             "{} prompt sent to conversation {}",
             active_session.prompt_kind.as_str(),
@@ -2447,10 +2460,11 @@ impl IssueSessionRunner {
         active_session.accumulate_tokens();
 
         if !prepared_turn.launch_reported {
-            observer.on_launch(
+            observer.on_launch_with_started_at(
                 &active_session
                     .manifest
                     .to_domain_metadata(RuntimeStreamState::Ready),
+                run_manifest.started_at.map(timestamp_ms_from_datetime),
             );
             prepared_turn.launch_reported = true;
         }
@@ -4934,6 +4948,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: vec!["area:memory".to_string()],
             project_id: None,

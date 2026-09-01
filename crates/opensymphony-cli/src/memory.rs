@@ -14127,6 +14127,7 @@ Public memory concept.
             interrupt_reason: None,
             status: RunStatus::Succeeded,
             created_at: now,
+            started_at: Some(now),
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),

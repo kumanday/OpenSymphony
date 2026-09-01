@@ -74,6 +74,11 @@ pub struct RunDetail {
     /// Blocker description when the run is blocked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<String>,
+    /// Current durable hierarchy generation, when this run is a parent whose
+    /// child scope is versioned. Clients must send this value with `replan`
+    /// actions so stale operator views cannot clear a newer fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_generation: Option<u64>,
     pub error: Option<String>,
     /// Actions the client may perform on this run.
     #[serde(default)]
@@ -109,6 +114,7 @@ pub struct RunDetail {
 #[serde(rename_all = "snake_case")]
 pub enum RunAction {
     Retry,
+    Replan,
     Cancel,
     Pause,
     Resume,
@@ -214,6 +220,10 @@ pub struct SafeActions {
     pub rehydrate: bool,
     #[serde(default)]
     pub detach: bool,
+    /// True when the parent is fenced by `HierarchyChanged` and can accept a
+    /// generation-checked replan action.
+    #[serde(default)]
+    pub replan: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -18,6 +18,11 @@ pub struct TrackerIssue {
     pub branch_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// All canonical pull-request attachments, retained so provider-backed
+    /// eligibility can select evidence for the current child run rather than
+    /// trusting the first historical attachment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_urls: Vec<String>,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
@@ -116,6 +121,8 @@ pub struct TrackerIssueRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub state: String,
+    #[serde(default = "unknown_tracker_state_kind")]
+    pub state_kind: TrackerIssueStateKind,
 }
 
 impl TrackerIssueRef {
@@ -160,6 +167,18 @@ impl TrackerIssueStateKind {
 
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Canceled)
+    }
+
+    pub fn from_tracker_name(value: impl AsRef<str>) -> Self {
+        match value.as_ref().trim().to_ascii_lowercase().as_str() {
+            "backlog" => Self::Backlog,
+            "todo" | "to do" => Self::Unstarted,
+            "in progress" | "started" | "review" | "human review" | "merging" => Self::Started,
+            "done" | "completed" | "closed" => Self::Completed,
+            "canceled" | "cancelled" => Self::Canceled,
+            "triage" | "triaged" => Self::Triage,
+            other => Self::Unknown(other.to_owned()),
+        }
     }
 }
 
@@ -264,6 +283,7 @@ mod tests {
             title: None,
             url: None,
             state: "done".to_string(),
+            state_kind: TrackerIssueStateKind::Completed,
         };
         let terminal_states = HashSet::from([String::from("Done"), String::from("Canceled")]);
 

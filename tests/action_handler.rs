@@ -69,6 +69,8 @@ fn fixture_snapshot(
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: None,
@@ -302,7 +304,7 @@ async fn action_handler_publishes_rejected_event_to_journal() {
 }
 
 #[tokio::test]
-async fn action_handler_rejects_duplicate_idempotency_key() {
+async fn action_handler_replays_duplicate_idempotency_key() {
     let journal = InMemoryEventJournal::new(1000, 64);
     let handler = ActionHandler::new(journal.clone());
     let envelope = fixture_envelope(
@@ -315,14 +317,9 @@ async fn action_handler_rejects_duplicate_idempotency_key() {
     let receipt1 = handler.dispatch(dispatch.clone(), &envelope).await;
     assert_eq!(receipt1.status, ActionStatus::Accepted);
     let receipt2 = handler.dispatch(dispatch, &envelope).await;
-    assert_eq!(receipt2.status, ActionStatus::Rejected);
-    assert!(
-        receipt2
-            .reason
-            .as_ref()
-            .expect("should not be None")
-            .contains("duplicate idempotency key")
-    );
+    assert_eq!(receipt2.status, ActionStatus::Accepted);
+    assert_eq!(receipt2.action_id, receipt1.action_id);
+    assert_eq!(receipt2.correlation_id, receipt1.correlation_id);
 }
 
 #[tokio::test]
@@ -424,7 +421,7 @@ async fn action_handler_resume_accepted_on_paused_issue() {
 }
 
 /// Concurrent idempotency test: two tasks with the same idempotency key
-/// should result in exactly one accepted receipt and one rejected receipt.
+/// should produce one dispatch and replay its accepted receipt.
 #[tokio::test]
 async fn action_handler_concurrent_idempotency_only_one_accepted() {
     let journal = InMemoryEventJournal::new(1000, 64);
@@ -446,20 +443,13 @@ async fn action_handler_concurrent_idempotency_only_one_accepted() {
 
     let (r1, r2) = tokio::join!(h1.dispatch(d1, &env1), h2.dispatch(d2, &env2),);
 
-    let statuses = vec![r1.status, r2.status];
-    assert!(
-        statuses.contains(&ActionStatus::Accepted),
-        "exactly one accepted receipt expected; got {:?}",
-        statuses
-    );
-    assert!(
-        statuses.contains(&ActionStatus::Rejected),
-        "exactly one rejected receipt expected; got {:?}",
-        statuses
-    );
+    assert_eq!(r1.status, ActionStatus::Accepted);
+    assert_eq!(r2.status, ActionStatus::Accepted);
+    assert_eq!(r1.action_id, r2.action_id);
+    assert_eq!(r1.correlation_id, r2.correlation_id);
 
-    // Verify exactly one audit event was appended to the journal (no
-    // duplicate-race event from the rejected dispatch).
+    // Verify exactly one audit event was appended to the journal (the retry
+    // replays the receipt without dispatching a second action).
     let cursor = opensymphony::opensymphony_gateway_schema::cursor::StreamCursor::new(0, "events");
     let page = journal.query_after(&cursor, 10).await.expect("query");
     assert_eq!(

@@ -65,6 +65,8 @@ fn fixture() -> SnapshotEnvelope {
                 max_turns: 0,
                 runtime_seconds: 0,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: Some("https://agent.example.com/runtime".to_owned()),

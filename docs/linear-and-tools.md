@@ -120,10 +120,12 @@ Important normalization rules:
 - `branch_name` comes from Linear `Issue.branchName` when present and is carried
   through tracker normalization so run-detail clients can show the same branch
   known to the scheduler
-- `pr_url` comes from Linear issue attachments only when the attachment has an
-  explicit GitHub `sourceType` and a canonical
-  `https://github.com/<owner>/<repo>/pull/<number>` URL; generic URL
-  attachments are ignored for Run Detail PR metadata
+- `pr_urls` retains every paginated Linear issue attachment whose explicit
+  `sourceType` is GitHub and whose URL is an HTTPS pull-request URL in the
+  `<owner>/<repo>/pull/<number>` shape. This accepts both github.com and
+  GitHub Enterprise authorities; generic URL attachments are ignored for Run
+  Detail PR metadata. `pr_url` remains the first qualifying URL as a
+  compatibility projection for consumers that only display one pull request.
 - `parent_id` comes from `parent.id`
 - `parent` retains the parent identifier when Linear returns it, and gateway
   task graph nodes use that identifier as the client-facing `parent_id`; the

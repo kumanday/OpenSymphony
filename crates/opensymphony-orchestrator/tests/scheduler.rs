@@ -8,18 +8,19 @@ use crate::opensymphony_domain::{
     CanonicalRepositoryId, DurationMs, HarnessInterruptCommand, HarnessInterruptReason,
     HarnessInterruptStatus, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
     RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint,
-    TrackerErrorCategory,
+    TrackerErrorCategory, TrackerIssueRef,
 };
 use crate::opensymphony_orchestrator::{
-    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
-    IssueStateCategory, NormalizedIssue, RecoveredRun, RecoveryRecord, ReleaseReason, RetryAttempt,
-    RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState,
-    Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
-    decide_issue_route,
+    ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
+    IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
+    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, RecoveredRun, RecoveryRecord,
+    ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry, RetryExhaustionRecord,
+    RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
+    SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
+    WorkerAbortReason, WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkspaceKey, WorkspaceRecord, decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -78,6 +79,7 @@ fn tracker_issue(id: &str, identifier: &str, state: &str, created_at: u64) -> Tr
         state_kind: tracker_issue_state_kind_from_name(state),
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         labels: Vec::new(),
         project_id: None,
         project_slug: None,
@@ -139,6 +141,7 @@ fn normalized_issue(id: &str, identifier: &str, state: &str) -> NormalizedIssue 
         },
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: Some(format!("https://linear.app/example/{identifier}")),
         labels: Vec::new(),
         project_id: None,
@@ -329,6 +332,14 @@ impl FakeError {
             retry_after: Some(retry_after),
         }
     }
+
+    fn not_found() -> Self {
+        Self {
+            message: "issue not found".to_string(),
+            category: Some(TrackerErrorCategory::NotFound),
+            retry_after: None,
+        }
+    }
 }
 
 impl std::fmt::Display for FakeError {
@@ -355,6 +366,7 @@ struct FakeTracker {
     terminal_requests: usize,
     detail_requests: Vec<Vec<String>>,
     state_requests: Vec<Vec<String>>,
+    parent_evidence: Option<ParentEligibilityEvidence>,
 }
 
 impl TrackerBackend for FakeTracker {
@@ -423,6 +435,20 @@ impl TrackerBackend for FakeTracker {
             .collect())
     }
 
+    async fn parent_eligibility(
+        &mut self,
+        _parent: &TrackerIssue,
+        _hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        Ok(self
+            .parent_evidence
+            .clone()
+            .unwrap_or_else(|| ParentEligibilityEvidence {
+                hierarchy_generation: 0,
+                children: Vec::new(),
+            }))
+    }
+
     fn error_category(error: &Self::Error) -> Option<TrackerErrorCategory> {
         error.category
     }
@@ -457,6 +483,10 @@ struct FakeWorkspace {
     persisted_interrupt_reasons: Vec<HarnessInterruptReason>,
     persist_interrupt_results: VecDeque<Result<(), FakeError>>,
     retain_failed: bool,
+    durable_state: Option<serde_json::Value>,
+    persisted_durable_states: Vec<serde_json::Value>,
+    persist_durable_state_results: VecDeque<Result<(), FakeError>>,
+    recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -486,6 +516,28 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(self.recovered_run_started_at.clone())
+    }
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(self.durable_state.clone())
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        if let Some(result) = self.persist_durable_state_results.pop_front() {
+            result?;
+        }
+        self.durable_state = Some(state.clone());
+        self.persisted_durable_states.push(state.clone());
+        Ok(())
     }
 
     async fn recover_retry_exhaustion(
@@ -621,6 +673,7 @@ impl WorkerBackend for FakeWorker {
             Some(result) => result,
             None => Ok(WorkerLaunch {
                 conversation: conversation(&request.run.worker_id),
+                started_at: None,
             }),
         }
     }
@@ -651,6 +704,529 @@ impl WorkerBackend for FakeWorker {
                 timed_out: false,
             }))
     }
+}
+
+#[tokio::test]
+async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
+    let child_id = IssueId::new("child-1").expect("child id should be valid");
+    let child_identifier = IssueIdentifier::new("COE-1-child").expect("child identifier");
+    let parent_id = IssueId::new("parent-1").expect("parent id should be valid");
+    let mut parent = tracker_issue("parent-1", "COE-1", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: child_identifier.to_string(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let snapshot = HierarchySnapshot::new(&parent);
+    let resource = LeaseResource {
+        issue_id: child_id.clone(),
+        repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+        checkout_generation: "checkout-1".to_owned(),
+    };
+    let mut durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot.clone())]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: resource.clone(),
+            owner: LeaseOwner::leaf_worker(&child_id),
+            hierarchy_generation: snapshot.generation,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        ..Default::default()
+    };
+    let evidence = ParentEligibilityEvidence {
+        hierarchy_generation: snapshot.generation,
+        children: vec![ChildEligibilityEvidence {
+            child_id: child_id.clone(),
+            hierarchy_generation: snapshot.generation,
+            orchestrator_terminal: true,
+            provider_merge_confirmed: true,
+            merge_required: true,
+            merge_result_commit: Some("merge-commit".to_owned()),
+            merge_result_commits: Vec::new(),
+            merge_result_commits_by_repository: vec![RequiredMergeCommit {
+                repository_id: Some(resource.repository_id.clone()),
+                commit: "merge-commit".to_owned(),
+            }],
+            merge_repository_id: Some(resource.repository_id.clone()),
+            merge_repository_ids: vec![resource.repository_id.clone()],
+            provider_evidence_at: None,
+            provider_evidence_by_issue: Vec::new(),
+            resource: Some(resource.clone()),
+            resources: Vec::new(),
+            unresolved_failure: None,
+        }],
+    };
+    let tracker = FakeTracker {
+        active: vec![parent.clone()],
+        parent_evidence: Some(evidence.clone()),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("eligible parent should dispatch");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            state.clone(),
+        )
+        .ok()
+        .and_then(|state| state.hierarchy.get(&parent_id).cloned())
+        .is_some_and(|snapshot| {
+            snapshot.dispatch_intended()
+                && snapshot.dispatch_required_merge_commits
+                    == vec![RequiredMergeCommit {
+                        repository_id: Some(resource.repository_id.clone()),
+                        commit: "merge-commit".to_owned(),
+                    }]
+        })
+    }));
+    durable_state = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("dispatch should persist durable state"),
+    )
+    .expect("durable state should decode");
+    assert!(durable_state.hierarchy[&parent_id].dispatch_claimed());
+    assert!(
+        durable_state
+            .leases
+            .iter()
+            .any(|lease| { lease.kind == LeaseKind::AncestorIntegration && lease.active() })
+    );
+    assert!(
+        durable_state
+            .leases
+            .iter()
+            .any(|lease| { lease.kind == LeaseKind::LeafWorker && lease.released_at.is_some() })
+    );
+
+    let tracker = FakeTracker {
+        active: vec![parent],
+        parent_evidence: Some(evidence),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut restarted = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    restarted
+        .tick(ts(200))
+        .await
+        .expect("restart should respect the durable dispatch claim");
+    assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn recovered_run_boundary_survives_initial_state_persistence() {
+    let issue_id = IssueId::new("recovered-boundary").expect("issue id should be valid");
+    let run_started_at = ts(50);
+    let recovered_workspace = workspace_record("COE-BOUNDARY", "/tmp/recovered/COE-BOUNDARY");
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("recovered-boundary", "COE-BOUNDARY", "In Progress"),
+            workspace: recovered_workspace,
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        recovered_run_started_at: BTreeMap::from([(issue_id.clone(), run_started_at)]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![tracker_issue(
+                "recovered-boundary",
+                "COE-BOUNDARY",
+                "In Progress",
+                0,
+            )],
+            ..Default::default()
+        },
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .bootstrap(ts(100))
+        .await
+        .expect("recovery bootstrap should persist the recovered boundary");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("bootstrap should persist durable state"),
+    )
+    .expect("durable state should decode");
+    assert_eq!(
+        state.run_started_at_by_issue.get(&issue_id),
+        Some(&run_started_at)
+    );
+}
+
+#[tokio::test]
+async fn terminal_recovery_prunes_run_boundary_after_cleanup() {
+    let issue_id = IssueId::new("terminal-recovery").expect("issue id should be valid");
+    let recovered_workspace = workspace_record("COE-TERMINAL", "/tmp/recovered/COE-TERMINAL");
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("terminal-recovery", "COE-TERMINAL", "Done"),
+            workspace: recovered_workspace,
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        recovered_run_started_at: BTreeMap::from([(issue_id.clone(), ts(50))]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![tracker_issue(
+                "terminal-recovery",
+                "COE-TERMINAL",
+                "Done",
+                0,
+            )],
+            ..Default::default()
+        },
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .bootstrap(ts(100))
+        .await
+        .expect("terminal recovery should complete cleanup");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("cleanup should persist pruned durable state"),
+    )
+    .expect("durable state should decode");
+    assert!(!state.run_started_at_by_issue.contains_key(&issue_id));
+}
+
+#[tokio::test]
+async fn active_ancestor_fence_is_checked_before_nested_parent_eligibility() {
+    let root_id = IssueId::new("root-fence").expect("root id");
+    let nested_id = IssueId::new("nested-fence").expect("nested id");
+    let canceled_child_id = IssueId::new("canceled-fence").expect("child id");
+    let mut root = tracker_issue("root-fence", "COE-FENCE-ROOT", "In Progress", 0);
+    root.sub_issues = vec![TrackerIssueRef {
+        id: nested_id.to_string(),
+        identifier: "COE-FENCE-NESTED".to_owned(),
+        title: Some("Nested parent".to_owned()),
+        url: None,
+        state: "In Progress".to_owned(),
+        state_kind: TrackerIssueStateKind::Started,
+    }];
+    let mut nested = tracker_issue("nested-fence", "COE-FENCE-NESTED", "In Progress", 1);
+    nested.parent_id = Some(root_id.to_string());
+    nested.sub_issues = vec![TrackerIssueRef {
+        id: canceled_child_id.to_string(),
+        identifier: "COE-FENCE-CANCELED".to_owned(),
+        title: Some("Canceled child".to_owned()),
+        url: None,
+        state: "Canceled".to_owned(),
+        state_kind: TrackerIssueStateKind::Canceled,
+    }];
+
+    let mut root_snapshot = HierarchySnapshot::new(&root);
+    root_snapshot.mark_dispatched();
+    let nested_snapshot = HierarchySnapshot::new(&nested);
+    let resource = LeaseResource {
+        issue_id: nested_id.clone(),
+        repository_id: CanonicalRepositoryId::new("github:fence-repo").expect("repository id"),
+        checkout_generation: "checkout-fence".to_owned(),
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([
+            (root_id.clone(), root_snapshot),
+            (nested_id.clone(), nested_snapshot.clone()),
+        ]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::AncestorIntegration,
+            resource,
+            owner: LeaseOwner::ancestor(&root_id),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        ..Default::default()
+    };
+    let tracker = FakeTracker {
+        active: vec![root, nested],
+        parent_evidence: Some(ParentEligibilityEvidence {
+            hierarchy_generation: nested_snapshot.generation,
+            children: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("ancestor fence should defer nested parent");
+
+    assert!(scheduler.worker().launches.is_empty());
+    let persisted =
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("state should remain durable"),
+        )
+        .expect("state should decode");
+    assert!(!persisted.hierarchy[&nested_id].dispatch_intended());
+    assert!(
+        !persisted
+            .leases
+            .iter()
+            .any(|lease| { lease.active() && lease.owner == LeaseOwner::ancestor(&nested_id) })
+    );
+}
+
+#[tokio::test]
+async fn replan_parent_clears_durable_hierarchy_changed_block_without_releasing_leases() {
+    let parent_id = IssueId::new("parent-replan").expect("parent id");
+    let mut parent = tracker_issue("parent-replan", "COE-REPLAN", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: "child-a".to_owned(),
+        identifier: "COE-CHILD".to_owned(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut snapshot = HierarchySnapshot::new(&parent);
+    snapshot.freeze().expect("snapshot should freeze");
+    snapshot.reconcile(&[TrackerIssueRef {
+        id: "child-b".to_owned(),
+        identifier: "COE-CHILD-2".to_owned(),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }]);
+    let retained_lease = LeaseRecord {
+        kind: LeaseKind::AncestorIntegration,
+        resource: LeaseResource {
+            issue_id: IssueId::new("child-a").expect("child id"),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository id"),
+            checkout_generation: "checkout-1".to_owned(),
+        },
+        owner: LeaseOwner::ancestor(&parent_id),
+        hierarchy_generation: 2,
+        acquired_at: 1,
+        expires_at: None,
+        released_at: None,
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+        leases: vec![retained_lease.clone()],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker::default(),
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    assert!(
+        scheduler
+            .replan_parent(&parent_id, ts(100))
+            .await
+            .expect("replan should persist")
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("replanned state should persist"),
+    )
+    .expect("state should decode");
+    assert_eq!(state.hierarchy[&parent_id].generation, 2);
+    assert!(!state.hierarchy[&parent_id].frozen);
+    assert!(state.hierarchy[&parent_id].blocked_reason.is_none());
+    assert_eq!(state.leases, vec![retained_lease]);
+}
+
+#[tokio::test]
+async fn replan_parent_target_preserves_tracker_failures_for_retry() {
+    let tracker = FakeTracker {
+        detail_errors: VecDeque::from([FakeError::rate_limited(Duration::from_secs(5))]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    let result = scheduler
+        .replan_parent_target("COE-REPLAN", 1, ts(100))
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { detail })
+            if detail == "rate limited"
+    ));
+}
+
+#[tokio::test]
+async fn replan_parent_target_restores_hierarchy_when_persistence_fails() {
+    let parent_id = IssueId::new("parent-replan").expect("parent id");
+    let child_a = TrackerIssueRef {
+        id: "child-a".to_owned(),
+        identifier: "COE-CHILD".to_owned(),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    };
+    let child_b = TrackerIssueRef {
+        id: "child-b".to_owned(),
+        identifier: "COE-CHILD-2".to_owned(),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    };
+    let mut durable_parent = tracker_issue("parent-replan", "COE-REPLAN", "In Progress", 0);
+    durable_parent.sub_issues = vec![child_a.clone()];
+    let mut snapshot = HierarchySnapshot::new(&durable_parent);
+    snapshot.freeze().expect("snapshot should freeze");
+    snapshot.reconcile(std::slice::from_ref(&child_b));
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id, snapshot)]),
+        ..Default::default()
+    };
+    let current_parent = durable_parent;
+    let tracker = FakeTracker {
+        detail_issues: Some(vec![current_parent]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        persist_durable_state_results: VecDeque::from([Err(FakeError {
+            message: "hierarchy state write failed".to_owned(),
+            category: None,
+            retry_after: None,
+        })]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    let result = scheduler
+        .replan_parent_target("COE-REPLAN", 2, ts(100))
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::opensymphony_orchestrator::SchedulerError::Workspace { detail })
+            if detail == "hierarchy state write failed"
+    ));
+    assert_eq!(scheduler.workspace().persisted_durable_states.len(), 0);
+
+    assert!(
+        !scheduler
+            .replan_parent_target("COE-REPLAN", 3, ts(101))
+            .await
+            .expect("retry should reject the unpersisted generation")
+    );
+    assert_eq!(scheduler.workspace().persisted_durable_states.len(), 0);
+}
+
+#[tokio::test]
+async fn replan_parent_target_rejects_a_disappeared_issue_without_aborting_dispatch() {
+    let tracker = FakeTracker {
+        detail_errors: VecDeque::from([FakeError::not_found()]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    assert!(
+        !scheduler
+            .replan_parent_target("COE-MISSING", 1, ts(100))
+            .await
+            .expect("missing replan targets are recorded as rejected outcomes")
+    );
 }
 
 #[tokio::test]
@@ -5298,12 +5874,13 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
 async fn unlabeled_parent_remains_repository_neutral() {
     let mut issue = tracker_issue("lin-repo-parent", "COE-548-PARENT", "In Progress", 0);
     issue.project_id = Some("project-id".to_string());
-    issue.sub_issues = vec![crate::opensymphony_domain::TrackerIssueRef {
+    issue.sub_issues = vec![TrackerIssueRef {
         id: "lin-repo-parent-child".to_string(),
         identifier: "COE-548-CHILD".to_string(),
         title: Some("Child".to_string()),
         url: Some("https://linear.app/trilogy-ai-coe/issue/COE-548-CHILD".to_string()),
         state: "Done".to_string(),
+        state_kind: TrackerIssueStateKind::Completed,
     }];
     let tracker = FakeTracker {
         active: vec![issue],

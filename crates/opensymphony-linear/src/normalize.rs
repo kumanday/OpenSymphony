@@ -2,6 +2,7 @@ use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerProjectMilestone,
 };
+use url::Url;
 
 use super::error::LinearError;
 use super::graphql::{
@@ -11,6 +12,7 @@ use super::graphql::{
 
 pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, LinearError> {
     let state = normalize_state(node.state);
+    let pr_urls = normalize_pr_urls(node.attachments.nodes);
     Ok(TrackerIssue {
         id: node.id,
         identifier: node.identifier,
@@ -21,7 +23,8 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         state: state.name,
         state_kind: state.kind,
         branch_name: normalize_branch_name(node.branch_name),
-        pr_url: normalize_pr_url(node.attachments.nodes),
+        pr_url: pr_urls.first().cloned(),
+        pr_urls,
         labels: normalize_labels(node.labels.nodes),
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug: node.project.as_ref().map(|project| project.slug_id.clone()),
@@ -95,7 +98,7 @@ fn normalize_branch_name(branch_name: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Option<String> {
+fn normalize_pr_urls(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Vec<String> {
     attachments
         .into_iter()
         .filter(|attachment| {
@@ -106,14 +109,18 @@ fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> O
                 .unwrap_or(false)
         })
         .map(|attachment| attachment.url)
-        .find(|url| is_canonical_github_pr_url(url))
+        .filter(|url| is_canonical_github_pr_url(url))
+        .collect()
 }
 
 fn is_canonical_github_pr_url(url: &str) -> bool {
-    let Some(path) = url.trim().strip_prefix("https://github.com/") else {
+    let Ok(url) = Url::parse(url.trim()) else {
         return false;
     };
-    let mut parts = path.split('/');
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return false;
+    }
+    let mut parts = url.path_segments().into_iter().flatten();
     let (Some(owner), Some(repo), Some("pull"), Some(number), None) = (
         parts.next(),
         parts.next(),
@@ -156,15 +163,24 @@ fn normalize_parent_id(parent: Option<&LinearParentNode>) -> Option<String> {
 fn normalize_parent(parent: Option<LinearParentNode>) -> Option<TrackerIssueRef> {
     let parent = parent?;
     let identifier = parent.identifier?;
+    let state = parent.state.map(|state| {
+        (
+            state.name,
+            TrackerIssueStateKind::from_tracker_type(state.kind),
+        )
+    });
     Some(TrackerIssueRef {
         id: parent.id,
         identifier,
         title: parent.title,
         url: parent.url,
-        state: parent
-            .state
-            .map(|state| state.name)
+        state: state
+            .as_ref()
+            .map(|state| state.0.clone())
             .unwrap_or_else(|| "unknown".to_string()),
+        state_kind: state
+            .map(|state| state.1)
+            .unwrap_or_else(|| TrackerIssueStateKind::Unknown("unknown".to_owned())),
     })
 }
 
@@ -180,12 +196,16 @@ fn normalize_project_milestone(
 fn normalize_sub_issues(children: Vec<LinearChildNode>) -> Vec<TrackerIssueRef> {
     let mut sub_issues = children
         .into_iter()
-        .map(|child| TrackerIssueRef {
-            id: child.id,
-            identifier: child.identifier,
-            title: child.title,
-            url: child.url,
-            state: child.state.name,
+        .map(|child| {
+            let state = child.state;
+            TrackerIssueRef {
+                id: child.id,
+                identifier: child.identifier,
+                title: child.title,
+                url: child.url,
+                state: state.name,
+                state_kind: TrackerIssueStateKind::from_tracker_type(state.kind),
+            }
         })
         .collect::<Vec<_>>();
     sub_issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
@@ -220,7 +240,8 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_canonical_github_pr_url, normalize_priority};
+    use super::super::graphql::LinearAttachmentNode;
+    use super::{is_canonical_github_pr_url, normalize_pr_urls, normalize_priority};
 
     #[test]
     fn priority_zero_becomes_none() {
@@ -253,9 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn github_pr_url_matching_requires_canonical_pull_path() {
+    fn github_pr_url_matching_supports_configured_enterprise_authorities() {
         assert!(is_canonical_github_pr_url(
             "https://github.com/kumanday/OpenSymphony/pull/155"
+        ));
+        assert!(is_canonical_github_pr_url(
+            "https://github.enterprise.example/kumanday/OpenSymphony/pull/155"
         ));
         assert!(!is_canonical_github_pr_url(
             "https://github.com/kumanday/OpenSymphony/wiki/pull/155"
@@ -264,7 +288,26 @@ mod tests {
             "https://github.com/kumanday/OpenSymphony/pull/not-a-number"
         ));
         assert!(!is_canonical_github_pr_url(
-            "https://example.com/kumanday/OpenSymphony/pull/155"
+            "http://github.enterprise.example/kumanday/OpenSymphony/pull/155"
         ));
+    }
+
+    #[test]
+    fn canonical_pull_request_normalization_retains_all_attachments() {
+        let urls = normalize_pr_urls(vec![
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/pull/12".to_owned(),
+                source_type: Some("github".to_owned()),
+            },
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/pull/34".to_owned(),
+                source_type: Some("github".to_owned()),
+            },
+        ]);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://github.com/kumanday/OpenSymphony/pull/12");
+        assert_eq!(urls[1], "https://github.com/kumanday/OpenSymphony/pull/34");
     }
 }

@@ -99,7 +99,7 @@ impl LinearError {
             Self::ResponseBody { .. } => TrackerErrorCategory::Transport,
             Self::Request(error) if error.is_timeout() => TrackerErrorCategory::Timeout,
             Self::Request(_) => TrackerErrorCategory::Transport,
-            Self::HttpStatus { status, .. } => http_status_category(*status),
+            Self::HttpStatus { status, body, .. } => http_status_category(*status, body),
             Self::Graphql { errors, .. } => graphql_category(errors),
         }
     }
@@ -118,9 +118,12 @@ impl LinearError {
     }
 }
 
-fn http_status_category(status: StatusCode) -> TrackerErrorCategory {
+fn http_status_category(status: StatusCode, body: &str) -> TrackerErrorCategory {
     match status {
         StatusCode::UNAUTHORIZED => TrackerErrorCategory::Auth,
+        StatusCode::FORBIDDEN if body.to_ascii_lowercase().contains("rate limit") => {
+            TrackerErrorCategory::RateLimited
+        }
         StatusCode::FORBIDDEN => TrackerErrorCategory::PermissionDenied,
         StatusCode::NOT_FOUND => TrackerErrorCategory::NotFound,
         StatusCode::TOO_MANY_REQUESTS => TrackerErrorCategory::RateLimited,
@@ -197,6 +200,11 @@ mod tests {
             body: "slow down".to_string(),
             retry_after: Some(Duration::from_secs(1)),
         };
+        let github_rate_limited = LinearError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: "GitHub API rate limit response".to_string(),
+            retry_after: Some(Duration::from_secs(2)),
+        };
 
         assert_eq!(auth.category(), TrackerErrorCategory::Auth);
         assert_eq!(
@@ -204,6 +212,14 @@ mod tests {
             TrackerErrorCategory::PermissionDenied
         );
         assert_eq!(rate_limited.category(), TrackerErrorCategory::RateLimited);
+        assert_eq!(
+            github_rate_limited.category(),
+            TrackerErrorCategory::RateLimited
+        );
+        assert_eq!(
+            github_rate_limited.retry_after(),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]

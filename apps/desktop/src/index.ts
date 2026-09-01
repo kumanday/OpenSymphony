@@ -338,6 +338,14 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.actionInner.cancelRun(runId);
   }
 
+  replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId?: string,
+  ): Promise<ActionReceipt> {
+    return this.actionInner.replanParent(parentId, hierarchyGeneration, operationId);
+  }
+
   retryRun(runId: string): Promise<ActionReceipt> {
     return this.actionInner.retryRun(runId);
   }

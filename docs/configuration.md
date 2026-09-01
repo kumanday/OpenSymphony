@@ -61,7 +61,9 @@ prompts, logs, or process arguments. The resulting config and inventory
 generations are copied into the run envelope and must match on recovery.
 The checkout credential must match the clone transport: `ssh-agent` is valid
 for SSH clone URLs, while `environment` credentials are rejected for SSH
-clones.
+clones. Active GitHub review profiles must separately resolve to an
+`environment` credential with a variable name, because review API requests do
+not use the checkout transport credential or ambient authentication.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before

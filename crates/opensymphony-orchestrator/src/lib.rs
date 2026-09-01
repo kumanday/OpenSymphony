@@ -1,3 +1,4 @@
+mod hierarchy;
 mod scheduler;
 mod selection;
 
@@ -13,6 +14,11 @@ pub use crate::opensymphony_domain::{
     TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
     TrackerIssueSummary, TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId,
     WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+};
+pub use hierarchy::{
+    ChildEligibilityEvidence, DurableOrchestratorState, HierarchyBlockedReason, HierarchyChildEdge,
+    HierarchyReconciliation, HierarchySnapshot, LeaseError, LeaseKind, LeaseOwner, LeaseRecord,
+    LeaseResource, ParentEligibilityEvidence, ProviderEvidenceBoundary, RequiredMergeCommit,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,
@@ -62,6 +68,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: Vec::new(),
             project_id: None,

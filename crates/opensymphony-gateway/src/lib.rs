@@ -4531,10 +4531,13 @@ fn build_runtime_overlay(
             ));
 
     let blocker_summary = if issue.blocked {
-        issue
-            .repository_binding
-            .as_ref()
-            .map(repository_binding_diagnostic)
+        hierarchy_blocker_diagnostic(issue)
+            .or_else(|| {
+                issue
+                    .repository_binding
+                    .as_ref()
+                    .map(repository_binding_diagnostic)
+            })
             .or_else(|| Some("Blocked by dependency".into()))
     } else {
         None
@@ -4558,6 +4561,15 @@ fn build_runtime_overlay(
         validation_status: None,
         blocker_summary,
     }
+}
+
+fn hierarchy_blocker_diagnostic(issue: &ControlPlaneIssueSnapshot) -> Option<String> {
+    issue.hierarchy_blocked_reason.as_ref().map(|reason| {
+        format!(
+            "Hierarchy blocked: {reason} (generation {})",
+            issue.hierarchy_generation.unwrap_or_default()
+        )
+    })
 }
 
 fn repository_binding_diagnostic(outcome: &RepositoryBindingOutcome) -> String {
@@ -4628,6 +4640,7 @@ async fn get_run_detail(
                     codex_thread_id: None,
                     summary: None,
                     blocker: None,
+                    hierarchy_generation: None,
                     error: Some("Run not found".into()),
                     allowed_actions: Vec::new(),
                     liveness: None,
@@ -4777,12 +4790,16 @@ async fn get_run_detail(
             codex_thread_id: issue.codex_thread_id.clone(),
             summary: None,
             blocker: issue.blocked.then(|| {
-                issue
-                    .repository_binding
-                    .as_ref()
-                    .map(repository_binding_diagnostic)
+                hierarchy_blocker_diagnostic(issue)
+                    .or_else(|| {
+                        issue
+                            .repository_binding
+                            .as_ref()
+                            .map(repository_binding_diagnostic)
+                    })
                     .unwrap_or_else(|| "Blocked by dependency".into())
             }),
+            hierarchy_generation: issue.hierarchy_generation,
             error: None,
             allowed_actions: allowed_actions_for_issue(issue, dispatchable),
             liveness: Some(build_liveness(issue)),
@@ -5403,6 +5420,11 @@ fn allowed_actions_for_issue(
         allowed.push(RunAction::Comment);
         allowed.push(RunAction::CreateFollowup);
     }
+    if issue.hierarchy_blocked_reason.as_deref() == Some("HierarchyChanged")
+        && issue.hierarchy_generation.is_some()
+    {
+        allowed.push(RunAction::Replan);
+    }
     // OpenWorkspace is available when there is a local workspace path.
     if !issue.workspace_path_suffix.is_empty() {
         allowed.push(RunAction::OpenWorkspace);
@@ -5449,12 +5471,15 @@ pub(crate) fn safe_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> SafeA
     // (stalled, degraded, or detached) and not already detached.
     let stream = build_liveness(issue).stream;
     let detach = !matches!(stream, RunStreamLiveness::Healthy) && !issue.detached;
+    let replan = issue.hierarchy_blocked_reason.as_deref() == Some("HierarchyChanged")
+        && issue.hierarchy_generation.is_some();
 
     SafeActions {
         retry,
         cancel,
         rehydrate,
         detach,
+        replan,
     }
 }
 
@@ -6218,6 +6243,25 @@ exit 2
     }
 
     #[test]
+    fn hierarchy_changed_parent_exposes_generation_checked_replan() {
+        let mut issue = test_issue(
+            ControlPlaneIssueRuntimeState::Idle,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        issue.blocked = true;
+        issue.hierarchy_generation = Some(7);
+        issue.hierarchy_blocked_reason = Some("HierarchyChanged".to_owned());
+
+        let actions = allowed_actions_for_issue(&issue, true);
+        assert!(actions.contains(&RunAction::Replan));
+        assert!(safe_actions_for_issue(&issue).replan);
+    }
+
+    #[test]
     fn allowed_actions_detach_matches_stream_health() {
         let stalled = test_issue(
             ControlPlaneIssueRuntimeState::RetryQueued,
@@ -6366,6 +6410,8 @@ exit 2
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: if flags.harness {
