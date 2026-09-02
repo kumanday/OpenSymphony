@@ -150,9 +150,10 @@ To address AI review feedback:
    is correct), or push back (disagree with reasoning)
 3. Reply inline to the review comment explaining your action
 4. If accepting, implement the fix, commit, and push
-5. Consult the workpad review ledger. Request the next full scan only when
-   fewer than eight have completed. The automatic scan is scan 1; scans 2
-   through 8 are explicit re-triggers.
+5. Consult the workpad review ledger. A clean completed scan for the current
+   head ends automated review. Request another full scan only after remediation
+   changes the head and fewer than eight scans have completed; the automatic
+   scan is scan 1.
 6. After scan 8, use exact-commit local review for later fixes or merge-conflict
    resolution and never request a ninth automated scan.
 

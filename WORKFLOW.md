@@ -232,14 +232,18 @@ Active review provider: `codex`
      https://github.com/kumanday/OpenSymphony/blob/main/docs/codex-code-review-setup.md -->
 
 Both providers post standard GitHub reviews with inline comments. Every PR gets
-exactly eight completed full-PR scans when a provider is active: the automatic
-scan at PR creation, then seven explicit re-triggers. Treat findings from either
+at least one and at most eight completed full-PR scans when a provider is active:
+the automatic scan at PR creation, then only the re-triggers needed after the
+review finds issues and remediation changes the head. Treat findings from either
 provider identically under the PR feedback sweep protocol below.
 
-Track the eight scans in the single workpad with scan number, reviewed head SHA,
+Track completed scans in the single workpad with scan number, reviewed head SHA,
 status, and finding resolution. A full scan reviews the entire current PR, not
-only the commits since the prior scan. Do not request scans 2 through 8 while the
-previous scan is still running, and do not request a ninth automated scan.
+only the commits since the prior scan. A completed clean review for the current
+head ends automated review: Codex 👍 or an explicit no-issues result counts as
+clean when the feedback sweep finds no unresolved actionable item; 👀 means only
+that review is still running. Never re-trigger a clean unchanged head, request a
+scan while the previous scan is running, or request a ninth automated scan.
 An exact-commit local review is read-only and covers only the named commit
 against its parent or parents; record its command and result in the workpad and
 do not post another automated-review trigger.
@@ -320,12 +324,14 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
    re-run validation, reply in the originating threads, and wait for checks.
    Do not request a review merely because a push occurred.
 7. Record the completed scan and reviewed head SHA in the workpad review ledger.
-8. If fewer than eight full scans have completed, re-trigger one full review
-   using `Automated AI PR review`, even when the current scan is clean, then
-   repeat this sweep for the new scan.
+8. If the completed scan is clean for the current head and no actionable
+   feedback remains, end automated review. Do not re-trigger it.
+9. If findings caused remediation changes, and fewer than eight full scans have
+   completed, re-trigger one full review using `Automated AI PR review`, then
+   repeat this sweep for the new head.
    - Do **not** re-trigger at PR creation; the automatic review is scan 1.
    - Never have more than one requested scan running at a time.
-9. After scan 8, do not request another automated review. If scan 8 produces
+10. After scan 8, do not request another automated review. If scan 8 produces
    accepted fixes, batch and validate them once, then run an exact-commit local
    review of those final remediation commits. Address valid blocking findings
    locally and repeat exact-commit review as needed; never start scan 9.
@@ -447,9 +453,11 @@ For most code review feedback (addressing comments, small fixes, requested tweak
 5. Re-run validation/tests to ensure changes are correct.
    - Always inspect current PR checks (`gh pr view --json statusCheckRollup`) before declaring feedback addressed.
    - If any required check is failing, treat that as unfinished rework even if the latest review text is positive.
-6. After pushing follow-up commits, consult the workpad review ledger. Request
-   the next full scan only when fewer than eight scans have completed. Once all
-   eight are complete, use exact-commit local review and never request scan 9.
+6. After pushing follow-up commits that resolve review findings, consult the
+   workpad review ledger. Request one full scan only when the current head has
+   not received a clean scan and fewer than eight scans have completed. A clean
+   scan for the unchanged head ends the cycle. At the ceiling, use exact-commit
+   local review and never request scan 9.
 7. Move the issue back to `Human Review` once all feedback is addressed.
 
 **Preserve review history**: Keeping the same PR preserves all discussion context, review threads, and decision history. Reviewers can see incremental changes rather than starting from scratch.
@@ -480,9 +488,10 @@ For major rework:
 - Step 1/2 checklist is fully complete and accurately reflected in the single workpad comment.
 - Acceptance criteria and required ticket-provided validation items are complete.
 - Validation/tests are green for the latest commit.
-- When an automated provider is active, the workpad records exactly eight
-  completed full-PR scans and all their findings are resolved or explicitly
-  pushed back in the originating thread.
+- When an automated provider is active, the workpad records a clean completed
+  full-PR scan for the current head, or the eight-scan ceiling plus exact-commit
+  review of later remediation. All findings are resolved or explicitly pushed
+  back in the originating thread.
 - PR feedback sweep is complete and no actionable comments remain.
 - PR checks are green, branch is pushed, and PR is linked on the issue.
 - Required PR metadata is present (`symphony` label).
