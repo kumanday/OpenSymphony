@@ -30,9 +30,13 @@ pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
 pub const DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE: &str = "api_key";
 pub const DEFAULT_ROUTING_HARNESS: &str = "openhands_agent_server";
-pub const DEFAULT_DEVIN_API_BASE_URL: &str = "https://api.devin.ai/v1";
-pub const DEFAULT_DEVIN_API_KEY_ENV: &str = "DEVIN_API_KEY";
-pub const DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS: u64 = 2_000;
+pub const DEFAULT_DEVIN_API_BASE_URL: &str = "https://api.devin.ai";
+/// Devin API v3 authenticates with a `cog_` service-user token.
+pub const DEFAULT_DEVIN_API_KEY_ENV: &str = "COG_SERVICE_USER_TOKEN";
+pub const DEFAULT_DEVIN_ORG_ID_ENV: &str = "DEVIN_ORG_ID";
+pub const DEFAULT_DEVIN_POLL_INTERVAL_MS: u64 = 5_000;
+/// Maximum number of tags the Devin API accepts on a session.
+pub const DEVIN_MAX_SESSION_TAGS: usize = 50;
 pub const DEFAULT_DEVIN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_ROUTING_HARNESS_ENV: &str = "OPENSYMPHONY_HARNESS";
 pub const DEFAULT_ROUTING_MODEL_ENV: &str = "OPENSYMPHONY_MODEL";
@@ -138,6 +142,8 @@ pub struct RoutingFrontMatter {
 pub struct DevinFrontMatter {
     #[serde(default)]
     pub api: DevinApiFrontMatter,
+    #[serde(default)]
+    pub session: DevinSessionFrontMatter,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,8 +153,34 @@ pub struct DevinApiFrontMatter {
     /// Environment variable holding the Devin API token. The token itself is
     /// never stored in workflow configuration or run manifests.
     pub api_key_env: Option<String>,
-    pub event_poll_interval_ms: Option<IntegerLike>,
+    /// Organization that owns the sessions (`org-...`).
+    pub org_id: Option<String>,
+    /// Environment variable holding the organization id when it is not set
+    /// inline. When neither is present the client resolves it from
+    /// `GET /v3/self`.
+    pub org_id_env: Option<String>,
+    pub poll_interval_ms: Option<IntegerLike>,
     pub request_timeout_ms: Option<IntegerLike>,
+}
+
+/// Documented `SessionCreateRequest` options carried into every Devin session
+/// this workflow starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DevinSessionFrontMatter {
+    pub playbook_id: Option<String>,
+    pub knowledge_ids: Option<Vec<String>>,
+    /// References to organization secrets Devin injects remotely. Values live
+    /// in Devin, never in workflow configuration.
+    pub secret_ids: Option<Vec<String>>,
+    pub max_acu_limit: Option<IntegerLike>,
+    pub tags: Option<Vec<String>>,
+    pub title: Option<String>,
+    /// `normal`, `fast`, `lite`, `ultra`, or `fusion`.
+    pub devin_mode: Option<String>,
+    /// VM platform or outpost pool override.
+    pub platform: Option<String>,
+    pub resumable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -302,14 +334,30 @@ pub struct WorkflowExtensions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevinConfig {
     pub api: DevinApiConfig,
+    pub session: DevinSessionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevinApiConfig {
     pub base_url: String,
     pub api_key_env: String,
-    pub event_poll_interval_ms: u64,
+    pub org_id: Option<String>,
+    pub org_id_env: String,
+    pub poll_interval_ms: u64,
     pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DevinSessionConfig {
+    pub playbook_id: Option<String>,
+    pub knowledge_ids: Option<Vec<String>>,
+    pub secret_ids: Option<Vec<String>>,
+    pub max_acu_limit: Option<u32>,
+    pub tags: Vec<String>,
+    pub title: Option<String>,
+    pub devin_mode: Option<String>,
+    pub platform: Option<String>,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -19,7 +19,9 @@ use crate::opensymphony_codex::{
     codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
     turn_status,
 };
-use crate::opensymphony_devin::{DEVIN_CLOUD_AGENT_KIND, DevinCloudAdapter, DevinCloudConfig};
+use crate::opensymphony_devin::{
+    DEVIN_CLOUD_AGENT_KIND, DevinCloudAdapter, DevinCloudConfig, DevinMode, DevinSessionOptions,
+};
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
     IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
@@ -5524,11 +5526,25 @@ fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
 /// only ever read from the worker environment by the Devin client.
 fn devin_route_unavailable_detail(workflow: &ResolvedWorkflow) -> String {
     let api = &workflow.extensions.devin.api;
+    let session = &workflow.extensions.devin.session;
     let adapter = DevinCloudAdapter::new(DevinCloudConfig {
         base_url: api.base_url.clone(),
         api_key_env: api.api_key_env.clone(),
-        event_poll_interval: Duration::from_millis(api.event_poll_interval_ms),
+        org_id: api.org_id.clone(),
+        org_id_env: api.org_id_env.clone(),
+        poll_interval: Duration::from_millis(api.poll_interval_ms),
         request_timeout: Duration::from_millis(api.request_timeout_ms),
+        session: DevinSessionOptions {
+            playbook_id: session.playbook_id.clone(),
+            knowledge_ids: session.knowledge_ids.clone(),
+            secret_ids: session.secret_ids.clone(),
+            max_acu_limit: session.max_acu_limit,
+            tags: session.tags.clone(),
+            title: session.title.clone(),
+            devin_mode: session.devin_mode.as_deref().and_then(DevinMode::parse),
+            platform: session.platform.clone(),
+            resumable: session.resumable,
+        },
     });
     format!(
         "{} endpoint `{}`, credential env `{}`; the local issue workspace stays evidence-only because Devin owns the remote execution workspace",

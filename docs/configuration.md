@@ -711,14 +711,20 @@ OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the
 conversation agent's LLM settings. The condenser is enabled by default with
 `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
-## Devin Cloud Harness (`devin.api`)
+## Devin Cloud Harness (`devin`)
+
+The harness targets the **Devin API v3** contract vendored at
+`crates/opensymphony-devin/contracts/devin-v3-openapi.yaml` (source:
+`https://docs.devin.ai/v3-openapi.yaml`). v3 is organization-scoped:
+requests go to `/v3/organizations/{org_id}/sessions...` with a `cog_`
+service-user bearer token.
 
 `devin_cloud_agent` is advertised as an unavailable capability, so these
-settings only describe the boundary a future hosted integration will use. They
-are resolved **only** when `routing.harness: devin_cloud_agent`; for OpenHands,
-Codex, or `rust_native` workflows the block is ignored entirely and an inert
-default is used, so a parked or half-configured `devin.api` block cannot fail
-an unrelated workflow.
+settings describe the boundary rather than a runnable route. They are resolved
+**only** when `routing.harness: devin_cloud_agent`; for OpenHands, Codex, or
+`rust_native` workflows the block is ignored entirely and an inert default is
+used, so a parked or half-configured `devin` block cannot fail an unrelated
+workflow.
 
 ```yaml
 routing:
@@ -726,21 +732,57 @@ routing:
 
 devin:
   api:
-    base_url: https://api.devin.ai/v1
-    api_key_env: DEVIN_API_KEY
-    event_poll_interval_ms: 2000
+    base_url: https://api.devin.ai
+    api_key_env: COG_SERVICE_USER_TOKEN
+    org_id_env: DEVIN_ORG_ID
+    poll_interval_ms: 5000
     request_timeout_ms: 30000
+  session:
+    playbook_id: playbook-abc123
+    knowledge_ids:
+      - note-abc123
+    secret_ids:
+      - secret-abc123
+    max_acu_limit: 25
+    tags:
+      - team:core
+    title: OpenSymphony run
+    devin_mode: normal
+    platform: linux
+    resumable: true
 ```
+
+`devin.api`:
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `base_url` | `https://api.devin.ai/v1` | Supports `${VAR}` env indirection. Must be an absolute `https` URL with a host, and must not embed credentials, a query string, or a fragment. |
-| `api_key_env` | `DEVIN_API_KEY` | **Literal environment-variable name**, never a value. |
-| `event_poll_interval_ms` | `2000` | Must be a positive integer. |
+| `base_url` | `https://api.devin.ai` | Supports `${VAR}` env indirection. Must be an absolute `https` URL with a host, and must not embed credentials, a query string, or a fragment. |
+| `api_key_env` | `COG_SERVICE_USER_TOKEN` | **Literal environment-variable name**, never a value. |
+| `org_id` | unset | Optional inline organization id (`org-...`). Resolved from `org_id_env`, then `GET /v3/self`, when omitted. |
+| `org_id_env` | `DEVIN_ORG_ID` | Literal environment-variable name holding the organization id. |
+| `poll_interval_ms` | `5000` | Session/message poll interval. Must be a positive integer. |
 | `request_timeout_ms` | `30000` | Must be a positive integer. |
 
+`devin.session` maps onto documented `SessionCreateRequest` fields:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `playbook_id` | unset | Devin playbook to run. |
+| `knowledge_ids` | unset | Knowledge notes to attach. |
+| `secret_ids` | unset | *References* to Devin-held organization secrets; values never live in OpenSymphony config. |
+| `max_acu_limit` | unset | Positive ACU cap for the session. |
+| `tags` | `[]` | At most 50 tags; an `opensymphony:<issue-workspace-key>` correlation tag is appended automatically. |
+| `title` | unset | Session title. |
+| `devin_mode` | unset | One of `normal`, `fast`, `lite`, `ultra`, `fusion`. |
+| `platform` | unset | VM platform / outpost pool override. |
+| `resumable` | `true` | Matches the API default; set `false` for disposable sessions. |
+
+Repository binding is prompt-carried: v3 takes repositories as `owner/name`
+entries in `repos` and has no branch field, so branch and issue context are
+rendered into the session prompt.
+
 `api_key_env` is deliberately not passed through env substitution: writing
-`api_key_env: ${DEVIN_API_KEY}` would resolve the token itself into resolved
+`api_key_env: ${COG_SERVICE_USER_TOKEN}` would resolve the token itself into resolved
 configuration, manifests, and debug output. The name is validated as an
 environment-variable identifier and the token is read from the process
 environment only at request time.
@@ -749,6 +791,18 @@ Because `devin_cloud_agent` capability is `available: false`, selecting it
 causes routing to reject issue dispatch before any local workspace is created:
 the local issue workspace is evidence and manifest storage only and is never
 Devin's execution directory.
+
+The client itself is verified against the live API by the opt-in suite in
+`tests/devin_cloud_agent_live.rs`. It needs `COG_SERVICE_USER_TOKEN` (and
+optionally `DEVIN_ORG_ID`) in the environment, and its lifecycle test creates a
+real session, so it consumes ACUs:
+
+```bash
+OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live -- --ignored --nocapture
+```
+
+See `docs/harness-adapter-compatibility.md` for what the last live run
+confirmed and what is still unverified.
 
 ## Runtime Config
 

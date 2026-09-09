@@ -109,8 +109,8 @@ mod tests {
         PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
         WorkflowLoadError,
         model::{
-            DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV,
-            DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+            DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV, DEFAULT_DEVIN_ORG_ID_ENV,
+            DEFAULT_DEVIN_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
             DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
@@ -118,7 +118,7 @@ mod tests {
             DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
             DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
             DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE,
-            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
+            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, DEVIN_MAX_SESSION_TAGS,
         },
     };
 
@@ -2578,13 +2578,21 @@ routing:
             DEFAULT_DEVIN_API_KEY_ENV
         );
         assert_eq!(
-            resolved.extensions.devin.api.event_poll_interval_ms,
-            DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS
+            resolved.extensions.devin.api.poll_interval_ms,
+            DEFAULT_DEVIN_POLL_INTERVAL_MS
         );
         assert_eq!(
             resolved.extensions.devin.api.request_timeout_ms,
             DEFAULT_DEVIN_REQUEST_TIMEOUT_MS
         );
+        assert_eq!(
+            resolved.extensions.devin.api.org_id_env,
+            DEFAULT_DEVIN_ORG_ID_ENV
+        );
+        assert!(resolved.extensions.devin.api.org_id.is_none());
+        assert!(resolved.extensions.devin.session.tags.is_empty());
+        // Matches the documented `resumable` default in the v3 contract.
+        assert!(resolved.extensions.devin.session.resumable);
 
         let overridden = WorkflowDefinition::parse(
             r#"---
@@ -2601,8 +2609,23 @@ devin:
   api:
     base_url: https://devin.internal.example.com/api
     api_key_env: DEVIN_TENANT_API_KEY
-    event_poll_interval_ms: 500
+    org_id: org-tenant123
+    org_id_env: DEVIN_TENANT_ORG_ID
+    poll_interval_ms: 500
     request_timeout_ms: 15000
+  session:
+    playbook_id: playbook-1
+    knowledge_ids:
+      - note-1
+    secret_ids:
+      - secret-1
+    max_acu_limit: 25
+    tags:
+      - team:core
+    title: Implement the issue
+    devin_mode: fast
+    platform: linux
+    resumable: true
 ---
 {{ issue.identifier }}
 "#,
@@ -2619,8 +2642,75 @@ devin:
             overridden.extensions.devin.api.api_key_env,
             "DEVIN_TENANT_API_KEY"
         );
-        assert_eq!(overridden.extensions.devin.api.event_poll_interval_ms, 500);
+        assert_eq!(overridden.extensions.devin.api.poll_interval_ms, 500);
         assert_eq!(overridden.extensions.devin.api.request_timeout_ms, 15_000);
+        assert_eq!(
+            overridden.extensions.devin.api.org_id.as_deref(),
+            Some("org-tenant123")
+        );
+        assert_eq!(
+            overridden.extensions.devin.api.org_id_env,
+            "DEVIN_TENANT_ORG_ID"
+        );
+
+        let session = &overridden.extensions.devin.session;
+        assert_eq!(session.playbook_id.as_deref(), Some("playbook-1"));
+        assert_eq!(
+            session.knowledge_ids.as_deref(),
+            Some(&["note-1".to_owned()][..])
+        );
+        assert_eq!(
+            session.secret_ids.as_deref(),
+            Some(&["secret-1".to_owned()][..])
+        );
+        assert_eq!(session.max_acu_limit, Some(25));
+        assert_eq!(session.tags, vec!["team:core".to_owned()]);
+        assert_eq!(session.title.as_deref(), Some("Implement the issue"));
+        assert_eq!(session.devin_mode.as_deref(), Some("fast"));
+        assert_eq!(session.platform.as_deref(), Some("linux"));
+        assert!(session.resumable);
+    }
+
+    #[test]
+    fn devin_session_options_are_validated_against_the_documented_v3_contract() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+        let tags = (0..(DEVIN_MAX_SESSION_TAGS + 1))
+            .map(|index| format!("      - tag-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for devin_block in [
+            "  api:\n    org_id: acme".to_owned(),
+            "  api:\n    org_id_env: devin org".to_owned(),
+            "  session:\n    devin_mode: turbo".to_owned(),
+            "  session:\n    max_acu_limit: 0".to_owned(),
+            format!("  session:\n    tags:\n{tags}"),
+            "  session:\n    tags:\n      - '   '".to_owned(),
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+{devin_block}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+
+            assert!(
+                workflow.resolve(Path::new("/repo"), &env).is_err(),
+                "`{devin_block}` should be rejected"
+            );
+        }
     }
 
     #[test]
