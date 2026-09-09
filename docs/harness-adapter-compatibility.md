@@ -208,6 +208,22 @@ A session that blocks on operator input settles as `Detached` with the run
 paused: the session stays alive and tracked so the human's answer continues the
 same run instead of a replacement session being created.
 
+`Detached` and `CancelFailed` also survive a restart. Because `Paused` and
+`Failed` alone are ambiguous, the run manifest persists the worker outcome in
+`terminal_worker_outcome`, and scheduler recovery restores it before any
+dispatch decision, so neither state becomes a replacement session. Local
+finalization or evidence-import failures keep that outcome and the cleanup
+guard whenever remote termination is still unconfirmed.
+
+Recovery after a daemon restart reattaches instead of creating: the route reads
+the Devin session id from the conversation manifest and follows the existing
+session, and a session that cannot be looked up settles as a non-retrying
+`CancelFailed` rather than launching a second one. When a detached issue later
+becomes terminal, workspace cleanup inspects the conversation manifest first,
+terminates and archives the remote session, and only then removes the local
+binding; if termination fails the workspace is retained so a later cleanup can
+retry it.
+
 Workflow configuration lives under the `devin.api` and `devin.session`
 front-matter blocks (see `docs/configuration.md`). Endpoints must be absolute
 HTTPS URLs without embedded credentials, query, or fragment; credential values

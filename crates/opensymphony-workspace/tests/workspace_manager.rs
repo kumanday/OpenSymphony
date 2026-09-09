@@ -232,6 +232,56 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn evidence_only_workspace_runs_no_hooks() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell("echo ran > after_create.txt")),
+            before_run: Some(HookDefinition::shell("echo ran > before_run.txt")),
+            after_run: Some(HookDefinition::shell("echo ran > after_run.txt")),
+            before_remove: None,
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-EVIDENCE");
+
+    let ensured = manager
+        .ensure_evidence_only(&issue)
+        .await
+        .expect("evidence-only workspace should be created");
+    assert!(ensured.created);
+    assert!(ensured.after_create.is_none());
+
+    let mut run_manifest = manager
+        .start_evidence_run(&ensured.handle, &RunDescriptor::new("run-evidence", 1))
+        .await
+        .expect("evidence run should start");
+    assert_eq!(run_manifest.status, RunStatus::Prepared);
+    assert!(run_manifest.hooks.is_empty());
+
+    manager
+        .finish_evidence_run(&ensured.handle, &mut run_manifest, RunStatus::Succeeded)
+        .await
+        .expect("evidence run should finish");
+    assert_eq!(run_manifest.status, RunStatus::Succeeded);
+    assert!(run_manifest.hooks.is_empty());
+
+    for marker in ["after_create.txt", "before_run.txt", "after_run.txt"] {
+        assert!(
+            !tokio::fs::try_exists(ensured.handle.workspace_path().join(marker))
+                .await
+                .expect("hook marker lookup should succeed"),
+            "{marker} must not exist: evidence-only workspaces run no repository hooks"
+        );
+    }
+}
+
 #[tokio::test]
 async fn checkout_timeout_does_not_override_legacy_hook_timeout() {
     let temp_dir = TempDir::new().expect("temp dir should exist");

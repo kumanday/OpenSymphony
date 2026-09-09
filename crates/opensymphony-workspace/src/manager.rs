@@ -61,6 +61,16 @@ struct HookFailure {
     record: HookExecutionRecord,
 }
 
+/// Whether workspace lifecycle hooks run while a workspace is materialized.
+///
+/// Hooks operate on a local checkout, so an evidence-only workspace for a
+/// remote-execution harness skips them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceHooks {
+    Executed,
+    Skipped,
+}
+
 enum ExistingIssueManifestState {
     Missing,
     Owned(IssueManifest),
@@ -315,16 +325,17 @@ impl WorkspaceManager {
     /// Ensures an issue workspace without preparing a local checkout.
     ///
     /// A remote-execution harness owns its own workspace, so the local one
-    /// carries manifests, journals, and imported evidence only. Cloning and
-    /// verifying repositories here would demand repository access on a host
-    /// that never runs the agent.
+    /// carries manifests, journals, and imported evidence only. Cloning the
+    /// repository or running the workspace hooks here would demand repository
+    /// access and Git on a host that never runs the agent.
     pub async fn ensure_evidence_only(
         &self,
         issue: &IssueDescriptor,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         let mut evidence_issue = issue.clone();
         evidence_issue.repository_binding = None;
-        self.ensure_with_run_id(&evidence_issue, None).await
+        self.ensure_local_workspace(&evidence_issue, WorkspaceHooks::Skipped)
+            .await
     }
 
     pub async fn ensure_with_run_id(
@@ -344,6 +355,15 @@ impl WorkspaceManager {
                 .await;
         }
 
+        self.ensure_local_workspace(issue, WorkspaceHooks::Executed)
+            .await
+    }
+
+    async fn ensure_local_workspace(
+        &self,
+        issue: &IssueDescriptor,
+        hooks: WorkspaceHooks,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
@@ -429,7 +449,7 @@ impl WorkspaceManager {
             existing_state,
             ExistingWorkspaceState::Missing | ExistingWorkspaceState::ForeignArtifact
         );
-        let after_create = if created {
+        let after_create = if created && hooks == WorkspaceHooks::Executed {
             match self.execute_hook(HookKind::AfterCreate, &handle).await {
                 Ok(record) => {
                     if record.is_some() {
@@ -2536,6 +2556,38 @@ impl WorkspaceManager {
             })?;
         }
         Ok(())
+    }
+
+    /// Starts a run in an evidence-only workspace.
+    ///
+    /// The configured `before_run` hook operates on a local checkout, which a
+    /// remote-execution harness never materializes, so it is not executed.
+    pub async fn start_evidence_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+    ) -> Result<RunManifest, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+
+        let mut manifest = RunManifest::new(workspace, run);
+        manifest.status = RunStatus::Prepared;
+        self.write_run_manifest(workspace, &manifest).await?;
+        Ok(manifest)
+    }
+
+    /// Finishes a run in an evidence-only workspace without the `after_run`
+    /// hook, which likewise assumes a local checkout.
+    pub async fn finish_evidence_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        status: RunStatus,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+
+        run_manifest.status = status;
+        run_manifest.updated_at = Utc::now();
+        self.write_run_manifest(workspace, run_manifest).await
     }
 
     pub async fn start_run(

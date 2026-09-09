@@ -14110,6 +14110,7 @@ Public memory concept.
         .expect("runtime envelope");
         let now = Utc::now();
         let run = RunManifest {
+            terminal_worker_outcome: None,
             run_id: "run-551".to_string(),
             issue_id: "issue-551".to_string(),
             identifier: "COE-551".to_string(),

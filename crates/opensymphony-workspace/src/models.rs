@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome};
+use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome, WorkerOutcomeKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutRepository {
@@ -917,6 +917,10 @@ pub struct RunManifest {
     pub retry_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
+    /// A worker outcome that must survive restart because retrying it would
+    /// duplicate work that is still live outside this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_worker_outcome: Option<WorkerOutcomeKind>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -945,6 +949,7 @@ impl RunManifest {
             retry_reason: None,
             retry_error: None,
             interrupt_reason: None,
+            terminal_worker_outcome: None,
             status: RunStatus::Preparing,
             created_at: now,
             updated_at: now,

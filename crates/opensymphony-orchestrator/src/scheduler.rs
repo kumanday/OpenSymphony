@@ -180,6 +180,9 @@ pub struct RecoveryRecord {
     pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
     pub interrupt_reason: Option<HarnessInterruptReason>,
+    /// A persisted outcome that forbids a replacement run because the work it
+    /// describes is still live outside this process.
+    pub terminal_worker_outcome: Option<WorkerOutcomeKind>,
     pub recovered_run: Option<RecoveredRun>,
 }
 
@@ -1322,7 +1325,39 @@ where
                     recovered_workspace = None;
                 }
                 self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
-                if record.had_in_flight_run {
+                if let Some(terminal_outcome) = record.terminal_worker_outcome {
+                    // `Paused` and `Failed` alone would make this dispatchable
+                    // again. The persisted outcome says the previous run left
+                    // something alive outside this process, so restart must
+                    // reach the same non-retrying release the in-process path
+                    // produces instead of launching a replacement.
+                    tracing::info!(
+                        issue = %issue_id,
+                        outcome = ?terminal_outcome,
+                        "restored a non-retrying worker outcome during recovery"
+                    );
+                    let worker_id = self.next_worker_id()?;
+                    let mut execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    execution.restore_worker_outcome(WorkerOutcomeRecord {
+                        worker_id,
+                        attempt: None,
+                        outcome: terminal_outcome,
+                        started_at: observed_at,
+                        finished_at: observed_at,
+                        turn_count: 0,
+                        summary: Some(
+                            "restored a non-retrying worker outcome from the run manifest"
+                                .to_owned(),
+                        ),
+                        error: None,
+                    });
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerInactive, None)?,
+                    );
+                } else if record.had_in_flight_run {
                     if recovered_run.is_some() {
                         self.restore_recovered_run(
                             &issue_id,
