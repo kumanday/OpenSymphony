@@ -5297,20 +5297,25 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
 #[tokio::test]
 async fn unavailable_harness_rejects_dispatch_before_workspace_creation() {
     let tracker = FakeTracker {
-        active: vec![tracker_issue("lin-devin", "COE-DEVIN-1", "In Progress", 0)],
+        active: vec![tracker_issue(
+            "lin-native",
+            "COE-NATIVE-1",
+            "In Progress",
+            0,
+        )],
         ..Default::default()
     };
     let workspace = FakeWorkspace::default();
     let worker = FakeWorker::default();
     let mut config = scheduler_config();
-    config.routing.harness = "devin_cloud_agent".into();
+    config.routing.harness = "rust_native".into();
     config.stall_timeout_ms = None;
     let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
 
     let error = scheduler
         .tick(ts(100))
         .await
-        .expect_err("unavailable devin routing should reject dispatch");
+        .expect_err("unavailable harness routing should reject dispatch");
 
     assert!(matches!(
         error,
@@ -5318,6 +5323,35 @@ async fn unavailable_harness_rejects_dispatch_before_workspace_creation() {
     ));
     assert!(scheduler.workspace().ensured.is_empty());
     assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn devin_cloud_routing_dispatches_a_worker() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-devin", "COE-DEVIN-1", "In Progress", 0)],
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.routing.harness = "devin_cloud_agent".into();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        config,
+    );
+
+    scheduler.tick(ts(100)).await.expect("devin routing runs");
+
+    let launch = scheduler
+        .worker()
+        .launches
+        .first()
+        .expect("devin route should launch a worker");
+    assert_eq!(launch.route.harness_kind, "devin_cloud_agent");
+    // Devin executes remotely, but the issue workspace is still materialized:
+    // it is where run manifests, journals, and imported evidence live.
+    assert_eq!(scheduler.workspace().ensured.len(), 1);
 }
 
 #[tokio::test]

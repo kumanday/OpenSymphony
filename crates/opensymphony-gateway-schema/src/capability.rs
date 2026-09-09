@@ -166,7 +166,7 @@ impl HarnessKind {
         match self {
             Self::OpenHandsAgentServer => HarnessCapability::openhands_agent_server(),
             Self::CodexAppServer => HarnessCapability::codex_app_server_local(),
-            Self::DevinCloudAgent => HarnessCapability::devin_cloud_future(),
+            Self::DevinCloudAgent => HarnessCapability::devin_cloud_agent(),
             Self::RustNative => HarnessCapability::rust_native_future(),
         }
     }
@@ -403,19 +403,18 @@ impl HarnessCapability {
         }
     }
 
-    /// Future remote Devin cloud harness shape.
+    /// Remote Devin cloud harness, driven by the Devin API v3 session lifecycle.
     ///
-    /// Devin executes in its own cloud-owned workspace, so this capability stays
-    /// unavailable until hosted-mode security (TLS pinning, authenticated event
-    /// streams, secret injection, tenant isolation) and event normalization have
-    /// hardening evidence.
-    pub fn devin_cloud_future() -> Self {
+    /// Devin executes in its own cloud-owned workspace: OpenSymphony creates and
+    /// polls a remote session over HTTPS and imports evidence back into the local
+    /// issue workspace, which is never Devin's execution cwd.
+    pub fn devin_cloud_agent() -> Self {
         Self {
             kind: "devin_cloud_agent".into(),
             display_name: "Devin cloud agent".into(),
-            available: false,
+            available: true,
             adapter_contract_version: "harness-adapter-v1".into(),
-            runtime_contract_version: None,
+            runtime_contract_version: Some("devin-api-v3".into()),
             actions: HarnessActionCapability {
                 start_run: true,
                 send_user_message: true,
@@ -430,7 +429,7 @@ impl HarnessCapability {
             event_streams: HarnessEventStreamCapability {
                 runtime_events: true,
                 terminal_frames: false,
-                replay_from_cursor: false,
+                replay_from_cursor: true,
                 raw_payload_refs: true,
                 delivery_modes: vec!["https_polling".into()],
             },
@@ -453,8 +452,8 @@ impl HarnessCapability {
             },
             cancellation: HarnessCancellationCapability {
                 cancel_run: true,
-                force_stop: false,
-                acknowledges_cancel: false,
+                force_stop: true,
+                acknowledges_cancel: true,
             },
             pause_resume: HarnessPauseResumeCapability {
                 pause: false,
@@ -462,7 +461,7 @@ impl HarnessCapability {
             },
             history: HarnessHistoryCapability {
                 fetch_history: true,
-                reconcile_after_ready: false,
+                reconcile_after_ready: true,
                 reconnect_and_replay: false,
                 preserve_unknown_events: true,
             },
@@ -470,15 +469,17 @@ impl HarnessCapability {
                 "Remote implementation agent executing in a Devin-owned cloud workspace.".into(),
                 "OpenSymphony keeps a local issue workspace for manifests, journals, and evidence only; it is never the Devin execution cwd."
                     .into(),
+                "Credentials are organization-scoped service-user tokens read from environment references; secrets are injected by Devin secret id, never by value."
+                    .into(),
             ],
             feature_gaps: vec![
-                "Remote workspace ownership is unimplemented: repository binding to a Devin-owned workspace has no verified checkout, diff, or evidence contract."
+                "Runtime events arrive by cursor-paginated HTTPS polling; there is no push stream, so event latency is bounded by the poll interval."
                     .into(),
-                "Devin event normalization is unimplemented: recognized event mapping and unknown-event retention have no hardening evidence yet."
+                "No mid-run interrupt: cancellation terminates and archives the remote session instead of stopping a single turn."
                     .into(),
-                "Authentication and secret handling are unimplemented: TLS posture, authenticated event streams, and API-token injection are not hardened."
+                "Pause/resume and approval flows are not exposed by the Devin API v3 session contract."
                     .into(),
-                "Tenant isolation is unimplemented: per-org/per-issue session scoping and cross-tenant leak protections are not enforced."
+                "Model settings are fixed at session creation through `devin_mode`; per-run model overrides are unavailable."
                     .into(),
             ],
         }

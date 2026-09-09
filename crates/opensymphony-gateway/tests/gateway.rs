@@ -1349,7 +1349,8 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
             .harnesses
             .iter()
             .any(|harness| harness.kind == "devin_cloud_agent"
-                && !harness.available
+                && harness.available
+                && harness.runtime_contract_version.as_deref() == Some("devin-api-v3")
                 && harness.transport.protocol == "https"
                 && harness.transport.remote
                 && !harness.transport.local

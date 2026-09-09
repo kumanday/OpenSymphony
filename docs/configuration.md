@@ -719,12 +719,19 @@ The harness targets the **Devin API v3** contract vendored at
 requests go to `/v3/organizations/{org_id}/sessions...` with a `cog_`
 service-user bearer token.
 
-`devin_cloud_agent` is advertised as an unavailable capability, so these
-settings describe the boundary rather than a runnable route. They are resolved
-**only** when `routing.harness: devin_cloud_agent`; for OpenHands, Codex, or
-`rust_native` workflows the block is ignored entirely and an inert default is
-used, so a parked or half-configured `devin` block cannot fail an unrelated
-workflow.
+Selecting `routing.harness: devin_cloud_agent` runs the issue on Devin's hosted
+infrastructure. These settings are resolved **only** when Devin is the selected
+harness; for OpenHands, Codex, or `rust_native` workflows the block is ignored
+entirely and an inert default is used, so a parked or half-configured `devin`
+block cannot fail an unrelated workflow.
+
+Before the first run, export the two credentials the defaults expect (a `cog_`
+service-user token and the organization it belongs to):
+
+```bash
+export COG_SERVICE_USER_TOKEN=cog_...
+export DEVIN_ORG_ID=org-...
+```
 
 ```yaml
 routing:
@@ -787,10 +794,27 @@ configuration, manifests, and debug output. The name is validated as an
 environment-variable identifier and the token is read from the process
 environment only at request time.
 
-Because `devin_cloud_agent` capability is `available: false`, selecting it
-causes routing to reject issue dispatch before any local workspace is created:
-the local issue workspace is evidence and manifest storage only and is never
-Devin's execution directory.
+### What a Devin run does
+
+1. Binds the client to one organization through `GET /v3/self`. A configured
+   `org_id` the credential does not own fails the run before any session is
+   created.
+2. Resolves `secret_ids` against that organization's Devin secrets, by secret id
+   or key. Unknown or out-of-organization references fail the run; secret
+   *values* are never read by OpenSymphony — Devin injects them remotely.
+3. Creates the session with the rendered issue prompt, repository, tags, and
+   session options, and reports the session URL as the run conversation link.
+4. Polls session status and cursor-paginated messages, publishing normalized
+   runtime events onto the run timeline.
+5. On settlement, imports evidence into the issue workspace under
+   `.opensymphony/devin/<run-id>`: `session.json`, `events.jsonl`,
+   `evidence.json` (outcome, status, ACU usage, pull-request URLs, structured
+   output), and downloaded attachments.
+6. Terminates and archives the remote session on cancellation, poll timeout, or
+   transport failure, so an abandoned run cannot keep burning ACUs.
+
+The local issue workspace is evidence and manifest storage only; it is never
+Devin's execution directory, and no local checkout is prepared for the run.
 
 The client itself is verified against the live API by the opt-in suite in
 `tests/devin_cloud_agent_live.rs`. It needs `COG_SERVICE_USER_TOKEN` (and
@@ -803,6 +827,12 @@ OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live -- --ignored 
 
 See `docs/harness-adapter-compatibility.md` for what the last live run
 confirmed and what is still unverified.
+
+Known limitations: event latency is bounded by `poll_interval_ms` (the v3
+contract has no push stream), cancellation terminates the whole session rather
+than interrupting a turn, pause/resume and approvals are unavailable, the model
+is fixed at session creation through `devin_mode`, and TLS certificate pinning
+is not implemented.
 
 ## Runtime Config
 

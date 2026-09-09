@@ -796,7 +796,7 @@ fn harness_capability_roundtrips_future_adapters() {
     let caps = vec![
         HarnessCapability::openhands_agent_server(),
         HarnessCapability::codex_app_server_local(),
-        HarnessCapability::devin_cloud_future(),
+        HarnessCapability::devin_cloud_agent(),
         HarnessCapability::rust_native_future(),
     ];
 
@@ -836,35 +836,43 @@ fn harness_capability_roundtrips_future_adapters() {
             .any(|gap| gap.contains("Hosted Codex worker pools"))
     );
     assert_eq!(back[2].kind, "devin_cloud_agent");
-    assert!(!back[2].available);
+    assert!(back[2].available);
+    assert!(back[2].transport.remote);
     assert_eq!(back[3].kind, "rust_native");
     assert!(back[3].pause_resume.pause);
 }
 
 #[test]
-fn devin_cloud_future_capability_shape_is_stable() {
-    let future = HarnessCapability::devin_cloud_future();
+fn devin_cloud_agent_capability_shape_is_stable() {
+    let future = HarnessCapability::devin_cloud_agent();
     let json = must_serialize(&future);
     let back: HarnessCapability = must_deserialize(&json);
 
     assert_eq!(back.kind, "devin_cloud_agent");
     assert_eq!(back.display_name, "Devin cloud agent");
-    assert!(!back.available);
+    assert!(back.available);
     assert_eq!(back.adapter_contract_version, "harness-adapter-v1");
-    assert_eq!(back.runtime_contract_version, None);
+    assert_eq!(
+        back.runtime_contract_version.as_deref(),
+        Some("devin-api-v3")
+    );
     assert_eq!(back.transport.protocol, "https");
     assert!(back.transport.remote);
     assert!(!back.transport.local);
     assert_eq!(back.transport.modes, vec!["rest"]);
+    assert_eq!(back.event_streams.delivery_modes, vec!["https_polling"]);
+    assert!(back.event_streams.replay_from_cursor);
     assert!(back.actions.start_run);
     assert!(back.actions.cancel);
     assert!(!back.actions.approve);
+    assert!(back.cancellation.acknowledges_cancel);
     assert!(back.history.preserve_unknown_events);
+    assert_eq!(back.model_settings.credential_reference_kinds, vec!["env"]);
     for expected_gap in [
-        "Remote workspace ownership",
-        "event normalization",
-        "Authentication and secret handling",
-        "Tenant isolation",
+        "polling",
+        "No mid-run interrupt",
+        "Pause/resume",
+        "per-run model overrides",
     ] {
         assert!(
             back.feature_gaps

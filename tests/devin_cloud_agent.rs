@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 
 use opensymphony::opensymphony_devin::{
     DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_REMOTE_CONTAINMENT,
-    DEVIN_UNDISCRIMINATED_EVENT_KIND, DevinCloudAdapter, DevinCloudClient, DevinCloudConfig,
-    DevinHttpMethod, DevinMessageCursor, DevinMode, DevinOperation, DevinProblemDetail,
-    DevinRemoteWorkspaceBinding, DevinRequest, DevinRequestBuilder, DevinSessionOptions,
-    DevinSessionStatus, DevinStatusDetail, NormalizedDevinEventKind, PaginatedResponse,
-    SessionMessage, SessionResponse, SessionsQueryParams, devin_event_summary,
-    normalize_devin_event, normalized_event_to_journal_record, session_create_request,
+    DEVIN_UNDISCRIMINATED_EVENT_KIND, DevinClientError, DevinCloudAdapter, DevinCloudClient,
+    DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinHttpMethod,
+    DevinMessageCursor, DevinMode, DevinOperation, DevinProblemDetail, DevinRemoteWorkspaceBinding,
+    DevinRequest, DevinRequestBuilder, DevinRunOutcome, DevinRunReport, DevinSelfResponse,
+    DevinSessionOptions, DevinSessionStatus, DevinStatusDetail, NormalizedDevinEventKind,
+    PaginatedResponse, SecretResponse, SessionAttachment, SessionMessage, SessionResponse,
+    SessionsQueryParams, attachment_download_url, devin_event_summary, ensure_session_tenant,
+    evidence_file_name, normalize_devin_event, normalized_event_to_journal_record,
+    reconcile_tenant, resolve_secret_references, session_create_request, session_created_event,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
@@ -102,21 +105,28 @@ fn message_page(messages: &[(&str, &str, &str)], end_cursor: Option<&str>, more:
 }
 
 #[test]
-fn adapter_exposes_stable_unavailable_capability() {
+fn adapter_exposes_stable_available_remote_capability() {
     let adapter = DevinCloudAdapter::default();
     let capability = adapter.capabilities();
 
     assert_eq!(adapter.harness_kind(), DEVIN_CLOUD_AGENT_KIND);
     assert_eq!(capability.kind, DEVIN_CLOUD_AGENT_KIND);
-    assert!(!capability.available);
+    assert!(capability.available);
+    assert_eq!(
+        capability.runtime_contract_version.as_deref(),
+        Some(DEVIN_CLOUD_API_CONTRACT)
+    );
     assert_eq!(capability.transport.protocol, "https");
     assert!(capability.transport.remote);
     assert!(!capability.transport.local);
-    assert_eq!(capability.feature_gaps.len(), 4);
+    assert!(capability.history.preserve_unknown_events);
+    assert!(capability.event_streams.replay_from_cursor);
+    assert_eq!(adapter.feature_gaps(), capability.feature_gaps);
     assert!(
-        adapter
-            .unavailability_reason()
-            .contains("advertised as unavailable")
+        capability
+            .feature_gaps
+            .iter()
+            .any(|gap| gap.contains("polling"))
     );
 }
 
@@ -630,4 +640,244 @@ fn undecodable_payloads_are_preserved_as_unknown() {
         record.payload.expect("payload")["raw_payload"],
         undiscriminated
     );
+}
+
+fn secret(secret_id: &str, key: Option<&str>) -> SecretResponse {
+    serde_json::from_value(json!({
+        "secret_id": secret_id,
+        "key": key,
+        "access_type": "organization",
+        "secret_type": "env",
+    }))
+    .expect("secret decodes")
+}
+
+fn attachment(name: &str, url: &str) -> SessionAttachment {
+    serde_json::from_value(json!({
+        "attachment_id": "att-1",
+        "name": name,
+        "url": url,
+        "source": "devin",
+        "content_type": "text/plain",
+    }))
+    .expect("attachment decodes")
+}
+
+fn client() -> DevinCloudClient {
+    DevinCloudClient::from_environment(&DevinCloudConfig::default(), |name| match name {
+        "COG_SERVICE_USER_TOKEN" => Some("cog_token".to_owned()),
+        "DEVIN_ORG_ID" => Some(ORG_ID.to_owned()),
+        _ => None,
+    })
+    .expect("client")
+}
+
+#[test]
+fn tenancy_binding_rejects_a_credential_from_another_organization() {
+    let identity = |org: &str| -> DevinSelfResponse {
+        serde_json::from_value(json!({
+            "principal_type": "service_user",
+            "org_id": org,
+            "service_user_id": "su-1",
+            "service_user_name": "opensymphony",
+        }))
+        .expect("identity decodes")
+    };
+
+    // A configured organization the credential does not own is refused instead
+    // of silently driving sessions in the credential's tenant.
+    let mismatch = reconcile_tenant(Some(ORG_ID), identity("org-other"));
+    assert!(matches!(
+        mismatch,
+        Err(DevinClientError::TenantMismatch {
+            ref configured,
+            ref credential,
+        }) if configured == ORG_ID && credential == "org-other"
+    ));
+
+    // Without a configured organization the credential's own tenant is adopted.
+    let adopted = reconcile_tenant(None, identity(ORG_ID)).expect("tenancy");
+    assert_eq!(adopted.org_id, ORG_ID);
+    assert_eq!(adopted.service_user_name.as_deref(), Some("opensymphony"));
+
+    // A credential without an organization cannot scope any request.
+    let anonymous: DevinSelfResponse = serde_json::from_value(json!({})).expect("identity");
+    assert!(matches!(
+        reconcile_tenant(None, anonymous),
+        Err(DevinClientError::MissingOrgId)
+    ));
+}
+
+#[test]
+fn cross_tenant_session_payloads_are_rejected() {
+    let mut session = session("working", None);
+    assert!(ensure_session_tenant(ORG_ID, &session).is_ok());
+
+    // A session id from another tenant must not become run state, even when the
+    // API returns it for a request scoped to this organization.
+    session.org_id = "org-other".to_owned();
+    assert!(matches!(
+        ensure_session_tenant(ORG_ID, &session),
+        Err(DevinClientError::CrossTenantPayload {
+            ref expected,
+            ref observed,
+        }) if expected == ORG_ID && observed == "org-other"
+    ));
+}
+
+#[test]
+fn secret_references_resolve_to_organization_owned_ids_only() {
+    let available = vec![
+        secret("secret-1", Some("GITHUB_TOKEN")),
+        secret("secret-2", Some("NPM_TOKEN")),
+    ];
+
+    // Ids and keys both resolve, and repeats collapse to one injected id.
+    let resolved = resolve_secret_references(
+        ORG_ID,
+        &available,
+        &[
+            "secret-1".to_owned(),
+            "NPM_TOKEN".to_owned(),
+            "GITHUB_TOKEN".to_owned(),
+        ],
+    )
+    .expect("resolved");
+    assert_eq!(resolved, vec!["secret-1", "secret-2"]);
+
+    // Anything the bound organization does not own is refused, so a workflow
+    // cannot name another tenant's secret.
+    let unknown =
+        resolve_secret_references(ORG_ID, &available, &["secret-from-other-org".to_owned()]);
+    assert!(matches!(
+        unknown,
+        Err(DevinClientError::UnknownSecret { ref reference, ref org_id })
+            if reference == "secret-from-other-org" && org_id == ORG_ID
+    ));
+}
+
+#[test]
+fn attachment_downloads_are_restricted_to_the_authenticated_api_origin() {
+    let base = "https://api.devin.ai";
+    let allowed = attachment("log.txt", "https://api.devin.ai/v3/attachments/att-1");
+    assert_eq!(
+        attachment_download_url(base, &allowed)
+            .expect("url")
+            .as_str(),
+        "https://api.devin.ai/v3/attachments/att-1"
+    );
+
+    // A bearer-authenticated download must never leave the API origin.
+    for foreign in [
+        "https://evil.example.com/att-1",
+        "http://api.devin.ai/v3/attachments/att-1",
+    ] {
+        assert!(matches!(
+            attachment_download_url(base, &attachment("log.txt", foreign)),
+            Err(DevinClientError::ForeignAttachmentOrigin { .. })
+        ));
+    }
+
+    assert!(matches!(
+        attachment_download_url(base, &attachment("log.txt", "not-a-url")),
+        Err(DevinClientError::InvalidUrl { .. })
+    ));
+}
+
+#[test]
+fn remote_attachment_names_stay_inside_the_evidence_directory() {
+    let traversal = attachment(
+        "../../etc/passwd",
+        "https://api.devin.ai/v3/attachments/att-1",
+    );
+    let name = evidence_file_name(0, &traversal);
+    assert!(!name.contains('/'));
+    assert!(!name.contains(".."));
+    assert_eq!(
+        Path::new("/evidence/attachments").join(&name).parent(),
+        Some(Path::new("/evidence/attachments"))
+    );
+
+    let long = attachment(
+        &"a".repeat(400),
+        "https://api.devin.ai/v3/attachments/att-1",
+    );
+    assert!(evidence_file_name(3, &long).len() <= 128);
+    assert!(evidence_file_name(3, &long).starts_with("003-"));
+}
+
+#[tokio::test]
+async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let evidence_root = root.path().join(".opensymphony/devin/run-1");
+    let mut collector = DevinEvidenceCollector::new(
+        &evidence_root,
+        DevinEvidenceLimits {
+            download_attachments: false,
+            ..DevinEvidenceLimits::default()
+        },
+    );
+
+    let session = session("exit", Some("finished"));
+    collector.record(&session_created_event(&session));
+    collector.record(&normalize_devin_event(
+        json!({ "session_id": "devin-1", "unrecognized": true }),
+    ));
+
+    let report = DevinRunReport {
+        session_id: session.session_id.clone(),
+        session_url: session.url.clone(),
+        outcome: DevinRunOutcome::Finished,
+        status: session.status.clone(),
+        status_detail: session.status_detail.clone(),
+        acus_consumed: 1.5,
+        pull_requests: vec![
+            serde_json::from_value(json!({
+                "pr_url": "https://github.com/acme/api/pull/7",
+                "pr_state": "open",
+            }))
+            .expect("pull request"),
+        ],
+        structured_output: Some(json!({ "summary": "done" })),
+        attachments: vec![attachment(
+            "log.txt",
+            "https://api.devin.ai/v3/attachments/att-1",
+        )],
+    };
+
+    let manifest = collector
+        .persist(&client(), &report)
+        .await
+        .expect("persist");
+
+    assert_eq!(manifest.event_count, 2);
+    assert_eq!(manifest.containment, DEVIN_REMOTE_CONTAINMENT);
+    assert_eq!(
+        manifest.pull_request_urls,
+        vec!["https://github.com/acme/api/pull/7"]
+    );
+    assert_eq!(manifest.acus_consumed, 1.5);
+    // Downloads were disabled, so the attachment is reported as skipped rather
+    // than silently dropped.
+    assert!(manifest.attachments.is_empty());
+    assert_eq!(manifest.skipped_attachments.len(), 1);
+
+    let journal = std::fs::read_to_string(evidence_root.join("events.jsonl")).expect("journal");
+    assert_eq!(journal.lines().count(), 2);
+    // Unknown payloads survive the round trip into local evidence.
+    assert!(journal.contains("unrecognized"));
+
+    let summary: Value = serde_json::from_str(
+        &std::fs::read_to_string(evidence_root.join("session.json")).expect("session file"),
+    )
+    .expect("summary");
+    assert_eq!(summary["structured_output"]["summary"], json!("done"));
+
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(evidence_root.join("evidence.json")).expect("manifest file"),
+    )
+    .expect("manifest");
+    assert_eq!(written["session_id"], json!("devin-1"));
+    // Everything Devin returned stays under the orchestrator-owned root.
+    assert!(evidence_root.starts_with(root.path()));
 }

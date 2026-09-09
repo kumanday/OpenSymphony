@@ -267,6 +267,14 @@ impl WorkspaceManager {
         &self.checkout_credential_envs
     }
 
+    /// Configured checkout policy for a canonical repository id.
+    ///
+    /// Remote harnesses that never materialize a local checkout still need the
+    /// configured remote and target branch to bind their own workspace.
+    pub fn checkout_repository(&self, repository_id: &str) -> Option<&CheckoutRepository> {
+        self.checkout_repositories.get(repository_id)
+    }
+
     pub fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf, WorkspaceError> {
         super::workspace_path_for_root(&self.config.root, issue_identifier)
     }

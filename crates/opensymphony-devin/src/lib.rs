@@ -23,15 +23,27 @@
 //!   `owner/name` entries; branch intent still travels in the prompt because
 //!   the API has no branch field.
 //!
-//! The capability advertised by this adapter remains unavailable: hosted
-//! security (secret injection, tenant isolation), remote artifact retrieval,
-//! and live-run evidence still need hardening before scheduler routing can be
-//! presented as production-ready.
+//! Hosted-mode posture implemented here:
+//!
+//! * Transport is HTTPS-only with TLS 1.2 as the floor, redirects refused (the
+//!   bearer token would otherwise follow a redirect to another host), and the
+//!   credential read from the environment at request time only.
+//! * Tenancy is bound before any session call through `GET /v3/self`: the
+//!   credential's organization must match the configured one, and every
+//!   session payload is re-checked against it so a response for another
+//!   organization is rejected rather than journaled.
+//! * Secret injection references organization secrets by id or key; the
+//!   references are resolved against `GET /v3/organizations/{org_id}/secrets`
+//!   so a run cannot request a secret outside its tenant, and secret *values*
+//!   never enter OpenSymphony.
+//! * Remote artifacts come back through [`DevinEvidence`]: session summary,
+//!   normalized event journal, pull requests, and same-origin attachment
+//!   downloads are written into the local evidence workspace.
 
 use std::{
     collections::HashSet,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -129,6 +141,29 @@ pub enum DevinClientError {
     PollTimeout {
         session_id: String,
         elapsed: Duration,
+    },
+    #[error(
+        "devin credential belongs to organization `{credential}` but routing is configured for `{configured}`"
+    )]
+    TenantMismatch {
+        configured: String,
+        credential: String,
+    },
+    #[error(
+        "devin returned a payload owned by organization `{observed}` while bound to `{expected}`"
+    )]
+    CrossTenantPayload { expected: String, observed: String },
+    #[error("devin secret `{reference}` is not available to organization `{org_id}`")]
+    UnknownSecret { reference: String, org_id: String },
+    #[error("devin attachment `{name}` is served from `{origin}`, which is not the api origin")]
+    ForeignAttachmentOrigin { name: String, origin: String },
+    #[error("devin attachment `{name}` exceeds the {limit} byte evidence download limit")]
+    AttachmentTooLarge { name: String, limit: u64 },
+    #[error("failed to persist devin evidence at {path}: {source}")]
+    Evidence {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -390,14 +425,9 @@ impl DevinCloudAdapter {
         &self.config
     }
 
-    /// Feature gaps that block hosted Devin routing today.
-    pub fn unavailability_reason(&self) -> String {
-        let capability = self.capabilities();
-        format!(
-            "harness `{}` is advertised as unavailable: {}",
-            capability.kind,
-            capability.feature_gaps.join(" ")
-        )
+    /// Remaining feature gaps for hosted Devin routing.
+    pub fn feature_gaps(&self) -> Vec<String> {
+        self.capabilities().feature_gaps
     }
 }
 
@@ -407,7 +437,7 @@ impl HarnessAdapter for DevinCloudAdapter {
     }
 
     fn capabilities(&self) -> HarnessCapability {
-        HarnessCapability::devin_cloud_future()
+        HarnessCapability::devin_cloud_agent()
     }
 }
 
@@ -640,6 +670,21 @@ pub struct SessionAttachment {
     pub content_type: Option<String>,
 }
 
+/// `SecretResponse` from the Devin v3 OpenAPI document.
+///
+/// Secret *values* are never returned by the API and never enter OpenSymphony:
+/// this record only carries the identifiers used to scope injection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretResponse {
+    pub secret_id: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub access_type: Option<String>,
+    #[serde(default)]
+    pub secret_type: Option<String>,
+}
+
 /// `SessionTagsUpdateRequest` from the Devin v3 OpenAPI document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTagsUpdateRequest {
@@ -749,6 +794,7 @@ pub enum DevinOperation {
     DeleteSession,
     ListSessionAttachments,
     UpdateSessionTags,
+    ListSecrets,
 }
 
 impl DevinOperation {
@@ -763,6 +809,7 @@ impl DevinOperation {
             Self::DeleteSession => "delete_session",
             Self::ListSessionAttachments => "list_session_attachments",
             Self::UpdateSessionTags => "update_session_tags",
+            Self::ListSecrets => "list_secrets",
         }
     }
 }
@@ -932,6 +979,33 @@ impl DevinRequestBuilder {
         }
     }
 
+    /// `GET /v3/organizations/{org_id}/secrets`
+    ///
+    /// Used to scope secret injection: a run may only reference secrets that
+    /// exist in its own organization.
+    pub fn list_secrets(&self, after: Option<&str>, first: Option<u32>) -> DevinRequest {
+        let mut path = format!(
+            "/v3/organizations/{}/secrets",
+            encode_path_segment(&self.org_id)
+        );
+        let mut separator = '?';
+        if let Some(after) = after {
+            path.push_str(&format!("{separator}after={}", encode_query_value(after)));
+            separator = '&';
+        }
+        if let Some(first) = first {
+            let first = first.clamp(1, DEVIN_MAX_PAGE_SIZE);
+            path.push_str(&format!("{separator}first={first}"));
+        }
+
+        DevinRequest {
+            operation: DevinOperation::ListSecrets,
+            method: DevinHttpMethod::Get,
+            path,
+            body: None,
+        }
+    }
+
     pub fn absolute_url(&self, request: &DevinRequest) -> Result<Url, DevinClientError> {
         let joined = format!("{}{}", self.base_url.trim_end_matches('/'), request.path);
         Url::parse(&joined).map_err(|source| DevinClientError::InvalidUrl {
@@ -991,6 +1065,21 @@ fn encode_query_value(value: &str) -> String {
 // Client
 // ---------------------------------------------------------------------------
 
+/// Verified identity of the credential driving a Devin run.
+///
+/// Produced by [`DevinCloudClient::bind_tenant`], which is the only path that
+/// marks a client as usable for session traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevinTenancy {
+    pub org_id: String,
+    #[serde(default)]
+    pub principal_type: Option<String>,
+    #[serde(default)]
+    pub service_user_id: Option<String>,
+    #[serde(default)]
+    pub service_user_name: Option<String>,
+}
+
 /// HTTPS client for the Devin cloud API.
 #[derive(Debug, Clone)]
 pub struct DevinCloudClient {
@@ -999,6 +1088,7 @@ pub struct DevinCloudClient {
     org_id: Option<String>,
     token: DevinApiToken,
     poll_interval: Duration,
+    tenancy: Option<DevinTenancy>,
 }
 
 impl DevinCloudClient {
@@ -1036,6 +1126,7 @@ impl DevinCloudClient {
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .https_only(true)
+            .min_tls_version(reqwest::tls::Version::TLS_1_2)
             // The bearer token is attached to every request, so a redirect to
             // another host would hand the credential to that host.
             .redirect(reqwest::redirect::Policy::none())
@@ -1048,6 +1139,7 @@ impl DevinCloudClient {
             org_id,
             token: DevinApiToken::new(token.trim()),
             poll_interval: config.poll_interval,
+            tenancy: None,
         })
     }
 
@@ -1068,17 +1160,39 @@ impl DevinCloudClient {
         Ok(DevinRequestBuilder::new(self.base_url.clone(), org_id))
     }
 
+    /// Verified tenancy, once [`Self::bind_tenant`] has run.
+    pub fn tenancy(&self) -> Option<&DevinTenancy> {
+        self.tenancy.as_ref()
+    }
+
+    /// Binds the client to exactly one organization.
+    ///
+    /// The credential's own organization is read from `GET /v3/self`. When an
+    /// organization was configured, the two must agree: a credential minted for
+    /// another tenant is refused rather than silently driving sessions there.
+    /// When none was configured, the credential's organization is adopted.
+    pub async fn bind_tenant(mut self) -> Result<Self, DevinClientError> {
+        let identity = self.identity().await?;
+        let tenancy = reconcile_tenant(self.org_id.as_deref(), identity)?;
+        self.org_id = Some(tenancy.org_id.clone());
+        self.tenancy = Some(tenancy);
+
+        Ok(self)
+    }
+
     /// Resolves the organization from the credential when it was not
     /// configured, so operators only need to supply the service user key.
-    pub async fn resolve_org_id(mut self) -> Result<Self, DevinClientError> {
-        if self.org_id.is_some() {
-            return Ok(self);
-        }
-        let identity: DevinSelfResponse = self
-            .send_typed(&DevinRequestBuilder::new(self.base_url.clone(), "").get_self())
-            .await?;
-        self.org_id = Some(identity.org_id.ok_or(DevinClientError::MissingOrgId)?);
-        Ok(self)
+    pub async fn resolve_org_id(self) -> Result<Self, DevinClientError> {
+        self.bind_tenant().await
+    }
+
+    /// Rejects a session payload owned by a different organization.
+    fn ensure_tenant(&self, session: &SessionResponse) -> Result<(), DevinClientError> {
+        let expected = self
+            .org_id
+            .as_deref()
+            .ok_or(DevinClientError::MissingOrgId)?;
+        ensure_session_tenant(expected, session)
     }
 
     pub async fn identity(&self) -> Result<DevinSelfResponse, DevinClientError> {
@@ -1137,21 +1251,32 @@ impl DevinCloudClient {
         &self,
         request: &SessionCreateRequest,
     ) -> Result<SessionResponse, DevinClientError> {
-        self.send_typed(&self.requests()?.create_session(request))
-            .await
+        let session: SessionResponse = self
+            .send_typed(&self.requests()?.create_session(request))
+            .await?;
+        self.ensure_tenant(&session)?;
+        Ok(session)
     }
 
     pub async fn get_session(&self, devin_id: &str) -> Result<SessionResponse, DevinClientError> {
-        self.send_typed(&self.requests()?.get_session(devin_id))
-            .await
+        let session: SessionResponse = self
+            .send_typed(&self.requests()?.get_session(devin_id))
+            .await?;
+        self.ensure_tenant(&session)?;
+        Ok(session)
     }
 
     pub async fn list_sessions(
         &self,
         query: &SessionsQueryParams,
     ) -> Result<PaginatedResponse<SessionResponse>, DevinClientError> {
-        self.send_typed(&self.requests()?.list_sessions(query))
-            .await
+        let page: PaginatedResponse<SessionResponse> = self
+            .send_typed(&self.requests()?.list_sessions(query))
+            .await?;
+        for session in &page.items {
+            self.ensure_tenant(session)?;
+        }
+        Ok(page)
     }
 
     /// Fetches one page of session messages. `after` is the `end_cursor` of the
@@ -1194,6 +1319,201 @@ impl DevinCloudClient {
         self.send_typed(&self.requests()?.list_attachments(devin_id))
             .await
     }
+
+    /// Every secret the bound organization exposes, walked to the last page.
+    pub async fn list_secrets(&self) -> Result<Vec<SecretResponse>, DevinClientError> {
+        let requests = self.requests()?;
+        let mut secrets = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page: PaginatedResponse<SecretResponse> = self
+                .send_typed(&requests.list_secrets(after.as_deref(), Some(DEVIN_MAX_PAGE_SIZE)))
+                .await?;
+            let advanced = page
+                .end_cursor
+                .clone()
+                .filter(|cursor| Some(cursor) != after.as_ref());
+            secrets.extend(page.items);
+            match (page.has_next_page, advanced) {
+                (true, Some(cursor)) => after = Some(cursor),
+                // A page that cannot advance its cursor would loop forever.
+                _ => return Ok(secrets),
+            }
+        }
+    }
+
+    /// Resolves configured secret references to organization secret ids.
+    ///
+    /// A reference may be a secret id or a secret key, which keeps workflow
+    /// files readable. Anything the bound organization does not own is
+    /// rejected, so a workflow cannot inject another tenant's secret into a
+    /// session, and secret values never enter OpenSymphony.
+    pub async fn resolve_secret_ids(
+        &self,
+        references: &[String],
+    ) -> Result<Vec<String>, DevinClientError> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        let org_id = self.org_id.clone().ok_or(DevinClientError::MissingOrgId)?;
+        let available = self.list_secrets().await?;
+        resolve_secret_references(&org_id, &available, references)
+    }
+
+    /// Downloads one session attachment for local evidence.
+    ///
+    /// Attachments are only fetched from the API origin the client is already
+    /// authenticated against: another origin would either receive the bearer
+    /// token or contribute unauthenticated bytes to run evidence.
+    pub async fn download_attachment(
+        &self,
+        attachment: &SessionAttachment,
+        limit: u64,
+    ) -> Result<Vec<u8>, DevinClientError> {
+        let url = attachment_download_url(&self.base_url, attachment)?;
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.expose())
+            .send()
+            .await
+            .map_err(|error| DevinClientError::Transport(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(DevinClientError::Status {
+                status: status.as_u16(),
+                problem: describe_problem(&body),
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(DevinClientError::AttachmentTooLarge {
+                name: attachment.name.clone(),
+                limit,
+            });
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| DevinClientError::Transport(error.to_string()))?;
+        // `Content-Length` is advisory, so the decoded body is checked too.
+        if bytes.len() as u64 > limit {
+            return Err(DevinClientError::AttachmentTooLarge {
+                name: attachment.name.clone(),
+                limit,
+            });
+        }
+
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Binds a credential identity to exactly one organization.
+///
+/// A configured organization must match the credential's own organization: a
+/// credential minted for another tenant is refused rather than silently driving
+/// sessions there. When none was configured, the credential's organization is
+/// adopted.
+pub fn reconcile_tenant(
+    configured: Option<&str>,
+    identity: DevinSelfResponse,
+) -> Result<DevinTenancy, DevinClientError> {
+    let credential_org = identity.org_id.ok_or(DevinClientError::MissingOrgId)?;
+    if let Some(configured) = configured
+        && configured != credential_org
+    {
+        return Err(DevinClientError::TenantMismatch {
+            configured: configured.to_owned(),
+            credential: credential_org,
+        });
+    }
+
+    Ok(DevinTenancy {
+        org_id: credential_org,
+        principal_type: identity.principal_type,
+        service_user_id: identity.service_user_id,
+        service_user_name: identity.service_user_name,
+    })
+}
+
+/// Rejects a session payload owned by a different organization.
+pub fn ensure_session_tenant(
+    expected: &str,
+    session: &SessionResponse,
+) -> Result<(), DevinClientError> {
+    if session.org_id != expected {
+        return Err(DevinClientError::CrossTenantPayload {
+            expected: expected.to_owned(),
+            observed: session.org_id.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Maps secret references onto ids owned by the bound organization.
+///
+/// A reference may be a secret id or a secret key, which keeps workflow files
+/// readable. Anything the organization does not own is rejected, so a workflow
+/// cannot inject another tenant's secret into a session.
+pub fn resolve_secret_references(
+    org_id: &str,
+    available: &[SecretResponse],
+    references: &[String],
+) -> Result<Vec<String>, DevinClientError> {
+    let mut resolved: Vec<String> = Vec::with_capacity(references.len());
+    for reference in references {
+        let reference = reference.trim();
+        let matched = available
+            .iter()
+            .find(|secret| secret.secret_id == reference)
+            .or_else(|| {
+                available
+                    .iter()
+                    .find(|secret| secret.key.as_deref() == Some(reference))
+            })
+            .ok_or_else(|| DevinClientError::UnknownSecret {
+                reference: reference.to_owned(),
+                org_id: org_id.to_owned(),
+            })?;
+        if !resolved.contains(&matched.secret_id) {
+            resolved.push(matched.secret_id.clone());
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// Validates that an attachment lives on the authenticated API origin.
+///
+/// Another origin would either receive the bearer token or contribute
+/// unauthenticated bytes to run evidence.
+pub fn attachment_download_url(
+    base_url: &str,
+    attachment: &SessionAttachment,
+) -> Result<Url, DevinClientError> {
+    let url = Url::parse(&attachment.url).map_err(|source| DevinClientError::InvalidUrl {
+        base_url: base_url.to_owned(),
+        path: attachment.attachment_id.clone(),
+        source,
+    })?;
+    let base = Url::parse(base_url).map_err(|source| DevinClientError::InvalidUrl {
+        base_url: base_url.to_owned(),
+        path: String::new(),
+        source,
+    })?;
+    if url.scheme() != base.scheme() || url.host_str() != base.host_str() {
+        return Err(DevinClientError::ForeignAttachmentOrigin {
+            name: attachment.name.clone(),
+            origin: url.origin().ascii_serialization(),
+        });
+    }
+
+    Ok(url)
 }
 
 /// Renders an error body as a problem description, falling back to the raw body
@@ -1688,4 +2008,310 @@ impl DevinSessionRunner {
             attachments,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Remote evidence retrieval
+// ---------------------------------------------------------------------------
+
+/// Directory, relative to the issue workspace metadata directory, that holds
+/// evidence imported from Devin-owned remote workspaces.
+pub const DEVIN_EVIDENCE_DIR_NAME: &str = "devin";
+/// Per-attachment ceiling for evidence downloads.
+pub const DEVIN_MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+/// Ceiling on how many attachments one session contributes to evidence.
+pub const DEVIN_MAX_EVIDENCE_ATTACHMENTS: usize = 50;
+
+/// Bounds applied while importing remote artifacts into the local workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevinEvidenceLimits {
+    pub max_attachment_bytes: u64,
+    pub max_attachments: usize,
+    /// Download attachment bytes, not just their metadata.
+    pub download_attachments: bool,
+}
+
+impl Default for DevinEvidenceLimits {
+    fn default() -> Self {
+        Self {
+            max_attachment_bytes: DEVIN_MAX_ATTACHMENT_BYTES,
+            max_attachments: DEVIN_MAX_EVIDENCE_ATTACHMENTS,
+            download_attachments: true,
+        }
+    }
+}
+
+/// One attachment that was imported into the local evidence directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevinStoredAttachment {
+    pub attachment_id: String,
+    pub name: String,
+    pub source: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Path relative to the evidence root.
+    pub stored_path: String,
+    pub bytes: u64,
+}
+
+/// One attachment that was deliberately not imported, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevinSkippedAttachment {
+    pub attachment_id: String,
+    pub name: String,
+    pub reason: String,
+}
+
+/// Index of everything written into the local evidence directory for a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DevinEvidenceManifest {
+    pub session_id: String,
+    pub session_url: String,
+    pub outcome: String,
+    pub status: String,
+    #[serde(default)]
+    pub status_detail: Option<String>,
+    pub acus_consumed: f64,
+    pub pull_request_urls: Vec<String>,
+    pub event_count: usize,
+    pub attachments: Vec<DevinStoredAttachment>,
+    pub skipped_attachments: Vec<DevinSkippedAttachment>,
+    /// Absolute path of the evidence root inside the local issue workspace.
+    pub evidence_root: PathBuf,
+    pub containment: String,
+}
+
+/// Collects normalized events during a run and imports remote artifacts into
+/// the local issue workspace when the session settles.
+///
+/// The evidence root is orchestrator-owned storage: Devin never executes there,
+/// and nothing Devin returns is allowed to escape it (attachment names are
+/// sanitized and the resolved path is re-checked against the root).
+#[derive(Debug, Clone)]
+pub struct DevinEvidenceCollector {
+    root: PathBuf,
+    events: Vec<Value>,
+    limits: DevinEvidenceLimits,
+}
+
+impl DevinEvidenceCollector {
+    pub fn new(root: impl Into<PathBuf>, limits: DevinEvidenceLimits) -> Self {
+        Self {
+            root: root.into(),
+            events: Vec::new(),
+            limits,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Records one normalized event for the journal written at settle time.
+    pub fn record(&mut self, event: &NormalizedDevinEvent) {
+        self.events.push(devin_event_payload(event));
+    }
+
+    /// Writes the session summary, event journal, and attachments, returning
+    /// the manifest that was also written to disk.
+    pub async fn persist(
+        &self,
+        client: &DevinCloudClient,
+        report: &DevinRunReport,
+    ) -> Result<DevinEvidenceManifest, DevinClientError> {
+        create_dir(&self.root).await?;
+
+        let summary = json!({
+            "session_id": report.session_id,
+            "session_url": report.session_url,
+            "outcome": report.outcome.as_str(),
+            "status": report.status.as_str(),
+            "status_detail": report.status_detail.as_ref().map(DevinStatusDetail::as_str),
+            "acus_consumed": report.acus_consumed,
+            "pull_requests": report.pull_requests,
+            "structured_output": report.structured_output,
+            "attachments": report.attachments,
+            "containment": DEVIN_REMOTE_CONTAINMENT,
+        });
+        write_file(&self.root.join("session.json"), pretty(&summary).as_bytes()).await?;
+
+        let mut journal = String::new();
+        for event in &self.events {
+            journal.push_str(&serde_json::to_string(event).unwrap_or_else(|_| "{}".to_owned()));
+            journal.push('\n');
+        }
+        write_file(&self.root.join("events.jsonl"), journal.as_bytes()).await?;
+
+        let (attachments, skipped) = self.import_attachments(client, report).await?;
+
+        let manifest = DevinEvidenceManifest {
+            session_id: report.session_id.clone(),
+            session_url: report.session_url.clone(),
+            outcome: report.outcome.as_str().to_owned(),
+            status: report.status.as_str().to_owned(),
+            status_detail: report
+                .status_detail
+                .as_ref()
+                .map(|detail| detail.as_str().to_owned()),
+            acus_consumed: report.acus_consumed,
+            pull_request_urls: report
+                .pull_requests
+                .iter()
+                .map(|pull_request| pull_request.pr_url.clone())
+                .collect(),
+            event_count: self.events.len(),
+            attachments,
+            skipped_attachments: skipped,
+            evidence_root: self.root.clone(),
+            containment: DEVIN_REMOTE_CONTAINMENT.to_owned(),
+        };
+        let rendered = serde_json::to_value(&manifest).unwrap_or_else(|_| json!({}));
+        write_file(
+            &self.root.join("evidence.json"),
+            pretty(&rendered).as_bytes(),
+        )
+        .await?;
+
+        Ok(manifest)
+    }
+
+    /// Downloads attachments into `attachments/`. A single failed download is
+    /// recorded as skipped rather than failing the run: evidence import must
+    /// not turn a completed Devin session into a failed OpenSymphony run.
+    async fn import_attachments(
+        &self,
+        client: &DevinCloudClient,
+        report: &DevinRunReport,
+    ) -> Result<(Vec<DevinStoredAttachment>, Vec<DevinSkippedAttachment>), DevinClientError> {
+        let mut stored = Vec::new();
+        let mut skipped = Vec::new();
+        if report.attachments.is_empty() {
+            return Ok((stored, skipped));
+        }
+
+        let directory = self.root.join("attachments");
+        if self.limits.download_attachments {
+            create_dir(&directory).await?;
+        }
+
+        for (index, attachment) in report.attachments.iter().enumerate() {
+            if !self.limits.download_attachments {
+                skipped.push(DevinSkippedAttachment {
+                    attachment_id: attachment.attachment_id.clone(),
+                    name: attachment.name.clone(),
+                    reason: "attachment download is disabled for this run".to_owned(),
+                });
+                continue;
+            }
+            if index >= self.limits.max_attachments {
+                skipped.push(DevinSkippedAttachment {
+                    attachment_id: attachment.attachment_id.clone(),
+                    name: attachment.name.clone(),
+                    reason: format!(
+                        "exceeds the {} attachment evidence limit",
+                        self.limits.max_attachments
+                    ),
+                });
+                continue;
+            }
+
+            let file_name = evidence_file_name(index, attachment);
+            let path = directory.join(&file_name);
+            // Sanitization already removes separators; this rejects anything a
+            // future change could let through.
+            if path.parent() != Some(directory.as_path()) {
+                skipped.push(DevinSkippedAttachment {
+                    attachment_id: attachment.attachment_id.clone(),
+                    name: attachment.name.clone(),
+                    reason: "resolved outside the evidence directory".to_owned(),
+                });
+                continue;
+            }
+
+            match client
+                .download_attachment(attachment, self.limits.max_attachment_bytes)
+                .await
+            {
+                Ok(bytes) => {
+                    write_file(&path, &bytes).await?;
+                    stored.push(DevinStoredAttachment {
+                        attachment_id: attachment.attachment_id.clone(),
+                        name: attachment.name.clone(),
+                        source: attachment.source.clone(),
+                        content_type: attachment.content_type.clone(),
+                        stored_path: format!("attachments/{file_name}"),
+                        bytes: bytes.len() as u64,
+                    });
+                }
+                Err(error) => skipped.push(DevinSkippedAttachment {
+                    attachment_id: attachment.attachment_id.clone(),
+                    name: attachment.name.clone(),
+                    reason: error.to_string(),
+                }),
+            }
+        }
+
+        Ok((stored, skipped))
+    }
+}
+
+/// Local file name for a remote attachment.
+///
+/// Remote names are untrusted: only `[A-Za-z0-9._-]` survives, consecutive dots
+/// are collapsed so no `..` segment can appear, the name is length-bounded, and
+/// the ordinal prefix keeps duplicates distinct.
+pub fn evidence_file_name(index: usize, attachment: &SessionAttachment) -> String {
+    let mut previous_dot = false;
+    let mut sanitized: String = attachment
+        .name
+        .chars()
+        .map(|character| {
+            let mapped =
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                    character
+                } else {
+                    '_'
+                };
+            let mapped = if mapped == '.' && previous_dot {
+                '_'
+            } else {
+                mapped
+            };
+            previous_dot = mapped == '.';
+            mapped
+        })
+        .collect();
+    sanitized = sanitized.trim_matches('.').to_owned();
+    sanitized.truncate(96);
+    if sanitized.is_empty() {
+        sanitized = "attachment".to_owned();
+    }
+
+    format!("{index:03}-{sanitized}")
+}
+
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
+}
+
+async fn create_dir(path: &Path) -> Result<(), DevinClientError> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|source| DevinClientError::Evidence {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+async fn write_file(path: &Path, contents: &[u8]) -> Result<(), DevinClientError> {
+    tokio::fs::write(path, contents)
+        .await
+        .map_err(|source| DevinClientError::Evidence {
+            path: path.to_path_buf(),
+            source,
+        })
 }
