@@ -5295,6 +5295,32 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
 }
 
 #[tokio::test]
+async fn unavailable_harness_rejects_dispatch_before_workspace_creation() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-devin", "COE-DEVIN-1", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.routing.harness = "devin_cloud_agent".into();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    let error = scheduler
+        .tick(ts(100))
+        .await
+        .expect_err("unavailable devin routing should reject dispatch");
+
+    assert!(matches!(
+        error,
+        crate::opensymphony_orchestrator::SchedulerError::InvalidConfiguration { .. }
+    ));
+    assert!(scheduler.workspace().ensured.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
 async fn unlabeled_parent_remains_repository_neutral() {
     let mut issue = tracker_issue("lin-repo-parent", "COE-548-PARENT", "In Progress", 0);
     issue.project_id = Some("project-id".to_string());

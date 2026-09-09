@@ -2691,6 +2691,10 @@ where
                 }
             }
 
+            // Route first: an unavailable harness must fail before a workspace
+            // is materialized and workspace creation hooks run.
+            let route = decide_issue_route(&normalized, &self.config)?;
+
             let workspace = self
                 .workspace
                 .ensure_workspace(&normalized, observed_at)
@@ -2739,7 +2743,6 @@ where
                     .and_then(RepositoryBindingOutcome::resolved_binding)
                     .cloned(),
             );
-            let route = decide_issue_route(&normalized, &self.config)?;
 
             let mut execution = self
                 .remove_execution(&issue_id)

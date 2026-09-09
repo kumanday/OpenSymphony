@@ -711,6 +711,45 @@ OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the
 conversation agent's LLM settings. The condenser is enabled by default with
 `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
+## Devin Cloud Harness (`devin.api`)
+
+`devin_cloud_agent` is advertised as an unavailable capability, so these
+settings only describe the boundary a future hosted integration will use. They
+are resolved **only** when `routing.harness: devin_cloud_agent`; for OpenHands,
+Codex, or `rust_native` workflows the block is ignored entirely and an inert
+default is used, so a parked or half-configured `devin.api` block cannot fail
+an unrelated workflow.
+
+```yaml
+routing:
+  harness: devin_cloud_agent
+
+devin:
+  api:
+    base_url: https://api.devin.ai/v1
+    api_key_env: DEVIN_API_KEY
+    event_poll_interval_ms: 2000
+    request_timeout_ms: 30000
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `base_url` | `https://api.devin.ai/v1` | Supports `${VAR}` env indirection. Must be an absolute `https` URL with a host, and must not embed credentials, a query string, or a fragment. |
+| `api_key_env` | `DEVIN_API_KEY` | **Literal environment-variable name**, never a value. |
+| `event_poll_interval_ms` | `2000` | Must be a positive integer. |
+| `request_timeout_ms` | `30000` | Must be a positive integer. |
+
+`api_key_env` is deliberately not passed through env substitution: writing
+`api_key_env: ${DEVIN_API_KEY}` would resolve the token itself into resolved
+configuration, manifests, and debug output. The name is validated as an
+environment-variable identifier and the token is read from the process
+environment only at request time.
+
+Because `devin_cloud_agent` capability is `available: false`, selecting it
+causes routing to reject issue dispatch before any local workspace is created:
+the local issue workspace is evidence and manifest storage only and is never
+Devin's execution directory.
+
 ## Runtime Config
 
 `opensymphony init` also copies a starter `config.yaml` next to the target

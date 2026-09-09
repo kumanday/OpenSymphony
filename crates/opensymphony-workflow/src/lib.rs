@@ -2661,6 +2661,101 @@ devin:
     }
 
     #[test]
+    fn devin_api_key_env_stays_a_literal_variable_name() {
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("DEVIN_API_KEY", "devin-secret-token"),
+        ]);
+
+        let resolved = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    api_key_env: DEVIN_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("devin credential reference should resolve");
+
+        // The name is kept verbatim; env indirection here would store the token.
+        assert_eq!(resolved.extensions.devin.api.api_key_env, "DEVIN_API_KEY");
+
+        let substituted = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    api_key_env: ${DEVIN_API_KEY}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env);
+
+        assert!(
+            substituted.is_err(),
+            "a substitution reference must be rejected rather than resolved to the token"
+        );
+    }
+
+    #[test]
+    fn devin_settings_are_inert_for_other_harnesses() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: codex_app_server
+devin:
+  api:
+    base_url: http://api.devin.ai/${DEVIN_UNSET_TENANT}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("parked devin settings must not fail a codex workflow");
+
+        assert_eq!(
+            resolved.extensions.devin.api.base_url,
+            DEFAULT_DEVIN_API_BASE_URL
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.api_key_env,
+            DEFAULT_DEVIN_API_KEY_ENV
+        );
+    }
+
+    #[test]
     fn selected_openhands_model_overrides_conversation_model() {
         let workflow = WorkflowDefinition::parse(
             r#"---

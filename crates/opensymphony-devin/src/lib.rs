@@ -34,6 +34,10 @@ pub const DEFAULT_DEVIN_API_KEY_ENV: &str = "DEVIN_API_KEY";
 pub const DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS: u64 = 2_000;
 pub const DEFAULT_DEVIN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
+/// Synthetic event type recorded when a Devin event carries no recognized
+/// discriminator field, so the payload is preserved rather than dropped.
+pub const DEVIN_UNDISCRIMINATED_EVENT_KIND: &str = "devin.undiscriminated_event";
+
 /// Effective containment label recorded for runs routed to Devin.
 ///
 /// The local workspace is never the execution directory for this harness.
@@ -47,6 +51,8 @@ pub enum DevinConfigError {
     InsecureBaseUrl,
     #[error("devin.api.base_url must not embed credentials")]
     CredentialsInBaseUrl,
+    #[error("devin.api.base_url must not carry a query string or fragment")]
+    DecoratedBaseUrl,
     #[error("devin.api.api_key_env must be an environment variable name")]
     InvalidApiKeyEnv,
     #[error("devin repository binding must be an absolute https git URL: {0}")]
@@ -70,6 +76,8 @@ pub enum DevinClientError {
     Status { status: u16, body: String },
     #[error("failed to decode devin api response: {0}")]
     Decode(String),
+    #[error("invalid devin api configuration: {0}")]
+    InvalidConfig(String),
 }
 
 /// API token wrapper that never renders its secret value.
@@ -124,6 +132,9 @@ impl DevinCloudConfig {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(DevinConfigError::CredentialsInBaseUrl);
         }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(DevinConfigError::DecoratedBaseUrl);
+        }
         if !is_environment_name(&self.api_key_env) {
             return Err(DevinConfigError::InvalidApiKeyEnv);
         }
@@ -174,6 +185,11 @@ impl DevinRemoteWorkspaceBinding {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(DevinConfigError::InvalidRepositoryUrl(
                 "must not embed credentials".into(),
+            ));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(DevinConfigError::InvalidRepositoryUrl(
+                "must not carry a query string or fragment".into(),
             ));
         }
 
@@ -404,6 +420,9 @@ impl DevinCloudClient {
         config: &DevinCloudConfig,
         environment: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, DevinClientError> {
+        config
+            .validate()
+            .map_err(|error| DevinClientError::InvalidConfig(error.to_string()))?;
         let token = environment(&config.api_key_env)
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| DevinClientError::MissingCredential {
@@ -412,6 +431,9 @@ impl DevinCloudClient {
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .https_only(true)
+            // The bearer token is attached to every request, so a redirect to
+            // another host would hand the credential to that host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| DevinClientError::Transport(error.to_string()))?;
 
@@ -504,8 +526,19 @@ pub struct NormalizedDevinEvent {
 ///
 /// Unrecognized event types are retained as [`NormalizedDevinEventKind::Unknown`]
 /// with the full raw JSON so future Devin schema additions replay unchanged.
-pub fn normalize_devin_event(raw: Value) -> Option<NormalizedDevinEvent> {
-    let event_type = first_string(&raw, &["type", "event_type", "kind"])?;
+pub fn normalize_devin_event(raw: Value) -> NormalizedDevinEvent {
+    let Some(event_type) = first_string(&raw, &["type", "event_type", "kind"]) else {
+        return NormalizedDevinEvent {
+            kind: NormalizedDevinEventKind::Unknown,
+            event_type: DEVIN_UNDISCRIMINATED_EVENT_KIND.to_owned(),
+            session_id: first_string(&raw, &["session_id", "sessionId"]),
+            run_id: first_string(&raw, &["run_id", "runId"]),
+            cursor: first_u64(&raw, &["cursor", "sequence", "seq"]),
+            message: first_string(&raw, &["message", "text", "content"]),
+            status: first_string(&raw, &["status", "status_enum"]),
+            raw,
+        };
+    };
     let kind = match event_type.as_str() {
         "session.created" | "session_created" => NormalizedDevinEventKind::SessionCreated,
         "session.resumed" | "session_resumed" => NormalizedDevinEventKind::SessionResumed,
@@ -526,7 +559,7 @@ pub fn normalize_devin_event(raw: Value) -> Option<NormalizedDevinEvent> {
         _ => NormalizedDevinEventKind::Unknown,
     };
 
-    Some(NormalizedDevinEvent {
+    NormalizedDevinEvent {
         kind,
         event_type,
         session_id: first_string(&raw, &["session_id", "sessionId"]),
@@ -535,7 +568,7 @@ pub fn normalize_devin_event(raw: Value) -> Option<NormalizedDevinEvent> {
         message: first_string(&raw, &["message", "text", "content"]),
         status: first_string(&raw, &["status", "status_enum"]),
         raw,
-    })
+    }
 }
 
 /// Normalizes an events page, accepting either a bare array or an object with
@@ -547,10 +580,7 @@ pub fn normalize_event_page(response: &Value) -> Vec<NormalizedDevinEvent> {
         .cloned()
         .unwrap_or_default();
 
-    events
-        .into_iter()
-        .filter_map(normalize_devin_event)
-        .collect()
+    events.into_iter().map(normalize_devin_event).collect()
 }
 
 pub fn devin_event_summary(event: &NormalizedDevinEvent) -> String {

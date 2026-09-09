@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use opensymphony::opensymphony_devin::{
-    DEVIN_CLOUD_AGENT_KIND, DEVIN_REMOTE_CONTAINMENT, DevinCloudAdapter, DevinCloudClient,
-    DevinCloudConfig, DevinHttpMethod, DevinLifecycleRequest, DevinRemoteWorkspaceBinding,
-    DevinRequestBuilder, NormalizedDevinEventKind, devin_event_summary, normalize_devin_event,
-    normalize_event_page, normalized_event_to_journal_record,
+    DEVIN_CLOUD_AGENT_KIND, DEVIN_REMOTE_CONTAINMENT, DEVIN_UNDISCRIMINATED_EVENT_KIND,
+    DevinCloudAdapter, DevinCloudClient, DevinCloudConfig, DevinHttpMethod, DevinLifecycleRequest,
+    DevinRemoteWorkspaceBinding, DevinRequestBuilder, NormalizedDevinEventKind,
+    devin_event_summary, normalize_devin_event, normalize_event_page,
+    normalized_event_to_journal_record,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
@@ -66,6 +67,24 @@ fn remote_binding_keeps_local_workspace_as_evidence_only() {
         )
         .is_err()
     );
+    assert!(
+        DevinRemoteWorkspaceBinding::new(
+            "acme-123",
+            PathBuf::from("/workspaces/acme-123"),
+            "https://github.com/acme/api?token=secret",
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        DevinRemoteWorkspaceBinding::new(
+            "acme-123",
+            PathBuf::from("/workspaces/acme-123"),
+            "https://github.com/acme/api#token=secret",
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -89,6 +108,12 @@ fn config_rejects_insecure_or_credentialed_endpoints() {
         ..DevinCloudConfig::default()
     };
     assert!(bad_env.validate().is_err());
+
+    let decorated = DevinCloudConfig {
+        base_url: "https://api.devin.ai/v1?token=secret".into(),
+        ..DevinCloudConfig::default()
+    };
+    assert!(decorated.validate().is_err());
 }
 
 #[test]
@@ -151,18 +176,26 @@ fn client_requires_the_configured_credential_environment_variable() {
         })
         .is_ok()
     );
+
+    // A bearer credential is attached to every request, so an invalid endpoint
+    // must be rejected before the token is ever handed to the HTTP client.
+    let invalid = DevinCloudConfig {
+        base_url: "http://api.devin.ai/v1".into(),
+        ..DevinCloudConfig::default()
+    };
+    assert!(DevinCloudClient::from_environment(&invalid, |_| Some("devin-token".into())).is_err());
 }
 
 #[test]
 fn known_events_normalize_into_journal_records() {
     let event = normalize_devin_event(json!({
         "type": "run.completed",
+
         "session_id": "sess-1",
         "run_id": "run-9",
         "cursor": 7,
         "status": "finished",
-    }))
-    .expect("normalized event");
+    }));
 
     assert_eq!(event.kind, NormalizedDevinEventKind::RunCompleted);
     assert_eq!(event.session_id.as_deref(), Some("sess-1"));
@@ -187,7 +220,7 @@ fn unknown_events_retain_their_raw_payload() {
         "session_id": "sess-1",
         "payload": { "nested": [1, 2, 3] },
     });
-    let event = normalize_devin_event(raw.clone()).expect("normalized event");
+    let event = normalize_devin_event(raw.clone());
 
     assert_eq!(event.kind, NormalizedDevinEventKind::Unknown);
     assert_eq!(event.raw, raw);
@@ -203,6 +236,16 @@ fn unknown_events_retain_their_raw_payload() {
 }
 
 #[test]
+fn events_without_a_discriminator_are_preserved_as_unknown() {
+    let raw = json!({ "session_id": "sess-1", "details": { "nested": true } });
+    let event = normalize_devin_event(raw.clone());
+
+    assert_eq!(event.kind, NormalizedDevinEventKind::Unknown);
+    assert_eq!(event.event_type, DEVIN_UNDISCRIMINATED_EVENT_KIND);
+    assert_eq!(event.raw, raw);
+}
+
+#[test]
 fn event_pages_accept_arrays_and_envelopes() {
     let page = json!({
         "events": [
@@ -213,10 +256,12 @@ fn event_pages_accept_arrays_and_envelopes() {
     });
     let normalized = normalize_event_page(&page);
 
-    assert_eq!(normalized.len(), 2);
+    assert_eq!(normalized.len(), 3);
     assert_eq!(normalized[0].kind, NormalizedDevinEventKind::AgentMessage);
     assert_eq!(devin_event_summary(&normalized[0]), "starting work");
     assert_eq!(normalized[1].kind, NormalizedDevinEventKind::ToolCall);
+    assert_eq!(normalized[2].kind, NormalizedDevinEventKind::Unknown);
+    assert_eq!(normalized[2].raw, json!({ "missing_type": true }));
 
     let bare = json!([{ "type": "run.started" }]);
     assert_eq!(normalize_event_page(&bare).len(), 1);

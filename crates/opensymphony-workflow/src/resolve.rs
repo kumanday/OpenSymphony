@@ -59,7 +59,11 @@ pub(crate) fn resolve_workflow<E: Environment>(
         } else {
             default_inactive_openhands_config()
         },
-        devin: resolve_devin(&workflow.front_matter.devin, env)?,
+        devin: if config.routing.harness == HarnessKind::DevinCloudAgent.as_str() {
+            resolve_devin(&workflow.front_matter.devin, env)?
+        } else {
+            default_inactive_devin_config()
+        },
     };
     apply_selected_model_to_openhands(&config.routing, &mut extensions.openhands);
 
@@ -568,12 +572,10 @@ fn resolve_devin_api<E: Environment>(
     )?;
     validate_devin_base_url(&base_url)?;
 
-    let api_key_env = resolve_string_or_default(
-        api.api_key_env.as_deref(),
-        env,
-        "devin.api.api_key_env",
-        DEFAULT_DEVIN_API_KEY_ENV,
-    )?;
+    // The credential reference is a literal variable name: resolving it through
+    // env indirection would store the token itself in resolved configuration.
+    let api_key_env = normalize_optional_literal(&api.api_key_env)
+        .unwrap_or_else(|| DEFAULT_DEVIN_API_KEY_ENV.to_owned());
     validate_env_name(&api_key_env, "devin.api.api_key_env")?;
 
     Ok(DevinApiConfig {
@@ -629,6 +631,20 @@ fn validate_devin_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
     }
 
     Ok(())
+}
+
+/// Devin settings are only resolved for Devin-routed workflows, so an unset
+/// substitution or parked endpoint in `devin.api` cannot reject an OpenHands or
+/// Codex workflow.
+fn default_inactive_devin_config() -> DevinConfig {
+    DevinConfig {
+        api: DevinApiConfig {
+            base_url: DEFAULT_DEVIN_API_BASE_URL.to_owned(),
+            api_key_env: DEFAULT_DEVIN_API_KEY_ENV.to_owned(),
+            event_poll_interval_ms: DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS,
+            request_timeout_ms: DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        },
+    }
 }
 
 fn default_inactive_openhands_config() -> OpenHandsConfig {
