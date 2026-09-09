@@ -1360,7 +1360,7 @@ impl DevinCloudClient {
         resolve_secret_references(&org_id, &available, references)
     }
 
-    /// Downloads one session attachment for local evidence.
+    /// Downloads one session attachment for local evidence, bounded by `limit`.
     ///
     /// Attachments are only fetched from the API origin the client is already
     /// authenticated against: another origin would either receive the bearer
@@ -1396,19 +1396,57 @@ impl DevinCloudClient {
                 limit,
             });
         }
-        let bytes = response
-            .bytes()
+        // `Content-Length` is advisory and absent for chunked responses, so the
+        // body is read incrementally and abandoned as soon as it exceeds the
+        // limit rather than being buffered in full first.
+        let mut response = response;
+        let mut body = BoundedBody::new(response.content_length(), limit);
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| DevinClientError::Transport(error.to_string()))?;
-        // `Content-Length` is advisory, so the decoded body is checked too.
-        if bytes.len() as u64 > limit {
-            return Err(DevinClientError::AttachmentTooLarge {
-                name: attachment.name.clone(),
-                limit,
-            });
+            .map_err(|error| DevinClientError::Transport(error.to_string()))?
+        {
+            body.push(&chunk)
+                .map_err(|()| DevinClientError::AttachmentTooLarge {
+                    name: attachment.name.clone(),
+                    limit,
+                })?;
         }
+        let body = body.into_inner();
 
-        Ok(bytes.to_vec())
+        Ok(body)
+    }
+}
+
+/// Accumulates a response body without ever holding more than `limit` bytes.
+///
+/// A chunked attachment reports no `Content-Length`, so the ceiling can only be
+/// enforced while the body streams in.
+struct BoundedBody {
+    buffer: Vec<u8>,
+    limit: u64,
+}
+
+impl BoundedBody {
+    fn new(content_length: Option<u64>, limit: u64) -> Self {
+        Self {
+            buffer: Vec::with_capacity(
+                usize::try_from(content_length.unwrap_or(0).min(limit)).unwrap_or(0),
+            ),
+            limit,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<(), ()> {
+        if self.buffer.len() as u64 + chunk.len() as u64 > self.limit {
+            return Err(());
+        }
+        self.buffer.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buffer
     }
 }
 
@@ -1506,7 +1544,12 @@ pub fn attachment_download_url(
         path: String::new(),
         source,
     })?;
-    if url.scheme() != base.scheme() || url.host_str() != base.host_str() {
+    // Ports are part of the origin: `https://api.devin.ai:8443` is a different
+    // service from `https://api.devin.ai`, and must never receive the token.
+    if url.scheme() != base.scheme()
+        || url.host_str() != base.host_str()
+        || url.port_or_known_default() != base.port_or_known_default()
+    {
         return Err(DevinClientError::ForeignAttachmentOrigin {
             name: attachment.name.clone(),
             origin: url.origin().ascii_serialization(),
@@ -2314,4 +2357,31 @@ async fn write_file(path: &Path, contents: &[u8]) -> Result<(), DevinClientError
             path: path.to_path_buf(),
             source,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedBody;
+
+    #[test]
+    fn bounded_body_stops_before_buffering_past_the_limit() {
+        let mut body = BoundedBody::new(None, 8);
+        assert!(body.push(&[0u8; 5]).is_ok());
+        assert!(body.push(&[0u8; 5]).is_err());
+        assert_eq!(body.into_inner().len(), 5);
+    }
+
+    #[test]
+    fn bounded_body_preserves_a_body_within_the_limit() {
+        let mut body = BoundedBody::new(Some(6), 8);
+        assert!(body.push(b"abc").is_ok());
+        assert!(body.push(b"def").is_ok());
+        assert_eq!(body.into_inner(), b"abcdef".to_vec());
+    }
+
+    #[test]
+    fn bounded_body_never_preallocates_past_the_limit() {
+        let body = BoundedBody::new(Some(u64::MAX), 16);
+        assert!(body.into_inner().capacity() <= 16);
+    }
 }

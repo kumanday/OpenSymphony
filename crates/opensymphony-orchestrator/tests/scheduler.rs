@@ -439,6 +439,7 @@ struct FakeWorkspace {
     retry_pending_recoveries: Vec<RetryPendingRecord>,
     cleared_retry_exhaustion: Vec<String>,
     ensured: Vec<String>,
+    ensured_evidence_only: Vec<String>,
     cleaned: Vec<(String, bool)>,
     failed_cleaned: Vec<String>,
     removed: Vec<String>,
@@ -482,6 +483,16 @@ impl WorkspaceBackend for FakeWorkspace {
             })
             .clone();
         Ok(record)
+    }
+
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<WorkspaceRecord, Self::Error> {
+        self.ensured_evidence_only
+            .push(issue.identifier.to_string());
+        self.ensure_workspace(issue, observed_at).await
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
@@ -5350,8 +5361,14 @@ async fn devin_cloud_routing_dispatches_a_worker() {
         .expect("devin route should launch a worker");
     assert_eq!(launch.route.harness_kind, "devin_cloud_agent");
     // Devin executes remotely, but the issue workspace is still materialized:
-    // it is where run manifests, journals, and imported evidence live.
+    // it is where run manifests, journals, and imported evidence live. It is
+    // prepared without a local checkout, so a host without repository access
+    // can still launch the remote session.
     assert_eq!(scheduler.workspace().ensured.len(), 1);
+    assert_eq!(
+        scheduler.workspace().ensured_evidence_only,
+        vec!["COE-DEVIN-1".to_string()]
+    );
 }
 
 #[tokio::test]

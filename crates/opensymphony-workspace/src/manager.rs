@@ -312,6 +312,21 @@ impl WorkspaceManager {
         self.ensure(issue).await
     }
 
+    /// Ensures an issue workspace without preparing a local checkout.
+    ///
+    /// A remote-execution harness owns its own workspace, so the local one
+    /// carries manifests, journals, and imported evidence only. Cloning and
+    /// verifying repositories here would demand repository access on a host
+    /// that never runs the agent.
+    pub async fn ensure_evidence_only(
+        &self,
+        issue: &IssueDescriptor,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        let mut evidence_issue = issue.clone();
+        evidence_issue.repository_binding = None;
+        self.ensure_with_run_id(&evidence_issue, None).await
+    }
+
     pub async fn ensure_with_run_id(
         &self,
         issue: &IssueDescriptor,

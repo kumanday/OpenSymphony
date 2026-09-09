@@ -766,11 +766,22 @@ fn attachment_downloads_are_restricted_to_the_authenticated_api_origin() {
             .as_str(),
         "https://api.devin.ai/v3/attachments/att-1"
     );
+    // An explicit default port is the same origin.
+    assert!(
+        attachment_download_url(
+            base,
+            &attachment("log.txt", "https://api.devin.ai:443/v3/attachments/att-1")
+        )
+        .is_ok()
+    );
 
-    // A bearer-authenticated download must never leave the API origin.
+    // A bearer-authenticated download must never leave the API origin, and the
+    // origin includes the effective port: `api.devin.ai:8443` is another
+    // service on the same host.
     for foreign in [
         "https://evil.example.com/att-1",
         "http://api.devin.ai/v3/attachments/att-1",
+        "https://api.devin.ai:8443/v3/attachments/att-1",
     ] {
         assert!(matches!(
             attachment_download_url(base, &attachment("log.txt", foreign)),

@@ -355,6 +355,18 @@ pub trait WorkspaceBackend {
         observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error>;
 
+    /// Prepares an issue workspace for a harness that executes remotely.
+    ///
+    /// The workspace holds manifests, journals, and imported evidence only, so
+    /// no local checkout is required and the host needs no repository access.
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<WorkspaceRecord, Self::Error> {
+        self.ensure_workspace(issue, observed_at).await
+    }
+
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
     async fn recover_retry_exhaustion(
@@ -2022,11 +2034,15 @@ where
         let replacement_workspace = if retain_workspace {
             execution.workspace().cloned()
         } else if retry.is_some() && has_resolved_replacement {
-            match self
-                .workspace
-                .ensure_workspace(&replacement, observed_at)
-                .await
-            {
+            match if harness_executes_remotely(&self.config.routing.harness) {
+                self.workspace
+                    .ensure_evidence_workspace(&replacement, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&replacement, observed_at)
+                    .await
+            } {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
                     if let Some(retry) = retry.as_ref()
@@ -2695,13 +2711,18 @@ where
             // is materialized and workspace creation hooks run.
             let route = decide_issue_route(&normalized, &self.config)?;
 
-            let workspace = self
-                .workspace
-                .ensure_workspace(&normalized, observed_at)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
+            let workspace = if harness_executes_remotely(&route.harness_kind) {
+                self.workspace
+                    .ensure_evidence_workspace(&normalized, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&normalized, observed_at)
+                    .await
+            }
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
 
             if let Some(normal_retry_count) = self
                 .executions
@@ -3801,6 +3822,16 @@ fn recovered_worker_ordinal(worker_id: &WorkerId) -> Option<u64> {
         .as_str()
         .strip_prefix("scheduler-worker-")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+/// Whether a harness runs the agent outside this host.
+///
+/// A remote-only harness owns its execution workspace, so the scheduler
+/// prepares an evidence-only local workspace instead of a checkout.
+fn harness_executes_remotely(kind: &str) -> bool {
+    HarnessKind::parse(kind)
+        .map(HarnessKind::capability)
+        .is_some_and(|capability| capability.transport.remote && !capability.transport.local)
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {

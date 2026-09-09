@@ -140,6 +140,17 @@ references, creates the session, streams normalized events as
 `WorkerUpdate::RuntimeEvent`, imports evidence, and maps the settled session
 onto a scheduler outcome.
 
+Because nothing is executed locally, the scheduler prepares the issue workspace
+through `ensure_evidence_workspace` for any harness whose capability transport
+is remote-only. That path materializes the contained issue directory for run
+manifests, journals, and evidence without cloning or verifying a checkout and
+without running repository hooks, so a host with no local repository access can
+still launch a session Devin itself can clone.
+
+A `--dry-run` route settles before any credential resolution or session
+creation, so it neither contacts the API nor consumes ACUs; it writes the local
+run manifest and no conversation binding.
+
 ### Tenant isolation and secrets
 
 Every client binds to exactly one organization before it issues session traffic:
@@ -182,7 +193,20 @@ A Devin session outlives the worker process, so every abandoned path stops it:
 poll timeout and transport failure terminate and archive the session before the
 route returns, a scheduler interrupt looks the session up in the live-session
 registry and deletes it, and dropping the worker task (scheduler abort) fires
-`DevinSessionGuard`, which archives the session in the background.
+`DevinSessionGuard`, which archives the session in the background. A scheduler
+interrupt that finds no tracked session — the normal state after a daemon
+restart — rebuilds a tenant-bound client from configuration and stops the
+session recorded in the conversation manifest.
+
+Ownership is only released once the remote session is provably gone. The route
+writes `run.json` and the Devin conversation binding *before* it reports the
+launch, so cancellation and restart recovery can always find the live session.
+If termination after a polling failure fails, the route keeps the cleanup guard
+armed and settles as `CancelFailed`, which does not retry, rather than as an
+ordinary failure that would start a second session while the first still bills.
+A session that blocks on operator input settles as `Detached` with the run
+paused: the session stays alive and tracked so the human's answer continues the
+same run instead of a replacement session being created.
 
 Workflow configuration lives under the `devin.api` and `devin.session`
 front-matter blocks (see `docs/configuration.md`). Endpoints must be absolute
