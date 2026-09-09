@@ -1315,7 +1315,14 @@ where
                 // the live tracker binding, discard the old workspace before
                 // restoring the retry so the replacement is materialized by
                 // the normal dispatch path.
-                if recovered_run.is_none() && recovered_workspace.is_some() && binding_changed {
+                // A persisted non-retrying outcome means something outside this
+                // process is still bound to this workspace, so its manifests
+                // and evidence must survive even when the binding moved.
+                if recovered_run.is_none()
+                    && recovered_workspace.is_some()
+                    && binding_changed
+                    && record.terminal_worker_outcome.is_none()
+                {
                     self.workspace
                         .remove_workspace(&record.workspace)
                         .await

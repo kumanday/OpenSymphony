@@ -3931,6 +3931,94 @@ async fn recovery_keeps_a_cancel_failed_run_undispatched() {
     .await;
 }
 
+async fn assert_repository_bound_detached_recovery_retains_the_workspace(
+    identifier: &str,
+    preserve_binding: bool,
+) {
+    let issue_key = format!("lin-devin-{identifier}");
+    let recovered_workspace = workspace_record(identifier, &format!("/tmp/recovered/{identifier}"));
+    let binding = match repository_routing().resolve(
+        &["repo:one".to_string()],
+        Some("project-id"),
+        None,
+        false,
+    ) {
+        RepositoryBindingOutcome::Resolved(binding) => binding,
+        outcome => panic!("expected a resolved binding, got {outcome:?}"),
+    };
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue = tracker_issue(&issue_key, identifier, "In Progress", 0);
+            issue.project_id = Some("project-id".to_string());
+            issue.labels = vec!["repo:one".to_string()];
+            issue
+        }],
+        ..Default::default()
+    };
+    let mut recovered_issue = normalized_issue(&issue_key, identifier, "In Progress");
+    if preserve_binding {
+        recovered_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding));
+    }
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: Some(WorkerOutcomeKind::Detached),
+            issue: recovered_issue,
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("devin_cloud_agent".to_string()),
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([(issue_key.clone(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("detached recovery should succeed");
+
+    // Removing the workspace here would terminate the waiting remote session
+    // and delete the evidence it already produced.
+    assert!(
+        scheduler.workspace().removed.is_empty(),
+        "a detached run must keep its evidence workspace"
+    );
+    assert!(scheduler.worker().launches.is_empty());
+    assert!(matches!(
+        scheduler
+            .execution(&IssueId::new(&issue_key).expect("issue id should be valid"))
+            .expect("execution should remain visible")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released { .. }
+    ));
+}
+
+#[tokio::test]
+async fn repository_bound_detached_recovery_keeps_its_evidence_workspace() {
+    assert_repository_bound_detached_recovery_retains_the_workspace("COE-DETACHED-BOUND", true)
+        .await;
+}
+
+#[tokio::test]
+async fn detached_recovery_without_a_proven_binding_keeps_its_evidence_workspace() {
+    assert_repository_bound_detached_recovery_retains_the_workspace("COE-DETACHED-UNBOUND", false)
+        .await;
+}
+
 #[tokio::test]
 async fn recovery_requeues_cancelled_merging_interrupt() {
     let recovered_workspace = workspace_record("COE-272-MERGING", "/tmp/recovered/COE-272-MERGING");

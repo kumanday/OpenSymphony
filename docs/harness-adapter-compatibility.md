@@ -145,7 +145,12 @@ through `ensure_evidence_workspace` for any harness whose capability transport
 is remote-only. That path materializes the contained issue directory for run
 manifests, journals, and evidence without cloning or verifying a checkout and
 without running repository hooks, so a host with no local repository access can
-still launch a session Devin itself can clone.
+still launch a session Devin itself can clone. All four hooks are skipped:
+`after_create`, `before_run`, `after_run`, and — through the evidence-only
+cleanup path — `before_remove`. The issue manifest still records the repository
+binding, because skipping the checkout must not erase which repository the
+remote run belongs to; recovery compares that identity against the live tracker
+binding, and a detached run keeps its evidence workspace either way.
 
 A `--dry-run` route settles before any credential resolution or session
 creation, so it neither contacts the API nor consumes ACUs; it writes the local

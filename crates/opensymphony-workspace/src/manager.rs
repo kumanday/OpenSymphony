@@ -332,9 +332,11 @@ impl WorkspaceManager {
         &self,
         issue: &IssueDescriptor,
     ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
-        let mut evidence_issue = issue.clone();
-        evidence_issue.repository_binding = None;
-        self.ensure_local_workspace(&evidence_issue, WorkspaceHooks::Skipped)
+        // The binding is kept in the issue manifest: it records which
+        // repository the remote run belongs to, and dropping it makes the
+        // workspace look unbound to every later binding comparison. Only the
+        // checkout it would otherwise drive is skipped.
+        self.ensure_local_workspace(issue, WorkspaceHooks::Skipped)
             .await
     }
 
@@ -2657,6 +2659,27 @@ impl WorkspaceManager {
             workspace,
             state,
             self.config.cleanup.remove_terminal_workspaces,
+            WorkspaceHooks::Executed,
+        )
+        .await
+    }
+
+    /// Clean up an evidence-only workspace without running `before_remove`.
+    ///
+    /// The hook is written for a checkout this workspace never materialized,
+    /// so running it here would execute repository commands in a directory
+    /// that only holds manifests, journals, and imported evidence.
+    pub async fn cleanup_evidence_only(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+        force_remove: bool,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
+        self.cleanup_with_terminal_removal(
+            workspace,
+            state,
+            force_remove || self.config.cleanup.remove_terminal_workspaces,
+            WorkspaceHooks::Skipped,
         )
         .await
     }
@@ -2668,8 +2691,13 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<CleanupOutcome, WorkspaceError> {
-        self.cleanup_with_terminal_removal(workspace, IssueLifecycleState::Terminal, true)
-            .await
+        self.cleanup_with_terminal_removal(
+            workspace,
+            IssueLifecycleState::Terminal,
+            true,
+            WorkspaceHooks::Executed,
+        )
+        .await
     }
 
     async fn cleanup_with_terminal_removal(
@@ -2677,6 +2705,7 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         state: IssueLifecycleState,
         remove_terminal_workspaces: bool,
+        hooks: WorkspaceHooks,
     ) -> Result<CleanupOutcome, WorkspaceError> {
         if !path_exists(workspace.workspace_path()).await? {
             return Ok(CleanupOutcome {
@@ -2697,9 +2726,14 @@ impl WorkspaceManager {
             });
         }
 
-        let before_remove = match self.execute_hook(HookKind::BeforeRemove, workspace).await {
-            Ok(record) => record,
-            Err(failure) => Some(failure.record),
+        let before_remove = match hooks {
+            WorkspaceHooks::Skipped => None,
+            WorkspaceHooks::Executed => {
+                match self.execute_hook(HookKind::BeforeRemove, workspace).await {
+                    Ok(record) => record,
+                    Err(failure) => Some(failure.record),
+                }
+            }
         };
         let decision = if remove_terminal_workspaces {
             CleanupDecision::Remove

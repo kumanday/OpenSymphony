@@ -1066,6 +1066,18 @@ impl RuntimeWorkspaceBackend {
                             session_id = %manifest.conversation_id,
                             "terminated the remote Devin session before removing its local binding"
                         );
+                        // This workspace never held a checkout, so the
+                        // repository-specific `before_remove` hook has nothing
+                        // to operate on here.
+                        self.manager
+                            .cleanup_evidence_only(
+                                &handle,
+                                IssueLifecycleState::Terminal,
+                                force_remove,
+                            )
+                            .await?;
+                        self.terminal_cleanup_paths.insert(workspace.path.clone());
+                        return Ok(());
                     }
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
                         let envelope_compatible = if handle.checkout_generation().is_some() {
@@ -6078,19 +6090,13 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
         Some(session_id) => match client.get_session(&session_id).await {
             Ok(session) => (session, true),
             Err(error) => {
-                // The bound session could not be loaded or does not belong to
-                // this organization. Report the failure without starting a
-                // replacement, and keep the outcome non-retrying.
-                let detail = format!(
-                    "devin session `{session_id}` could not be reattached after restart: {error}"
-                );
-                report_launch_failure(launch_tx, detail.clone());
-                return Ok(DevinSettlement {
-                    outcome: WorkerOutcomeKind::CancelFailed,
-                    summary: format!("Devin session {session_id} could not be reattached"),
-                    error: Some(detail),
-                    run_status: RunStatus::Failed,
-                });
+                return Ok(devin_reattach_failure(
+                    launch_tx,
+                    &session_id,
+                    &config.base_url,
+                    route,
+                    &error.to_string(),
+                ));
             }
         },
         None => {
@@ -6456,6 +6462,34 @@ fn devin_conversation_metadata(
         total_tokens: 0,
         runtime_seconds: 0,
         next_activity_sequence: 0,
+    }
+}
+
+/// Settle a session that could not be reattached after a restart.
+///
+/// The launch has to be reported as successful so the worker registers and the
+/// scheduler observes the non-retrying settlement. A launch failure instead
+/// becomes a launch error the scheduler retries, which starts exactly the
+/// replacement session this outcome exists to prevent.
+fn devin_reattach_failure(
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    session_id: &str,
+    base_url: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    error: &str,
+) -> DevinSettlement {
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            devin_conversation_metadata(session_id, base_url, route),
+        )));
+    }
+    DevinSettlement {
+        outcome: WorkerOutcomeKind::CancelFailed,
+        summary: format!("Devin session {session_id} could not be reattached"),
+        error: Some(format!(
+            "devin session `{session_id}` could not be reattached after restart: {error}"
+        )),
+        run_status: RunStatus::Failed,
     }
 }
 
@@ -9989,6 +10023,43 @@ mod tests {
             Some("devin-session-recovered".to_string()),
             "recovery must reattach to the persisted session instead of creating one"
         );
+    }
+
+    #[tokio::test]
+    async fn devin_reattachment_failure_reports_a_launch_that_cannot_be_retried() {
+        let (launch_sender, launch_receiver) = oneshot::channel();
+        let mut launch_tx = Some(launch_sender);
+        let route = devin_test_route(false);
+        let settlement = devin_reattach_failure(
+            &mut launch_tx,
+            "devin-session-lost",
+            "https://api.devin.ai",
+            &route,
+            "status 404",
+        );
+
+        assert_eq!(settlement.outcome, WorkerOutcomeKind::CancelFailed);
+        assert_eq!(settlement.run_status, RunStatus::Failed);
+        assert_eq!(
+            non_retrying_devin_outcome(settlement.outcome),
+            Some(WorkerOutcomeKind::CancelFailed)
+        );
+        let report = launch_receiver
+            .await
+            .expect("a launch report should be sent");
+        // `LaunchReport::Failed` becomes a launch error the scheduler retries,
+        // and the later `Finished` update is then ignored because the worker
+        // never registered.
+        match report {
+            LaunchReport::Conversation(conversation) => assert_eq!(
+                conversation.conversation_id.as_str(),
+                "devin-session-lost",
+                "the launch must register the bound session, not a replacement"
+            ),
+            LaunchReport::Failed(detail) => {
+                panic!("a failed reattachment must not report a retryable launch failure: {detail}")
+            }
+        }
     }
 
     #[tokio::test]
