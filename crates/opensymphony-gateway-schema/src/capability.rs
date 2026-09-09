@@ -127,13 +127,15 @@ pub struct HarnessHistoryCapability {
 pub enum HarnessKind {
     OpenHandsAgentServer,
     CodexAppServer,
+    DevinCloudAgent,
     RustNative,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::OpenHandsAgentServer,
         Self::CodexAppServer,
+        Self::DevinCloudAgent,
         Self::RustNative,
     ];
 
@@ -141,6 +143,7 @@ impl HarnessKind {
         match value {
             "openhands_agent_server" => Some(Self::OpenHandsAgentServer),
             "codex_app_server" => Some(Self::CodexAppServer),
+            "devin_cloud_agent" => Some(Self::DevinCloudAgent),
             "rust_native" => Some(Self::RustNative),
             _ => None,
         }
@@ -150,6 +153,7 @@ impl HarnessKind {
         match self {
             Self::OpenHandsAgentServer => "openhands_agent_server",
             Self::CodexAppServer => "codex_app_server",
+            Self::DevinCloudAgent => "devin_cloud_agent",
             Self::RustNative => "rust_native",
         }
     }
@@ -162,6 +166,7 @@ impl HarnessKind {
         match self {
             Self::OpenHandsAgentServer => HarnessCapability::openhands_agent_server(),
             Self::CodexAppServer => HarnessCapability::codex_app_server_local(),
+            Self::DevinCloudAgent => HarnessCapability::devin_cloud_future(),
             Self::RustNative => HarnessCapability::rust_native_future(),
         }
     }
@@ -393,6 +398,87 @@ impl HarnessCapability {
                 "Production hosted or remote Codex routing is not implemented.".into(),
                 "Codex history fetch and reconnect replay cursors are not implemented.".into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
+                    .into(),
+            ],
+        }
+    }
+
+    /// Future remote Devin cloud harness shape.
+    ///
+    /// Devin executes in its own cloud-owned workspace, so this capability stays
+    /// unavailable until hosted-mode security (TLS pinning, authenticated event
+    /// streams, secret injection, tenant isolation) and event normalization have
+    /// hardening evidence.
+    pub fn devin_cloud_future() -> Self {
+        Self {
+            kind: "devin_cloud_agent".into(),
+            display_name: "Devin cloud agent".into(),
+            available: false,
+            adapter_contract_version: "harness-adapter-v1".into(),
+            runtime_contract_version: None,
+            actions: HarnessActionCapability {
+                start_run: true,
+                send_user_message: true,
+                retry: true,
+                cancel: true,
+                pause: false,
+                resume: false,
+                approve: false,
+                reject: false,
+                comment: false,
+            },
+            event_streams: HarnessEventStreamCapability {
+                runtime_events: true,
+                terminal_frames: false,
+                replay_from_cursor: false,
+                raw_payload_refs: true,
+                delivery_modes: vec!["https_polling".into()],
+            },
+            approvals: HarnessApprovalCapability {
+                tool_approval: false,
+                human_decision: false,
+                policy_metadata: false,
+            },
+            model_settings: HarnessModelSettingsCapability {
+                api_compatible_settings: false,
+                subscription_credentials: false,
+                per_run_overrides: false,
+                credential_reference_kinds: vec!["env".into()],
+            },
+            transport: HarnessTransportCapability {
+                protocol: "https".into(),
+                modes: vec!["rest".into()],
+                local: false,
+                remote: true,
+            },
+            cancellation: HarnessCancellationCapability {
+                cancel_run: true,
+                force_stop: false,
+                acknowledges_cancel: false,
+            },
+            pause_resume: HarnessPauseResumeCapability {
+                pause: false,
+                resume: false,
+            },
+            history: HarnessHistoryCapability {
+                fetch_history: true,
+                reconcile_after_ready: false,
+                reconnect_and_replay: false,
+                preserve_unknown_events: true,
+            },
+            notes: vec![
+                "Remote implementation agent executing in a Devin-owned cloud workspace.".into(),
+                "OpenSymphony keeps a local issue workspace for manifests, journals, and evidence only; it is never the Devin execution cwd."
+                    .into(),
+            ],
+            feature_gaps: vec![
+                "Remote workspace ownership is unimplemented: repository binding to a Devin-owned workspace has no verified checkout, diff, or evidence contract."
+                    .into(),
+                "Devin event normalization is unimplemented: recognized event mapping and unknown-event retention have no hardening evidence yet."
+                    .into(),
+                "Authentication and secret handling are unimplemented: TLS posture, authenticated event streams, and API-token injection are not hardened."
+                    .into(),
+                "Tenant isolation is unimplemented: per-org/per-issue session scoping and cross-tenant leak protections are not enforced."
                     .into(),
             ],
         }

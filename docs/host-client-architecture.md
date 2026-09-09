@@ -753,7 +753,7 @@ ModelConfigurationProfile
 ├─ base_url
 ├─ model
 ├─ credential_ref
-└─ harnesses: openhands_agent_server | codex_app_server | other
+└─ harnesses: openhands_agent_server | codex_app_server | devin_cloud_agent | other
 ```
 
 The configuration profile records settings that are directly meaningful to the
@@ -788,6 +788,29 @@ model/credential reference reuse. Hosted worker pools, remote routing, and
 loopback WebSocket production routing remain future work. See
 `docs/codex-app-server-harness.md` for the current contract evidence and
 benchmark procedure.
+
+### 8.5 Devin cloud agent harness shape
+
+```text
+DevinCloudAdapter
+├─ transport: https rest, remote only
+├─ auth: api key read from a configured environment variable name
+├─ workspace: Devin-owned remote workspace, local checkout is evidence only
+├─ entities: session, run, message, tool call, event
+├─ streams: polled event pages with cursor
+├─ actions: create session, resume session, send message, start run, cancel run
+└─ normalization: Devin event to OpenSymphony event envelope, unknown events
+   retained as raw JSON
+```
+
+Unlike the local harnesses, OpenSymphony never owns Devin's execution
+directory. `DevinRemoteWorkspaceBinding` maps an issue workspace key and
+repository URL onto the remote workspace while the local issue workspace stays
+evidence-only, so the workspace manager's local-checkout invariants are not
+applied to remote runs. The capability is advertised as unavailable: TLS
+pinning, authenticated event streams, secret injection, tenant isolation,
+remote workspace ownership, and event-normalization hardening evidence are all
+prerequisites before `available` can become true.
 
 ## 9. Hosted mode architecture
 

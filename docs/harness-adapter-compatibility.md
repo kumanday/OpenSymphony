@@ -101,6 +101,44 @@ Known gaps:
   tokens in OpenSymphony workspaces or browser payloads.
 - Hosted Codex worker pools and remote routing remain future work.
 
+## Devin Cloud Agent
+
+Devin is a remote, vendor-hosted implementation agent. The adapter lives in
+`crates/opensymphony-devin` (source-included by the root crate, not a separate
+Cargo package) and advertises `devin_cloud_agent` with `available: false` over
+an HTTPS transport (`remote: true`, `local: false`).
+
+The module provides the boundary primitives a hosted route needs: validated
+configuration (HTTPS-only endpoint, credential *environment variable name*
+rather than a token), a request builder covering session create/resume, message
+send, run start/cancel, and event retrieval, a client that reads the token from
+the configured environment variable and injects it only on the wire, and event
+normalization that maps recognized Devin events into journal records while
+preserving every unknown payload as raw JSON.
+
+Devin owns its execution workspace. `DevinRemoteWorkspaceBinding` binds an issue
+workspace key and repository URL to that remote workspace and keeps the local
+OpenSymphony checkout as an evidence-only path; it is never used as Devin's
+working directory. The CLI route therefore rejects `devin_cloud_agent` launches
+with an explicit unavailability reason before any local workspace is prepared.
+
+Workflow configuration lives under the `devin.api` front-matter block
+(`base_url`, `api_key_env`, `event_poll_interval_ms`, `request_timeout_ms`).
+Endpoints must be absolute HTTPS URLs without embedded credentials, query, or
+fragment; credential values are never serialized into workflow config,
+manifests, or logs.
+
+Known gaps (all blocking `available: true`):
+
+- Remote workspace ownership: repository binding, checkout verification, and
+  artifact/evidence retrieval from the Devin-owned workspace are unimplemented.
+- Event normalization: the mapping is a first pass against an unverified event
+  vocabulary and needs hardening evidence against the live API.
+- Authentication and secret handling: TLS pinning, authenticated event streams,
+  and secret injection into remote sessions are unimplemented.
+- Tenant isolation: per-tenant credential scoping and isolation guarantees are
+  unimplemented.
+
 ## Rust-Native Harness
 
 A Rust-native or in-process harness fits the same contract by implementing

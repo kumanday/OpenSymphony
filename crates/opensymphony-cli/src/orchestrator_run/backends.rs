@@ -19,6 +19,7 @@ use crate::opensymphony_codex::{
     codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
     turn_status,
 };
+use crate::opensymphony_devin::{DEVIN_CLOUD_AGENT_KIND, DevinCloudAdapter, DevinCloudConfig};
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
     IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
@@ -2194,6 +2195,26 @@ impl RuntimeWorkerBackend {
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
             let run_id = format!("run-{launch_worker_id}");
+            if route.harness_kind == DEVIN_CLOUD_AGENT_KIND {
+                // Devin executes in a Devin-owned cloud workspace, so the local
+                // issue workspace is never prepared as an execution cwd for this
+                // route. Dispatch resolves the adapter first and refuses the run
+                // while the harness capability is advertised as unavailable.
+                let detail = devin_route_unavailable_detail(&workflow);
+                report_launch_failure(&mut launch_tx, detail.clone());
+                let outcome = WorkerOutcomeRecord::from_run(
+                    &run,
+                    WorkerOutcomeKind::Failed,
+                    now_timestamp(),
+                    Some("devin cloud routing is not available".to_owned()),
+                    Some(detail),
+                );
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
             let mut workspace_issue = issue_descriptor(&issue);
             if recovered && let Some(binding) = run.repository_binding.clone() {
                 workspace_issue.repository_binding =
@@ -5494,6 +5515,27 @@ fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
         .ok_or_else(|| RunCommandError::MissingTransportPort {
             value: url.as_str().to_string(),
         })
+}
+
+/// Devin adapter dispatch detail.
+///
+/// The workflow-resolved endpoint and credential *reference* are echoed so
+/// operators can confirm routing configuration; the credential value itself is
+/// only ever read from the worker environment by the Devin client.
+fn devin_route_unavailable_detail(workflow: &ResolvedWorkflow) -> String {
+    let api = &workflow.extensions.devin.api;
+    let adapter = DevinCloudAdapter::new(DevinCloudConfig {
+        base_url: api.base_url.clone(),
+        api_key_env: api.api_key_env.clone(),
+        event_poll_interval: Duration::from_millis(api.event_poll_interval_ms),
+        request_timeout: Duration::from_millis(api.request_timeout_ms),
+    });
+    format!(
+        "{} endpoint `{}`, credential env `{}`; the local issue workspace stays evidence-only because Devin owns the remote execution workspace",
+        adapter.unavailability_reason(),
+        api.base_url,
+        api.api_key_env
+    )
 }
 
 fn report_launch_failure(

@@ -9,19 +9,21 @@ use url::{Host, Url};
 use super::{
     error::WorkflowConfigError,
     model::{
-        AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
-        DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS,
-        DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE,
-        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
-        DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
-        DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE, DEFAULT_OPENHANDS_LLM_MODEL,
-        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
-        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS, DEFAULT_ROUTING_HARNESS_ENV,
-        DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        AgentConfig, AgentFrontMatter, DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV,
+        DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
+        DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND,
+        DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
+        DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE,
+        DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_OPENHANDS_MAX_ITERATIONS,
+        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS,
+        DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+        DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, DevinApiConfig, DevinApiFrontMatter,
+        DevinConfig, DevinFrontMatter, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
         OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY, OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION,
         OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
@@ -57,6 +59,7 @@ pub(crate) fn resolve_workflow<E: Environment>(
         } else {
             default_inactive_openhands_config()
         },
+        devin: resolve_devin(&workflow.front_matter.devin, env)?,
     };
     apply_selected_model_to_openhands(&config.routing, &mut extensions.openhands);
 
@@ -542,6 +545,90 @@ fn resolve_openhands<E: Environment>(
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
         websocket,
     })
+}
+
+fn resolve_devin<E: Environment>(
+    devin: &DevinFrontMatter,
+    env: &E,
+) -> Result<DevinConfig, WorkflowConfigError> {
+    Ok(DevinConfig {
+        api: resolve_devin_api(&devin.api, env)?,
+    })
+}
+
+fn resolve_devin_api<E: Environment>(
+    api: &DevinApiFrontMatter,
+    env: &E,
+) -> Result<DevinApiConfig, WorkflowConfigError> {
+    let base_url = resolve_string_or_default(
+        api.base_url.as_deref(),
+        env,
+        "devin.api.base_url",
+        DEFAULT_DEVIN_API_BASE_URL,
+    )?;
+    validate_devin_base_url(&base_url)?;
+
+    let api_key_env = resolve_string_or_default(
+        api.api_key_env.as_deref(),
+        env,
+        "devin.api.api_key_env",
+        DEFAULT_DEVIN_API_KEY_ENV,
+    )?;
+    validate_env_name(&api_key_env, "devin.api.api_key_env")?;
+
+    Ok(DevinApiConfig {
+        base_url,
+        api_key_env,
+        event_poll_interval_ms: resolve_positive_u64(
+            api.event_poll_interval_ms.as_ref(),
+            "devin.api.event_poll_interval_ms",
+            DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS,
+        )?,
+        request_timeout_ms: resolve_positive_u64(
+            api.request_timeout_ms.as_ref(),
+            "devin.api.request_timeout_ms",
+            DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        )?,
+    })
+}
+
+/// Devin is a hosted remote harness, so its endpoint must be https and must not
+/// carry credentials, query strings, or fragments.
+fn validate_devin_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
+    let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
+        field: "devin.api.base_url",
+        message: format!("must be an absolute https URL: {error}"),
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must use the https scheme for remote Devin routing".to_owned(),
+        });
+    }
+
+    if parsed.host().is_none() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must include a host".to_owned(),
+        });
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must not embed credentials".to_owned(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must not include query or fragment suffixes".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn default_inactive_openhands_config() -> OpenHandsConfig {

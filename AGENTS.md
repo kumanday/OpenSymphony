@@ -156,8 +156,8 @@ The runtime client must:
 ### Keep harness capability discovery public
 
 - Public harness metadata belongs in `opensymphony-gateway-schema::capability::HarnessCapability` and the `/api/v1/capabilities` response.
-- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, and `rust_native`; do not expose private adapter type names to clients.
-- Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, or future in-process protocol details inside their adapter modules.
+- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, `devin_cloud_agent`, and `rust_native`; do not expose private adapter type names to clients.
+- Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, Devin, or future in-process protocol details inside their adapter modules.
 - Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
 - When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
 
@@ -169,6 +169,15 @@ and benchmark evidence documented in `docs/codex-app-server-harness.md`. The old
 capability must stay available in normal builds. Do not advertise hosted worker
 pools, remote routing, or loopback WebSocket as production-ready until those
 paths have their own hardening evidence.
+
+The remote Devin cloud harness uses the `opensymphony_devin` internal module
+boundary and is advertised as an unavailable HTTPS capability with explicit
+feature gaps. Devin owns its own remote execution workspace: never treat a local
+issue workspace path as Devin's working directory, and keep credentials as
+environment-variable references rather than values in workflow config,
+manifests, or logs. Do not flip `devin_cloud_agent` to available until hosted
+security (TLS, authenticated streams, secret injection, tenant isolation),
+remote workspace ownership, and event-normalization hardening evidence exist.
 
 ### Preserve forward compatibility
 

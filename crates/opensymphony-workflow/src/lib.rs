@@ -109,6 +109,8 @@ mod tests {
         PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
         WorkflowLoadError,
         model::{
+            DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV,
+            DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
             DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
@@ -2540,6 +2542,122 @@ openhands:
 
         assert_eq!(resolved.config.routing.harness, "codex_app_server");
         assert!(!resolved.extensions.openhands.local_server.enabled);
+    }
+
+    #[test]
+    fn devin_routing_resolves_defaults_and_overrides() {
+        let defaults = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = defaults
+            .resolve(Path::new("/repo"), &env)
+            .expect("devin routing should resolve");
+
+        assert_eq!(resolved.config.routing.harness, "devin_cloud_agent");
+        assert_eq!(
+            resolved.extensions.devin.api.base_url,
+            DEFAULT_DEVIN_API_BASE_URL
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.api_key_env,
+            DEFAULT_DEVIN_API_KEY_ENV
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.event_poll_interval_ms,
+            DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.request_timeout_ms,
+            DEFAULT_DEVIN_REQUEST_TIMEOUT_MS
+        );
+
+        let overridden = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    base_url: https://devin.internal.example.com/api
+    api_key_env: DEVIN_TENANT_API_KEY
+    event_poll_interval_ms: 500
+    request_timeout_ms: 15000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("devin overrides should resolve");
+
+        assert_eq!(
+            overridden.extensions.devin.api.base_url,
+            "https://devin.internal.example.com/api"
+        );
+        assert_eq!(
+            overridden.extensions.devin.api.api_key_env,
+            "DEVIN_TENANT_API_KEY"
+        );
+        assert_eq!(overridden.extensions.devin.api.event_poll_interval_ms, 500);
+        assert_eq!(overridden.extensions.devin.api.request_timeout_ms, 15_000);
+    }
+
+    #[test]
+    fn devin_endpoint_must_be_https_without_embedded_credentials() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        for base_url in [
+            "http://api.devin.ai/v1",
+            "https://user:secret@api.devin.ai/v1",
+            "https://api.devin.ai/v1?token=secret",
+            "not-a-url",
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    base_url: {base_url}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+
+            assert!(
+                workflow.resolve(Path::new("/repo"), &env).is_err(),
+                "`{base_url}` should be rejected as a devin endpoint"
+            );
+        }
     }
 
     #[test]

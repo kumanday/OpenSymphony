@@ -1346,6 +1346,17 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
     );
     assert!(
         caps_response
+            .harnesses
+            .iter()
+            .any(|harness| harness.kind == "devin_cloud_agent"
+                && !harness.available
+                && harness.transport.protocol == "https"
+                && harness.transport.remote
+                && !harness.transport.local
+                && !harness.feature_gaps.is_empty())
+    );
+    assert!(
+        caps_response
             .features
             .iter()
             .any(|feature| feature.feature == "model_settings" && feature.available)

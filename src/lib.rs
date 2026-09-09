@@ -6,6 +6,8 @@ pub mod opensymphony_code_intel;
 pub mod opensymphony_codex;
 #[path = "../crates/opensymphony-control/src/lib.rs"]
 pub mod opensymphony_control;
+#[path = "../crates/opensymphony-devin/src/lib.rs"]
+pub mod opensymphony_devin;
 #[path = "../crates/opensymphony-domain/src/lib.rs"]
 pub mod opensymphony_domain;
 #[path = "../crates/opensymphony-gateway/src/lib.rs"]

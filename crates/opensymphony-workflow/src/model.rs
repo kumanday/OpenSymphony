@@ -30,6 +30,10 @@ pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
 pub const DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE: &str = "api_key";
 pub const DEFAULT_ROUTING_HARNESS: &str = "openhands_agent_server";
+pub const DEFAULT_DEVIN_API_BASE_URL: &str = "https://api.devin.ai/v1";
+pub const DEFAULT_DEVIN_API_KEY_ENV: &str = "DEVIN_API_KEY";
+pub const DEFAULT_DEVIN_EVENT_POLL_INTERVAL_MS: u64 = 2_000;
+pub const DEFAULT_DEVIN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_ROUTING_HARNESS_ENV: &str = "OPENSYMPHONY_HARNESS";
 pub const DEFAULT_ROUTING_MODEL_ENV: &str = "OPENSYMPHONY_MODEL";
 pub const DEFAULT_ROUTING_MODEL_PROFILE_ENV: &str = "OPENSYMPHONY_MODEL_PROFILE";
@@ -58,6 +62,8 @@ pub struct WorkflowFrontMatter {
     pub agent: AgentFrontMatter,
     #[serde(default)]
     pub openhands: OpenHandsFrontMatter,
+    #[serde(default)]
+    pub devin: DevinFrontMatter,
     #[serde(default)]
     pub routing: RoutingFrontMatter,
     #[serde(default)]
@@ -125,6 +131,24 @@ pub struct RoutingFrontMatter {
     pub harness_env: Option<String>,
     pub model_env: Option<String>,
     pub model_profile_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DevinFrontMatter {
+    #[serde(default)]
+    pub api: DevinApiFrontMatter,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DevinApiFrontMatter {
+    pub base_url: Option<String>,
+    /// Environment variable holding the Devin API token. The token itself is
+    /// never stored in workflow configuration or run manifests.
+    pub api_key_env: Option<String>,
+    pub event_poll_interval_ms: Option<IntegerLike>,
+    pub request_timeout_ms: Option<IntegerLike>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -272,6 +296,20 @@ pub struct WorkflowConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowExtensions {
     pub openhands: OpenHandsConfig,
+    pub devin: DevinConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevinConfig {
+    pub api: DevinApiConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevinApiConfig {
+    pub base_url: String,
+    pub api_key_env: String,
+    pub event_poll_interval_ms: u64,
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
