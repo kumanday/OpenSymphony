@@ -753,7 +753,7 @@ ModelConfigurationProfile
 ├─ base_url
 ├─ model
 ├─ credential_ref
-└─ harnesses: openhands_agent_server | codex_app_server | other
+└─ harnesses: openhands_agent_server | codex_app_server | devin_cloud_agent | other
 ```
 
 The configuration profile records settings that are directly meaningful to the
@@ -788,6 +788,38 @@ model/credential reference reuse. Hosted worker pools, remote routing, and
 loopback WebSocket production routing remain future work. See
 `docs/codex-app-server-harness.md` for the current contract evidence and
 benchmark procedure.
+
+### 8.5 Devin cloud agent harness shape
+
+```text
+DevinCloudAdapter
+├─ transport: https rest, remote only
+├─ auth: api key read from a configured environment variable name
+├─ workspace: Devin-owned remote workspace, local checkout is evidence only
+├─ tenancy: one organization per client, verified by GET /v3/self
+├─ entities: session, message, attachment, secret reference, event
+├─ streams: cursor-paginated message pages plus session status polling
+├─ actions: create session, send message, terminate/archive, list attachments
+└─ normalization: Devin event to OpenSymphony event envelope, unknown events
+   retained as raw JSON
+```
+
+Unlike the local harnesses, OpenSymphony never owns Devin's execution
+directory. `DevinRemoteWorkspaceBinding` maps an issue workspace key and
+repository URL onto the remote workspace while the local issue workspace stays
+evidence-only, so the workspace manager's local-checkout invariants are not
+applied to remote runs. The scheduler still materializes that issue workspace:
+run manifests, journals, and the evidence imported from the remote session live
+there, under `.opensymphony/devin/<run-id>`.
+
+The capability is advertised as available against `devin-api-v3`. Its hosted
+posture is organization-bound credentials, secret injection by Devin secret id,
+HTTPS-only transport with TLS 1.2+ and redirects disabled, origin- and
+size-bounded attachment import, and explicit remote-session termination on every
+abandoned path. Cursor polling instead of a push stream, cancellation instead of
+a mid-run interrupt, no pause/resume or approvals, fixed per-session model
+selection, and the absence of certificate pinning remain advertised feature
+gaps. See `docs/harness-adapter-compatibility.md` for the live evidence.
 
 ## 9. Hosted mode architecture
 

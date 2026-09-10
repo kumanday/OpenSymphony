@@ -9,19 +9,22 @@ use url::{Host, Url};
 use super::{
     error::WorkflowConfigError,
     model::{
-        AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
-        DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS,
-        DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE,
-        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
-        DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
-        DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE, DEFAULT_OPENHANDS_LLM_MODEL,
-        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
-        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS, DEFAULT_ROUTING_HARNESS_ENV,
-        DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        AgentConfig, AgentFrontMatter, DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV,
+        DEFAULT_DEVIN_ORG_ID_ENV, DEFAULT_DEVIN_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
+        DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND,
+        DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
+        DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE,
+        DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_OPENHANDS_MAX_ITERATIONS,
+        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS,
+        DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+        DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, DEVIN_MAX_SESSION_TAGS, DevinApiConfig,
+        DevinApiFrontMatter, DevinConfig, DevinFrontMatter, DevinSessionConfig,
+        DevinSessionFrontMatter, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
         OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY, OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION,
         OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
@@ -56,6 +59,11 @@ pub(crate) fn resolve_workflow<E: Environment>(
             resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?
         } else {
             default_inactive_openhands_config()
+        },
+        devin: if config.routing.harness == HarnessKind::DevinCloudAgent.as_str() {
+            resolve_devin(&workflow.front_matter.devin, env)?
+        } else {
+            default_inactive_devin_config()
         },
     };
     apply_selected_model_to_openhands(&config.routing, &mut extensions.openhands);
@@ -542,6 +550,191 @@ fn resolve_openhands<E: Environment>(
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
         websocket,
     })
+}
+
+fn resolve_devin<E: Environment>(
+    devin: &DevinFrontMatter,
+    env: &E,
+) -> Result<DevinConfig, WorkflowConfigError> {
+    Ok(DevinConfig {
+        api: resolve_devin_api(&devin.api, env)?,
+        session: resolve_devin_session(&devin.session)?,
+    })
+}
+
+fn resolve_devin_api<E: Environment>(
+    api: &DevinApiFrontMatter,
+    env: &E,
+) -> Result<DevinApiConfig, WorkflowConfigError> {
+    let base_url = resolve_string_or_default(
+        api.base_url.as_deref(),
+        env,
+        "devin.api.base_url",
+        DEFAULT_DEVIN_API_BASE_URL,
+    )?;
+    validate_devin_base_url(&base_url)?;
+
+    // The credential reference is a literal variable name: resolving it through
+    // env indirection would store the token itself in resolved configuration.
+    let api_key_env = normalize_optional_literal(&api.api_key_env)
+        .unwrap_or_else(|| DEFAULT_DEVIN_API_KEY_ENV.to_owned());
+    validate_env_name(&api_key_env, "devin.api.api_key_env")?;
+
+    // The organization identifier is not a credential, so env indirection is
+    // allowed here; an unset value is read from `org_id_env` at request time
+    // and otherwise resolved from `GET /v3/self`.
+    let org_id = match api.org_id.as_deref().and_then(normalize_optional) {
+        Some(value) => Some(resolve_string(&value, env, "devin.api.org_id")?),
+        None => None,
+    };
+    if let Some(org_id) = org_id.as_deref()
+        && !is_devin_org_id(org_id)
+    {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.org_id",
+            message: "must be a devin organization id such as `org-abc123`".to_owned(),
+        });
+    }
+
+    let org_id_env = normalize_optional_literal(&api.org_id_env)
+        .unwrap_or_else(|| DEFAULT_DEVIN_ORG_ID_ENV.to_owned());
+    validate_env_name(&org_id_env, "devin.api.org_id_env")?;
+
+    Ok(DevinApiConfig {
+        base_url,
+        api_key_env,
+        org_id,
+        org_id_env,
+        poll_interval_ms: resolve_positive_u64(
+            api.poll_interval_ms.as_ref(),
+            "devin.api.poll_interval_ms",
+            DEFAULT_DEVIN_POLL_INTERVAL_MS,
+        )?,
+        request_timeout_ms: resolve_positive_u64(
+            api.request_timeout_ms.as_ref(),
+            "devin.api.request_timeout_ms",
+            DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        )?,
+    })
+}
+
+/// Devin is a hosted remote harness, so its endpoint must be https and must not
+/// carry credentials, query strings, or fragments.
+fn validate_devin_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
+    let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
+        field: "devin.api.base_url",
+        message: format!("must be an absolute https URL: {error}"),
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must use the https scheme for remote Devin routing".to_owned(),
+        });
+    }
+
+    if parsed.host().is_none() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must include a host".to_owned(),
+        });
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must not embed credentials".to_owned(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.api.base_url",
+            message: "must not include query or fragment suffixes".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_devin_org_id(value: &str) -> bool {
+    value.len() > "org-".len()
+        && value.starts_with("org-")
+        && value
+            .chars()
+            .all(|character| character == '-' || character.is_ascii_alphanumeric())
+}
+
+/// Session options map onto documented `SessionCreateRequest` fields. They are
+/// plain identifiers and flags: no credential values are accepted here.
+fn resolve_devin_session(
+    session: &DevinSessionFrontMatter,
+) -> Result<DevinSessionConfig, WorkflowConfigError> {
+    let max_acu_limit = match session.max_acu_limit.as_ref() {
+        Some(value) => {
+            let parsed = resolve_positive_u64(Some(value), "devin.session.max_acu_limit", 0)?;
+            Some(
+                u32::try_from(parsed).map_err(|_| WorkflowConfigError::InvalidField {
+                    field: "devin.session.max_acu_limit",
+                    message: "must fit in a 32-bit unsigned integer".to_owned(),
+                })?,
+            )
+        }
+        None => None,
+    };
+
+    let tags = session.tags.clone().unwrap_or_default();
+    if tags.len() > DEVIN_MAX_SESSION_TAGS {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.session.tags",
+            message: format!("devin accepts at most {DEVIN_MAX_SESSION_TAGS} session tags"),
+        });
+    }
+    if tags.iter().any(|tag| tag.trim().is_empty()) {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.session.tags",
+            message: "must not contain blank tags".to_owned(),
+        });
+    }
+
+    let devin_mode = normalize_optional_literal(&session.devin_mode);
+    if let Some(mode) = devin_mode.as_deref()
+        && !matches!(mode, "normal" | "fast" | "lite" | "ultra" | "fusion")
+    {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "devin.session.devin_mode",
+            message: "must be one of `normal`, `fast`, `lite`, `ultra`, or `fusion`".to_owned(),
+        });
+    }
+
+    Ok(DevinSessionConfig {
+        playbook_id: normalize_optional_literal(&session.playbook_id),
+        knowledge_ids: session.knowledge_ids.clone(),
+        secret_ids: session.secret_ids.clone(),
+        max_acu_limit,
+        tags,
+        title: normalize_optional_literal(&session.title),
+        devin_mode,
+        platform: normalize_optional_literal(&session.platform),
+        resumable: session.resumable.unwrap_or(true),
+    })
+}
+
+/// Devin settings are only resolved for Devin-routed workflows, so an unset
+/// substitution or parked endpoint in `devin.api` cannot reject an OpenHands or
+/// Codex workflow.
+fn default_inactive_devin_config() -> DevinConfig {
+    DevinConfig {
+        api: DevinApiConfig {
+            base_url: DEFAULT_DEVIN_API_BASE_URL.to_owned(),
+            api_key_env: DEFAULT_DEVIN_API_KEY_ENV.to_owned(),
+            org_id: None,
+            org_id_env: DEFAULT_DEVIN_ORG_ID_ENV.to_owned(),
+            poll_interval_ms: DEFAULT_DEVIN_POLL_INTERVAL_MS,
+            request_timeout_ms: DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
+        },
+        session: DevinSessionConfig::default(),
+    }
 }
 
 fn default_inactive_openhands_config() -> OpenHandsConfig {

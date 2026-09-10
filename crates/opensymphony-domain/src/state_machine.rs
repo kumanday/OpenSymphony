@@ -688,6 +688,12 @@ impl IssueExecution {
         super::IssueSnapshot::from(self)
     }
 
+    /// Restores a worker outcome persisted by a previous process so recovery
+    /// applies the same non-retrying rules the in-process path applies.
+    pub fn restore_worker_outcome(&mut self, outcome: WorkerOutcomeRecord) {
+        self.record_outcome(outcome);
+    }
+
     fn record_outcome(&mut self, outcome: WorkerOutcomeRecord) {
         if outcome.outcome == super::WorkerOutcomeKind::CancelFailed
             && let Some(interrupt) = &mut self.interrupt

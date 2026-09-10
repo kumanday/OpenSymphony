@@ -19,6 +19,13 @@ use crate::opensymphony_codex::{
     codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
     turn_status,
 };
+use crate::opensymphony_devin::{
+    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_EVIDENCE_DIR_NAME, DevinClientError,
+    DevinCloudClient, DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinMode,
+    DevinRemoteWorkspaceBinding, DevinRunOptions, DevinRunOutcome, DevinRunReport,
+    DevinSessionOptions, DevinSessionRunner, devin_event_payload, devin_event_summary,
+    session_create_request, session_created_event, status_event,
+};
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
     IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
@@ -85,6 +92,8 @@ pub(super) enum CliWorkspaceError {
     OpenHandsLifecycle(String),
     #[error("conversation lifecycle recovery failed: {0}")]
     ConversationLifecycle(String),
+    #[error("Devin lifecycle recovery failed: {0}")]
+    DevinLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
 }
@@ -153,6 +162,9 @@ pub(super) struct RuntimeWorkspaceBackend {
     codex_bin: String,
     retain_failed: bool,
     retry_state_root: PathBuf,
+    /// Needed to reach a detached Devin session at terminal cleanup, when no
+    /// worker task or registry entry is left to interrupt.
+    devin_config: DevinCloudConfig,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -168,6 +180,7 @@ pub(super) struct RuntimeWorkerBackend {
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     codex_interrupts: CodexInterruptRegistry,
+    devin_sessions: DevinSessionRegistry,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
@@ -178,6 +191,9 @@ pub(super) struct RuntimeWorkerBackend {
 type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
 type CodexInterruptRegistry = Arc<Mutex<HashMap<String, Arc<AsyncMutex<CodexInterruptChannel>>>>>;
 type CodexInterruptResponseRegistry = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>>;
+/// Live Devin sessions keyed by session id, so a scheduler interrupt can stop
+/// the remote session that a worker task is currently polling.
+type DevinSessionRegistry = Arc<Mutex<HashMap<String, DevinCloudClient>>>;
 
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
@@ -965,6 +981,7 @@ impl RuntimeWorkspaceBackend {
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             retain_failed,
             retry_state_root,
+            devin_config: devin_cloud_config(workflow),
         }
     }
 
@@ -1024,6 +1041,44 @@ impl RuntimeWorkspaceBackend {
                 .await?
             {
                 match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+                    Ok(manifest) if conversation_manifest_is_devin(&manifest) => {
+                        // A detached Devin run has no current run to interrupt,
+                        // so this manifest is the only remaining reference to a
+                        // session that is still billing. Terminate it before
+                        // the binding is deleted, and keep the workspace for a
+                        // later retry when termination fails.
+                        if let Err(error) = terminate_devin_session_for_cleanup(
+                            &self.devin_config,
+                            manifest.conversation_id.as_str(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                issue = %handle.identifier(),
+                                session_id = %manifest.conversation_id,
+                                %error,
+                                "preserving terminal Devin workspace until its remote session is terminated"
+                            );
+                            return Err(CliWorkspaceError::DevinLifecycle(error));
+                        }
+                        tracing::info!(
+                            issue = %handle.identifier(),
+                            session_id = %manifest.conversation_id,
+                            "terminated the remote Devin session before removing its local binding"
+                        );
+                        // This workspace never held a checkout, so the
+                        // repository-specific `before_remove` hook has nothing
+                        // to operate on here.
+                        self.manager
+                            .cleanup_evidence_only(
+                                &handle,
+                                IssueLifecycleState::Terminal,
+                                force_remove,
+                            )
+                            .await?;
+                        self.terminal_cleanup_paths.insert(workspace.path.clone());
+                        return Ok(());
+                    }
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
                         let envelope_compatible = if handle.checkout_generation().is_some() {
                             self.manager
@@ -1225,6 +1280,30 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         })
     }
 
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        _observed_at: TimestampMs,
+    ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
+        let ensured = self
+            .manager
+            .ensure_evidence_only(&issue_descriptor(issue))
+            .await?;
+        self.terminal_cleanup_paths
+            .remove(ensured.handle.workspace_path());
+        Ok(crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
+            created_now: ensured.created,
+            created_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.created_at)),
+            updated_at: Some(datetime_to_timestamp_ms(ensured.issue_manifest.updated_at)),
+            last_seen_tracker_refresh_at: ensured
+                .issue_manifest
+                .last_seen_tracker_refresh_at
+                .map(datetime_to_timestamp_ms),
+        })
+    }
+
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         let mut recoveries = Vec::new();
         for (handle, manifest) in self.manager.list_all_workspaces().await? {
@@ -1309,6 +1388,9 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     .as_ref()
                     .and_then(|run| run.interrupt_reason.as_deref())
                     .and_then(interrupt_reason_from_manifest),
+                terminal_worker_outcome: run_manifest
+                    .as_ref()
+                    .and_then(|run| run.terminal_worker_outcome),
                 recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
         }
@@ -2085,6 +2167,7 @@ impl RuntimeWorkerBackend {
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
+            devin_sessions: Arc::new(Mutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -2184,16 +2267,208 @@ impl RuntimeWorkerBackend {
         let recovered = recovered
             && matches!(
                 route.harness_kind.as_str(),
-                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND
+                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND | DEVIN_CLOUD_AGENT_KIND
             );
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let codex_interrupts = Arc::clone(&self.codex_interrupts);
+        let devin_sessions = Arc::clone(&self.devin_sessions);
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
             let run_id = format!("run-{launch_worker_id}");
+            if route.harness_kind == DEVIN_CLOUD_AGENT_KIND {
+                // Devin executes in a Devin-owned cloud workspace, so this route
+                // never prepares a local execution cwd: `ensure_with_run_id` and
+                // checkout verification below are for local harnesses only. The
+                // scheduler-bound workspace is used purely to store manifests,
+                // journals, and evidence imported from the remote session.
+                let ensured = match workspace_manager
+                    .ensure_evidence_only(&issue_descriptor(&issue))
+                    .await
+                {
+                    Ok(ensured) => ensured,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to ensure devin evidence workspace: {error}"),
+                        );
+                        return;
+                    }
+                };
+                if let Err(detail) =
+                    assert_scheduler_bound_workspace(&run, ensured.handle.workspace_path()).await
+                {
+                    report_launch_failure(&mut launch_tx, detail);
+                    return;
+                }
+                // A restarted worker must reattach to the session its previous
+                // process created; creating a second one would leave the first
+                // running and billing with nothing tracking it.
+                let reattach_session_id = if recovered {
+                    match devin_session_binding(&workspace_manager, &ensured.handle).await {
+                        Ok(session_id) => session_id,
+                        Err(error) => {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!("failed to read devin session binding: {error}"),
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
+                // The run manifest has to exist before the scheduler is told a
+                // worker launched: cancellation persists interrupt intent into
+                // it, and restart recovery reads it to find the live session.
+                // Hooks are skipped because they operate on a checkout this
+                // route never materializes.
+                let mut run_manifest = match workspace_manager
+                    .start_evidence_run(
+                        &ensured.handle,
+                        &RunDescriptor::new(&run_id, attempt)
+                            .with_normal_retry_count(run.normal_retry_count)
+                            .with_repository_binding(run.repository_binding.clone()),
+                    )
+                    .await
+                {
+                    Ok(run_manifest) => run_manifest,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to prepare devin workspace run: {error}"),
+                        );
+                        return;
+                    }
+                };
+                // A routing preview must never reach Devin: a created session
+                // executes and bills immediately, with no dry-run mode of its
+                // own.
+                if route.dry_run {
+                    if let Some(sender) = launch_tx.take() {
+                        let _ = sender.send(LaunchReport::Conversation(Box::new(
+                            dry_run_conversation_metadata(&run, &route),
+                        )));
+                    }
+                    run_manifest.status_detail = Some(route.summary());
+                    let finish_error = workspace_manager
+                        .finish_evidence_run(
+                            &ensured.handle,
+                            &mut run_manifest,
+                            RunStatus::Succeeded,
+                        )
+                        .await
+                        .err();
+                    let outcome = WorkerOutcomeRecord::from_run(
+                        &run,
+                        if finish_error.is_some() {
+                            WorkerOutcomeKind::Failed
+                        } else {
+                            WorkerOutcomeKind::Succeeded
+                        },
+                        now_timestamp(),
+                        Some(match &finish_error {
+                            Some(_) => "routing dry-run workspace finalization failed".into(),
+                            None => route.summary(),
+                        }),
+                        finish_error.map(|error| error.to_string()),
+                    );
+                    let _ = updates_tx.send(WorkerUpdate::Finished {
+                        worker_id: finished_worker_id.clone(),
+                        outcome,
+                    });
+                    return;
+                }
+                let result = run_devin_cloud_route(DevinRouteContext {
+                    workflow: &workflow,
+                    issue: &issue,
+                    run: &run,
+                    route: &route,
+                    run_id: &run_id,
+                    workspace_manager: &workspace_manager,
+                    workspace: &ensured.handle,
+                    run_manifest: &mut run_manifest,
+                    updates_tx: &updates_tx,
+                    devin_sessions: &devin_sessions,
+                    worker_id: &finished_worker_id,
+                    launch_tx: &mut launch_tx,
+                    reattach_session_id,
+                })
+                .await;
+                let (outcome, run_status) = match result {
+                    Ok(settlement) => {
+                        let run_status = settlement.run_status;
+                        (
+                            WorkerOutcomeRecord::from_run(
+                                &run,
+                                settlement.outcome,
+                                now_timestamp(),
+                                Some(settlement.summary),
+                                settlement.error,
+                            ),
+                            run_status,
+                        )
+                    }
+                    Err(detail) => {
+                        report_launch_failure(&mut launch_tx, detail.clone());
+                        (
+                            WorkerOutcomeRecord::from_run(
+                                &run,
+                                WorkerOutcomeKind::Failed,
+                                now_timestamp(),
+                                Some("devin cloud run failed".to_owned()),
+                                Some(detail),
+                            ),
+                            RunStatus::Failed,
+                        )
+                    }
+                };
+                let non_retrying = non_retrying_devin_outcome(outcome.outcome);
+                let outcome = match finish_devin_workspace_run(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    run_status,
+                    non_retrying,
+                )
+                .await
+                {
+                    Ok(()) => outcome,
+                    // A local write failure says nothing about the remote
+                    // session. Downgrading a non-retrying outcome here would
+                    // authorize a replacement session while the original one
+                    // is still alive.
+                    Err(error) if non_retrying.is_some() => WorkerOutcomeRecord::from_run(
+                        &run,
+                        outcome.outcome,
+                        now_timestamp(),
+                        outcome.summary.clone(),
+                        Some(match outcome.error.as_deref() {
+                            Some(previous) => {
+                                format!("{previous}; devin workspace finalization failed: {error}")
+                            }
+                            None => format!("devin workspace finalization failed: {error}"),
+                        }),
+                    ),
+                    Err(error) => WorkerOutcomeRecord::from_run(
+                        &run,
+                        WorkerOutcomeKind::Failed,
+                        now_timestamp(),
+                        Some("devin workspace finalization failed".to_owned()),
+                        Some(format!(
+                            "failed to finish devin workspace run as {run_status}: {error}"
+                        )),
+                    ),
+                };
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
             let mut workspace_issue = issue_descriptor(&issue);
             if recovered && let Some(binding) = run.repository_binding.clone() {
                 workspace_issue.repository_binding =
@@ -5496,6 +5771,728 @@ fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
         })
 }
 
+/// Devin client configuration resolved from workflow front matter.
+///
+/// Only the credential *reference* travels through configuration; the value is
+/// read from the worker environment by the Devin client itself.
+fn devin_cloud_config(workflow: &ResolvedWorkflow) -> DevinCloudConfig {
+    let api = &workflow.extensions.devin.api;
+    let session = &workflow.extensions.devin.session;
+    DevinCloudConfig {
+        base_url: api.base_url.clone(),
+        api_key_env: api.api_key_env.clone(),
+        org_id: api.org_id.clone(),
+        org_id_env: api.org_id_env.clone(),
+        poll_interval: Duration::from_millis(api.poll_interval_ms),
+        request_timeout: Duration::from_millis(api.request_timeout_ms),
+        session: DevinSessionOptions {
+            playbook_id: session.playbook_id.clone(),
+            knowledge_ids: session.knowledge_ids.clone(),
+            secret_ids: session.secret_ids.clone(),
+            max_acu_limit: session.max_acu_limit,
+            tags: session.tags.clone(),
+            title: session.title.clone(),
+            devin_mode: session.devin_mode.as_deref().and_then(DevinMode::parse),
+            platform: session.platform.clone(),
+            resumable: session.resumable,
+        },
+    }
+}
+
+/// Everything the Devin route needs from the worker task.
+struct DevinRouteContext<'context> {
+    workflow: &'context ResolvedWorkflow,
+    issue: &'context NormalizedIssue,
+    run: &'context crate::opensymphony_domain::RunAttempt,
+    route: &'context crate::opensymphony_orchestrator::HarnessRouteDecision,
+    run_id: &'context str,
+    workspace_manager: &'context WorkspaceManager,
+    workspace: &'context WorkspaceHandle,
+    run_manifest: &'context mut RunManifest,
+    updates_tx: &'context mpsc::UnboundedSender<WorkerUpdate>,
+    devin_sessions: &'context DevinSessionRegistry,
+    worker_id: &'context crate::opensymphony_domain::WorkerId,
+    launch_tx: &'context mut Option<oneshot::Sender<LaunchReport>>,
+    /// Set when a restarted worker inherited a live session binding; the route
+    /// then follows that session instead of creating a replacement.
+    reattach_session_id: Option<String>,
+}
+
+/// How a Devin session settled, in scheduler terms.
+struct DevinSettlement {
+    outcome: WorkerOutcomeKind,
+    summary: String,
+    error: Option<String>,
+    run_status: RunStatus,
+}
+
+/// Confirms the worker's workspace is the one the scheduler bound to this run.
+async fn assert_scheduler_bound_workspace(
+    run: &crate::opensymphony_domain::RunAttempt,
+    ensured_path: &Path,
+) -> Result<(), String> {
+    let scheduler_workspace_path = fs::canonicalize(&run.workspace_path)
+        .await
+        .map_err(|error| format!("failed to resolve scheduler-bound workspace: {error}"))?;
+    let ensured_workspace_path = fs::canonicalize(ensured_path)
+        .await
+        .map_err(|error| format!("failed to resolve ensured workspace: {error}"))?;
+    if ensured_workspace_path != scheduler_workspace_path {
+        return Err(format!(
+            "workspace generation changed during worker launch: scheduler bound {}, ensured {}",
+            run.workspace_path.display(),
+            ensured_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn finish_devin_workspace_run(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    status: RunStatus,
+    terminal_worker_outcome: Option<WorkerOutcomeKind>,
+) -> Result<(), WorkspaceError> {
+    run_manifest.status = status;
+    run_manifest.status_detail = Some(format!("Devin cloud route ended with {status}"));
+    // `Paused` and `Failed` are ambiguous across a restart, so the outcome that
+    // forbids a replacement run is persisted alongside them.
+    run_manifest.terminal_worker_outcome = terminal_worker_outcome;
+    workspace_manager
+        .finish_evidence_run(workspace, run_manifest, status)
+        .await
+}
+
+/// The Devin outcomes that must never be retried automatically because the
+/// remote session is either still alive or of unconfirmed state.
+fn non_retrying_devin_outcome(outcome: WorkerOutcomeKind) -> Option<WorkerOutcomeKind> {
+    matches!(
+        outcome,
+        WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
+    )
+    .then_some(outcome)
+}
+
+/// Terminates and archives a Devin session that only its durable binding still
+/// points at, rebuilding a tenant-bound client because no worker task is left.
+async fn terminate_devin_session_for_cleanup(
+    config: &DevinCloudConfig,
+    session_id: &str,
+) -> Result<(), String> {
+    let client = DevinCloudClient::from_environment(config, |name| ProcessEnvironment.get(name))
+        .map_err(|error| {
+            format!("no devin client could be built for session `{session_id}`: {error}")
+        })?
+        .bind_tenant()
+        .await
+        .map_err(|error| {
+            format!("devin tenant binding failed while stopping `{session_id}`: {error}")
+        })?;
+    match client.delete_session(session_id, true).await {
+        Ok(()) => Ok(()),
+        // An already-deleted session is the state cleanup wants; retaining the
+        // workspace forever over it would leak local state instead.
+        Err(DevinClientError::Status { status: 404, .. }) => Ok(()),
+        Err(error) => Err(format!(
+            "devin session `{session_id}` could not be terminated: {error}"
+        )),
+    }
+}
+
+fn conversation_manifest_is_devin(manifest: &IssueConversationManifest) -> bool {
+    manifest.transport_target.as_deref() == Some(DEVIN_CLOUD_AGENT_KIND)
+}
+
+/// Reads the durable Devin session binding for a workspace, if it has one.
+async fn devin_session_binding(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+) -> Result<Option<String>, WorkspaceError> {
+    let Some(raw) = workspace_manager
+        .read_text_artifact(workspace, &workspace.conversation_manifest_path())
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Ok(manifest) = serde_json::from_str::<IssueConversationManifest>(&raw) else {
+        return Ok(None);
+    };
+    Ok(conversation_manifest_is_devin(&manifest).then(|| manifest.conversation_id.to_string()))
+}
+
+/// Persists the remote session binding so cancellation and restart recovery can
+/// find the live Devin session without the worker task.
+async fn write_devin_conversation_manifest(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+    session_id: &str,
+    base_url: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    run_manifest: &mut RunManifest,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let conversation_id = ConversationId::new(session_id.to_owned())
+        .map_err(|error| format!("invalid devin session id for conversation manifest: {error}"))?;
+    let manifest = IssueConversationManifest {
+        issue_id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        conversation_id,
+        reuse_policy: "per_run".to_string(),
+        server_base_url: Some(base_url.to_owned()),
+        transport_target: Some(DEVIN_CLOUD_AGENT_KIND.to_string()),
+        http_auth_mode: Some("bearer".to_string()),
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        persistence_dir: workspace.metadata_dir(),
+        created_at: now,
+        updated_at: now,
+        last_attached_at: now,
+        launch_profile: None,
+        llm_config_fingerprint: None,
+        fresh_conversation: true,
+        workflow_prompt_seeded: true,
+        reset_reason: None,
+        runtime_contract_version: Some(DEVIN_CLOUD_API_CONTRACT.to_string()),
+        runtime_envelope: None,
+        codex_archive_state: None,
+        last_turn_id: None,
+        active_run_id: Some(run_manifest.run_id.clone()),
+        prepared_run_id: None,
+        trigger_pending_run_id: None,
+        last_prompt_kind: None,
+        last_prompt_at: Some(now),
+        last_prompt_path: None,
+        last_execution_status: None,
+        last_event_id: None,
+        last_event_kind: Some("devin.session_created".into()),
+        last_event_at: Some(now),
+        last_event_summary: Some(route.summary()),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        last_token_accumulation_at: None,
+    };
+    workspace_manager
+        .write_json_artifact_atomically(
+            workspace,
+            &pending_conversation_manifest_path(workspace),
+            &Some(&manifest),
+        )
+        .await
+        .map_err(|error| format!("failed to persist devin session binding: {error}"))?;
+    workspace_manager
+        .write_json_artifact(
+            workspace,
+            &workspace.conversation_manifest_path(),
+            &manifest,
+        )
+        .await
+        .map_err(|error| format!("failed to persist devin session binding: {error}"))?;
+    run_manifest.status = RunStatus::Running;
+    run_manifest.status_detail = Some(format!("devin session {session_id} is running"));
+    workspace_manager
+        .write_run_manifest(workspace, run_manifest)
+        .await
+        .map_err(|error| format!("failed to persist devin run state: {error}"))?;
+    Ok(())
+}
+
+/// Stops the remote session if the worker task is dropped mid-run.
+///
+/// Scheduler aborts drop the worker future, which for a local harness kills the
+/// child process. Devin's session lives in Devin's cloud, so it has to be
+/// stopped explicitly or it would keep burning ACUs unattended.
+struct DevinSessionGuard {
+    client: Option<DevinCloudClient>,
+    session_id: String,
+    registry: DevinSessionRegistry,
+}
+
+impl DevinSessionGuard {
+    fn new(client: DevinCloudClient, session_id: String, registry: DevinSessionRegistry) -> Self {
+        if let Ok(mut sessions) = registry.lock() {
+            sessions.insert(session_id.clone(), client.clone());
+        }
+        Self {
+            client: Some(client),
+            session_id,
+            registry,
+        }
+    }
+
+    /// The session settled on its own; nothing left to stop.
+    fn disarm(&mut self) {
+        self.client = None;
+    }
+}
+
+impl Drop for DevinSessionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = self.registry.lock() {
+            sessions.remove(&self.session_id);
+        }
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        let session_id = self.session_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = client.delete_session(&session_id, true).await {
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "failed to stop devin session after worker abort"
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Runs one issue on Devin: bind tenancy, create the remote session, stream
+/// normalized events to the orchestrator, then import evidence locally.
+async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSettlement, String> {
+    let DevinRouteContext {
+        workflow,
+        issue,
+        run,
+        route,
+        run_id,
+        workspace_manager,
+        workspace,
+        run_manifest,
+        updates_tx,
+        devin_sessions,
+        worker_id,
+        launch_tx,
+        reattach_session_id,
+    } = context;
+
+    let config = devin_cloud_config(workflow);
+    let binding = devin_remote_binding(issue, run, run_id, workspace_manager)?;
+    let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
+    let task_prompt = devin_task_prompt(workflow, issue, attempt, route)?;
+
+    let client = DevinCloudClient::from_environment(&config, |name| ProcessEnvironment.get(name))
+        .map_err(|error| format!("devin client configuration failed: {error}"))?;
+    // No session traffic before the credential's organization is verified.
+    let client = client
+        .bind_tenant()
+        .await
+        .map_err(|error| format!("devin tenant binding failed: {error}"))?;
+
+    let (created, reattached) = match reattach_session_id {
+        // A restart inherited a live session: follow it. Creating a second
+        // session would orphan the first one, which keeps running and billing.
+        Some(session_id) => match client.get_session(&session_id).await {
+            Ok(session) => (session, true),
+            Err(error) => {
+                return Ok(devin_reattach_failure(
+                    launch_tx,
+                    &session_id,
+                    &config.base_url,
+                    route,
+                    &error.to_string(),
+                ));
+            }
+        },
+        None => {
+            let mut session_options = config.session.clone();
+            if let Some(references) = session_options.secret_ids.as_ref() {
+                let resolved = client
+                    .resolve_secret_ids(references)
+                    .await
+                    .map_err(|error| format!("devin secret resolution failed: {error}"))?;
+                session_options.secret_ids = Some(resolved);
+            }
+
+            let request = session_create_request(&task_prompt, &binding, &session_options);
+            let created = client
+                .create_session(&request)
+                .await
+                .map_err(|error| format!("devin session creation failed: {error}"))?;
+            (created, false)
+        }
+    };
+    let mut guard = DevinSessionGuard::new(
+        client.clone(),
+        created.session_id.clone(),
+        Arc::clone(devin_sessions),
+    );
+    // The session binding and run state must be durable before the scheduler
+    // hears about the launch: cancellation and restart recovery reach the live
+    // session only through these records, and a failure here leaves the guard
+    // armed so the remote session is terminated rather than orphaned.
+    write_devin_conversation_manifest(
+        workspace_manager,
+        workspace,
+        issue,
+        &created.session_id,
+        &config.base_url,
+        route,
+        run_manifest,
+    )
+    .await?;
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            devin_conversation_metadata(&created.session_id, &config.base_url, route),
+        )));
+    }
+
+    let mut collector = DevinEvidenceCollector::new(
+        binding.local_evidence_path.clone(),
+        DevinEvidenceLimits::default(),
+    );
+    let created_event = if reattached {
+        status_event(&created)
+    } else {
+        session_created_event(&created)
+    };
+    collector.record(&created_event);
+    publish_devin_event(updates_tx, worker_id, &created_event);
+
+    let runner = DevinSessionRunner::new(
+        client.clone(),
+        DevinRunOptions {
+            stop_when_waiting_on_operator: true,
+            max_duration: None,
+            collect_attachments: true,
+            message_page_size: 100,
+        },
+    );
+    let report = runner
+        .follow(&created.session_id, |event| {
+            collector.record(&event);
+            publish_devin_event(updates_tx, worker_id, &event);
+        })
+        .await;
+    let report = match report {
+        Ok(report) => {
+            guard.disarm();
+            report
+        }
+        Err(error) => {
+            // Polling gave up (timeout, transport failure) while the remote
+            // session is still live, so it has to be stopped explicitly rather
+            // than left burning ACUs in Devin's cloud.
+            match client.delete_session(&created.session_id, true).await {
+                Ok(()) => {
+                    guard.disarm();
+                    return Err(format!(
+                        "devin session polling failed: {error} (remote session terminated)"
+                    ));
+                }
+                Err(stop_error) => {
+                    // Ownership stays with this run: the session may still be
+                    // executing and billing, so the guard keeps retrying
+                    // termination on drop and the outcome must not authorize a
+                    // replacement session.
+                    tracing::warn!(
+                        session_id = %created.session_id,
+                        error = %stop_error,
+                        "failed to stop devin session after polling failure"
+                    );
+                    return Ok(DevinSettlement {
+                        outcome: WorkerOutcomeKind::CancelFailed,
+                        summary: format!(
+                            "Devin session {} could not be terminated after a polling failure",
+                            created.session_id
+                        ),
+                        error: Some(format!(
+                            "devin session polling failed: {error} (remote session termination failed: {stop_error}; session {} may still be running at {})",
+                            created.session_id, created.url
+                        )),
+                        run_status: RunStatus::Failed,
+                    });
+                }
+            }
+        }
+    };
+
+    if matches!(report.outcome, DevinRunOutcome::Suspended) {
+        // A suspended session still exists remotely; stop it before the
+        // scheduler is allowed to start a replacement, and before evidence
+        // import gets the chance to fail with the session still alive.
+        if let Err(stop_error) = client.delete_session(&created.session_id, true).await {
+            return Ok(DevinSettlement {
+                outcome: WorkerOutcomeKind::CancelFailed,
+                summary: format!(
+                    "Devin session {} was suspended and could not be terminated",
+                    created.session_id
+                ),
+                error: Some(format!(
+                    "remote session termination failed: {stop_error}; session {} may still be running at {}",
+                    created.session_id, created.url
+                )),
+                run_status: RunStatus::Failed,
+            });
+        }
+    }
+
+    let manifest = match collector.persist(&client, &report).await {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let settlement = devin_settlement(&report);
+            // Losing local evidence must not turn a session that is still
+            // alive into a retryable failure: the operator's answer belongs to
+            // the session the conversation manifest still points at.
+            if non_retrying_devin_outcome(settlement.outcome).is_some() {
+                return Ok(DevinSettlement {
+                    error: Some(match settlement.error {
+                        Some(previous) => {
+                            format!("{previous}; devin evidence import failed: {error}")
+                        }
+                        None => format!("devin evidence import failed: {error}"),
+                    }),
+                    ..settlement
+                });
+            }
+            return Err(format!("devin evidence import failed: {error}"));
+        }
+    };
+    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+        worker_id: worker_id.clone(),
+        observed_at: now_timestamp(),
+        event_id: Some(format!("{}::evidence", report.session_id)),
+        event_kind: Some("devin.evidence_imported".to_owned()),
+        summary: Some(format!(
+            "Imported Devin evidence for {} ({} events, {} attachments)",
+            report.session_id,
+            manifest.event_count,
+            manifest.attachments.len()
+        )),
+        payload: serde_json::to_value(&manifest).ok(),
+    });
+
+    Ok(devin_settlement(&report))
+}
+
+/// Maps a settled Devin session onto a scheduler outcome.
+fn devin_settlement(report: &DevinRunReport) -> DevinSettlement {
+    let pull_requests = report
+        .pull_requests
+        .iter()
+        .map(|pull_request| pull_request.pr_url.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let summary = format!(
+        "Devin session {} {} ({:.2} ACUs){}",
+        report.session_id,
+        report.outcome.as_str(),
+        report.acus_consumed,
+        if pull_requests.is_empty() {
+            String::new()
+        } else {
+            format!("; pull requests: {pull_requests}")
+        }
+    );
+    let (outcome, run_status, error) = match report.outcome {
+        DevinRunOutcome::Finished => (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded, None),
+        // Devin is waiting for a human and the session stays alive, so the run
+        // detaches instead of retrying: a retry would start a second session
+        // while the operator's answer still belongs to the first one, which
+        // remains reachable through the persisted conversation manifest.
+        DevinRunOutcome::WaitingOnOperator => (
+            WorkerOutcomeKind::Detached,
+            RunStatus::Paused,
+            Some(format!(
+                "devin session {} is waiting on operator input and stays active: {}",
+                report.session_id, report.session_url
+            )),
+        ),
+        // Reached only after the route terminated the suspended session.
+        DevinRunOutcome::Suspended => (
+            WorkerOutcomeKind::Stalled,
+            RunStatus::Failed,
+            Some(format!(
+                "devin session {} was suspended and terminated",
+                report.session_id
+            )),
+        ),
+        DevinRunOutcome::Failed => (
+            WorkerOutcomeKind::Failed,
+            RunStatus::Failed,
+            Some(format!(
+                "devin session {} reported status `{}`",
+                report.session_id,
+                report.status.as_str()
+            )),
+        ),
+        DevinRunOutcome::Terminated => (
+            WorkerOutcomeKind::Cancelled,
+            RunStatus::Cancelled,
+            Some(format!(
+                "devin session {} was terminated",
+                report.session_id
+            )),
+        ),
+    };
+
+    DevinSettlement {
+        outcome,
+        summary,
+        error,
+        run_status,
+    }
+}
+
+fn publish_devin_event(
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &crate::opensymphony_domain::WorkerId,
+    event: &crate::opensymphony_devin::NormalizedDevinEvent,
+) {
+    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+        worker_id: worker_id.clone(),
+        observed_at: now_timestamp(),
+        event_id: event.event_id.clone(),
+        event_kind: Some(event.event_type.clone()),
+        summary: Some(devin_event_summary(event)),
+        payload: Some(devin_event_payload(event)),
+    });
+}
+
+/// Resolves the Devin-owned remote workspace binding for an issue.
+///
+/// The local path handed to the binding is an evidence directory inside the
+/// scheduler-bound issue workspace; it is never Devin's working directory.
+fn devin_remote_binding(
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    run_id: &str,
+    workspace_manager: &WorkspaceManager,
+) -> Result<DevinRemoteWorkspaceBinding, String> {
+    let repository_binding = run
+        .repository_binding
+        .as_ref()
+        .or_else(|| {
+            issue
+                .repository_binding
+                .as_ref()
+                .and_then(RepositoryBindingOutcome::resolved_binding)
+        })
+        .ok_or_else(|| {
+            "devin routing requires a resolved repository binding for the issue".to_owned()
+        })?;
+    let repository = workspace_manager
+        .checkout_repository(repository_binding.repository_id().as_str())
+        .ok_or_else(|| {
+            format!(
+                "repository `{}` has no configured checkout policy to bind a devin workspace",
+                repository_binding.repository_id()
+            )
+        })?;
+    let evidence_path = run
+        .workspace_path
+        .join(".opensymphony")
+        .join(DEVIN_EVIDENCE_DIR_NAME)
+        .join(run_id);
+
+    DevinRemoteWorkspaceBinding::new(
+        issue.identifier.to_string(),
+        evidence_path,
+        repository.remote.clone(),
+        Some(repository.target_branch.clone()),
+    )
+    .map_err(|error| format!("devin repository binding rejected: {error}"))
+}
+
+/// Renders the workflow prompt plus the issue facts Devin needs.
+fn devin_task_prompt(
+    workflow: &ResolvedWorkflow,
+    issue: &NormalizedIssue,
+    attempt: u32,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> Result<String, String> {
+    let central_procedure = workflow
+        .render_prompt(issue, Some(attempt))
+        .map_err(|error| format!("failed to render workflow prompt: {error}"))?;
+
+    Ok(compose_terminal_prompt(
+        &central_procedure,
+        &format!(
+            "Issue: {}\nTitle: {}\nAttempt: {}\nDescription:\n{}",
+            issue.identifier,
+            issue.title,
+            attempt,
+            issue
+                .description
+                .as_deref()
+                .filter(|description| !description.trim().is_empty())
+                .unwrap_or("No tracker description provided."),
+        ),
+        "Work in your own Devin cloud workspace. The OpenSymphony workspace on \
+         the orchestrator host stores evidence only and is not reachable from \
+         your environment.",
+        None,
+        &format!(
+            "harness={} containment={}",
+            route.harness_kind,
+            crate::opensymphony_devin::DEVIN_REMOTE_CONTAINMENT
+        ),
+    ))
+}
+
+fn devin_conversation_metadata(
+    session_id: &str,
+    base_url: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: ConversationId::new(session_id.to_owned())
+            .expect("devin session id should not be empty"),
+        server_base_url: Some(base_url.to_owned()),
+        transport_target: Some(route.harness_kind.clone()),
+        http_auth_mode: Some("bearer".to_owned()),
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        fresh_conversation: true,
+        runtime_contract_version: Some(DEVIN_CLOUD_API_CONTRACT.to_owned()),
+        stream_state: RuntimeStreamState::Closed,
+        last_event_id: None,
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: Some(route.summary()),
+        recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
+    }
+}
+
+/// Settle a session that could not be reattached after a restart.
+///
+/// The launch has to be reported as successful so the worker registers and the
+/// scheduler observes the non-retrying settlement. A launch failure instead
+/// becomes a launch error the scheduler retries, which starts exactly the
+/// replacement session this outcome exists to prevent.
+fn devin_reattach_failure(
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    session_id: &str,
+    base_url: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    error: &str,
+) -> DevinSettlement {
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            devin_conversation_metadata(session_id, base_url, route),
+        )));
+    }
+    DevinSettlement {
+        outcome: WorkerOutcomeKind::CancelFailed,
+        summary: format!("Devin session {session_id} could not be reattached"),
+        error: Some(format!(
+            "devin session `{session_id}` could not be reattached after restart: {error}"
+        )),
+        run_status: RunStatus::Failed,
+    }
+}
+
 fn report_launch_failure(
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
     detail: impl Into<String>,
@@ -5703,6 +6700,9 @@ impl WorkerBackend for RuntimeWorkerBackend {
         if command.harness_kind == CODEX_APP_SERVER_KIND {
             return send_codex_stdio_interrupt(&self.codex_interrupts, &command).await;
         }
+        if command.harness_kind == DEVIN_CLOUD_AGENT_KIND {
+            return stop_devin_session(&self.devin_sessions, &self.workflow, &command).await;
+        }
         if command.harness_kind != OPENHANDS_AGENT_SERVER_KIND {
             return Err(CliWorkerError::InterruptFailed(format!(
                 "harness `{}` does not expose a scheduler-side interrupt channel",
@@ -5742,6 +6742,59 @@ impl WorkerBackend for RuntimeWorkerBackend {
             timed_out: acknowledgement.timed_out,
         })
     }
+}
+
+/// Stops the remote Devin session backing a conversation.
+///
+/// Devin has no mid-turn interrupt; the documented control is terminating the
+/// session, which is also what keeps a cancelled run from burning ACUs.
+async fn stop_devin_session(
+    registry: &DevinSessionRegistry,
+    workflow: &ResolvedWorkflow,
+    command: &crate::opensymphony_domain::HarnessInterruptCommand,
+) -> Result<WorkerInterruptAcknowledgement, CliWorkerError> {
+    let session_id = command.conversation_id.as_str();
+    let tracked = registry
+        .lock()
+        .map_err(|_| {
+            CliWorkerError::InterruptFailed("Devin session registry lock poisoned".to_string())
+        })?
+        .get(session_id)
+        .cloned();
+    // After a daemon restart the in-process registry is empty, but the session
+    // binding survives in the conversation manifest and the session is still
+    // billing. Rebuild a tenant-bound client so cancellation still reaches it.
+    let client = match tracked {
+        Some(client) => client,
+        None => {
+            let config = devin_cloud_config(workflow);
+            DevinCloudClient::from_environment(&config, |name| ProcessEnvironment.get(name))
+                .map_err(|error| {
+                    CliWorkerError::InterruptFailed(format!(
+                        "devin session `{session_id}` is untracked and no client could be built: {error}"
+                    ))
+                })?
+                .bind_tenant()
+                .await
+                .map_err(|error| {
+                    CliWorkerError::InterruptFailed(format!(
+                        "devin tenant binding failed while stopping `{session_id}`: {error}"
+                    ))
+                })?
+        }
+    };
+
+    client
+        .delete_session(session_id, true)
+        .await
+        .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
+    Ok(WorkerInterruptAcknowledgement {
+        accepted: true,
+        detail: Some(format!(
+            "devin session `{session_id}` terminated and archived"
+        )),
+        timed_out: false,
+    })
 }
 
 fn openhands_execution_stopped(status: &str) -> bool {
@@ -6216,6 +7269,7 @@ mod tests {
     fn strict_recovery_requires_bound_run_and_conversation_envelopes() {
         let now = chrono::Utc::now();
         let run_manifest = RunManifest {
+            terminal_worker_outcome: None,
             run_id: "run-strict-envelope".to_owned(),
             issue_id: "issue-contract".to_owned(),
             identifier: "COE-479".to_owned(),
@@ -6289,6 +7343,7 @@ mod tests {
         }))
         .expect("sample runtime envelope should decode");
         let run_manifest = RunManifest {
+            terminal_worker_outcome: None,
             run_id: "run-strict-pending".to_owned(),
             issue_id: "issue-contract".to_owned(),
             identifier: "COE-479".to_owned(),
@@ -6370,6 +7425,7 @@ mod tests {
             .expect("sample runtime envelope should decode");
         runtime_envelope.conversation_binding = Some("conv-unsent-prompt".to_owned());
         let run_manifest = RunManifest {
+            terminal_worker_outcome: None,
             run_id: "run-unsent-prompt".to_owned(),
             issue_id: "issue-contract".to_owned(),
             identifier: "COE-479".to_owned(),
@@ -7470,6 +8526,69 @@ mod tests {
                 .trim(),
             "before_remove"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_retains_a_devin_workspace_until_the_session_is_stopped() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let mut workflow = sample_workflow(tempdir.path(), &workspace_root);
+        // An unset credential makes the termination attempt fail deterministically
+        // without reaching the network, which is the case cleanup must not treat
+        // as "the remote session is gone".
+        workflow.extensions.devin.api.api_key_env =
+            "OPENSYMPHONY_DEVIN_CLEANUP_PROBE_TOKEN".to_string();
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(WorkspaceManagerConfig {
+                root: workspace_root,
+                hooks: HookConfig::default(),
+                cleanup: CleanupConfig {
+                    remove_terminal_workspaces: true,
+                },
+            })
+            .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut manifest = sample_conversation_manifest("devin-session-detached");
+        manifest.transport_target = Some(DEVIN_CLOUD_AGENT_KIND.to_string());
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("devin conversation manifest should persist");
+        let workspace = crate::opensymphony_domain::WorkspaceRecord {
+            path: ensured.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())
+                .expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+
+        let error = backend
+            .cleanup_workspace(&workspace, true)
+            .await
+            .expect_err("cleanup must fail while the remote session is unconfirmed");
+
+        assert!(
+            matches!(error, CliWorkspaceError::DevinLifecycle(_)),
+            "unexpected cleanup error: {error}"
+        );
+        assert!(
+            ensured.handle.conversation_manifest_path().is_file(),
+            "the devin binding must survive so cleanup can retry termination"
+        );
+        assert!(ensured.handle.workspace_path().is_dir());
+        assert!(!backend.terminal_cleanup_paths.contains(&workspace.path));
     }
 
     #[tokio::test]
@@ -8760,6 +9879,231 @@ mod tests {
                 .status_detail
                 .as_deref()
                 .is_some_and(|detail| detail.contains("routing dry-run ended"))
+        );
+    }
+
+    #[tokio::test]
+    async fn devin_dry_run_settles_locally_without_creating_a_remote_session() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            Arc::clone(&workspace_manager),
+            None,
+            BTreeMap::new(),
+        );
+        let issue = sample_issue();
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-devin-dry-run").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let launch = backend
+            .start_worker(WorkerStartRequest {
+                issue: issue.clone(),
+                workspace,
+                run,
+                route: devin_test_route(true),
+                memory_grant_registry_recovered: false,
+            })
+            .await
+            .expect("devin dry-run worker should launch");
+        assert_eq!(
+            launch.conversation.last_event_kind.as_deref(),
+            Some("routing.decision")
+        );
+
+        let mut outcome = None;
+        for _ in 0..40 {
+            for update in backend
+                .poll_updates()
+                .await
+                .expect("devin dry-run updates should poll")
+            {
+                if let WorkerUpdate::Finished { outcome: kind, .. } = update {
+                    outcome = Some(kind);
+                }
+            }
+            if outcome.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // A dry run never reaches credential resolution or session creation, so
+        // it succeeds locally even though no Devin credentials are configured.
+        assert!(matches!(
+            outcome.map(|record| record.outcome),
+            Some(WorkerOutcomeKind::Succeeded)
+        ));
+
+        let ensured = workspace_manager
+            .ensure_evidence_only(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should still be inspectable");
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.status, RunStatus::Succeeded);
+        assert!(
+            workspace_manager
+                .load_conversation_manifest(&ensured.handle)
+                .await
+                .expect("conversation manifest should load")
+                .is_none(),
+            "a dry run must not bind a remote Devin session"
+        );
+    }
+
+    #[tokio::test]
+    async fn devin_recovery_reads_the_persisted_session_binding() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure_evidence_only(&issue_descriptor(&issue))
+            .await
+            .expect("evidence workspace should be ensured");
+
+        assert_eq!(
+            devin_session_binding(&workspace_manager, &ensured.handle)
+                .await
+                .expect("binding lookup should succeed"),
+            None
+        );
+
+        let mut manifest = sample_conversation_manifest("devin-session-recovered");
+        manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("conversation manifest should persist");
+        assert_eq!(
+            devin_session_binding(&workspace_manager, &ensured.handle)
+                .await
+                .expect("binding lookup should succeed"),
+            None,
+            "another harness's binding must never be followed as a Devin session"
+        );
+
+        manifest.transport_target = Some(DEVIN_CLOUD_AGENT_KIND.to_string());
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("devin conversation manifest should persist");
+        assert_eq!(
+            devin_session_binding(&workspace_manager, &ensured.handle)
+                .await
+                .expect("binding lookup should succeed"),
+            Some("devin-session-recovered".to_string()),
+            "recovery must reattach to the persisted session instead of creating one"
+        );
+    }
+
+    #[tokio::test]
+    async fn devin_reattachment_failure_reports_a_launch_that_cannot_be_retried() {
+        let (launch_sender, launch_receiver) = oneshot::channel();
+        let mut launch_tx = Some(launch_sender);
+        let route = devin_test_route(false);
+        let settlement = devin_reattach_failure(
+            &mut launch_tx,
+            "devin-session-lost",
+            "https://api.devin.ai",
+            &route,
+            "status 404",
+        );
+
+        assert_eq!(settlement.outcome, WorkerOutcomeKind::CancelFailed);
+        assert_eq!(settlement.run_status, RunStatus::Failed);
+        assert_eq!(
+            non_retrying_devin_outcome(settlement.outcome),
+            Some(WorkerOutcomeKind::CancelFailed)
+        );
+        let report = launch_receiver
+            .await
+            .expect("a launch report should be sent");
+        // `LaunchReport::Failed` becomes a launch error the scheduler retries,
+        // and the later `Finished` update is then ignored because the worker
+        // never registered.
+        match report {
+            LaunchReport::Conversation(conversation) => assert_eq!(
+                conversation.conversation_id.as_str(),
+                "devin-session-lost",
+                "the launch must register the bound session, not a replacement"
+            ),
+            LaunchReport::Failed(detail) => {
+                panic!("a failed reattachment must not report a retryable launch failure: {detail}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn devin_finalization_persists_the_non_retrying_outcome() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure_evidence_only(&issue_descriptor(&issue))
+            .await
+            .expect("evidence workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_evidence_run(&ensured.handle, &RunDescriptor::new("run-detached", 1))
+            .await
+            .expect("evidence run should start");
+
+        finish_devin_workspace_run(
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            RunStatus::Paused,
+            non_retrying_devin_outcome(WorkerOutcomeKind::Detached),
+        )
+        .await
+        .expect("evidence run should finish");
+
+        let persisted = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(persisted.status, RunStatus::Paused);
+        assert_eq!(
+            persisted.terminal_worker_outcome,
+            Some(WorkerOutcomeKind::Detached),
+            "a paused status alone lets recovery dispatch a replacement session"
+        );
+        assert_eq!(
+            non_retrying_devin_outcome(WorkerOutcomeKind::Failed),
+            None,
+            "ordinary failures must keep their retry behaviour"
         );
     }
 
@@ -10073,6 +11417,18 @@ Run the scheduler.
             category: IssueStateCategory::Terminal,
         };
         issue
+    }
+
+    fn devin_test_route(dry_run: bool) -> crate::opensymphony_orchestrator::HarnessRouteDecision {
+        crate::opensymphony_orchestrator::HarnessRouteDecision {
+            task_type: "issue_execution".into(),
+            harness_kind: DEVIN_CLOUD_AGENT_KIND.into(),
+            model: None,
+            model_profile: None,
+            reason: "test devin route".into(),
+            dry_run,
+            user_override: false,
+        }
     }
 
     fn codex_test_route(dry_run: bool) -> crate::opensymphony_orchestrator::HarnessRouteDecision {

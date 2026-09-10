@@ -12,8 +12,9 @@ pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
 pub use model::{
     AgentConfig, AgentFrontMatter, DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_PROMPT_TEMPLATE,
     DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
-    DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
-    OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+    DEFAULT_WORKSPACE_ROOT, DevinApiFrontMatter, DevinFrontMatter, DevinSessionFrontMatter,
+    Environment, HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig,
+    OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
     OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
     OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
     OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
@@ -109,6 +110,8 @@ mod tests {
         PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
         WorkflowLoadError,
         model::{
+            DEFAULT_DEVIN_API_BASE_URL, DEFAULT_DEVIN_API_KEY_ENV, DEFAULT_DEVIN_ORG_ID_ENV,
+            DEFAULT_DEVIN_POLL_INTERVAL_MS, DEFAULT_DEVIN_REQUEST_TIMEOUT_MS,
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
             DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
@@ -116,7 +119,7 @@ mod tests {
             DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
             DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
             DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE,
-            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
+            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, DEVIN_MAX_SESSION_TAGS,
         },
     };
 
@@ -2540,6 +2543,307 @@ openhands:
 
         assert_eq!(resolved.config.routing.harness, "codex_app_server");
         assert!(!resolved.extensions.openhands.local_server.enabled);
+    }
+
+    #[test]
+    fn devin_routing_resolves_defaults_and_overrides() {
+        let defaults = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = defaults
+            .resolve(Path::new("/repo"), &env)
+            .expect("devin routing should resolve");
+
+        assert_eq!(resolved.config.routing.harness, "devin_cloud_agent");
+        assert_eq!(
+            resolved.extensions.devin.api.base_url,
+            DEFAULT_DEVIN_API_BASE_URL
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.api_key_env,
+            DEFAULT_DEVIN_API_KEY_ENV
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.poll_interval_ms,
+            DEFAULT_DEVIN_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.request_timeout_ms,
+            DEFAULT_DEVIN_REQUEST_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.org_id_env,
+            DEFAULT_DEVIN_ORG_ID_ENV
+        );
+        assert!(resolved.extensions.devin.api.org_id.is_none());
+        assert!(resolved.extensions.devin.session.tags.is_empty());
+        // Matches the documented `resumable` default in the v3 contract.
+        assert!(resolved.extensions.devin.session.resumable);
+
+        let overridden = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    base_url: https://devin.internal.example.com/api
+    api_key_env: DEVIN_TENANT_API_KEY
+    org_id: org-tenant123
+    org_id_env: DEVIN_TENANT_ORG_ID
+    poll_interval_ms: 500
+    request_timeout_ms: 15000
+  session:
+    playbook_id: playbook-1
+    knowledge_ids:
+      - note-1
+    secret_ids:
+      - secret-1
+    max_acu_limit: 25
+    tags:
+      - team:core
+    title: Implement the issue
+    devin_mode: fast
+    platform: linux
+    resumable: true
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("devin overrides should resolve");
+
+        assert_eq!(
+            overridden.extensions.devin.api.base_url,
+            "https://devin.internal.example.com/api"
+        );
+        assert_eq!(
+            overridden.extensions.devin.api.api_key_env,
+            "DEVIN_TENANT_API_KEY"
+        );
+        assert_eq!(overridden.extensions.devin.api.poll_interval_ms, 500);
+        assert_eq!(overridden.extensions.devin.api.request_timeout_ms, 15_000);
+        assert_eq!(
+            overridden.extensions.devin.api.org_id.as_deref(),
+            Some("org-tenant123")
+        );
+        assert_eq!(
+            overridden.extensions.devin.api.org_id_env,
+            "DEVIN_TENANT_ORG_ID"
+        );
+
+        let session = &overridden.extensions.devin.session;
+        assert_eq!(session.playbook_id.as_deref(), Some("playbook-1"));
+        assert_eq!(
+            session.knowledge_ids.as_deref(),
+            Some(&["note-1".to_owned()][..])
+        );
+        assert_eq!(
+            session.secret_ids.as_deref(),
+            Some(&["secret-1".to_owned()][..])
+        );
+        assert_eq!(session.max_acu_limit, Some(25));
+        assert_eq!(session.tags, vec!["team:core".to_owned()]);
+        assert_eq!(session.title.as_deref(), Some("Implement the issue"));
+        assert_eq!(session.devin_mode.as_deref(), Some("fast"));
+        assert_eq!(session.platform.as_deref(), Some("linux"));
+        assert!(session.resumable);
+    }
+
+    #[test]
+    fn devin_session_options_are_validated_against_the_documented_v3_contract() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+        let tags = (0..(DEVIN_MAX_SESSION_TAGS + 1))
+            .map(|index| format!("      - tag-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for devin_block in [
+            "  api:\n    org_id: acme".to_owned(),
+            "  api:\n    org_id_env: devin org".to_owned(),
+            "  session:\n    devin_mode: turbo".to_owned(),
+            "  session:\n    max_acu_limit: 0".to_owned(),
+            format!("  session:\n    tags:\n{tags}"),
+            "  session:\n    tags:\n      - '   '".to_owned(),
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+{devin_block}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+
+            assert!(
+                workflow.resolve(Path::new("/repo"), &env).is_err(),
+                "`{devin_block}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn devin_endpoint_must_be_https_without_embedded_credentials() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        for base_url in [
+            "http://api.devin.ai/v1",
+            "https://user:secret@api.devin.ai/v1",
+            "https://api.devin.ai/v1?token=secret",
+            "not-a-url",
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    base_url: {base_url}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+
+            assert!(
+                workflow.resolve(Path::new("/repo"), &env).is_err(),
+                "`{base_url}` should be rejected as a devin endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn devin_api_key_env_stays_a_literal_variable_name() {
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("DEVIN_API_KEY", "devin-secret-token"),
+        ]);
+
+        let resolved = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    api_key_env: DEVIN_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("devin credential reference should resolve");
+
+        // The name is kept verbatim; env indirection here would store the token.
+        assert_eq!(resolved.extensions.devin.api.api_key_env, "DEVIN_API_KEY");
+
+        let substituted = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: devin_cloud_agent
+devin:
+  api:
+    api_key_env: ${DEVIN_API_KEY}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env);
+
+        assert!(
+            substituted.is_err(),
+            "a substitution reference must be rejected rather than resolved to the token"
+        );
+    }
+
+    #[test]
+    fn devin_settings_are_inert_for_other_harnesses() {
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: codex_app_server
+devin:
+  api:
+    base_url: http://api.devin.ai/${DEVIN_UNSET_TENANT}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect("parked devin settings must not fail a codex workflow");
+
+        assert_eq!(
+            resolved.extensions.devin.api.base_url,
+            DEFAULT_DEVIN_API_BASE_URL
+        );
+        assert_eq!(
+            resolved.extensions.devin.api.api_key_env,
+            DEFAULT_DEVIN_API_KEY_ENV
+        );
     }
 
     #[test]

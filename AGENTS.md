@@ -156,8 +156,8 @@ The runtime client must:
 ### Keep harness capability discovery public
 
 - Public harness metadata belongs in `opensymphony-gateway-schema::capability::HarnessCapability` and the `/api/v1/capabilities` response.
-- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, and `rust_native`; do not expose private adapter type names to clients.
-- Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, or future in-process protocol details inside their adapter modules.
+- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, `devin_cloud_agent`, and `rust_native`; do not expose private adapter type names to clients.
+- Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, Devin, or future in-process protocol details inside their adapter modules.
 - Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
 - When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
 
@@ -169,6 +169,40 @@ and benchmark evidence documented in `docs/codex-app-server-harness.md`. The old
 capability must stay available in normal builds. Do not advertise hosted worker
 pools, remote routing, or loopback WebSocket as production-ready until those
 paths have their own hardening evidence.
+
+The remote Devin cloud harness uses the `opensymphony_devin` internal module
+boundary and is advertised as an available HTTPS capability against the Devin
+API v3 contract (`devin-api-v3`), with explicit feature gaps for the properties
+the hosted API does not provide: cursor-paginated polling instead of a push
+stream, cancellation as session termination instead of a mid-run interrupt, no
+pause/resume or approval flow, and model selection fixed at session creation.
+Devin owns its own remote execution workspace: never treat a local issue
+workspace path as Devin's working directory. The scheduler-bound issue workspace
+holds run manifests, journals, and imported evidence only.
+
+Devin hardening rules that must hold for any change to this harness:
+
+- Every client binds to exactly one organization through `GET /v3/self` before
+  any session call, and session, listing, and message payloads owned by another
+  organization are rejected rather than journaled.
+- Credentials stay environment-variable references in workflow config,
+  manifests, and logs; the token is never serialized or logged.
+- Secrets are injected by organization-scoped Devin `secret_ids` resolved from
+  the bound organization; raw secret values never enter OpenSymphony.
+- Transport is HTTPS-only with TLS 1.2+, no redirects, and no credentials,
+  query, or fragment in the configured base URL. Certificate pinning is not
+  implemented; do not claim it.
+- Evidence downloads are restricted to the authenticated API origin, bounded by
+  size and count limits, and written under sanitized names inside the issue
+  workspace.
+- Every abandoned path (poll timeout, transport failure, scheduler interrupt,
+  worker task drop) must terminate and archive the remote session; an orphaned
+  Devin session keeps consuming ACUs.
+
+Changes to the route or the client must keep the opt-in live suite
+(`OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live --
+--ignored`) passing; it is the only evidence that the hosted contract still
+holds.
 
 ### Preserve forward compatibility
 

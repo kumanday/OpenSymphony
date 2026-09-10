@@ -711,6 +711,219 @@ OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the
 conversation agent's LLM settings. The condenser is enabled by default with
 `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
+## Devin Cloud Harness (`devin`)
+
+The harness targets the **Devin API v3** contract vendored at
+`crates/opensymphony-devin/contracts/devin-v3-openapi.yaml` (source:
+`https://docs.devin.ai/v3-openapi.yaml`). v3 is organization-scoped:
+requests go to `/v3/organizations/{org_id}/sessions...` with a `cog_`
+service-user bearer token.
+
+Selecting `routing.harness: devin_cloud_agent` runs the issue on Devin's hosted
+infrastructure. These settings are resolved **only** when Devin is the selected
+harness; for OpenHands, Codex, or `rust_native` workflows the block is ignored
+entirely and an inert default is used, so a parked or half-configured `devin`
+block cannot fail an unrelated workflow.
+
+Before the first run, export the two credentials the defaults expect (a `cog_`
+service-user token and the organization it belongs to):
+
+```bash
+export COG_SERVICE_USER_TOKEN=cog_...
+export DEVIN_ORG_ID=org-...
+```
+
+```yaml
+routing:
+  harness: devin_cloud_agent
+
+devin:
+  api:
+    base_url: https://api.devin.ai
+    api_key_env: COG_SERVICE_USER_TOKEN
+    org_id_env: DEVIN_ORG_ID
+    poll_interval_ms: 5000
+    request_timeout_ms: 30000
+  session:
+    playbook_id: playbook-abc123
+    knowledge_ids:
+      - note-abc123
+    secret_ids:
+      - secret-abc123
+    max_acu_limit: 25
+    tags:
+      - team:core
+    title: OpenSymphony run
+    devin_mode: normal
+    platform: linux
+    resumable: true
+```
+
+`devin.api`:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `base_url` | `https://api.devin.ai` | Supports `${VAR}` env indirection. Must be an absolute `https` URL with a host, and must not embed credentials, a query string, or a fragment. |
+| `api_key_env` | `COG_SERVICE_USER_TOKEN` | **Literal environment-variable name**, never a value. |
+| `org_id` | unset | Optional inline organization id (`org-...`). Resolved from `org_id_env`, then `GET /v3/self`, when omitted. |
+| `org_id_env` | `DEVIN_ORG_ID` | Literal environment-variable name holding the organization id. |
+| `poll_interval_ms` | `5000` | Session/message poll interval. Must be a positive integer. |
+| `request_timeout_ms` | `30000` | Must be a positive integer. |
+
+`devin.session` maps onto documented `SessionCreateRequest` fields:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `playbook_id` | unset | Devin playbook to run. |
+| `knowledge_ids` | unset | Knowledge notes to attach. |
+| `secret_ids` | unset | *References* to Devin-held organization secrets; values never live in OpenSymphony config. |
+| `max_acu_limit` | unset | Positive ACU cap for the session. |
+| `tags` | `[]` | At most 50 tags; an `opensymphony:<issue-workspace-key>` correlation tag is appended automatically. |
+| `title` | unset | Session title. |
+| `devin_mode` | unset | One of `normal`, `fast`, `lite`, `ultra`, `fusion`. |
+| `platform` | unset | VM platform / outpost pool override. |
+| `resumable` | `true` | Matches the API default; set `false` for disposable sessions. |
+
+Repository binding is prompt-carried: v3 takes repositories as `owner/name`
+entries in `repos` and has no branch field, so branch and issue context are
+rendered into the session prompt.
+
+`api_key_env` is deliberately not passed through env substitution: writing
+`api_key_env: ${COG_SERVICE_USER_TOKEN}` would resolve the token itself into resolved
+configuration, manifests, and debug output. The name is validated as an
+environment-variable identifier and the token is read from the process
+environment only at request time.
+
+### Running issues on Devin
+
+The route needs the repository's remote and target branch to bind Devin's
+workspace, and those come from the central repository inventory, which is
+consumed only in `project_set` routing. A repository-local `WORKFLOW.md` on
+its own (or `legacy_single` routing) has no checkout policy to bind, so the
+worker fails with `has no configured checkout policy to bind a devin
+workspace`. A minimal `~/.opensymphony/config.yaml`:
+
+```yaml
+schema_version: 1
+instance:
+  id: devin-trial
+  state_root: ~/.opensymphony/state/devin-trial
+routing:
+  mode: project_set
+  active_project_set: trial
+  harness: devin_cloud_agent
+tracker_profiles:
+  linear:
+    provider: linear
+    credential: linear-key
+    active_states: [Todo, In Progress, Rework]
+    terminal_states: [Done, Canceled]
+project_sets:
+  trial:
+    tracker_profile: linear
+    projects: [trial-project]
+linear_projects:
+  trial-project:
+    provider_project_id: "<linear-project-id>"
+    repositories: [target]
+repositories:
+  target:
+    aliases: [target]
+    remote:
+      provider: github
+      locator: owner/repo
+      clone: https://github.com/owner/repo.git
+    target_branch: main
+    credential: github-https
+    review_profile: github
+    instructions:
+      path: WORKFLOW.md
+credentials:
+  linear-key:
+    kind: environment
+    variable: LINEAR_API_KEY
+  github-https:
+    kind: environment
+    variable: GITHUB_TOKEN
+review_profiles:
+  github:
+    provider: github
+    credential: github-https
+workspace:
+  root: ~/.opensymphony/workspaces/devin-trial
+memory:
+  catalog_root: ~/.opensymphony/state/devin-trial/memory
+scheduler:
+  max_concurrent_tasks: 1
+devin:
+  session:
+    max_acu_limit: 10
+    tags: [opensymphony]
+```
+
+`clone` must be an `https://` URL: Devin clones with its own credentials, and
+the binding rejects SSH locators. The `devin:` block takes the same shape as the
+`WORKFLOW.md` front matter above; the central copy wins, and a repository-local
+block is only consulted when the central file has none. `api_key_env` and
+`org_id_env` must not name a checkout-credential variable. Each Linear issue to
+dispatch carries the managed `repo:target` label and sits in an active state of
+the selected project.
+
+```bash
+export LINEAR_API_KEY=lin_api_... COG_SERVICE_USER_TOKEN=cog_... DEVIN_ORG_ID=org-...
+opensymphony run --dry-run   # resolves routing, writes run.json, creates no session
+opensymphony run             # creates real sessions and consumes ACUs
+```
+
+`project_set` routing reads no repository checkout, so the command can run from
+any directory. Nothing loads `.env` for you; export the variables (or
+`set -a; . ./.env`). Watch progress with `opensymphony tui`; per-run evidence
+lands under `<workspace root>/<issue>/.opensymphony/devin/<run-id>/`.
+Interrupting the orchestrator with Ctrl-C does not stop remote sessions: they
+keep running within `max_acu_limit`, and the next `opensymphony run`
+reattaches to them through the persisted binding. To stop a session, move its
+issue to a terminal tracker state; terminal cleanup terminates and archives it.
+
+### What a Devin run does
+
+1. Binds the client to one organization through `GET /v3/self`. A configured
+   `org_id` the credential does not own fails the run before any session is
+   created.
+2. Resolves `secret_ids` against that organization's Devin secrets, by secret id
+   or key. Unknown or out-of-organization references fail the run; secret
+   *values* are never read by OpenSymphony — Devin injects them remotely.
+3. Creates the session with the rendered issue prompt, repository, tags, and
+   session options, and reports the session URL as the run conversation link.
+4. Polls session status and cursor-paginated messages, publishing normalized
+   runtime events onto the run timeline.
+5. On settlement, imports evidence into the issue workspace under
+   `.opensymphony/devin/<run-id>`: `session.json`, `events.jsonl`,
+   `evidence.json` (outcome, status, ACU usage, pull-request URLs, structured
+   output), and downloaded attachments.
+6. Terminates and archives the remote session on cancellation, poll timeout, or
+   transport failure, so an abandoned run cannot keep burning ACUs.
+
+The local issue workspace is evidence and manifest storage only; it is never
+Devin's execution directory, and no local checkout is prepared for the run.
+
+The client itself is verified against the live API by the opt-in suite in
+`tests/devin_cloud_agent_live.rs`. It needs `COG_SERVICE_USER_TOKEN` (and
+optionally `DEVIN_ORG_ID`) in the environment, and its lifecycle test creates a
+real session, so it consumes ACUs:
+
+```bash
+OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live -- --ignored --nocapture
+```
+
+See `docs/harness-adapter-compatibility.md` for what the last live run
+confirmed and what is still unverified.
+
+Known limitations: event latency is bounded by `poll_interval_ms` (the v3
+contract has no push stream), cancellation terminates the whole session rather
+than interrupting a turn, pause/resume and approvals are unavailable, the model
+is fixed at session creation through `devin_mode`, and TLS certificate pinning
+is not implemented.
+
 ## Runtime Config
 
 `opensymphony init` also copies a starter `config.yaml` next to the target

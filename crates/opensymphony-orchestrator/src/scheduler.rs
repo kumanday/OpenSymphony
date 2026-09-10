@@ -180,6 +180,9 @@ pub struct RecoveryRecord {
     pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
     pub interrupt_reason: Option<HarnessInterruptReason>,
+    /// A persisted outcome that forbids a replacement run because the work it
+    /// describes is still live outside this process.
+    pub terminal_worker_outcome: Option<WorkerOutcomeKind>,
     pub recovered_run: Option<RecoveredRun>,
 }
 
@@ -354,6 +357,18 @@ pub trait WorkspaceBackend {
         issue: &NormalizedIssue,
         observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error>;
+
+    /// Prepares an issue workspace for a harness that executes remotely.
+    ///
+    /// The workspace holds manifests, journals, and imported evidence only, so
+    /// no local checkout is required and the host needs no repository access.
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<WorkspaceRecord, Self::Error> {
+        self.ensure_workspace(issue, observed_at).await
+    }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
@@ -1300,7 +1315,14 @@ where
                 // the live tracker binding, discard the old workspace before
                 // restoring the retry so the replacement is materialized by
                 // the normal dispatch path.
-                if recovered_run.is_none() && recovered_workspace.is_some() && binding_changed {
+                // A persisted non-retrying outcome means something outside this
+                // process is still bound to this workspace, so its manifests
+                // and evidence must survive even when the binding moved.
+                if recovered_run.is_none()
+                    && recovered_workspace.is_some()
+                    && binding_changed
+                    && record.terminal_worker_outcome.is_none()
+                {
                     self.workspace
                         .remove_workspace(&record.workspace)
                         .await
@@ -1310,7 +1332,39 @@ where
                     recovered_workspace = None;
                 }
                 self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
-                if record.had_in_flight_run {
+                if let Some(terminal_outcome) = record.terminal_worker_outcome {
+                    // `Paused` and `Failed` alone would make this dispatchable
+                    // again. The persisted outcome says the previous run left
+                    // something alive outside this process, so restart must
+                    // reach the same non-retrying release the in-process path
+                    // produces instead of launching a replacement.
+                    tracing::info!(
+                        issue = %issue_id,
+                        outcome = ?terminal_outcome,
+                        "restored a non-retrying worker outcome during recovery"
+                    );
+                    let worker_id = self.next_worker_id()?;
+                    let mut execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    execution.restore_worker_outcome(WorkerOutcomeRecord {
+                        worker_id,
+                        attempt: None,
+                        outcome: terminal_outcome,
+                        started_at: observed_at,
+                        finished_at: observed_at,
+                        turn_count: 0,
+                        summary: Some(
+                            "restored a non-retrying worker outcome from the run manifest"
+                                .to_owned(),
+                        ),
+                        error: None,
+                    });
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerInactive, None)?,
+                    );
+                } else if record.had_in_flight_run {
                     if recovered_run.is_some() {
                         self.restore_recovered_run(
                             &issue_id,
@@ -2022,11 +2076,15 @@ where
         let replacement_workspace = if retain_workspace {
             execution.workspace().cloned()
         } else if retry.is_some() && has_resolved_replacement {
-            match self
-                .workspace
-                .ensure_workspace(&replacement, observed_at)
-                .await
-            {
+            match if harness_executes_remotely(&self.config.routing.harness) {
+                self.workspace
+                    .ensure_evidence_workspace(&replacement, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&replacement, observed_at)
+                    .await
+            } {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
                     if let Some(retry) = retry.as_ref()
@@ -2691,13 +2749,22 @@ where
                 }
             }
 
-            let workspace = self
-                .workspace
-                .ensure_workspace(&normalized, observed_at)
-                .await
-                .map_err(|error| SchedulerError::Workspace {
-                    detail: error.to_string(),
-                })?;
+            // Route first: an unavailable harness must fail before a workspace
+            // is materialized and workspace creation hooks run.
+            let route = decide_issue_route(&normalized, &self.config)?;
+
+            let workspace = if harness_executes_remotely(&route.harness_kind) {
+                self.workspace
+                    .ensure_evidence_workspace(&normalized, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&normalized, observed_at)
+                    .await
+            }
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
 
             if let Some(normal_retry_count) = self
                 .executions
@@ -2739,7 +2806,6 @@ where
                     .and_then(RepositoryBindingOutcome::resolved_binding)
                     .cloned(),
             );
-            let route = decide_issue_route(&normalized, &self.config)?;
 
             let mut execution = self
                 .remove_execution(&issue_id)
@@ -3798,6 +3864,16 @@ fn recovered_worker_ordinal(worker_id: &WorkerId) -> Option<u64> {
         .as_str()
         .strip_prefix("scheduler-worker-")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+/// Whether a harness runs the agent outside this host.
+///
+/// A remote-only harness owns its execution workspace, so the scheduler
+/// prepares an evidence-only local workspace instead of a checkout.
+fn harness_executes_remotely(kind: &str) -> bool {
+    HarnessKind::parse(kind)
+        .map(HarnessKind::capability)
+        .is_some_and(|capability| capability.transport.remote && !capability.transport.local)
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {

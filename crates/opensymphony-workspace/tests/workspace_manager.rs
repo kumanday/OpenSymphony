@@ -232,6 +232,107 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn evidence_only_workspace_runs_no_hooks() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell("echo ran > after_create.txt")),
+            before_run: Some(HookDefinition::shell("echo ran > before_run.txt")),
+            after_run: Some(HookDefinition::shell("echo ran > after_run.txt")),
+            before_remove: Some(HookDefinition::shell("echo ran > before_remove.txt")),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let mut issue = sample_issue("COE-EVIDENCE");
+    let binding = RepositoryBinding {
+        alias: "source".to_owned(),
+        repository: RepositoryIdentity {
+            id: CanonicalRepositoryId::from_remote("github", None, "acme/evidence")
+                .expect("repository id should be valid"),
+            safe_remote_fingerprint: SafeRemoteFingerprint::from_remote(
+                "github",
+                None,
+                "acme/evidence",
+            )
+            .expect("fingerprint should be valid"),
+        },
+        config_generation: "config-1".to_owned(),
+        inventory_generation: "inventory-1".to_owned(),
+    };
+    issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+
+    let ensured = manager
+        .ensure_evidence_only(&issue)
+        .await
+        .expect("evidence-only workspace should be created");
+    assert!(ensured.created);
+    assert!(ensured.after_create.is_none());
+    // Skipping the checkout must not erase which repository the remote run
+    // belongs to: recovery compares this binding against the live one.
+    assert_eq!(
+        ensured
+            .issue_manifest
+            .repository_binding
+            .as_ref()
+            .and_then(|outcome| outcome.repository_id()),
+        Some(binding.repository_id()),
+        "an evidence-only workspace must keep its repository identity"
+    );
+
+    let mut run_manifest = manager
+        .start_evidence_run(&ensured.handle, &RunDescriptor::new("run-evidence", 1))
+        .await
+        .expect("evidence run should start");
+    assert_eq!(run_manifest.status, RunStatus::Prepared);
+    assert!(run_manifest.hooks.is_empty());
+
+    manager
+        .finish_evidence_run(&ensured.handle, &mut run_manifest, RunStatus::Succeeded)
+        .await
+        .expect("evidence run should finish");
+    assert_eq!(run_manifest.status, RunStatus::Succeeded);
+    assert!(run_manifest.hooks.is_empty());
+
+    let retained = manager
+        .cleanup_evidence_only(&ensured.handle, IssueLifecycleState::Terminal, false)
+        .await
+        .expect("evidence-only cleanup should succeed");
+    assert_eq!(retained.decision, CleanupDecision::Retain);
+    assert!(retained.before_remove.is_none());
+
+    for marker in [
+        "after_create.txt",
+        "before_run.txt",
+        "after_run.txt",
+        "before_remove.txt",
+    ] {
+        assert!(
+            !tokio::fs::try_exists(ensured.handle.workspace_path().join(marker))
+                .await
+                .expect("hook marker lookup should succeed"),
+            "{marker} must not exist: evidence-only workspaces run no repository hooks"
+        );
+    }
+
+    let removed = manager
+        .cleanup_evidence_only(&ensured.handle, IssueLifecycleState::Terminal, true)
+        .await
+        .expect("evidence-only cleanup should remove the workspace");
+    assert_eq!(removed.decision, CleanupDecision::Remove);
+    assert!(removed.before_remove.is_none());
+    assert!(
+        !tokio::fs::try_exists(ensured.handle.workspace_path())
+            .await
+            .expect("workspace lookup should succeed")
+    );
+}
+
 #[tokio::test]
 async fn checkout_timeout_does_not_override_legacy_hook_timeout() {
     let temp_dir = TempDir::new().expect("temp dir should exist");

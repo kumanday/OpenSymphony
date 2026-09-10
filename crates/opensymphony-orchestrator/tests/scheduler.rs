@@ -439,6 +439,7 @@ struct FakeWorkspace {
     retry_pending_recoveries: Vec<RetryPendingRecord>,
     cleared_retry_exhaustion: Vec<String>,
     ensured: Vec<String>,
+    ensured_evidence_only: Vec<String>,
     cleaned: Vec<(String, bool)>,
     failed_cleaned: Vec<String>,
     removed: Vec<String>,
@@ -482,6 +483,16 @@ impl WorkspaceBackend for FakeWorkspace {
             })
             .clone();
         Ok(record)
+    }
+
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<WorkspaceRecord, Self::Error> {
+        self.ensured_evidence_only
+            .push(issue.identifier.to_string());
+        self.ensure_workspace(issue, observed_at).await
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
@@ -1538,6 +1549,7 @@ async fn recovered_human_review_run_uses_restored_harness_kind_for_merging_inter
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-492", "COE-492", "Human Review"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -1629,6 +1641,7 @@ async fn recovered_retry_run_restores_retry_state_before_launch() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-494", "COE-494", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -2776,6 +2789,7 @@ async fn same_repository_recovery_supersedes_stale_binding_generations() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue(
                 "lin-same-repository-generation",
                 "COE-548-SAME-REPOSITORY-GENERATION",
@@ -3722,6 +3736,7 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-272", "COE-272", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -3793,6 +3808,7 @@ async fn recovery_keeps_an_active_cancelled_run_released() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-272-cancelled", "COE-272-CANCELLED", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -3833,6 +3849,176 @@ async fn recovery_keeps_an_active_cancelled_run_released() {
     ));
 }
 
+async fn assert_recovered_non_retrying_outcome_is_not_dispatched(
+    identifier: &str,
+    outcome: WorkerOutcomeKind,
+    completed_run: bool,
+) {
+    let issue_key = format!("lin-devin-{identifier}");
+    let recovered_workspace = workspace_record(identifier, &format!("/tmp/recovered/{identifier}"));
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(&issue_key, identifier, "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: Some(outcome),
+            issue: normalized_issue(&issue_key, identifier, "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("devin_cloud_agent".to_string()),
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([(issue_key.clone(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("recovery should succeed");
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("second tick should not dispatch a replacement");
+
+    let issue_id = IssueId::new(&issue_key).expect("issue id should be valid");
+    assert!(
+        scheduler.worker().launches.is_empty(),
+        "a restored {outcome:?} run must not launch a replacement worker"
+    );
+    assert!(matches!(
+        scheduler
+            .execution(&issue_id)
+            .expect("execution should remain visible")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::TrackerInactive,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn recovery_keeps_a_detached_run_undispatched() {
+    assert_recovered_non_retrying_outcome_is_not_dispatched(
+        "COE-DETACHED",
+        WorkerOutcomeKind::Detached,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn recovery_keeps_a_cancel_failed_run_undispatched() {
+    assert_recovered_non_retrying_outcome_is_not_dispatched(
+        "COE-CANCEL-FAILED",
+        WorkerOutcomeKind::CancelFailed,
+        true,
+    )
+    .await;
+}
+
+async fn assert_repository_bound_detached_recovery_retains_the_workspace(
+    identifier: &str,
+    preserve_binding: bool,
+) {
+    let issue_key = format!("lin-devin-{identifier}");
+    let recovered_workspace = workspace_record(identifier, &format!("/tmp/recovered/{identifier}"));
+    let binding = match repository_routing().resolve(
+        &["repo:one".to_string()],
+        Some("project-id"),
+        None,
+        false,
+    ) {
+        RepositoryBindingOutcome::Resolved(binding) => binding,
+        outcome => panic!("expected a resolved binding, got {outcome:?}"),
+    };
+    let tracker = FakeTracker {
+        active: vec![{
+            let mut issue = tracker_issue(&issue_key, identifier, "In Progress", 0);
+            issue.project_id = Some("project-id".to_string());
+            issue.labels = vec!["repo:one".to_string()];
+            issue
+        }],
+        ..Default::default()
+    };
+    let mut recovered_issue = normalized_issue(&issue_key, identifier, "In Progress");
+    if preserve_binding {
+        recovered_issue.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding));
+    }
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: Some(WorkerOutcomeKind::Detached),
+            issue: recovered_issue,
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: false,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("devin_cloud_agent".to_string()),
+            interrupt_reason: None,
+            recovered_run: None,
+        }],
+        records: HashMap::from([(issue_key.clone(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.repository_routing = Some(repository_routing());
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("detached recovery should succeed");
+
+    // Removing the workspace here would terminate the waiting remote session
+    // and delete the evidence it already produced.
+    assert!(
+        scheduler.workspace().removed.is_empty(),
+        "a detached run must keep its evidence workspace"
+    );
+    assert!(scheduler.worker().launches.is_empty());
+    assert!(matches!(
+        scheduler
+            .execution(&IssueId::new(&issue_key).expect("issue id should be valid"))
+            .expect("execution should remain visible")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released { .. }
+    ));
+}
+
+#[tokio::test]
+async fn repository_bound_detached_recovery_keeps_its_evidence_workspace() {
+    assert_repository_bound_detached_recovery_retains_the_workspace("COE-DETACHED-BOUND", true)
+        .await;
+}
+
+#[tokio::test]
+async fn detached_recovery_without_a_proven_binding_keeps_its_evidence_workspace() {
+    assert_repository_bound_detached_recovery_retains_the_workspace("COE-DETACHED-UNBOUND", false)
+        .await;
+}
+
 #[tokio::test]
 async fn recovery_requeues_cancelled_merging_interrupt() {
     let recovered_workspace = workspace_record("COE-272-MERGING", "/tmp/recovered/COE-272-MERGING");
@@ -3847,6 +4033,7 @@ async fn recovery_requeues_cancelled_merging_interrupt() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-272-merging", "COE-272-MERGING", "Merging"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -3905,6 +4092,7 @@ async fn recovery_parks_cancelled_merging_interrupt_with_consumed_count() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue(
                 "lin-272-merging-exhausted",
                 "COE-272-MERGING-EXHAUSTED",
@@ -3952,6 +4140,7 @@ async fn pre_conversation_recovery_honors_retry_limit() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -4001,6 +4190,7 @@ async fn recovery_advances_consumed_retry_budget_before_dispatch() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-274", "COE-274", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -4048,6 +4238,7 @@ async fn recovery_queues_an_active_successful_run_for_continuation() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-278", "COE-278", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: true,
@@ -4105,6 +4296,7 @@ async fn recovery_releases_an_active_successful_run_when_retry_limit_reached() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-279", "COE-279", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: true,
@@ -4157,6 +4349,7 @@ async fn recovery_merges_successful_run_with_pending_retry_exhaustion() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: issue.clone(),
             workspace: recovered_workspace,
             successful_run: true,
@@ -4213,6 +4406,7 @@ async fn recovery_keeps_successful_run_with_active_tracker_and_exhausted_marker_
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: issue.clone(),
             workspace: recovered_workspace,
             successful_run: true,
@@ -4268,6 +4462,7 @@ async fn recovery_dispatches_persisted_pending_retry_before_limit() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-276", "COE-276", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -4317,6 +4512,7 @@ async fn recovery_parks_pending_retry_when_current_limit_is_lowered() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-277", "COE-277", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -4472,6 +4668,7 @@ async fn inactive_retry_exhaustion_retries_failed_workspace_cleanup() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-278-exhausted", "COE-278-EXHAUSTED", "Backlog"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -4541,6 +4738,7 @@ async fn recovery_restores_exhausted_retry_count_without_dispatching() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-273", "COE-273", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -4594,6 +4792,7 @@ async fn recovery_reopens_exhausted_execution_after_retry_limit_increase() {
     let workspace = FakeWorkspace {
         retain_failed: true,
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-279", "COE-279", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -4699,6 +4898,7 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
     let workspace = FakeWorkspace {
         retain_failed: true,
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-274", "COE-274", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -4739,6 +4939,7 @@ async fn terminal_recovery_preserves_cancelled_workspace_policy() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-275", "COE-275", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -4790,6 +4991,7 @@ async fn parked_recovered_issue_redispatches_when_tracker_reactivates() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-532", "COE-532", "Backlog"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -4990,6 +5192,7 @@ async fn recovered_in_flight_run_restores_persisted_interrupt_intent() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-493", "COE-493", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -5058,6 +5261,7 @@ async fn recovery_does_not_count_released_issues_as_running_capacity() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
             workspace: recovered_workspace,
             successful_run: false,
@@ -5292,6 +5496,72 @@ async fn repository_binding_outcome_blocks_before_workspace_creation() {
     ));
     assert!(scheduler.workspace().ensured.is_empty());
     assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_harness_rejects_dispatch_before_workspace_creation() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            "lin-native",
+            "COE-NATIVE-1",
+            "In Progress",
+            0,
+        )],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.routing.harness = "rust_native".into();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    let error = scheduler
+        .tick(ts(100))
+        .await
+        .expect_err("unavailable harness routing should reject dispatch");
+
+    assert!(matches!(
+        error,
+        crate::opensymphony_orchestrator::SchedulerError::InvalidConfiguration { .. }
+    ));
+    assert!(scheduler.workspace().ensured.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn devin_cloud_routing_dispatches_a_worker() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-devin", "COE-DEVIN-1", "In Progress", 0)],
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.routing.harness = "devin_cloud_agent".into();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        config,
+    );
+
+    scheduler.tick(ts(100)).await.expect("devin routing runs");
+
+    let launch = scheduler
+        .worker()
+        .launches
+        .first()
+        .expect("devin route should launch a worker");
+    assert_eq!(launch.route.harness_kind, "devin_cloud_agent");
+    // Devin executes remotely, but the issue workspace is still materialized:
+    // it is where run manifests, journals, and imported evidence live. It is
+    // prepared without a local checkout, so a host without repository access
+    // can still launch the remote session.
+    assert_eq!(scheduler.workspace().ensured.len(), 1);
+    assert_eq!(
+        scheduler.workspace().ensured_evidence_only,
+        vec!["COE-DEVIN-1".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -5532,6 +5802,7 @@ async fn recovery_fences_persisted_binding_before_superseding_it() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue("lin-repo-recovery", "COE-548-RECOVERY", "In Progress"),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -5629,6 +5900,7 @@ async fn legacy_recovery_backfills_binding_before_drift_comparison() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: recovered_issue,
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -5769,6 +6041,7 @@ async fn external_retry_marker_merges_into_metadata_only_workspace_recovery() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: pending_issue.clone(),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -5849,6 +6122,7 @@ async fn metadata_only_retry_recovery_rematerializes_after_binding_drift() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: pending_issue.clone(),
             workspace: recovered_workspace.clone(),
             successful_run: false,
@@ -6036,6 +6310,7 @@ async fn legacy_recovery_rematerializes_without_persisted_binding_proof() {
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue(
                 "lin-legacy-unproven",
                 "COE-548-LEGACY-UNPROVEN",
@@ -6120,6 +6395,7 @@ async fn unproven_recovery_keeps_workspace_and_worker_until_stop_acknowledges() 
     };
     let workspace = FakeWorkspace {
         recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
             issue: normalized_issue(
                 "lin-legacy-stop-pending",
                 "COE-548-LEGACY-STOP-PENDING",
