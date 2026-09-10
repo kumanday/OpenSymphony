@@ -14,9 +14,9 @@ use crate::opensymphony_domain::{
 use crate::opensymphony_memory::DEFAULT_PRIVATE_MEMORY_CONFIG_FILE;
 use crate::opensymphony_openhands::OpenHandsConversationStorePaths;
 use crate::opensymphony_workflow::{
-    AgentFrontMatter, HooksFrontMatter, IntegerLike, OpenHandsFrontMatter, PollingFrontMatter,
-    ResolvedWorkflow, RoutingFrontMatter, TrackerFrontMatter, WorkflowDefinition,
-    WorkflowFrontMatter, WorkspaceFrontMatter,
+    AgentFrontMatter, DevinFrontMatter, HooksFrontMatter, IntegerLike, OpenHandsFrontMatter,
+    PollingFrontMatter, ResolvedWorkflow, RoutingFrontMatter, TrackerFrontMatter,
+    WorkflowDefinition, WorkflowFrontMatter, WorkspaceFrontMatter,
 };
 use crate::opensymphony_workflow::{
     DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
@@ -87,6 +87,8 @@ struct CentralConfigFile {
     control_plane: CentralControlPlaneFile,
     #[serde(default)]
     openhands: CentralOpenHandsFile,
+    #[serde(default)]
+    devin: Option<DevinFrontMatter>,
     #[serde(default)]
     compatibility: CentralCompatibilityFile,
 }
@@ -754,7 +756,7 @@ const CENTRAL_CONFIG_KEYS: &[&str] = &[
     "compatibility",
 ];
 
-const VERSIONED_CENTRAL_SHARED_KEYS: &[&str] = &["control_plane", "openhands"];
+const VERSIONED_CENTRAL_SHARED_KEYS: &[&str] = &["control_plane", "openhands", "devin"];
 
 fn has_central_top_level_key(raw: &str) -> bool {
     raw.lines().any(|line| {
@@ -1502,6 +1504,16 @@ fn reject_checkout_credential_env_reuse(
         "OPENSYMPHONY_CODEX_BIN".to_owned(),
         "runtime.codex_binary_env",
     );
+    if let Some(devin) = config.devin.as_ref() {
+        for (field, variable) in [
+            ("devin.api.api_key_env", devin.api.api_key_env.as_deref()),
+            ("devin.api.org_id_env", devin.api.org_id_env.as_deref()),
+        ] {
+            if let Some(variable) = variable {
+                non_checkout_variables.insert(variable.to_owned(), field);
+            }
+        }
+    }
     if let Some(front_matter) = config.openhands.front_matter.as_ref() {
         let value = serde_yaml::to_value(front_matter).map_err(|_| {
             CentralConfigError::InvalidReference {
@@ -1960,6 +1972,7 @@ fn central_workflow_front_matter(
             }
             openhands
         },
+        devin: config.devin.clone().unwrap_or_default(),
         ..WorkflowFrontMatter::default()
     };
     Ok(front_matter)
@@ -1970,6 +1983,9 @@ fn merge_repository_local_front_matter(
     local: &WorkflowFrontMatter,
 ) -> WorkflowFrontMatter {
     central.codex = local.codex.clone();
+    if central.devin == DevinFrontMatter::default() {
+        central.devin = local.devin.clone();
+    }
     central.logging = local.logging.clone();
     central.extensions = local.extensions.clone();
     central
@@ -3965,13 +3981,18 @@ scheduler:
     #[test]
     fn central_runtime_preserves_repository_local_front_matter_extensions() {
         let local = WorkflowDefinition::parse(
-            "---\ncodex:\n  command: codex app-server\nlogging:\n  level: debug\n---\nImplementation instructions\n",
+            "---\ncodex:\n  command: codex app-server\ndevin:\n  session:\n    max_acu_limit: 25\n    tags: [team:core]\nlogging:\n  level: debug\n---\nImplementation instructions\n",
         )
         .expect("repository-local workflow should parse")
         .front_matter;
         let merged = merge_repository_local_front_matter(WorkflowFrontMatter::default(), &local);
 
         assert_eq!(merged.codex, local.codex);
+        assert_eq!(merged.devin, local.devin);
+        assert_eq!(
+            merged.devin.session.tags.as_deref(),
+            Some(&["team:core".to_owned()][..])
+        );
         assert_eq!(merged.logging, local.logging);
         assert!(merged.extensions.is_empty());
     }
@@ -4107,6 +4128,70 @@ scheduler:
                 .and_then(|llm| llm.api_key_env.as_deref()),
             Some("CUSTOM_OPENAI_KEY")
         );
+    }
+
+    #[test]
+    fn central_config_carries_devin_session_options_into_front_matter() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = format!(
+            "{}\ndevin:\n  api:\n    org_id_env: CUSTOM_DEVIN_ORG\n  session:\n    max_acu_limit: 25\n    tags: [team:core]\n",
+            central_fixture(root.path()).replace(
+                "  harness_env: TEST_HARNESS\n",
+                "  harness: devin_cloud_agent\n  harness_env: TEST_HARNESS\n"
+            )
+        );
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("devin profile should resolve");
+        assert_eq!(
+            resolved.workflow_front_matter.routing.harness.as_deref(),
+            Some("devin_cloud_agent")
+        );
+        let devin = &resolved.workflow_front_matter.devin;
+        assert_eq!(devin.api.org_id_env.as_deref(), Some("CUSTOM_DEVIN_ORG"));
+        assert_eq!(devin.session.max_acu_limit, Some(IntegerLike::Integer(25)));
+        assert_eq!(
+            devin.session.tags.as_deref(),
+            Some(&["team:core".to_owned()][..])
+        );
+        let local = WorkflowDefinition::parse(
+            "---\ndevin:\n  session:\n    max_acu_limit: 5\n---\nInstructions\n",
+        )
+        .expect("repository-local workflow should parse")
+        .front_matter;
+        let merged =
+            merge_repository_local_front_matter(resolved.workflow_front_matter.clone(), &local);
+        assert_eq!(
+            merged.devin.session.max_acu_limit,
+            Some(IntegerLike::Integer(25))
+        );
+    }
+
+    #[test]
+    fn central_config_rejects_devin_credential_reuse_as_checkout_credential() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        let source = format!(
+            "{}\ndevin:\n  api:\n    api_key_env: GITHUB_TOKEN\n",
+            central_fixture(root.path())
+                .replace(
+                    "clone: git@github.com:kumanday/OpenSymphony.git",
+                    "clone: https://github.com/kumanday/OpenSymphony.git"
+                )
+                .replace(
+                    "  github-ssh:\n    kind: ssh-agent",
+                    "  github-ssh:\n    kind: environment\n    variable: GITHUB_TOKEN"
+                )
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("devin token must not double as a checkout credential");
+        assert!(matches!(
+            &error,
+            CentralConfigError::InvalidReference { field } if field == "devin.api.api_key_env"
+        ));
     }
 
     #[test]

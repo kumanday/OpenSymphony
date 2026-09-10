@@ -794,6 +794,96 @@ configuration, manifests, and debug output. The name is validated as an
 environment-variable identifier and the token is read from the process
 environment only at request time.
 
+### Running issues on Devin
+
+The route needs the repository's remote and target branch to bind Devin's
+workspace, and those come from the central repository inventory, which is
+consumed only in `project_set` routing. A repository-local `WORKFLOW.md` on
+its own (or `legacy_single` routing) has no checkout policy to bind, so the
+worker fails with `has no configured checkout policy to bind a devin
+workspace`. A minimal `~/.opensymphony/config.yaml`:
+
+```yaml
+schema_version: 1
+instance:
+  id: devin-trial
+  state_root: ~/.opensymphony/state/devin-trial
+routing:
+  mode: project_set
+  active_project_set: trial
+  harness: devin_cloud_agent
+tracker_profiles:
+  linear:
+    provider: linear
+    credential: linear-key
+    active_states: [Todo, In Progress, Rework]
+    terminal_states: [Done, Canceled]
+project_sets:
+  trial:
+    tracker_profile: linear
+    projects: [trial-project]
+linear_projects:
+  trial-project:
+    provider_project_id: "<linear-project-id>"
+    repositories: [target]
+repositories:
+  target:
+    aliases: [target]
+    remote:
+      provider: github
+      locator: owner/repo
+      clone: https://github.com/owner/repo.git
+    target_branch: main
+    credential: github-https
+    review_profile: github
+    instructions:
+      path: WORKFLOW.md
+credentials:
+  linear-key:
+    kind: environment
+    variable: LINEAR_API_KEY
+  github-https:
+    kind: environment
+    variable: GITHUB_TOKEN
+review_profiles:
+  github:
+    provider: github
+    credential: github-https
+workspace:
+  root: ~/.opensymphony/workspaces/devin-trial
+memory:
+  catalog_root: ~/.opensymphony/state/devin-trial/memory
+scheduler:
+  max_concurrent_tasks: 1
+devin:
+  session:
+    max_acu_limit: 10
+    tags: [opensymphony]
+```
+
+`clone` must be an `https://` URL: Devin clones with its own credentials, and
+the binding rejects SSH locators. The `devin:` block takes the same shape as the
+`WORKFLOW.md` front matter above; the central copy wins, and a repository-local
+block is only consulted when the central file has none. `api_key_env` and
+`org_id_env` must not name a checkout-credential variable. Each Linear issue to
+dispatch carries the managed `repo:target` label and sits in an active state of
+the selected project.
+
+```bash
+export LINEAR_API_KEY=lin_api_... COG_SERVICE_USER_TOKEN=cog_... DEVIN_ORG_ID=org-...
+opensymphony run --dry-run   # resolves routing, writes run.json, creates no session
+opensymphony run             # creates real sessions and consumes ACUs
+```
+
+`project_set` routing reads no repository checkout, so the command can run from
+any directory. Nothing loads `.env` for you; export the variables (or
+`set -a; . ./.env`). Watch progress with `opensymphony tui`; per-run evidence
+lands under `<workspace root>/<issue>/.opensymphony/devin/<run-id>/`.
+Interrupting the orchestrator with Ctrl-C does not stop remote sessions: they
+keep running within `max_acu_limit`, and the next `opensymphony run`
+reattaches to them through the persisted binding. To stop a session, move its
+issue to a terminal tracker state; terminal cleanup terminates and archives it.
+
 ### What a Devin run does
 
 1. Binds the client to one organization through `GET /v3/self`. A configured

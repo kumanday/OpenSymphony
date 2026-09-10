@@ -12,8 +12,9 @@ pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
 pub use model::{
     AgentConfig, AgentFrontMatter, DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_PROMPT_TEMPLATE,
     DEFAULT_ROUTING_HARNESS_ENV, DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV,
-    DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
-    OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+    DEFAULT_WORKSPACE_ROOT, DevinApiFrontMatter, DevinFrontMatter, DevinSessionFrontMatter,
+    Environment, HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig,
+    OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
     OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
     OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
     OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
