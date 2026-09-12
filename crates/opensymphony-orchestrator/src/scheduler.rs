@@ -320,6 +320,7 @@ pub struct WorkerInterruptAcknowledgement {
 struct WorkerMetadata {
     issue_id: IssueId,
     harness_kind: Option<String>,
+    dry_run: bool,
 }
 
 impl WorkerMetadata {
@@ -327,7 +328,13 @@ impl WorkerMetadata {
         Self {
             issue_id,
             harness_kind,
+            dry_run: false,
         }
+    }
+
+    fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
     }
 }
 
@@ -3578,8 +3585,9 @@ where
                 issue_id.clone(),
                 harness_kind
                     .filter(|kind| !kind.trim().is_empty())
-                    .or(Some(route.harness_kind)),
-            ),
+                    .or(Some(route.harness_kind.clone())),
+            )
+            .with_dry_run(route.dry_run),
         );
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
@@ -4158,7 +4166,7 @@ where
                     .flatten(),
             };
 
-            if !normalized.sub_issues.is_empty() {
+            if !normalized.sub_issues.is_empty() && !start_request.route.dry_run {
                 let previous_state = self.hierarchy_state.clone();
                 let input_version = self
                     .hierarchy_state
@@ -4260,7 +4268,8 @@ where
                         WorkerMetadata::new(
                             issue_id.clone(),
                             Some(start_request.route.harness_kind),
-                        ),
+                        )
+                        .with_dry_run(start_request.route.dry_run),
                     );
                     let run_start_changed = self
                         .hierarchy_state
@@ -4470,6 +4479,11 @@ where
             && execution.issue().state.category == IssueStateCategory::Terminal
         {
             controller.complete(&attempt_id, &input_version, outcome.finished_at)?;
+        } else if status == ParentAttemptStatus::Passed {
+            // The harness evidence is final, but only the tracker can prove
+            // that the parent reached its terminal workflow state. Preserve
+            // this passed attempt so a later successful tracker refresh can
+            // finalize it without rerunning or losing its exact receipts.
         } else if merging_continuation {
             controller.prepare_retry(
                 &attempt_id,
@@ -4612,6 +4626,15 @@ where
                     let Some(execution) = self.remove_execution(&issue_id) else {
                         continue;
                     };
+                    if metadata.dry_run {
+                        let execution = execution.release(
+                            outcome.finished_at,
+                            ReleaseReason::Completed,
+                            Some(outcome),
+                        )?;
+                        self.insert_execution(issue_id, execution);
+                        continue;
+                    }
                     let finished_at = outcome.finished_at;
                     let original_execution = execution.clone();
                     let finished_outcome = outcome.clone();
@@ -4897,7 +4920,10 @@ where
             return Ok(());
         };
 
-        execution.refresh_issue(issue)?;
+        if let Err(error) = execution.refresh_issue(issue) {
+            self.insert_execution(issue_id, execution);
+            return Err(error.into());
+        }
         let abort_requested = abort_reason.is_some();
         let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
@@ -4922,9 +4948,37 @@ where
             self.insert_execution(issue_id, execution);
             return Ok(());
         }
-        if let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(&issue_id)
-            && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
-        {
+        let previous_parent_state = self.hierarchy_state.clone();
+        let parent_update = (|| -> Result<bool, SchedulerError> {
+            let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(&issue_id)
+            else {
+                return Ok(false);
+            };
+            if execution.issue().state.category == IssueStateCategory::Terminal
+                && !controller.state.terminal()
+                && controller.current_attempt_id().is_none()
+                && let Some(attempt_id) = controller
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.status == ParentAttemptStatus::Passed)
+                    .map(|attempt| attempt.id.clone())
+            {
+                let input_version = parent_controller_input_version(controller);
+                match controller.complete(&attempt_id, &input_version, observed_at) {
+                    Ok(()) => return Ok(true),
+                    Err(ParentIntegrationError::FinalVerificationIncomplete) => {
+                        // A legacy or malformed Passed marker is insufficient
+                        // to release the parent. Keep its controller and
+                        // leases intact for operator-visible recovery.
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+                return Ok(false);
+            };
             if execution
                 .interrupt()
                 .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
@@ -4965,7 +5019,21 @@ where
                 true,
                 observed_at,
             )?;
-            self.persist_orchestrator_state().await?;
+            Ok(true)
+        })();
+        let parent_changed = match parent_update {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.hierarchy_state = previous_parent_state;
+                self.insert_execution(issue_id, execution);
+                return Err(error);
+            }
+        };
+        if parent_changed && let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_parent_state;
+            self.hierarchy_state_dirty = true;
+            self.insert_execution(issue_id, execution);
+            return Err(error);
         }
         self.workspace
             .revoke_issue_resources(execution.issue().identifier.as_str());
@@ -5012,6 +5080,47 @@ where
             self.insert_execution(issue_id, execution);
             return Err(error);
         }
+        let parent_workspace = !execution.issue().sub_issues.is_empty();
+        let mut retry_cleanup_succeeded = retain_failed;
+        if parent_workspace
+            && cleanup_terminal
+            && parent_finalized
+            && remote_stopped
+            && !retain_failed
+            && let Some(workspace) = execution.workspace().cloned()
+        {
+            let leased = match self.workspace_has_active_lease(&workspace).await {
+                Ok(leased) => leased,
+                Err(error) => {
+                    self.insert_execution(issue_id, execution);
+                    return Err(error);
+                }
+            };
+            if leased {
+                self.insert_execution(issue_id, execution);
+                return Ok(());
+            }
+            let cleanup = if cleanup_reason == ReleaseReason::RetryExhausted {
+                self.workspace.cleanup_failed_workspace(&workspace).await
+            } else {
+                self.workspace.cleanup_workspace(&workspace, true).await
+            };
+            match cleanup {
+                Ok(()) => {
+                    retry_cleanup_succeeded = true;
+                    execution.clear_workspace();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        issue = %issue_id,
+                        %error,
+                        "retaining finalized parent and its child leases while workspace cleanup retries"
+                    );
+                    self.insert_execution(issue_id, execution);
+                    return Ok(());
+                }
+            }
+        }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
@@ -5027,8 +5136,8 @@ where
             self.insert_execution(issue_id, execution);
             return Err(error);
         }
-        let mut retry_cleanup_succeeded = retain_failed;
-        if cleanup_terminal
+        if !parent_workspace
+            && cleanup_terminal
             && parent_finalized
             && remote_stopped
             && !retain_failed
@@ -5277,6 +5386,8 @@ where
             &execution.issue().id,
             !execution.issue().sub_issues.is_empty(),
         );
+        let defer_parent_retirement =
+            parent_finalized && !execution.issue().sub_issues.is_empty() && outcome.is_some();
         if cleanup_terminal && parent_finalized {
             self.retain_terminal_child_lease(&execution).await?;
         }
@@ -5289,10 +5400,12 @@ where
             self.record_terminal_orchestrator_success(&execution.issue().id)
                 .await?;
         }
-        if matches!(
-            reason,
-            ReleaseReason::TrackerTerminal | ReleaseReason::Completed
-        ) && parent_finalized
+        if !defer_parent_retirement
+            && matches!(
+                reason,
+                ReleaseReason::TrackerTerminal | ReleaseReason::Completed
+            )
+            && parent_finalized
         {
             self.release_parent_leases_after_finalization(
                 &execution.issue().id,
@@ -5316,7 +5429,8 @@ where
             let mut execution = execution.release(observed_at, reason, outcome)?;
             execution.set_retry_count_override(normal_retry_count);
             let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
-            if cleanup_terminal
+            if !defer_parent_retirement
+                && cleanup_terminal
                 && parent_finalized
                 && !retain_failed
                 && let Some(workspace) = execution.workspace().cloned()
@@ -5339,7 +5453,8 @@ where
         let mut execution = execution.release(observed_at, reason, outcome)?;
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
-        if cleanup_terminal
+        if !defer_parent_retirement
+            && cleanup_terminal
             && parent_finalized
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()

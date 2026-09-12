@@ -3427,6 +3427,31 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
+        let mut multi_repository_issue = issue.clone();
+        multi_repository_issue.scope_refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Repository,
+            id: "repository-2@run-17".to_string(),
+            label: Some("Repo Two exact run".to_string()),
+        });
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &multi_repository_issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from(["repository-1".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &multi_repository_issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from([
+                    "repository-1".to_string(),
+                    "repository-2".to_string(),
+                ])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
         assert!(indexed_issue_matches_scope(
             &config,
             &issue,
@@ -3830,11 +3855,21 @@ Reviews are triggered when you open a pull request for review.
             labels: vec!["runtime".to_string()],
             ..IssueEvidence::default()
         });
+        source.issues.push(IssueEvidence {
+            identifier: "COE-125".to_string(),
+            title: "Same repository runtime record".to_string(),
+            labels: vec!["runtime".to_string()],
+            ..IssueEvidence::default()
+        });
         let plan = plan_capture(
             &config,
             &source,
             &IssueSelection {
-                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                identifiers: vec![
+                    "COE-123".to_string(),
+                    "COE-124".to_string(),
+                    "COE-125".to_string(),
+                ],
                 ..IssueSelection::default()
             },
             true,
@@ -3884,6 +3919,12 @@ Reviews are triggered when you open a pull request for review.
             .expect("repo-b scope refs");
         connection
             .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_a_scopes, "COE-125"],
+            )
+            .expect("same-doc repo-a scope refs");
+        connection
+            .execute(
                 "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
                 duckdb::params!["COE-123", "area-b-only", "repo-b:public_docs"],
             )
@@ -3910,6 +3951,21 @@ Reviews are triggered when you open a pull request for review.
         .expect("repository-local docs should ignore other repository records");
 
         assert!(docs.contains("# OpenHands Runtime"));
+        let docs_error = docs_for_area_with_scope(
+            &selected_config,
+            "openhands-runtime",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                authorized_work_items: Some(BTreeSet::from(["COE-123".to_string()])),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect_err("aggregate docs must reject unauthorized same-document contributors");
+        assert!(
+            docs_error
+                .to_string()
+                .contains("outside the requested scope")
+        );
         let search = search_with_scope(
             &selected_config,
             "WebSocket",

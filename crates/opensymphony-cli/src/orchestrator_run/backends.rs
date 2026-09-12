@@ -5060,7 +5060,7 @@ impl RuntimeWorkerBackend {
                 )
                 .await
                 .err();
-                let mut outcome = WorkerOutcomeRecord::from_run(
+                let outcome = WorkerOutcomeRecord::from_run(
                     &run,
                     if finish_error.is_some() {
                         WorkerOutcomeKind::Failed
@@ -5074,14 +5074,6 @@ impl RuntimeWorkerBackend {
                     }),
                     finish_error.map(|error| error.to_string()),
                 );
-                attach_parent_verification_receipt(
-                    &mut outcome,
-                    &workspace_manager,
-                    &ensured.handle,
-                    &issue,
-                    parent_runtime_envelope.as_ref(),
-                )
-                .await;
                 let _ = updates_tx.send(WorkerUpdate::Finished {
                     worker_id: finished_worker_id.clone(),
                     outcome,

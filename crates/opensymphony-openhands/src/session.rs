@@ -1547,7 +1547,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return Err(IssueSessionError::RehydrationFailed(format!(
@@ -2159,7 +2159,7 @@ impl IssueSessionRunner {
         run: &RunAttempt,
         mut active_session: ActiveSession,
         launch_reported: bool,
-        observer: &mut O,
+        _observer: &mut O,
     ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError>
     where
         O: IssueSessionObserver,
@@ -2169,7 +2169,7 @@ impl IssueSessionRunner {
             && turn_is_in_progress(status)
         {
             if let Err(error) = self
-                .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                .wait_for_active_turn_to_finish(&mut active_session.stream)
                 .await
             {
                 return self
@@ -2389,7 +2389,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return self
@@ -3479,14 +3479,10 @@ impl IssueSessionRunner {
         }
     }
 
-    async fn wait_for_active_turn_to_finish<O>(
+    async fn wait_for_active_turn_to_finish(
         &self,
         stream: &mut RuntimeEventStream,
-        observer: &mut O,
-    ) -> Result<(), OpenHandsError>
-    where
-        O: IssueSessionObserver,
-    {
+    ) -> Result<(), OpenHandsError> {
         if stream
             .state_mirror()
             .execution_status()
@@ -3519,7 +3515,10 @@ impl IssueSessionRunner {
                         ),
                     });
                 }
-                Ok(Ok(Some(event))) => observe_event(observer, &event),
+                // This is a prior turn. The stream mirror and event cache
+                // still consume its events, but the current worker observer
+                // must not attribute its commands to the new parent attempt.
+                Ok(Ok(Some(_event))) => {}
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     if stream
@@ -4846,6 +4845,90 @@ mod tests {
             observer.event_ids,
             vec!["command-start".to_owned(), "command-finish".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn prior_turn_wait_keeps_its_commands_out_of_the_current_attempt() {
+        let server = FakeOpenHandsServer::start()
+            .await
+            .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-prior-turn",
+                "/tmp/opensymphony-prior-turn/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let mut stream = client
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_secs(2),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+            )
+            .await
+            .expect("runtime stream should attach");
+        server
+            .emit_state_update(conversation.conversation_id, "running")
+            .await
+            .expect("prior turn should run");
+        stream
+            .next_event()
+            .await
+            .expect("running event")
+            .expect("running event payload");
+        let prior_command = EventEnvelope::new(
+            "prior-command",
+            Utc::now(),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test prior"}),
+        );
+        server
+            .insert_event(conversation.conversation_id, prior_command)
+            .await
+            .expect("prior command should be delivered");
+        server
+            .emit_state_update(conversation.conversation_id, "finished")
+            .await
+            .expect("prior turn should finish");
+
+        let config = IssueSessionRunnerConfig {
+            terminal_wait_timeout: Duration::from_secs(2),
+            ..IssueSessionRunnerConfig::default()
+        };
+        let runner = IssueSessionRunner::new(client, config);
+        runner
+            .wait_for_active_turn_to_finish(&mut stream)
+            .await
+            .expect("prior turn should drain");
+
+        let baseline_event_ids = stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+        assert!(baseline_event_ids.contains("prior-command"));
+        let current_command = EventEnvelope::new(
+            "current-command",
+            Utc::now() + chrono::Duration::milliseconds(1),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test current"}),
+        );
+        let mut observer = ReconciledEventObserver::default();
+        let mut events = stream.event_cache().items().to_vec();
+        events.push(current_command);
+        observe_reconciled_events(&mut observer, &events, &baseline_event_ids);
+        assert_eq!(observer.event_ids, vec!["current-command".to_owned()]);
     }
 
     #[test]
