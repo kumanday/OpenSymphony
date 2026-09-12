@@ -105,7 +105,10 @@ fn normalize_pr_urls(attachments: Vec<super::graphql::LinearAttachmentNode>) -> 
             attachment
                 .source_type
                 .as_deref()
-                .map(|source_type| source_type.eq_ignore_ascii_case("github"))
+                .map(|source_type| {
+                    source_type.eq_ignore_ascii_case("github")
+                        || source_type.eq_ignore_ascii_case("api")
+                })
                 .unwrap_or(false)
         })
         .map(|attachment| attachment.url)
@@ -305,9 +308,20 @@ mod tests {
                 url: "https://github.com/kumanday/OpenSymphony/pull/34".to_owned(),
                 source_type: Some("github".to_owned()),
             },
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/pull/233".to_owned(),
+                source_type: Some("api".to_owned()),
+            },
+            LinearAttachmentNode {
+                title: None,
+                url: "https://github.com/kumanday/OpenSymphony/issues/234".to_owned(),
+                source_type: Some("api".to_owned()),
+            },
         ]);
-        assert_eq!(urls.len(), 2);
+        assert_eq!(urls.len(), 3);
         assert_eq!(urls[0], "https://github.com/kumanday/OpenSymphony/pull/12");
         assert_eq!(urls[1], "https://github.com/kumanday/OpenSymphony/pull/34");
+        assert_eq!(urls[2], "https://github.com/kumanday/OpenSymphony/pull/233");
     }
 }

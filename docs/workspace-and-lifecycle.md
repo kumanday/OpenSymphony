@@ -117,6 +117,10 @@ must not release a still-required descendant's leaf, review, or ancestor leases.
 The old parent's review ownership can be released independently; a later
 leaf-only cleanup pass must not override the reachability decision.
 
+A partial issue refresh that changes an existing hierarchy keeps the prior
+scope and leases and requests a full tracker observation on the next tick.
+Generation-checked replans also fetch full reachability before reconciling
+changed edges, so rejecting a stale replan cannot discard reparented evidence.
 
 ## 4. Workspace directory layout
 

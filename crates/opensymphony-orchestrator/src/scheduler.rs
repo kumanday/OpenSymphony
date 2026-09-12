@@ -1100,8 +1100,16 @@ where
         // accepted snapshot changed while the action was in flight, preserve
         // the new HierarchyChanged fence instead of silently accepting scope
         // the operator did not explicitly replan.
+        let tracker_snapshot = self
+            .load_tracker_snapshot(observed_at)
+            .await?
+            .ok_or_else(|| SchedulerError::Tracker {
+                detail: "replan reachability refresh deferred by tracker rate limit".to_owned(),
+            })?;
+        let reachable_child_edges =
+            self.required_child_edges_in_tracker_snapshot(&tracker_snapshot);
         let previous_state = self.hierarchy_state.clone();
-        self.reconcile_hierarchy_issue(&issue, None)?;
+        self.reconcile_hierarchy_issue(&issue, Some(&reachable_child_edges))?;
         let current_generation = self
             .hierarchy_state
             .hierarchy
@@ -1576,6 +1584,21 @@ where
             self.terminal_child_failure_ids.remove(&normalized.id);
         }
         let existing_snapshot = self.hierarchy_state.hierarchy.get(&normalized.id).cloned();
+        if reachable_child_edges.is_none()
+            && existing_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.required_child_edges
+                    != HierarchySnapshot::new_with_canceled_states(
+                        tracker_issue,
+                        &self.config.terminal_states,
+                    )
+                    .required_child_edges
+            })
+        {
+            // Keep the old scope and its leases until the full observation can
+            // distinguish removed children from children moved to another parent.
+            self.last_full_detail_refresh_at = None;
+            return Ok(false);
+        }
         let should_retain_parent_identity = !tracker_issue.sub_issues.is_empty()
             || existing_snapshot.as_ref().is_some_and(|snapshot| {
                 !snapshot.required_child_edges.is_empty()

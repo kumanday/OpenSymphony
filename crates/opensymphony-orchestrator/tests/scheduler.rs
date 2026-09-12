@@ -1053,6 +1053,86 @@ async fn hierarchy_reconciliation_preserves_reparented_leases_and_releases_termi
 }
 
 #[tokio::test]
+async fn partial_hierarchy_refresh_defers_removal_until_full_reachability_is_known() {
+    let child_id = IssueId::new("moved-child").expect("child");
+    let parent_id = IssueId::new("old-parent").expect("parent");
+    let mut parent = tracker_issue("old-parent", "COE-OLD", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), HierarchySnapshot::new(&parent))]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: LeaseResource {
+                issue_id: child_id.clone(),
+                repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+                checkout_generation: "checkout-1".to_owned(),
+            },
+            owner: LeaseOwner::leaf_worker(&child_id),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![parent.clone()],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("initial full observation");
+    parent.sub_issues.clear();
+    scheduler.tracker_mut().active = vec![parent];
+    let mut child = tracker_issue("moved-child", "COE-CHILD", "Done", 0);
+    child.parent_id = Some("new-parent".to_owned());
+    scheduler.tracker_mut().terminal = vec![child];
+    scheduler.tick(ts(60_100)).await.expect("summary discovery");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode");
+    assert!(
+        state.leases.iter().any(LeaseRecord::active),
+        "partial observation released a reparented lease"
+    );
+    assert_eq!(
+        state.hierarchy[&parent_id].generation, 1,
+        "partial scope must remain available for full reconciliation"
+    );
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("prompt full refresh");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode");
+    assert!(state.leases.iter().any(LeaseRecord::active));
+    assert!(
+        state
+            .hierarchy
+            .get(&parent_id)
+            .is_none_or(|snapshot| snapshot.required_child_edges.is_empty())
+    );
+    assert_eq!(scheduler.tracker().active_requests, 2);
+}
+
+#[tokio::test]
 async fn recovered_run_boundary_survives_initial_state_persistence() {
     let issue_id = IssueId::new("recovered-boundary").expect("issue id should be valid");
     let run_started_at = ts(50);
@@ -1380,10 +1460,26 @@ async fn replan_parent_target_restores_hierarchy_when_persistence_fails() {
     snapshot.reconcile(std::slice::from_ref(&child_b));
     let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
         hierarchy: BTreeMap::from([(parent_id, snapshot)]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: LeaseResource {
+                issue_id: IssueId::new("child-b").expect("child b"),
+                repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+                checkout_generation: "checkout-1".to_owned(),
+            },
+            owner: LeaseOwner::leaf_worker(&IssueId::new("child-b").expect("child b")),
+            hierarchy_generation: 2,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
         ..Default::default()
     };
     let current_parent = durable_parent;
+    let mut moved_child = tracker_issue("child-b", "COE-CHILD-2", "Done", 0);
+    moved_child.parent_id = Some("new-parent".to_owned());
     let tracker = FakeTracker {
+        terminal: vec![moved_child],
         detail_issues: Some(vec![current_parent]),
         ..Default::default()
     };
@@ -1403,6 +1499,21 @@ async fn replan_parent_target_restores_hierarchy_when_persistence_fails() {
         scheduler_config(),
     );
 
+    scheduler
+        .tracker_mut()
+        .candidate_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(1)));
+    assert!(
+        matches!(
+            scheduler
+                .replan_parent_target("COE-REPLAN", 2, ts(99))
+                .await,
+            Err(crate::opensymphony_orchestrator::SchedulerError::Tracker { .. })
+        ),
+        "transient refresh failures must retain the action for retry"
+    );
+    assert!(scheduler.workspace().persisted_durable_states.is_empty());
+
     let result = scheduler
         .replan_parent_target("COE-REPLAN", 2, ts(100))
         .await;
@@ -1420,6 +1531,19 @@ async fn replan_parent_target_restores_hierarchy_when_persistence_fails() {
             .expect("retry should reject the unpersisted generation")
     );
     assert_eq!(scheduler.workspace().persisted_durable_states.len(), 0);
+    assert!(
+        !scheduler
+            .replan_parent_target("COE-REPLAN", 2, ts(102))
+            .await
+            .expect("changed scope rejects stale replan")
+    );
+    let persisted: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("state");
+    assert!(
+        persisted.leases.iter().any(LeaseRecord::active),
+        "rejected replan released a reparented lease"
+    );
 }
 
 #[tokio::test]

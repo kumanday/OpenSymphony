@@ -123,9 +123,10 @@ Important normalization rules:
 - `pr_urls` retains qualifying URLs from the 32 most recently updated Linear
   attachments containing `/pull/`, fetched in the issue query without historical
   attachment pagination. When more exist, hydration logs the truncation. The explicit
-  `sourceType` must be GitHub and the URL must be an HTTPS pull-request URL in the
+  `sourceType` must be GitHub or API (including links created by the agent-side
+  GraphQL helper), and the URL must be an HTTPS pull-request URL in the
   `<owner>/<repo>/pull/<number>` shape. This accepts both github.com and
-  GitHub Enterprise authorities; generic URL attachments are ignored for Run
+  GitHub Enterprise authorities; non-PR URL attachments are ignored for Run
   Detail PR metadata. `pr_url` remains the first qualifying URL as a
   compatibility projection for consumers that only display one pull request.
 - `parent_id` comes from `parent.id`
