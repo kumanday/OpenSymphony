@@ -1704,34 +1704,37 @@ where
                     reachable_child_edges,
                     current_epoch_millis(),
                 );
-        let reactivated_parent = self
-            .hierarchy_state
-            .hierarchy
-            .get(&normalized.id)
-            .is_some_and(|snapshot| {
-                snapshot.dispatch_claimed()
-                    && !snapshot.has_in_flight_dispatch()
-                    && normalized.state.category == IssueStateCategory::Active
-                    && !self
-                        .executions
-                        .get(&normalized.id)
-                        .is_some_and(|execution| {
-                            matches!(
-                                execution.status(),
-                                SchedulerStatus::Claimed | SchedulerStatus::Running
-                            )
+        let parent_waiting_for_tracker_confirmation =
+            self.parent_waiting_for_tracker_confirmation(&normalized.id);
+        let reactivated_parent = !parent_waiting_for_tracker_confirmation
+            && self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| {
+                    snapshot.dispatch_claimed()
+                        && !snapshot.has_in_flight_dispatch()
+                        && normalized.state.category == IssueStateCategory::Active
+                        && !self
+                            .executions
+                            .get(&normalized.id)
+                            .is_some_and(|execution| {
+                                matches!(
+                                    execution.status(),
+                                    SchedulerStatus::Claimed | SchedulerStatus::Running
+                                )
+                            })
+                        && !self.hierarchy_state.leases.iter().any(|lease| {
+                            lease.active()
+                                && normalized.parent_id.is_none()
+                                && (lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                                    || (lease.kind == super::LeaseKind::Review
+                                        && lease.owner.id.starts_with(&format!(
+                                            "review:{normalized_id}:",
+                                            normalized_id = normalized.id
+                                        ))))
                         })
-                    && !self.hierarchy_state.leases.iter().any(|lease| {
-                        lease.active()
-                            && normalized.parent_id.is_none()
-                            && (lease.owner == super::LeaseOwner::ancestor(&normalized.id)
-                                || (lease.kind == super::LeaseKind::Review
-                                    && lease.owner.id.starts_with(&format!(
-                                        "review:{normalized_id}:",
-                                        normalized_id = normalized.id
-                                    ))))
-                    })
-            });
+                });
         let reconciliation =
             if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
                 if reactivated_parent {
@@ -1771,6 +1774,9 @@ where
             };
         if let Some((generation, current_child_ids, removed_child_ids)) = reconciliation {
             self.parent_eligibility_checked_at.remove(&normalized.id);
+            self.hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(&normalized.id);
             let retained_child_ids = current_child_ids
                 .iter()
                 .filter(|child_id| {
@@ -2363,7 +2369,12 @@ where
                         .remove_execution(&issue_id)
                         .expect("active recovery execution should be present");
                     let already_exhausted = retry_exhausted_release(&execution);
-                    if self.retry_limit_reached(record.normal_retry_count) {
+                    if self.parent_waiting_for_tracker_confirmation(&issue_id) {
+                        self.insert_execution(
+                            issue_id.clone(),
+                            execution.release(observed_at, ReleaseReason::Completed, None)?,
+                        );
+                    } else if self.retry_limit_reached(record.normal_retry_count) {
                         let mut execution = if already_exhausted {
                             execution
                         } else {
@@ -5340,6 +5351,16 @@ where
 
         self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
             .await?;
+        if self.parent_waiting_for_tracker_confirmation(&issue_id) {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
         self.queue_retry_for_outcome(execution, outcome, observed_at)
             .await
     }
@@ -5499,9 +5520,32 @@ where
 
     fn parent_finalized_success(&self, issue_id: &IssueId, issue_has_children: bool) -> bool {
         match self.hierarchy_state.parent_integrations.get(issue_id) {
-            Some(controller) => controller.state == super::ParentIntegrationState::Completed,
+            Some(controller) => {
+                controller.state == super::ParentIntegrationState::Completed
+                    && self
+                        .hierarchy_state
+                        .hierarchy
+                        .get(issue_id)
+                        .is_some_and(|snapshot| {
+                            snapshot.accepts_event(controller.hierarchy_generation)
+                        })
+            }
             None => !issue_has_children,
         }
+    }
+
+    fn parent_waiting_for_tracker_confirmation(&self, issue_id: &IssueId) -> bool {
+        self.hierarchy_state
+            .parent_integrations
+            .get(issue_id)
+            .is_some_and(|controller| {
+                !controller.state.terminal()
+                    && controller.current_attempt_id().is_none()
+                    && controller
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| attempt.status == ParentAttemptStatus::Passed)
+            })
     }
 
     async fn release_parent_leases_after_finalization(
@@ -5765,6 +5809,9 @@ where
                             reason: ReleaseReason::TrackerTerminal | ReleaseReason::Completed,
                             ..
                         }
+                    ) && self.parent_finalized_success(
+                        &child.child_id,
+                        !execution.issue().sub_issues.is_empty(),
                     )
                 },
             );

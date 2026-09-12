@@ -544,7 +544,9 @@ same conversation, and its exact repository commit map to equal the runtime
 envelope. A terminal run manifest or harness success by itself cannot authorize
 parent capture. The durable binding explicitly marks a parent even when this
 verified commit map is empty, so repository-neutral capture cannot inherit a
-configured default leaf repository.
+configured default leaf repository. That empty-target capture still records one
+repository-neutral parent-runtime source reference with the durable run and
+attempt identifiers.
 Retained legacy run envelopes that lack usable run/attempt provenance are
 skipped as non-bindable entries during the pre-cleanup scan rather than
 preventing unrelated terminal captures from completing.

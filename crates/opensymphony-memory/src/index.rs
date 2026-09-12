@@ -187,20 +187,36 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 registration_source_id: None,
             });
         }
-        if let Some(run_id) = issue_plan.issue.execution_run_id.as_deref() {
-            live_source_refs.extend(issue_plan.issue.verified_repository_commits.iter().map(
-                |(repository_id, commit)| MemorySourceRef {
+        if issue_plan.issue.parent_integration
+            && let Some(run_id) = issue_plan.issue.execution_run_id.as_deref()
+        {
+            if issue_plan.issue.verified_repository_commits.is_empty() {
+                live_source_refs.push(MemorySourceRef {
                     kind: "parent_terminal_runtime_envelope".to_owned(),
                     id: format!(
-                        "run={run_id};attempt={};repo={repository_id};target_commit={commit}",
+                        "run={run_id};attempt={};repo=;target_commit=",
                         issue_plan.issue.execution_attempt.unwrap_or_default()
                     ),
                     url: None,
-                    repo_id: Some(repository_id.clone()),
+                    repo_id: None,
                     symbol_key: None,
                     registration_source_id: None,
-                },
-            ));
+                });
+            } else {
+                live_source_refs.extend(issue_plan.issue.verified_repository_commits.iter().map(
+                    |(repository_id, commit)| MemorySourceRef {
+                        kind: "parent_terminal_runtime_envelope".to_owned(),
+                        id: format!(
+                            "run={run_id};attempt={};repo={repository_id};target_commit={commit}",
+                            issue_plan.issue.execution_attempt.unwrap_or_default()
+                        ),
+                        url: None,
+                        repo_id: Some(repository_id.clone()),
+                        symbol_key: None,
+                        registration_source_id: None,
+                    },
+                ));
+            }
         }
         for source_ref in live_source_refs {
             if !source_refs.contains(&source_ref) {

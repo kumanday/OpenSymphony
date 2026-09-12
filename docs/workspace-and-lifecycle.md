@@ -253,6 +253,11 @@ indeterminate and reruns after named-resource cleanup and baseline refresh. Term
 tracker state cannot publish orchestrator success, release descendant leases,
 or remove the parent workspace until the durable controller reaches
 `completed` through accepted final verification.
+A verified passed attempt remains parked while the tracker still reports the
+parent active or its refresh is unavailable. Restart recovery preserves that
+tracker-confirmation wait and does not launch a second attempt. A completed
+controller authorizes terminal cleanup only while its hierarchy generation
+still matches the current unblocked snapshot.
 A recovered parent worker must find the exact conversation manifest recorded by
 the controller. Its expected identity crosses the scheduler-to-worker request,
 and a missing or different manifest fails before any harness session is

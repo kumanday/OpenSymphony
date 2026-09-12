@@ -14789,6 +14789,23 @@ Public memory concept.
                 .all(|scope| scope.kind != KnowledgeScopeKind::Repository),
             "repository-neutral parent capture must not inherit a default repository"
         );
+        let source_refs_json: String = connection
+            .query_row(
+                "SELECT source_refs_json FROM issues WHERE issue_key = 'COE-PARENT'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("captured parent source refs");
+        let source_refs: Vec<serde_json::Value> =
+            serde_json::from_str(&source_refs_json).expect("source refs JSON");
+        assert!(source_refs.iter().any(|source_ref| {
+            source_ref["kind"] == "parent_terminal_runtime_envelope"
+                && source_ref["id"] == "run=run-parent;attempt=1;repo=;target_commit="
+                && source_ref["repo_id"].is_null()
+        }));
+        let capsule = std::fs::read_to_string(&plan.selected[0].capsule_path)
+            .expect("repository-neutral parent capsule");
+        assert!(capsule.contains("run=run-parent;attempt=1;repo=;target_commit="));
     }
 
     #[test]

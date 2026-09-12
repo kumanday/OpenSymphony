@@ -788,9 +788,18 @@ fn terminal_runtime_source_ref(issue: &IssueEvidence) -> Option<String> {
 }
 
 fn parent_terminal_runtime_source_refs(issue: &IssueEvidence) -> Vec<String> {
+    if !issue.parent_integration {
+        return Vec::new();
+    }
     let Some(run_id) = issue.execution_run_id.as_deref() else {
         return Vec::new();
     };
+    if issue.verified_repository_commits.is_empty() {
+        return vec![format!(
+            "run={run_id};attempt={};repo=;target_commit=",
+            issue.execution_attempt.unwrap_or_default()
+        )];
+    }
     issue
         .verified_repository_commits
         .iter()
