@@ -3904,6 +3904,9 @@ impl RuntimeWorkerBackend {
                 workspace_issue.repository_binding =
                     Some(RepositoryBindingOutcome::Resolved(binding));
             }
+            let is_parent_retry = recovered
+                || run.normal_retry_count > 0
+                || run.attempt.is_some_and(|attempt| attempt.get() > 1);
             let (ensured, parent_execution) = if issue.sub_issues.is_empty() {
                 match workspace_manager
                     .ensure_with_run_id(&workspace_issue, Some(&run_id))
@@ -3919,10 +3922,19 @@ impl RuntimeWorkerBackend {
                     }
                 }
             } else {
-                match workspace_manager
-                    .open_parent_execution_root_at(&workspace_issue, &run.workspace_path)
-                    .await
-                {
+                let parent = if is_parent_retry {
+                    workspace_manager
+                        .open_parent_execution_root_at_for_retry(
+                            &workspace_issue,
+                            &run.workspace_path,
+                        )
+                        .await
+                } else {
+                    workspace_manager
+                        .open_parent_execution_root_at(&workspace_issue, &run.workspace_path)
+                        .await
+                };
+                match parent {
                     Ok(parent) => {
                         let issue_manifest =
                             match workspace_manager.load_issue_manifest(&parent.handle).await {
@@ -4346,7 +4358,9 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref() {
+            let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref()
+                && !is_parent_retry
+            {
                 match workspace_manager
                     .parent_repository_instructions(parent)
                     .await
@@ -7914,6 +7928,15 @@ mod tests {
             parent_checkout_requests(&state, &parent_id, &snapshot),
             Err(CliWorkspaceError::RetryState(reason)) if reason.contains("ambiguous")
         ));
+
+        snapshot.required_child_edges.clear();
+        snapshot.dispatch_required_merge_commits.clear();
+        state.leases.clear();
+        assert!(
+            parent_checkout_requests(&state, &parent_id, &snapshot)
+                .expect("a parent with no required children should need no checkouts")
+                .is_empty()
+        );
     }
 
     fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {

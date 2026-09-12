@@ -347,6 +347,13 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     ));
     std::fs::remove_file(child_b.handle.workspace_path().join("dirty.txt"))
         .expect("dirty marker should be removed");
+    assert!(
+        !manager
+            .config()
+            .root
+            .join("parents/parent-COE-PARENT/5")
+            .exists()
+    );
 
     let expected_remote = git(
         child_c.handle.workspace_path(),
@@ -371,10 +378,11 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         &["remote", "set-url", "origin", &expected_remote],
     );
 
+    let repeat_requests = requests.clone();
     let prepared = manager
-        .prepare_parent_execution_root(&parent, 7, requests)
+        .prepare_parent_execution_root(&parent, 5, requests)
         .await
-        .expect("parent root should be prepared from retained storage");
+        .expect("same generation should retry after incomplete preparation is rolled back");
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert_eq!(prepared.child_checkout_map.repositories.len(), 3);
@@ -415,11 +423,77 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]),
         child_a1_head
     );
+    assert_eq!(
+        git(
+            child_c.handle.workspace_path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ),
+        "false"
+    );
+    manager
+        .prepare_parent_execution_root(&parent, 8, repeat_requests)
+        .await
+        .expect("a deepened retained child should support a later parent generation");
     assert!(matches!(
         manager.resolve_parent_checkout(&prepared, "../arbitrary").await,
         Err(WorkspaceError::CheckoutVerification { reason, .. })
             if reason.contains("not present")
     ));
+
+    std::fs::write(
+        child_a2
+            .handle
+            .workspace_path()
+            .join("late-child-drift.txt"),
+        "must be detected\n",
+    )
+    .expect("late child drift marker should be written");
+    let child_drift_error = manager
+        .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+        .await
+        .expect_err("a dirty non-source child must invalidate the parent root");
+    assert!(
+        child_drift_error.to_string().contains("dirty"),
+        "unexpected child-drift error: {child_drift_error}"
+    );
+    std::fs::remove_file(
+        child_a2
+            .handle
+            .workspace_path()
+            .join("late-child-drift.txt"),
+    )
+    .expect("late child drift marker should be removed");
+
+    let integration = prepared
+        .handle
+        .workspace_path()
+        .join(&repository_a.relative_path);
+    std::fs::write(
+        integration.join("parent-change.txt"),
+        "preserve across retry\n",
+    )
+    .expect("parent change should be written");
+    let parent_drift_error = manager
+        .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+        .await
+        .expect_err("strict reopen must reject dirty parent integration work");
+    assert!(
+        parent_drift_error.to_string().contains("dirty"),
+        "unexpected parent-drift error: {parent_drift_error}"
+    );
+    manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("retry attachment should preserve parent integration changes");
+    assert_eq!(
+        manager
+            .resolve_parent_checkout(&prepared, &repository_a.checkout_handle)
+            .await
+            .expect("handle resolution should permit parent-owned changes"),
+        integration
+    );
+    std::fs::remove_file(integration.join("parent-change.txt"))
+        .expect("parent change should be removed before manifest mismatch validation");
 
     let mut changed_requests = prepared
         .child_checkout_map
@@ -440,7 +514,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .collect::<Vec<_>>();
     changed_requests[0].lease_owner = "ancestor-integration:other-parent".to_owned();
     assert!(matches!(
-        manager.prepare_parent_execution_root(&parent, 7, changed_requests).await,
+        manager.prepare_parent_execution_root(&parent, 5, changed_requests).await,
         Err(WorkspaceError::CheckoutVerification { reason, .. })
             if reason.contains("does not match")
     ));
@@ -490,31 +564,49 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
 
     #[cfg(unix)]
     {
-        let integration = prepared
-            .handle
-            .workspace_path()
-            .join(&repository_a.relative_path);
-        git(
-            child_a1.handle.workspace_path(),
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                integration.to_str().expect("integration path"),
-            ],
-        );
+        let repositories = prepared.handle.workspace_path().join("repositories");
         let outside = temp_dir.path().join("outside-parent-root");
-        std::fs::create_dir_all(&outside).expect("outside directory should exist");
-        symlink(&outside, &integration).expect("integration symlink should be created");
+        std::fs::rename(&repositories, &outside)
+            .expect("repository worktrees should move outside the parent root");
+        symlink(&outside, &repositories).expect("repositories symlink should be created");
         assert!(matches!(
             manager
                 .resolve_parent_checkout(&prepared, &repository_a.checkout_handle)
                 .await,
             Err(WorkspaceError::PathEscape { .. })
                 | Err(WorkspaceError::ManagedPathSymlink { .. })
+                | Err(WorkspaceError::InstructionPathEscape { .. })
                 | Err(WorkspaceError::CheckoutVerification { .. })
         ));
     }
+}
+
+#[tokio::test]
+async fn parent_execution_root_supports_no_required_child_checkouts() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let mut parent = sample_issue("COE-CANCELED-PARENT");
+    parent.issue_id = "canceled-parent-id".to_owned();
+
+    let prepared = manager
+        .prepare_parent_execution_root(&parent, 1, Vec::new())
+        .await
+        .expect("a parent with no required child checkouts should still get an execution root");
+
+    assert!(!prepared.handle.workspace_path().join(".git").exists());
+    assert!(prepared.child_checkout_map.repositories.is_empty());
+    assert!(
+        prepared
+            .handle
+            .workspace_path()
+            .join("repositories")
+            .is_dir()
+    );
 }
 
 #[cfg(unix)]

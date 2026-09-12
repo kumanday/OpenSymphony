@@ -140,17 +140,31 @@ child generation by canonical repository, records the safe remote fingerprint,
 target and provider merge-result commits, instruction provenance, and the
 selected shared-storage generation. Reopening an existing root verifies that
 the incoming generation, lease owners, children, and merge results still match
-that map. Arbitrary paths and handles that are absent from the map are rejected.
+that map, then revalidates every retained child generation before use. A parent
+whose children are all canceled still gets a valid root with an empty checkout
+map. Arbitrary paths and handles that are absent from the map are rejected.
 
 Parent preparation verifies retained child identity and cleanliness without
 moving a child branch or HEAD. It can accept a recorded shallow generation,
 then fetch and deepen the configured target through the repository credential
-provider before adding a detached integration worktree. The new worktree must
+provider before adding a detached integration worktree. A shallow-to-complete
+storage transition remains valid against the immutable child manifest on later
+parent generations. Preparation bounds both authenticated fetches and worktree
+creation, terminates their process groups on timeout, and rolls back incomplete
+roots so the same hierarchy generation can retry. Credentialed fetches disable
+repository-local credential helpers before exposing the configured secret to
+Git's orchestrator-owned askpass process. The new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both fetch and push remote fingerprints, be clean, and point at the
 recorded target commit. Several children in one repository share one handle;
 the target must contain every provider merge-result commit, while replaced
 feature commits from squash or rebase are not required.
+
+The initial launch requires the integration worktrees to match their prepared
+targets exactly. A continuation or failure retry may reattach when the recorded
+target remains an ancestor of the current integration HEAD, preserving
+parent-owned committed and uncommitted work. Repository instruction bytes share
+one aggregate size budget across the entire parent prompt.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

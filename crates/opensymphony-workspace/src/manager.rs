@@ -279,10 +279,10 @@ impl WorkspaceManager {
         hierarchy_generation: u64,
         requests: Vec<ParentCheckoutRequest>,
     ) -> Result<ParentExecutionRoot, WorkspaceError> {
-        if hierarchy_generation == 0 || requests.is_empty() || issue.repository_binding.is_some() {
+        if hierarchy_generation == 0 || issue.repository_binding.is_some() {
             return Err(checkout_verification(
                 &self.config.root,
-                "parent preparation requires a repository-neutral issue, a hierarchy generation, and retained checkout requests",
+                "parent preparation requires a repository-neutral issue and a hierarchy generation",
             ));
         }
         let workspace_key = format!("parent-{}", sanitize_workspace_key(&issue.identifier)?);
@@ -301,24 +301,25 @@ impl WorkspaceManager {
             return Ok(parent);
         }
         self.create_directory(&root).await?;
-        let root = self.canonicalize_path(&root).await?;
-        ensure_descendant(&self.canonicalize_path(&self.config.root).await?, &root)?;
-        let handle = WorkspaceHandle::new(
-            issue.issue_id.clone(),
-            issue.identifier.clone(),
-            workspace_key,
-            root,
-        );
-        self.bootstrap_workspace_layout(&handle).await?;
-        self.create_managed_directory(&handle, &handle.workspace_path().join("evidence"))
-            .await?;
-        self.create_managed_directory(&handle, &handle.workspace_path().join("repositories"))
-            .await?;
+        let result = async {
+            let root = self.canonicalize_path(&root).await?;
+            ensure_descendant(&self.canonicalize_path(&self.config.root).await?, &root)?;
+            let handle = WorkspaceHandle::new(
+                issue.issue_id.clone(),
+                issue.identifier.clone(),
+                workspace_key,
+                root,
+            );
+            self.bootstrap_workspace_layout(&handle).await?;
+            self.create_managed_directory(&handle, &handle.workspace_path().join("evidence"))
+                .await?;
+            self.create_managed_directory(&handle, &handle.workspace_path().join("repositories"))
+                .await?;
 
-        let retained = self.list_all_workspaces().await?;
-        let mut grouped = BTreeMap::<String, Vec<ParentCheckoutRequest>>::new();
-        let mut request_keys = BTreeSet::new();
-        for request in requests {
+            let retained = self.list_all_workspaces().await?;
+            let mut grouped = BTreeMap::<String, Vec<ParentCheckoutRequest>>::new();
+            let mut request_keys = BTreeSet::new();
+            for request in requests {
             if request.issue_id.trim().is_empty()
                 || request.repository_id.trim().is_empty()
                 || request.checkout_generation.trim().is_empty()
@@ -339,14 +340,14 @@ impl WorkspaceManager {
                     "parent checkout requests contain a duplicate generation-bound handle",
                 ));
             }
-            grouped
-                .entry(request.repository_id.clone())
-                .or_default()
-                .push(request);
-        }
+                grouped
+                    .entry(request.repository_id.clone())
+                    .or_default()
+                    .push(request);
+            }
 
-        let mut repositories = BTreeMap::new();
-        for (repository_id, mut repository_requests) in grouped {
+            let mut repositories = BTreeMap::new();
+            for (repository_id, mut repository_requests) in grouped {
             repository_requests.sort_by(|left, right| {
                 left.issue_id
                     .cmp(&right.issue_id)
@@ -449,15 +450,20 @@ impl WorkspaceManager {
             let integration_path_text = integration_path.to_str().ok_or_else(|| {
                 checkout_verification(&integration_path, "integration checkout path is not UTF-8")
             })?;
-            self.git(
+            checkout_operation_with_timeout(
+                Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
                 source_handle.workspace_path(),
-                &[
-                    "worktree",
-                    "add",
-                    "--detach",
-                    integration_path_text,
-                    &target_commit,
-                ],
+                "create parent integration worktree",
+                self.git(
+                    source_handle.workspace_path(),
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        integration_path_text,
+                        &target_commit,
+                    ],
+                ),
             )
             .await?;
             let instruction = self
@@ -475,18 +481,18 @@ impl WorkspaceManager {
                 required_merge_commits: required_merge_commits.into_iter().collect(),
                 instruction,
             };
-            self.verify_parent_integration_checkout(&handle, &record, &source_handle)
+            self.verify_parent_integration_checkout(&handle, &record, &source_handle, false)
                 .await?;
-            repositories.insert(repository_id, record);
-        }
+                repositories.insert(repository_id, record);
+            }
 
-        let now = Utc::now();
-        let child_checkout_map = ParentChildCheckoutMap {
+            let now = Utc::now();
+            let child_checkout_map = ParentChildCheckoutMap {
             schema_version: 1,
             hierarchy_generation,
             repositories,
-        };
-        let manifest = ParentExecutionManifest {
+            };
+            let manifest = ParentExecutionManifest {
             schema_version: 1,
             parent_issue_id: issue.issue_id.clone(),
             parent_identifier: issue.identifier.clone(),
@@ -498,29 +504,35 @@ impl WorkspaceManager {
             repositories_directory: PathBuf::from("repositories"),
             created_at: now,
             updated_at: now,
-        };
-        self.write_manifest_atomically(
+            };
+            self.write_manifest_atomically(
             &handle,
             &handle.child_checkouts_path(),
             &child_checkout_map,
         )
-        .await?;
-        self.write_bytes_artifact_atomically(
+            .await?;
+            self.write_bytes_artifact_atomically(
             &handle,
             &handle.workspace_path().join("integration-plan.md"),
             render_parent_integration_plan(&child_checkout_map).as_bytes(),
         )
-        .await?;
-        self.write_manifest_atomically(&handle, &handle.parent_manifest_path(), &manifest)
             .await?;
-        let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
-        debug_assert_eq!(issue_manifest.workspace_path, handle.workspace_path());
-        Ok(ParentExecutionRoot {
-            handle,
-            manifest,
-            child_checkout_map,
-            created: true,
-        })
+            self.write_manifest_atomically(&handle, &handle.parent_manifest_path(), &manifest)
+                .await?;
+            let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+            debug_assert_eq!(issue_manifest.workspace_path, handle.workspace_path());
+            Ok(ParentExecutionRoot {
+                handle,
+                manifest,
+                child_checkout_map,
+                created: true,
+            })
+        }
+        .await;
+        if result.is_err() {
+            self.rollback_parent_preparation(&root).await;
+        }
+        result
     }
 
     pub async fn open_parent_execution_root(
@@ -528,6 +540,17 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         hierarchy_generation: u64,
         root: &Path,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        self.open_parent_execution_root_with_changes(issue, hierarchy_generation, root, false)
+            .await
+    }
+
+    async fn open_parent_execution_root_with_changes(
+        &self,
+        issue: &IssueDescriptor,
+        hierarchy_generation: u64,
+        root: &Path,
+        allow_worker_changes: bool,
     ) -> Result<ParentExecutionRoot, WorkspaceError> {
         self.reject_symlinked_path_components(
             &self.config.root,
@@ -593,14 +616,8 @@ impl WorkspaceManager {
             ));
         }
         for record in child_checkout_map.repositories.values() {
-            let source = self
-                .find_retained_checkout(
-                    &record.repository_id,
-                    &record.storage_source_generation,
-                    None,
-                )
-                .await?;
-            self.verify_parent_integration_checkout(&handle, record, &source)
+            let source = self.validate_parent_retained_checkouts(record).await?;
+            self.verify_parent_integration_checkout(&handle, record, &source, allow_worker_changes)
                 .await?;
         }
         Ok(ParentExecutionRoot {
@@ -633,6 +650,33 @@ impl WorkspaceManager {
             .await
     }
 
+    pub async fn open_parent_execution_root_at_for_retry(
+        &self,
+        issue: &IssueDescriptor,
+        root: &Path,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(root).await?;
+        let handle = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            canonical_root,
+        );
+        let manifest = self
+            .load_manifest::<ParentExecutionManifest>(&handle, &handle.parent_manifest_path())
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(handle.workspace_path(), "parent manifest is missing")
+            })?;
+        self.open_parent_execution_root_with_changes(
+            issue,
+            manifest.hierarchy_generation,
+            root,
+            true,
+        )
+        .await
+    }
+
     pub async fn resolve_parent_checkout(
         &self,
         parent: &ParentExecutionRoot,
@@ -649,14 +693,8 @@ impl WorkspaceManager {
                     "checkout handle is not present in the pinned parent map",
                 )
             })?;
-        let source = self
-            .find_retained_checkout(
-                &record.repository_id,
-                &record.storage_source_generation,
-                None,
-            )
-            .await?;
-        self.verify_parent_integration_checkout(&parent.handle, record, &source)
+        let source = self.validate_parent_retained_checkouts(record).await?;
+        self.verify_parent_integration_checkout(&parent.handle, record, &source, true)
             .await?;
         Ok(parent.handle.workspace_path().join(&record.relative_path))
     }
@@ -730,6 +768,7 @@ impl WorkspaceManager {
         parent: &ParentExecutionRoot,
     ) -> Result<BTreeMap<String, String>, WorkspaceError> {
         let mut instructions = BTreeMap::new();
+        let mut total_bytes = 0;
         for record in parent.child_checkout_map.repositories.values() {
             let checkout = self
                 .resolve_parent_checkout(parent, &record.checkout_handle)
@@ -745,7 +784,6 @@ impl WorkspaceManager {
                 })?;
             self.reject_symlinked_path_components(parent.handle.workspace_path(), relative)
                 .await?;
-            let mut total_bytes = 0;
             let (hash, bytes) =
                 read_bounded_instruction_file(&path, &mut total_bytes, true).await?;
             if hash != record.instruction.content_hash {
@@ -973,7 +1011,12 @@ impl WorkspaceManager {
         };
 
         let mut command = Command::new("git");
-        command.arg("-C").arg(checkout).args(args);
+        command
+            .arg("-c")
+            .arg("credential.helper=")
+            .arg("-C")
+            .arg(checkout)
+            .args(args);
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
@@ -1009,7 +1052,28 @@ impl WorkspaceManager {
         }
         configure_process_group(&mut command);
         command.kill_on_drop(true);
-        let output = timeout(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT, command.output()).await;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(source) => {
+                if let Some(path) = askpass_path.as_ref() {
+                    let _ = fs::remove_file(path).await;
+                }
+                return Err(WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                });
+            }
+        };
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let output = timeout(
+            RETAINED_CHECKOUT_VERIFICATION_TIMEOUT,
+            child.wait_with_output(),
+        )
+        .await;
         if let Some(path) = askpass_path.as_ref() {
             let _ = fs::remove_file(path).await;
         }
@@ -1027,6 +1091,8 @@ impl WorkspaceManager {
                 path: checkout.to_path_buf(),
                 detail: source.to_string(),
             })?;
+        #[cfg(unix)]
+        process_group_guard.disarm();
         if output.status.success() {
             return Ok(());
         }
@@ -1046,10 +1112,15 @@ impl WorkspaceManager {
         parent: &WorkspaceHandle,
         record: &ParentIntegrationCheckout,
         source: &WorkspaceHandle,
+        allow_worker_changes: bool,
     ) -> Result<(), WorkspaceError> {
         let integration = resolve_path_within_root(parent.workspace_path(), &record.relative_path)?;
         let repositories = parent.workspace_path().join("repositories");
+        self.reject_symlinked_path_components(parent.workspace_path(), Path::new("repositories"))
+            .await?;
+        let canonical_parent = self.canonicalize_path(parent.workspace_path()).await?;
         let canonical_repositories = self.canonicalize_path(&repositories).await?;
+        ensure_descendant(&canonical_parent, &canonical_repositories)?;
         let canonical_integration = self.canonicalize_path(&integration).await?;
         ensure_descendant(&canonical_repositories, &canonical_integration)?;
         if integration.file_name().and_then(|name| name.to_str())
@@ -1093,19 +1164,29 @@ impl WorkspaceManager {
                 "integration checkout does not share retained child Git storage",
             ));
         }
-        if self.git(&integration, &["rev-parse", "HEAD"]).await? != record.target_commit {
+        let head = self.git(&integration, &["rev-parse", "HEAD"]).await?;
+        if (!allow_worker_changes && head != record.target_commit)
+            || (allow_worker_changes
+                && !self
+                    .git_is_ancestor(
+                        &integration,
+                        &["merge-base", "--is-ancestor", &record.target_commit, &head],
+                    )
+                    .await?)
+        {
             return Err(checkout_verification(
                 &integration,
-                "integration checkout is not at its recorded target commit",
+                "integration checkout does not retain its recorded target commit",
             ));
         }
-        if !self
-            .git(
-                &integration,
-                &["status", "--porcelain", "--untracked-files=all"],
-            )
-            .await?
-            .is_empty()
+        if !allow_worker_changes
+            && !self
+                .git(
+                    &integration,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                )
+                .await?
+                .is_empty()
         {
             return Err(checkout_verification(
                 &integration,
@@ -1150,16 +1231,99 @@ impl WorkspaceManager {
                 }
             }
         }
-        let instruction = self
-            .load_instruction_provenance(&integration, repository, &record.target_commit)
-            .await?;
-        if instruction != record.instruction {
-            return Err(checkout_verification(
-                &integration,
-                "repository instruction provenance does not match the parent checkout map",
-            ));
+        if !allow_worker_changes {
+            let instruction = self
+                .load_instruction_provenance(&integration, repository, &record.target_commit)
+                .await?;
+            if instruction != record.instruction {
+                return Err(checkout_verification(
+                    &integration,
+                    "repository instruction provenance does not match the parent checkout map",
+                ));
+            }
         }
         Ok(())
+    }
+
+    async fn validate_parent_retained_checkouts(
+        &self,
+        record: &ParentIntegrationCheckout,
+    ) -> Result<WorkspaceHandle, WorkspaceError> {
+        let mut source = None;
+        for retained in &record.retained_checkouts {
+            let child = self
+                .find_retained_checkout(
+                    &record.repository_id,
+                    &retained.checkout_generation,
+                    Some(&retained.issue_id),
+                )
+                .await?;
+            let child_manifest = self.verify_checkout_for_parent(&child).await?;
+            let status = self
+                .git(
+                    child.workspace_path(),
+                    &["status", "--porcelain", "--untracked-files=all"],
+                )
+                .await?;
+            if !status.is_empty() {
+                return Err(checkout_verification(
+                    child.workspace_path(),
+                    "retained child checkout is dirty",
+                ));
+            }
+            if child_manifest.head != retained.child_head
+                || child_manifest.current_branch != retained.child_branch
+            {
+                return Err(checkout_verification(
+                    child.workspace_path(),
+                    "retained child evidence no longer matches the pinned parent map",
+                ));
+            }
+            if retained.checkout_generation == record.storage_source_generation {
+                source = Some(child);
+            }
+        }
+        source.ok_or_else(|| {
+            checkout_verification(
+                &self.config.root,
+                "parent checkout map has no retained storage source",
+            )
+        })
+    }
+
+    async fn rollback_parent_preparation(&self, root: &Path) {
+        let repositories = root.join("repositories");
+        if let Ok(mut entries) = fs::read_dir(&repositories).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let integration = entry.path();
+                if entry
+                    .file_type()
+                    .await
+                    .is_ok_and(|file_type| file_type.is_dir() && !file_type.is_symlink())
+                    && let Some(integration_text) = integration.to_str()
+                {
+                    let _ = checkout_operation_with_timeout(
+                        Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+                        &integration,
+                        "roll back parent integration worktree",
+                        self.git(
+                            &integration,
+                            &["worktree", "remove", "--force", integration_text],
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+        if let Err(error) = fs::remove_dir_all(root).await
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %root.display(),
+                %error,
+                "failed to roll back incomplete parent execution root"
+            );
+        }
     }
 
     pub async fn ensure(
@@ -1785,9 +1949,11 @@ impl WorkspaceManager {
                 reason: "checkout manifest provenance is inconsistent".to_owned(),
             });
         }
+        let shallow_state_matches = facts.shallow == manifest.shallow
+            || (allow_shallow && manifest.shallow && !facts.shallow);
         if (!allow_worker_changes && facts.head != manifest.head)
             || (!allow_worker_changes && facts.branch != manifest.current_branch)
-            || facts.shallow != manifest.shallow
+            || !shallow_state_matches
             || (!allow_worker_changes && (!facts.clean || manifest.clean != facts.clean))
         {
             return Err(WorkspaceError::CheckoutVerification {
