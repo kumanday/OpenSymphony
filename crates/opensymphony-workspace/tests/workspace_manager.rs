@@ -444,6 +444,10 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         "false"
     );
     manager
+        .verify_checkout_for_retry(&child_c.handle)
+        .await
+        .expect("a parent-deepened child should remain reusable for its own retry");
+    manager
         .prepare_parent_execution_root(&parent, 8, repeat_requests.clone())
         .await
         .expect("a deepened retained child should support a later parent generation");

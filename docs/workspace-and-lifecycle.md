@@ -149,11 +149,12 @@ moving a child branch or HEAD. It can accept a recorded shallow generation,
 then fetch and deepen the configured target through the repository credential
 provider before adding a detached integration worktree. A shallow-to-complete
 storage transition remains valid against the immutable child manifest on later
-parent generations. Preparation bounds both authenticated fetches and worktree
-creation, terminates their process groups on timeout, and rolls back incomplete
-roots so the same hierarchy generation can retry. Credentialed fetches disable
-repository-local credential helpers before exposing the configured secret to
-Git's orchestrator-owned askpass process. The new worktree must
+parent generations and ordinary child retry/reuse. Preparation bounds both
+authenticated fetches and worktree creation, terminates their process groups on
+timeout, and rolls back incomplete roots so the same hierarchy generation can
+retry. Credentialed fetches disable repository-local credential helpers before
+exposing the configured secret to Git's orchestrator-owned askpass process. The
+new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both fetch and push remote fingerprints, be clean, and point at the
 recorded target commit. Several children in one repository share one handle;
@@ -164,7 +165,10 @@ The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
 target remains an ancestor of the current integration HEAD, preserving
 parent-owned committed and uncommitted work. Repository instruction bytes share
-one aggregate size budget across the entire parent prompt.
+one aggregate size budget across the entire parent prompt. Fresh conversations
+always reload the pinned repository instructions; reused conversations rely on
+their existing full prompt. The runtime revalidates the parent root and envelope
+after the `before_run` hook and before harness attachment.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

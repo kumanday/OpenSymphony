@@ -4359,7 +4359,7 @@ impl RuntimeWorkerBackend {
                 None
             };
             let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref()
-                && !is_parent_retry
+                && persisted_conversation_binding.is_none()
             {
                 match workspace_manager
                     .parent_repository_instructions(parent)
@@ -4620,6 +4620,68 @@ impl RuntimeWorkerBackend {
                         "verified checkout envelope changed before harness attach".to_owned(),
                     );
                     return;
+                }
+            }
+
+            if let Some(parent) = parent_execution.as_ref() {
+                let verified_parent = match if is_parent_retry {
+                    workspace_manager
+                        .open_parent_execution_root_at_for_retry(
+                            &workspace_issue,
+                            parent.handle.workspace_path(),
+                        )
+                        .await
+                } else {
+                    workspace_manager
+                        .open_parent_execution_root_at(
+                            &workspace_issue,
+                            parent.handle.workspace_path(),
+                        )
+                        .await
+                } {
+                    Ok(parent) => parent,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("parent execution root changed before harness attach: {error}"),
+                        );
+                        return;
+                    }
+                };
+                if let Some(expected) = parent_runtime_envelope.as_ref()
+                    && let Err(error) =
+                        workspace_manager.verify_parent_runtime_envelope(&verified_parent, expected)
+                {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("parent runtime envelope changed before harness attach: {error}"),
+                    );
+                    return;
+                }
+                if persisted_conversation_binding.is_none() {
+                    let final_instructions = match workspace_manager
+                        .parent_repository_instructions(&verified_parent)
+                        .await
+                    {
+                        Ok(instructions) => instructions,
+                        Err(error) => {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!(
+                                    "parent repository instructions changed before harness attach: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    if parent_repository_instructions != final_instructions {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            "parent repository instructions changed before harness attach"
+                                .to_owned(),
+                        );
+                        return;
+                    }
                 }
             }
 

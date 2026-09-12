@@ -810,6 +810,20 @@ impl WorkspaceManager {
         parent: &ParentExecutionRoot,
         envelope: &ParentRuntimeEnvelope,
     ) -> Result<(), WorkspaceError> {
+        self.verify_parent_runtime_envelope(parent, envelope)?;
+        self.write_manifest_atomically(
+            &parent.handle,
+            &parent.handle.parent_runtime_envelope_path(),
+            envelope,
+        )
+        .await
+    }
+
+    pub fn verify_parent_runtime_envelope(
+        &self,
+        parent: &ParentExecutionRoot,
+        envelope: &ParentRuntimeEnvelope,
+    ) -> Result<(), WorkspaceError> {
         if envelope.parent_issue_id != parent.manifest.parent_issue_id
             || envelope.parent_identifier != parent.manifest.parent_identifier
             || envelope.hierarchy_generation != parent.manifest.hierarchy_generation
@@ -843,12 +857,7 @@ impl WorkspaceManager {
                 "parent runtime envelope does not match the prepared execution root",
             ));
         }
-        self.write_manifest_atomically(
-            &parent.handle,
-            &parent.handle.parent_runtime_envelope_path(),
-            envelope,
-        )
-        .await
+        Ok(())
     }
 
     pub fn parent_runtime_envelope(
@@ -1249,6 +1258,7 @@ impl WorkspaceManager {
         &self,
         record: &ParentIntegrationCheckout,
     ) -> Result<WorkspaceHandle, WorkspaceError> {
+        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
         let mut source = None;
         for retained in &record.retained_checkouts {
             let child = self
@@ -1258,25 +1268,38 @@ impl WorkspaceManager {
                     Some(&retained.issue_id),
                 )
                 .await?;
-            self.verify_checkout_for_parent(&child).await?;
-            let status = self
-                .git(
+            self.verify_checkout_with_worker_changes_timeout(&child, true, true, deadline)
+                .await?;
+            let status = checkout_operation_with_timeout(
+                checkout_time_remaining(deadline),
+                child.workspace_path(),
+                "verify retained child cleanliness",
+                self.git(
                     child.workspace_path(),
                     &["status", "--porcelain", "--untracked-files=all"],
-                )
-                .await?;
+                ),
+            )
+            .await?;
             if !status.is_empty() {
                 return Err(checkout_verification(
                     child.workspace_path(),
                     "retained child checkout is dirty",
                 ));
             }
-            let child_head = self
-                .git(child.workspace_path(), &["rev-parse", "HEAD"])
-                .await?;
-            let child_branch = self
-                .git(child.workspace_path(), &["branch", "--show-current"])
-                .await?;
+            let child_head = checkout_operation_with_timeout(
+                checkout_time_remaining(deadline),
+                child.workspace_path(),
+                "verify retained child head",
+                self.git(child.workspace_path(), &["rev-parse", "HEAD"]),
+            )
+            .await?;
+            let child_branch = checkout_operation_with_timeout(
+                checkout_time_remaining(deadline),
+                child.workspace_path(),
+                "verify retained child branch",
+                self.git(child.workspace_path(), &["branch", "--show-current"]),
+            )
+            .await?;
             if child_head != retained.child_head || child_branch != retained.child_branch {
                 return Err(checkout_verification(
                     child.workspace_path(),
@@ -1953,8 +1976,8 @@ impl WorkspaceManager {
                 reason: "checkout manifest provenance is inconsistent".to_owned(),
             });
         }
-        let shallow_state_matches = facts.shallow == manifest.shallow
-            || (allow_shallow && manifest.shallow && !facts.shallow);
+        let shallow_state_matches =
+            facts.shallow == manifest.shallow || (manifest.shallow && !facts.shallow);
         if (!allow_worker_changes && facts.head != manifest.head)
             || (!allow_worker_changes && facts.branch != manifest.current_branch)
             || !shallow_state_matches
