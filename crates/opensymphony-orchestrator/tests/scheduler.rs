@@ -791,6 +791,13 @@ async fn parent_provider_cooldown_stops_later_lookups_in_the_same_dispatch_pass(
 async fn launched_parent_scheduler(
     suffix: &str,
 ) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
+    launched_parent_scheduler_with_config(suffix, scheduler_config()).await
+}
+
+async fn launched_parent_scheduler_with_config(
+    suffix: &str,
+    config: SchedulerConfig,
+) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
     let parent_id = IssueId::new(format!("parent-{suffix}")).expect("parent id");
     let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
     let parent_identifier = format!("COE-PARENT-{suffix}");
@@ -866,11 +873,158 @@ async fn launched_parent_scheduler(
             ..Default::default()
         },
         FakeWorker::default(),
-        scheduler_config(),
+        config,
     );
     scheduler.tick(ts(100)).await.expect("launch parent");
     assert_eq!(scheduler.worker().launches.len(), 1);
     (scheduler, parent_id)
+}
+
+#[tokio::test]
+async fn parent_runtime_command_event_is_persisted_before_worker_completion() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("EVENT-PERSIST").await;
+    let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id,
+            observed_at: ts(120),
+            event_id: Some("command-persist".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "startedAtMs": 120,
+                    "item": {
+                        "id": "command-persist",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration"
+                    }
+                }
+            })),
+        });
+
+    scheduler
+        .tick(ts(120))
+        .await
+        .expect("runtime event should persist independently");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let attempt = state.parent_integrations[&parent_id]
+        .attempts
+        .last()
+        .expect("parent attempt");
+    assert_eq!(attempt.commands.len(), 1, "{attempt:?}");
+    assert_eq!(attempt.commands[0].command_id, "command-persist");
+    assert!(attempt.finished_at.is_none());
+}
+
+#[tokio::test]
+async fn dry_run_parent_preview_does_not_bind_its_conversation() {
+    let mut config = scheduler_config();
+    config.routing.dry_run = true;
+    let (scheduler, parent_id) = launched_parent_scheduler_with_config("DRY-RUN", config).await;
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.worker().launches[0].route.dry_run);
+    assert!(
+        scheduler.worker().launches[0]
+            .expected_parent_conversation_id
+            .is_none()
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(controller.conversation_id.is_none());
+    assert!(
+        controller
+            .attempts
+            .last()
+            .expect("preview attempt")
+            .conversation_id
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn legacy_in_flight_parent_migrates_controller_before_reattachment() {
+    let (scheduler, parent_id) = launched_parent_scheduler("LEGACY-MIGRATION").await;
+    let launch = scheduler.worker().launches[0].clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    let active = scheduler.tracker().active.clone();
+    let parent_evidence = scheduler.tracker().parent_evidence.clone();
+    let parent_targets = scheduler.workspace().parent_targets.clone();
+    let mut durable_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    durable_state.parent_integrations.remove(&parent_id);
+
+    let recovery = RecoveryRecord {
+        issue: launch.issue.clone(),
+        workspace: launch.workspace.clone(),
+        successful_run: false,
+        cancelled_run: false,
+        completed_run: false,
+        had_in_flight_run: true,
+        pending_retry: false,
+        normal_retry_count: 0,
+        retry_scheduled_at: None,
+        retry_due_at: None,
+        retry_reason: None,
+        retry_error: None,
+        harness_kind: Some(launch.route.harness_kind.clone()),
+        interrupt_reason: None,
+        recovered_run: Some(RecoveredRun {
+            worker_id: launch.run.worker_id.clone(),
+            conversation: conversation.clone(),
+            normal_retry_count: 0,
+            repository_binding: launch.run.repository_binding.clone(),
+        }),
+    };
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            active,
+            parent_evidence,
+            ..Default::default()
+        },
+        FakeWorkspace {
+            recoveries: vec![recovery],
+            durable_state: Some(serde_json::to_value(durable_state).expect("legacy state")),
+            recovered_run_started_at: BTreeMap::from([(parent_id.clone(), ts(100))]),
+            parent_targets,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    restarted
+        .tick(ts(200))
+        .await
+        .expect("legacy parent should migrate before reattachment");
+    assert_eq!(restarted.worker().launches.len(), 1);
+    assert_eq!(
+        restarted.worker().launches[0]
+            .expected_parent_conversation_id
+            .as_deref(),
+        Some(conversation.conversation_id.as_str())
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(restarted.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.conversation_id.as_deref(),
+        Some(conversation.conversation_id.as_str())
+    );
+    assert_eq!(controller.attempts.len(), 1);
 }
 
 #[tokio::test]

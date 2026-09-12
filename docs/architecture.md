@@ -131,7 +131,8 @@ handle and supplies the deadline, exit result, bounded log,
 foreground-process ownership, and
 teardown from those runtime events before it can pass the attempt. Generic
 harness success or a prompt-authored claim without matching events is
-insufficient. On timeout or cancellation, a reconciled harness stopped state
+insufficient. Each accepted command or resource event is persisted with the
+controller before the worker reaches a terminal outcome. On timeout or cancellation, a reconciled harness stopped state
 releases the foreground-process receipt; any other named resource remains an
 explicit cleanup fence. The durable final record maps every canonical repository to the
 exact verified commit so a higher ancestor can consume the completed parent
@@ -145,6 +146,10 @@ cleanup and baseline refresh. A terminal harness manifest whose controller
 outcome was lost becomes indeterminate and reruns after resource cleanup and
 baseline refresh. Recovered parent memory grants restore the bearer
 already held by the bound conversation into the reconstructed registry.
+Legacy in-flight parent runs that predate controller persistence reconstruct
+and persist that controller from the durable hierarchy, workspace envelope,
+run identity, and existing conversation before backend reattachment. Route
+preview conversations never become controller bindings.
 Every recovered parent dispatch carries that expected conversation identity
 into the worker launch boundary. A missing or different conversation manifest
 fails before a replacement harness session can start. Reused turns receive a

@@ -76,8 +76,10 @@ Why fakes matter:
   completed-parent reopen with unchanged child edges, compacted admission
   idempotency, empty-target verification, recursive intermediate-descendant
   memory grants, durable-controller-gated parent capture, stable default memory
-  endpoint recovery, terminal-success finalization gates, and retry after a
-  failed durable outcome write
+  endpoint recovery, event-only command-receipt persistence, dry-run preview
+  isolation, legacy missing-controller migration before same-conversation
+  reattachment, terminal-success finalization gates, and retry after a failed
+  durable outcome write
 
 ## 2.4 Live local tests
 

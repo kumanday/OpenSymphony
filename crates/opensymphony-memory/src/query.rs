@@ -1011,6 +1011,11 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    if let Some(authorized_work_items) = &scope.authorized_work_items
+        && !indexed_issue_matches_authorized_work_items(issue, authorized_work_items)
+    {
+        return false;
+    }
     if let Some(issue_key) = scope.issue.as_ref().map(|issue| normalize_issue_key(issue))
         && issue.issue_key != issue_key
     {
@@ -1066,6 +1071,28 @@ fn indexed_issue_matches_scope(
         return false;
     }
     true
+}
+
+fn indexed_issue_matches_authorized_work_items(
+    issue: &IndexedIssue,
+    authorized_work_items: &BTreeSet<String>,
+) -> bool {
+    if authorized_work_items.is_empty() {
+        return false;
+    }
+    std::iter::once(issue.issue_key.as_str())
+        .chain(
+            issue
+                .scope_refs
+                .iter()
+                .filter(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
+                .map(|scope| scope.id.as_str()),
+        )
+        .any(|work_item| {
+            authorized_work_items
+                .iter()
+                .any(|authorized| authorized.eq_ignore_ascii_case(work_item))
+        })
 }
 
 fn indexed_issue_matches_authorized_repositories(

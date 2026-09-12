@@ -1064,6 +1064,11 @@ pub struct MemoryScopeFilter {
     /// manufacture or widen its repository set through query arguments.
     #[serde(skip)]
     pub authorized_repositories: Option<BTreeSet<String>>,
+    /// Work-item authorization supplied by a worker grant. Like repository
+    /// authorization, this is an internal upper bound rather than a caller
+    /// controlled query field.
+    #[serde(skip)]
+    pub authorized_work_items: Option<BTreeSet<String>>,
     /// `public` narrows a worker read to public records. A private grant is
     /// allowed to read both private and public records.
     #[serde(skip)]
@@ -3381,6 +3386,11 @@ Reviews are triggered when you open a pull request for review.
                     id: "repository-1".to_string(),
                     label: Some("Repo One".to_string()),
                 },
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::WorkItem,
+                    id: "COE-CHILD".to_string(),
+                    label: Some("Child work item".to_string()),
+                },
             ],
             source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
@@ -3410,6 +3420,30 @@ Reviews are triggered when you open a pull request for review.
             &issue,
             &MemoryScopeFilter {
                 authorized_repositories: Some(BTreeSet::from(["repository-2".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["coe-123".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["coe-child".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["COE-OUTSIDER".to_string()])),
                 ..MemoryScopeFilter::default()
             }
         ));
@@ -3661,6 +3695,49 @@ Reviews are triggered when you open a pull request for review.
                 .expect("scoped status")
                 .issue_count,
             1
+        );
+        let authorized_work_item = MemoryScopeFilter {
+            authorized_work_items: Some(BTreeSet::from(["COE-123".to_string()])),
+            ..scoped.clone()
+        };
+        let unrelated_work_item = MemoryScopeFilter {
+            authorized_work_items: Some(BTreeSet::from(["COE-999".to_string()])),
+            ..scoped.clone()
+        };
+        assert_eq!(
+            search_with_scope(&config, "websocket", 10, &authorized_work_item)
+                .expect("authorized work-item search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            search_with_scope(&config, "websocket", 10, &unrelated_work_item)
+                .expect("unrelated work-item search")
+                .len(),
+            0
+        );
+        assert_eq!(
+            related_by_area_with_scope(&config, "openhands-runtime", 10, &unrelated_work_item,)
+                .expect("unrelated work-item area lookup")
+                .len(),
+            0
+        );
+        assert_eq!(
+            related_by_paths_with_scope(
+                &config,
+                &[PathBuf::from("crates/opensymphony-openhands/src/client.rs")],
+                10,
+                &unrelated_work_item,
+            )
+            .expect("unrelated work-item path lookup")
+            .len(),
+            0
+        );
+        assert_eq!(
+            status_with_scope(&config, &IssueSelection::default(), &unrelated_work_item,)
+                .expect("unrelated work-item status")
+                .issue_count,
+            0
         );
         assert_eq!(
             search_with_scope(

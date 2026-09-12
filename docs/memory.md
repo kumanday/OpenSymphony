@@ -542,7 +542,9 @@ and requires the matching lifecycle to be `completed`, its final attempt to be
 passed for the same run and input version, its final evidence to be bound to the
 same conversation, and its exact repository commit map to equal the runtime
 envelope. A terminal run manifest or harness success by itself cannot authorize
-parent capture.
+parent capture. The durable binding explicitly marks a parent even when this
+verified commit map is empty, so repository-neutral capture cannot inherit a
+configured default leaf repository.
 Retained legacy run envelopes that lack usable run/attempt provenance are
 skipped as non-bindable entries during the pre-cleanup scan rather than
 preventing unrelated terminal captures from completing.

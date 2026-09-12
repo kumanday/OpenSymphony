@@ -1893,6 +1893,12 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        if self
+            .migrate_legacy_in_flight_parent_controllers(&records, observed_at)
+            .await?
+        {
+            self.persist_orchestrator_state().await?;
+        }
         for record in &records {
             if let Some(controller) = self
                 .hierarchy_state
@@ -3321,6 +3327,78 @@ where
         Ok(())
     }
 
+    /// Migrate runs written before parent controllers were persisted. The
+    /// recovered run manifest and parent workspace envelope are the durable
+    /// proof that launch already happened, so recreate the missing controller
+    /// and bind it to that exact conversation before backend reattachment.
+    async fn migrate_legacy_in_flight_parent_controllers(
+        &mut self,
+        records: &[RecoveryRecord],
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let mut changed = false;
+        for record in records {
+            if !record.had_in_flight_run {
+                continue;
+            }
+            let Some(recovered_run) = record.recovered_run.as_ref() else {
+                continue;
+            };
+            if self
+                .hierarchy_state
+                .parent_integrations
+                .contains_key(&record.issue.id)
+            {
+                continue;
+            }
+            let Some(snapshot) = self
+                .hierarchy_state
+                .hierarchy
+                .get(&record.issue.id)
+                .cloned()
+            else {
+                continue;
+            };
+            if snapshot.required_child_edges.is_empty() && record.issue.sub_issues.is_empty() {
+                continue;
+            }
+
+            let targets = self
+                .workspace
+                .parent_workspace_targets(&record.issue, &record.workspace)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+            let started_at = self
+                .hierarchy_state
+                .run_started_at_by_issue
+                .get(&record.issue.id)
+                .copied()
+                .unwrap_or(observed_at);
+            let admission_input_version = parent_input_version(&snapshot);
+            let targets_input_version = parent_targets_input_version(snapshot.generation, &targets);
+            let mut controller =
+                ParentIntegrationController::new(record.issue.id.clone(), snapshot.generation)?;
+            controller.admit(&admission_input_version, started_at)?;
+            controller.record_workspace_prepared(targets, &targets_input_version, started_at)?;
+            controller.start_attempt(
+                "parent integration harness run",
+                format!("parent-run:{}", recovered_run.worker_id),
+                ParentAttemptRoot::ParentRoot,
+                recovered_run.conversation.conversation_id.as_str(),
+                effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
+                targets_input_version,
+                started_at,
+            )?;
+            self.hierarchy_state
+                .parent_integrations
+                .insert(record.issue.id.clone(), controller);
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     async fn restore_recovered_run(
         &mut self,
         issue_id: &IssueId,
@@ -3444,7 +3522,7 @@ where
             }
         };
         self.recovered_memory_issue_ids.remove(issue_id);
-        if !execution.issue().sub_issues.is_empty() {
+        if !execution.issue().sub_issues.is_empty() && !route.dry_run {
             let conversation_id = launch.conversation.conversation_id.to_string();
             let attempt_id = self
                 .hierarchy_state
@@ -4151,7 +4229,7 @@ where
                 Ok(launch) => {
                     self.recovered_memory_issue_ids.remove(&issue_id);
                     let started_at = launch.started_at.unwrap_or(observed_at);
-                    if !execution.issue().sub_issues.is_empty() {
+                    if !execution.issue().sub_issues.is_empty() && !start_request.route.dry_run {
                         let conversation_id = launch.conversation.conversation_id.to_string();
                         let attempt_id = self
                             .hierarchy_state
@@ -4617,6 +4695,13 @@ where
                     }
                 }
             }
+        }
+
+        if self.hierarchy_state_dirty
+            && let Err(error) = self.persist_orchestrator_state().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
         }
 
         first_error.map_or(Ok(()), Err)
