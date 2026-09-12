@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -1871,15 +1872,36 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
-        for record in records.iter().filter(|record| record.had_in_flight_run) {
+        for record in &records {
             if let Some(controller) = self
                 .hierarchy_state
                 .parent_integrations
                 .get_mut(&record.issue.id)
             {
-                controller.reconcile_restart(record.recovered_run.is_some(), observed_at)?;
+                if record.recovered_run.is_some() {
+                    controller.reconcile_restart(true, observed_at)?;
+                } else if record.successful_run || record.completed_run || record.cancelled_run {
+                    controller.reconcile_terminal_run_after_restart(observed_at)?;
+                } else {
+                    controller.reconcile_restart(false, observed_at)?;
+                }
                 self.hierarchy_state_dirty = true;
             }
+        }
+        for controller in self.hierarchy_state.parent_integrations.values_mut() {
+            let has_unlaunched_attempt = controller.attempts.iter().any(|attempt| {
+                attempt.status == ParentAttemptStatus::Running
+                    && attempt.conversation_id.is_none()
+                    && attempt.commands.is_empty()
+                    && attempt.resources.is_empty()
+            });
+            if has_unlaunched_attempt {
+                controller.reconcile_restart(false, observed_at)?;
+                self.hierarchy_state_dirty = true;
+            }
+        }
+        if self.hierarchy_state_dirty {
+            self.persist_orchestrator_state().await?;
         }
         // Recovery manifests intentionally do not persist a second hierarchy
         // identity. Hydrate the parent edge from the provider's full issue
@@ -2400,7 +2422,12 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
-                if record.successful_run && !record.had_in_flight_run {
+                let issue_has_children = tracker_snapshot
+                    .terminal_issue(&issue_id)
+                    .map(|issue| !issue.sub_issues.is_empty())
+                    .unwrap_or(!record.issue.sub_issues.is_empty());
+                let parent_finalized = self.parent_finalized_success(&issue_id, issue_has_children);
+                if record.successful_run && !record.had_in_flight_run && parent_finalized {
                     self.record_terminal_orchestrator_success(&issue_id).await?;
                 }
                 if let Some(recovered_run) = record.recovered_run.as_ref() {
@@ -2420,7 +2447,8 @@ where
                         retry_records.push(record);
                         continue;
                     }
-                    if record.had_in_flight_run
+                    if parent_finalized
+                        && record.had_in_flight_run
                         && self.hierarchy_state.hierarchy.contains_key(&issue_id)
                     {
                         let nested_child_ids = self
@@ -2450,6 +2478,16 @@ where
                         );
                         self.persist_orchestrator_state().await?;
                     }
+                }
+                if !parent_finalized {
+                    let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
+                    execution.attach_workspace(record.workspace.clone())?;
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerTerminal, None)?,
+                    );
+                    self.terminal_child_failure_ids.insert(issue_id.clone());
+                    continue;
                 }
                 if let Err(error) = self
                     .release_parent_leases_after_finalization(
@@ -4214,7 +4252,7 @@ where
         &mut self,
         issue_id: &IssueId,
         execution: &IssueExecution,
-        outcome: &WorkerOutcomeRecord,
+        outcome: &mut WorkerOutcomeRecord,
     ) -> Result<(), SchedulerError> {
         let previous_state = self.hierarchy_state.clone();
         let merging_continuation = tracker_merging_interrupt_cancelled(execution, outcome);
@@ -4229,6 +4267,9 @@ where
             .iter()
             .find(|attempt| attempt.id == attempt_id)
             .is_some_and(|attempt| attempt.conversation_id.is_none());
+        let deadline_reached = controller
+            .current_attempt_deadline()
+            .is_some_and(|deadline| outcome.finished_at.as_u64() >= deadline.as_u64());
         if execution
             .interrupt()
             .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
@@ -4239,21 +4280,30 @@ where
                 outcome.finished_at,
             )?;
         }
-        let verification_passed = match outcome.parent_verification.as_ref() {
-            Some(evidence) => {
-                match controller.record_verification_evidence(&attempt_id, evidence) {
-                    Ok(passed) => passed,
-                    Err(error) => {
-                        controller.append_log(
-                            &attempt_id,
-                            &format!("verification receipt rejected: {error}"),
-                        )?;
-                        false
+        let verification_passed = if deadline_reached {
+            controller.append_log(
+                &attempt_id,
+                "worker outcome arrived at or after the absolute parent attempt deadline",
+            )?;
+            false
+        } else {
+            match outcome.parent_verification.as_ref() {
+                Some(evidence) => {
+                    match controller.record_verification_evidence(&attempt_id, evidence) {
+                        Ok(passed) => passed,
+                        Err(error) => {
+                            controller.append_log(
+                                &attempt_id,
+                                &format!("verification receipt rejected: {error}"),
+                            )?;
+                            false
+                        }
                     }
                 }
+                None => false,
             }
-            None => false,
         };
+        enforce_parent_outcome_trust(outcome, deadline_reached, verification_passed);
         let observed_cleanup = controller
             .attempts
             .iter()
@@ -4390,6 +4440,11 @@ where
                             .map(|payload| format!(" {payload}"))
                             .unwrap_or_default()
                     );
+                    let parent_workspace_path = self
+                        .executions
+                        .get(&issue_id)
+                        .and_then(IssueExecution::workspace)
+                        .map(|workspace| workspace.path.clone());
                     if let Some(controller) =
                         self.hierarchy_state.parent_integrations.get_mut(&issue_id)
                         && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
@@ -4397,6 +4452,7 @@ where
                         if let Err(error) = observe_parent_command_event(
                             controller,
                             &attempt_id,
+                            parent_workspace_path.as_deref(),
                             observed_at,
                             event_id.as_deref(),
                             event_kind.as_deref(),
@@ -4810,29 +4866,36 @@ where
                 && execution
                     .last_worker_outcome()
                     .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
-        if successful_terminal_outcome {
+        let parent_finalized =
+            self.parent_finalized_success(&issue_id, !execution.issue().sub_issues.is_empty());
+        if successful_terminal_outcome && parent_finalized {
             self.record_terminal_orchestrator_success(&issue_id).await?;
         }
-        if cleanup_terminal && let Err(error) = self.retain_terminal_child_lease(&execution).await {
+        if cleanup_terminal
+            && parent_finalized
+            && let Err(error) = self.retain_terminal_child_lease(&execution).await
+        {
             self.insert_execution(issue_id, execution);
             return Err(error);
         }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
-        ) && let Err(error) = self
-            .release_parent_leases_after_finalization(
-                &issue_id,
-                execution.issue().parent_id.as_ref(),
-                observed_at,
-            )
-            .await
+        ) && parent_finalized
+            && let Err(error) = self
+                .release_parent_leases_after_finalization(
+                    &issue_id,
+                    execution.issue().parent_id.as_ref(),
+                    observed_at,
+                )
+                .await
         {
             self.insert_execution(issue_id, execution);
             return Err(error);
         }
         let mut retry_cleanup_succeeded = retain_failed;
         if cleanup_terminal
+            && parent_finalized
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
@@ -4949,12 +5012,12 @@ where
     async fn resolve_finished_execution(
         &mut self,
         mut execution: IssueExecution,
-        outcome: WorkerOutcomeRecord,
+        mut outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
     ) -> Result<IssueExecution, SchedulerError> {
         let issue_id = execution.issue().id.clone();
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
-            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
@@ -4969,7 +5032,7 @@ where
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
         ) {
-            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
             return self
                 .release_finished_execution(
@@ -4981,7 +5044,7 @@ where
                 .await;
         }
         if acknowledged_operator_cancel_terminal(&execution, &outcome) {
-            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
             return self
                 .release_finished_execution(
@@ -5003,7 +5066,7 @@ where
             if let Some(reason) =
                 non_active_release_reason(execution.issue().state.category.clone())
             {
-                self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                     .await?;
                 return self
                     .release_finished_execution(execution, observed_at, reason, Some(outcome))
@@ -5025,14 +5088,14 @@ where
             // the refresh failed), park the exhausted run rather than making
             // a successful worker turn look like a completed Linear task.
             let reason = ReleaseReason::RetryExhausted;
-            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
         }
 
-        self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+        self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
             .await?;
         self.queue_retry_for_outcome(execution, outcome, observed_at)
             .await
@@ -5076,7 +5139,11 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
-        if cleanup_terminal {
+        let parent_finalized = self.parent_finalized_success(
+            &execution.issue().id,
+            !execution.issue().sub_issues.is_empty(),
+        );
+        if cleanup_terminal && parent_finalized {
             self.retain_terminal_child_lease(&execution).await?;
         }
         let successful_terminal_outcome = reason == ReleaseReason::Completed
@@ -5084,14 +5151,15 @@ where
                 && outcome
                     .as_ref()
                     .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
-        if successful_terminal_outcome {
+        if successful_terminal_outcome && parent_finalized {
             self.record_terminal_orchestrator_success(&execution.issue().id)
                 .await?;
         }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
-        ) {
+        ) && parent_finalized
+        {
             self.release_parent_leases_after_finalization(
                 &execution.issue().id,
                 execution.issue().parent_id.as_ref(),
@@ -5115,6 +5183,7 @@ where
             execution.set_retry_count_override(normal_retry_count);
             let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
             if cleanup_terminal
+                && parent_finalized
                 && !retain_failed
                 && let Some(workspace) = execution.workspace().cloned()
                 && !self.workspace_has_active_lease(&workspace).await?
@@ -5137,6 +5206,7 @@ where
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
+            && parent_finalized
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
             && !self.workspace_has_active_lease(&workspace).await?
@@ -5176,6 +5246,13 @@ where
             return Err(error);
         }
         Ok(())
+    }
+
+    fn parent_finalized_success(&self, issue_id: &IssueId, issue_has_children: bool) -> bool {
+        match self.hierarchy_state.parent_integrations.get(issue_id) {
+            Some(controller) => controller.state == super::ParentIntegrationState::Completed,
+            None => !issue_has_children,
+        }
     }
 
     async fn release_parent_leases_after_finalization(
@@ -6272,6 +6349,12 @@ impl TrackerSnapshot {
         self.terminal_state_by_id.contains_key(issue_id)
     }
 
+    fn terminal_issue(&self, issue_id: &IssueId) -> Option<&TrackerIssue> {
+        self.terminal
+            .iter()
+            .find(|issue| issue.id == issue_id.as_str())
+    }
+
     fn terminal_state_name(&self, issue_id: &str) -> Option<&str> {
         self.terminal_state_by_id.get(issue_id).map(String::as_str)
     }
@@ -6930,8 +7013,11 @@ fn parent_targets_input_version(
         .iter()
         .map(|target| {
             format!(
-                "{}:{}@{}",
-                target.repository_id, target.checkout_handle, target.target_commit
+                "{}:{}:{}@{}",
+                target.repository_id,
+                target.checkout_handle,
+                target.relative_path.display(),
+                target.target_commit
             )
         })
         .collect::<Vec<_>>()
@@ -6949,6 +7035,7 @@ fn parent_controller_input_version(controller: &ParentIntegrationController) -> 
 fn observe_parent_command_event(
     controller: &mut ParentIntegrationController,
     attempt_id: &str,
+    parent_workspace_path: Option<&Path>,
     observed_at: TimestampMs,
     event_id: Option<&str>,
     event_kind: Option<&str>,
@@ -6978,10 +7065,18 @@ fn observe_parent_command_event(
         if kind == "codex.item/started" {
             if let (Some(command_id), Some(command)) = (command_id, command) {
                 let command = redact_runtime_diagnostic(command);
+                let cwd = item
+                    .get("cwd")
+                    .or_else(|| item.get("workingDirectory"))
+                    .or_else(|| params.get("cwd"))
+                    .or_else(|| params.get("workingDirectory"))
+                    .and_then(serde_json::Value::as_str);
+                let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
                 controller.observe_command_started(
                     attempt_id,
                     command_id,
                     &command,
+                    root,
                     observed_at,
                 )?;
             }
@@ -7008,14 +7103,22 @@ fn observe_parent_command_event(
         return Ok(());
     }
     if kind.ends_with("ActionEvent") {
-        let command = payload.get("command").and_then(serde_json::Value::as_str);
+        let command = nested_runtime_string(payload, &["command"]);
         let command_id = payload
             .get("action_id")
             .and_then(serde_json::Value::as_str)
             .or(event_id);
         if let (Some(command_id), Some(command)) = (command_id, command) {
             let command = redact_runtime_diagnostic(command);
-            controller.observe_command_started(attempt_id, command_id, &command, observed_at)?;
+            let cwd = nested_runtime_string(payload, &["cwd", "working_dir"]);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                &command,
+                root,
+                observed_at,
+            )?;
         }
     } else if kind.ends_with("ObservationEvent")
         && let Some(exit_code) = payload
@@ -7050,6 +7153,86 @@ fn observe_parent_command_event(
     Ok(())
 }
 
+fn nested_runtime_string<'a>(payload: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    [Some(payload), payload.get("arguments"), payload.get("args")]
+        .into_iter()
+        .flatten()
+        .find_map(|object| {
+            keys.iter()
+                .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        })
+}
+
+fn observed_parent_command_root(
+    controller: &ParentIntegrationController,
+    parent_workspace_path: Option<&Path>,
+    cwd: Option<&str>,
+) -> Result<ParentAttemptRoot, ParentIntegrationError> {
+    let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) else {
+        return Ok(ParentAttemptRoot::ParentRoot);
+    };
+    let cwd = PathBuf::from(cwd);
+    let relative = if cwd.is_absolute() {
+        let parent = parent_workspace_path.ok_or_else(|| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command reported an absolute cwd without a parent workspace binding"
+                    .to_owned(),
+            )
+        })?;
+        cwd.strip_prefix(parent).map_err(|_| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command cwd is outside the parent integration workspace".to_owned(),
+            )
+        })?
+    } else {
+        cwd.as_path()
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(ParentIntegrationError::InvalidVerificationEvidence(
+            "runtime command cwd is not a contained parent workspace path".to_owned(),
+        ));
+    }
+    if relative.as_os_str().is_empty() || relative == Path::new(".") {
+        return Ok(ParentAttemptRoot::ParentRoot);
+    }
+    controller
+        .targets
+        .values()
+        .find(|target| target.relative_path == relative)
+        .map(|target| ParentAttemptRoot::CheckoutHandle(target.checkout_handle.clone()))
+        .ok_or_else(|| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command cwd does not match a verified parent checkout".to_owned(),
+            )
+        })
+}
+
+fn enforce_parent_outcome_trust(
+    outcome: &mut WorkerOutcomeRecord,
+    deadline_reached: bool,
+    verification_passed: bool,
+) {
+    if deadline_reached && outcome.outcome == WorkerOutcomeKind::Succeeded {
+        outcome.outcome = WorkerOutcomeKind::TimedOut;
+        outcome.summary = Some("parent attempt exceeded its absolute deadline".to_owned());
+        outcome.error = Some("parent worker outcome arrived after the attempt deadline".to_owned());
+    } else if outcome.outcome == WorkerOutcomeKind::Succeeded && !verification_passed {
+        outcome.outcome = WorkerOutcomeKind::Failed;
+        outcome.summary = Some("parent final verification did not pass".to_owned());
+        outcome.error = Some(match outcome.error.take() {
+            Some(existing) => format!(
+                "{existing}; parent success lacked matching orchestrator-owned command evidence"
+            ),
+            None => "parent success lacked matching orchestrator-owned command evidence".to_owned(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7058,6 +7241,39 @@ mod tests {
     fn conversation_suffix_matches_gateway_alias_shape() {
         assert_eq!(conversation_id_suffix("conv-123456789"), "23456789");
         assert_eq!(conversation_id_suffix("short"), "short");
+    }
+
+    #[test]
+    fn parent_outcome_trust_enforces_deadline_and_runtime_verification() {
+        let outcome = || WorkerOutcomeRecord {
+            worker_id: WorkerId::new("parent-worker").expect("worker id"),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: TimestampMs::new(3),
+            finished_at: TimestampMs::new(103),
+            turn_count: 1,
+            summary: Some("claimed success".to_owned()),
+            error: None,
+            parent_verification: None,
+        };
+        let mut late = outcome();
+        enforce_parent_outcome_trust(&mut late, true, true);
+        assert_eq!(late.outcome, WorkerOutcomeKind::TimedOut);
+        assert!(
+            late.error
+                .as_deref()
+                .is_some_and(|error| error.contains("deadline"))
+        );
+
+        let mut unverified = outcome();
+        enforce_parent_outcome_trust(&mut unverified, false, false);
+        assert_eq!(unverified.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            unverified
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("orchestrator-owned command evidence"))
+        );
     }
 
     #[test]
@@ -7142,6 +7358,7 @@ mod tests {
                     )
                     .expect("repository id"),
                     checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
                     target_commit: "abc123".to_owned(),
                 }],
                 "targets:1",
@@ -7163,19 +7380,24 @@ mod tests {
         observe_parent_command_event(
             &mut controller,
             &attempt_id,
+            Some(Path::new("/parent")),
             TimestampMs::new(10),
             Some("action-1"),
             Some("ActionEvent"),
             Some(&serde_json::json!({
                 "action_id": "action-1",
                 "tool_name": "terminal",
-                "command": "cargo test"
+                "arguments": {
+                    "command": "cargo test",
+                    "cwd": "/parent/repositories/one"
+                }
             })),
         )
         .expect("command start");
         observe_parent_command_event(
             &mut controller,
             &attempt_id,
+            None,
             TimestampMs::new(20),
             Some("observation-1"),
             Some("ObservationEvent"),
@@ -7201,6 +7423,12 @@ mod tests {
             Some("cargo test")
         );
         assert_eq!(attempt.exit_code, Some(0));
+        assert_eq!(
+            attempt.commands.last().map(|command| &command.root),
+            Some(&ParentAttemptRoot::CheckoutHandle(
+                "checkout-one".to_owned()
+            ))
+        );
         assert_eq!(
             attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
             Some(ParentCleanupStatus::Succeeded)
@@ -7232,6 +7460,7 @@ mod tests {
                     )
                     .expect("repository id"),
                     checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
                     target_commit: "abc123".to_owned(),
                 }],
                 "targets:1",
@@ -7253,6 +7482,7 @@ mod tests {
         observe_parent_command_event(
             &mut controller,
             &attempt_id,
+            None,
             TimestampMs::new(10),
             Some("command-1"),
             Some("codex.item/started"),
@@ -7271,6 +7501,7 @@ mod tests {
         let error = observe_parent_command_event(
             &mut controller,
             &attempt_id,
+            None,
             TimestampMs::new(103),
             Some("command-1"),
             Some("codex.item/completed"),

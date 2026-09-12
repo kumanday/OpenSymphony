@@ -119,8 +119,10 @@ indeterminate and must pass cleanup and repository refresh before rerun. Final
 evidence is accepted only from the run-bound
 `evidence/final-verification.json` receipt. The runtime reopens every checkout
 at its exact prepared commit and uses the file only to select an actual command
-observed through the Codex or OpenHands event stream. The controller supplies
-the deadline, exit result, bounded log, foreground-process ownership, and
+observed through the Codex or OpenHands event stream. The controller maps the
+observed command working directory to the parent root or an exact checkout
+handle and supplies the deadline, exit result, bounded log,
+foreground-process ownership, and
 teardown from those runtime events before it can pass the attempt. Generic
 harness success or a prompt-authored claim without matching events is
 insufficient. On timeout or cancellation, a reconciled harness stopped state
@@ -128,6 +130,15 @@ releases the foreground-process receipt; any other named resource remains an
 explicit cleanup fence. The durable final record maps every canonical repository to the
 exact verified commit so a higher ancestor can consume the completed parent
 without assigning repository roles.
+Recovery treats a persisted launch intent with no attached conversation,
+command, or resource as a metadata-only crash and safely returns through
+cleanup and baseline refresh. A terminal harness manifest whose controller
+outcome was lost becomes indeterminate and reruns after resource cleanup and
+baseline refresh. Recovered parent memory grants restore the bearer
+already held by the bound conversation into the reconstructed registry.
+Terminal success and descendant lease release are
+gated by the durable controller's completed state in both live and recovery
+release paths.
 
 ### 3.2 OpenHands is the execution adapter
 

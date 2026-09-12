@@ -626,9 +626,12 @@ fn load_terminal_capture_bindings_inner(
                     .unwrap_or_default(),
                 repository_commits: envelope
                     .checkouts
-                    .iter()
-                    .map(|(repository_id, checkout)| {
-                        (repository_id.clone(), checkout.target_commit.clone())
+                    .values()
+                    .map(|checkout| {
+                        (
+                            checkout.repository_id.clone(),
+                            checkout.target_commit.clone(),
+                        )
                     })
                     .collect(),
             };
@@ -2304,6 +2307,34 @@ impl MemoryScopeGrantRegistry {
         let token = format!("opensymphony-worker-{}", Uuid::new_v4());
         state.grants.insert(token.clone(), grant);
         (token, requires_fresh_conversation)
+    }
+
+    pub(crate) fn restore_parent_claims(
+        &self,
+        token: &str,
+        grant: MemoryScopeGrant,
+    ) -> Result<String, String> {
+        if !token.starts_with("opensymphony-worker-") {
+            return Err(
+                "recovered parent memory bearer is not an OpenSymphony worker token".into(),
+            );
+        }
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        if state.revoked_issues.contains(&grant.issue) {
+            return Err("recovered parent memory bearer belongs to a revoked issue".into());
+        }
+        if state
+            .grants
+            .get(token)
+            .is_some_and(|existing| existing.issue != grant.issue)
+        {
+            return Err("recovered parent memory bearer is already bound to another issue".into());
+        }
+        state.grants.retain(|existing_token, existing| {
+            existing.issue != grant.issue || existing_token == token
+        });
+        state.grants.insert(token.to_owned(), grant);
+        Ok(token.to_owned())
     }
 
     pub(crate) fn acknowledge_fresh_conversation(&self, issue: &str) {
@@ -4697,11 +4728,20 @@ fn resolve_parent_code_graph_overlay(
     let envelope = run.parent_runtime_envelope.as_ref().ok_or_else(|| {
         MemoryError::InvalidInput("durable run manifest has no parent runtime envelope".to_owned())
     })?;
-    let checkout = envelope.checkouts.get(repo_id).ok_or_else(|| {
+    let mut matching_checkouts = envelope
+        .checkouts
+        .values()
+        .filter(|checkout| checkout.repository_id == repo_id);
+    let checkout = matching_checkouts.next().ok_or_else(|| {
         MemoryError::InvalidInput(
             "requested repository is absent from the parent runtime envelope".to_owned(),
         )
     })?;
+    if matching_checkouts.next().is_some() {
+        return Err(MemoryError::InvalidInput(
+            "requested repository has multiple parent runtime checkouts".to_owned(),
+        ));
+    }
     if grant.run_id.as_deref() != Some(run_id)
         || run.run_id != run_id
         || grant.attempt != Some(run.attempt)
@@ -4746,6 +4786,7 @@ fn resolve_parent_code_graph_overlay(
             "parent checkout does not match the registered repository".to_owned(),
         ));
     }
+    verify_parent_checkout_target_ancestry(&checkout_path, &overlay.target_commit)?;
     let branch = code_index_branch_for_config(config)
         .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
     let base_revision = workspace_merge_base(&checkout_path, &branch)?;
@@ -4758,6 +4799,40 @@ fn resolve_parent_code_graph_overlay(
         context_query,
     )
     .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+}
+
+fn verify_parent_checkout_target_ancestry(
+    checkout_path: &Path,
+    target_commit: &str,
+) -> Result<(), MemoryError> {
+    let head = process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(checkout_path)
+        .output()
+        .map_err(|source| {
+            MemoryError::InvalidInput(format!("failed to inspect parent checkout HEAD: {source}"))
+        })?;
+    if !head.status.success() {
+        return Err(MemoryError::InvalidInput(
+            "parent checkout HEAD could not be resolved".to_owned(),
+        ));
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    let target_is_ancestor = process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", target_commit, head.as_str()])
+        .current_dir(checkout_path)
+        .status()
+        .map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "failed to verify parent checkout ancestry: {source}"
+            ))
+        })?;
+    if !target_is_ancestor.success() {
+        return Err(MemoryError::InvalidInput(
+            "parent checkout HEAD no longer descends from its verified target commit".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn workspace_merge_base(workspace_path: &Path, branch: &str) -> Result<String, MemoryError> {
@@ -8816,16 +8891,17 @@ mod tests {
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryLiveOverlayGrant,
         MemoryMcpRequest, MemoryScopeGrant, MemoryScopeGrantRegistry, MemoryServerAccess,
         MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
-        authorize_memory_request, brief_scope_filter, call_code_graph_context_tool,
-        call_memory_ingest_code_intel_tool, call_memory_tool, call_memory_tool_with_workspace,
-        context_source_from_mcp, find_verified_checkout_for_code_intel,
-        find_verified_checkout_for_code_intel_with_claims, load_memory_config,
-        memory_server_health, memory_server_health_payload, memory_tool_descriptors,
-        origin_is_localhost, parse_remote_memory_response,
+        authorize_memory_request, authorize_memory_request_with_scoped_grant, brief_scope_filter,
+        call_code_graph_context_tool, call_memory_ingest_code_intel_tool, call_memory_tool,
+        call_memory_tool_with_workspace, context_source_from_mcp,
+        find_verified_checkout_for_code_intel, find_verified_checkout_for_code_intel_with_claims,
+        load_memory_config, memory_server_health, memory_server_health_payload,
+        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
         refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
         remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
         resolve_code_graph_overlay, resolve_code_intel_config, resolve_code_intel_repo, run_init,
         sha256_file_hex, trim_auto_memory_status_log, validate_worker_memory_scope,
+        verify_parent_checkout_target_ancestry,
     };
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
@@ -13928,6 +14004,50 @@ Public memory concept.
     }
 
     #[test]
+    fn parent_memory_grant_restart_restores_the_conversation_bearer() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let bearer = "opensymphony-worker-parent-before-restart";
+        let restored = registry
+            .restore_parent_claims(
+                bearer,
+                MemoryScopeGrant {
+                    issue: "COE-554".to_owned(),
+                    run_id: Some("run-after-restart".to_owned()),
+                    attempt: Some(2),
+                    ..MemoryScopeGrant::default()
+                },
+            )
+            .expect("restore parent bearer");
+
+        assert_eq!(restored, bearer);
+        let restored_grant = registry
+            .get(Some(bearer))
+            .expect("restored bearer authorizes current claims");
+        assert_eq!(restored_grant.run_id.as_deref(), Some("run-after-restart"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {bearer}").parse().expect("authorization"),
+        );
+        authorize_memory_request_with_scoped_grant(
+            &headers,
+            &MemoryServerAuth::default(),
+            MemoryServerAccess::Read,
+            Some(&restored_grant),
+        )
+        .expect("the existing conversation bearer authenticates after restart");
+        let (refreshed, requires_fresh) =
+            registry.issue_or_refresh_parent_claims(MemoryScopeGrant {
+                issue: "COE-554".to_owned(),
+                run_id: Some("run-continuation".to_owned()),
+                attempt: Some(3),
+                ..MemoryScopeGrant::default()
+            });
+        assert_eq!(refreshed, bearer);
+        assert!(!requires_fresh);
+    }
+
+    #[test]
     fn worker_memory_grant_can_be_revoked_at_issue_lifecycle_boundary() {
         let registry = MemoryScopeGrantRegistry::default();
         let (token, fresh) = registry.issue_or_refresh_with_lifecycle(
@@ -14136,6 +14256,53 @@ Public memory concept.
                 .canonicalize()
                 .expect("checkout should canonicalize")
         );
+    }
+
+    #[test]
+    fn parent_overlay_requires_the_verified_target_to_remain_in_head_ancestry() {
+        let checkout = TempDir::new().expect("checkout");
+        std::fs::write(checkout.path().join("README.md"), "baseline\n").expect("baseline");
+        init_test_git_repo(checkout.path(), "develop");
+        let target = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(checkout.path())
+            .output()
+            .expect("target")
+            .stdout;
+        let target = String::from_utf8(target).expect("utf8").trim().to_owned();
+        std::fs::write(checkout.path().join("README.md"), "descendant\n").expect("descendant");
+        for args in [&["add", "."][..], &["commit", "-m", "descendant"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(checkout.path())
+                    .status()
+                    .expect("git command")
+                    .success()
+            );
+        }
+        verify_parent_checkout_target_ancestry(checkout.path(), &target)
+            .expect("descendant checkout remains valid");
+
+        assert!(
+            std::process::Command::new("git")
+                .args(["checkout", "--orphan", "unrelated"])
+                .current_dir(checkout.path())
+                .status()
+                .expect("orphan checkout")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "--allow-empty", "-m", "unrelated"])
+                .current_dir(checkout.path())
+                .status()
+                .expect("unrelated commit")
+                .success()
+        );
+        let error = verify_parent_checkout_target_ancestry(checkout.path(), &target)
+            .expect_err("unrelated head must be rejected");
+        assert!(error.to_string().contains("no longer descends"));
     }
 
     #[test]
@@ -14498,7 +14665,7 @@ Public memory concept.
             "hierarchy_generation": 4,
             "workspace_path": parent_workspace,
             "checkouts": {
-                "repo-a": {
+                "checkout-a": {
                     "repository_id": "repo-a",
                     "checkout_handle": "checkout-a",
                     "relative_path": "repositories/repo-a",
@@ -14507,7 +14674,7 @@ Public memory concept.
                     "instruction_path": "AGENTS.md",
                     "instruction_hash": "sha256:a"
                 },
-                "repo-b": {
+                "checkout-b": {
                     "repository_id": "repo-b",
                     "checkout_handle": "checkout-b",
                     "relative_path": "repositories/repo-b",

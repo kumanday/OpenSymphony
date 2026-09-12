@@ -927,6 +927,7 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
             repository_id: resource.repository_id.clone(),
             checkout_handle: "checkout-repo".to_owned(),
+            relative_path: PathBuf::from("repositories/repo"),
             target_commit: "merge-commit".to_owned(),
         }],
         ..Default::default()
@@ -1005,9 +1006,9 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
 
     let mut failed_outcome = WorkerOutcomeRecord::from_run(
         &parent_run,
-        WorkerOutcomeKind::Failed,
+        WorkerOutcomeKind::Succeeded,
         ts(150),
-        Some("parent verification failed".to_owned()),
+        Some("worker claimed success despite failed verification".to_owned()),
         None,
     );
     failed_outcome.parent_verification = Some(parent_verification_evidence(
@@ -1107,6 +1108,15 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
     assert_eq!(
         controller.attempts[0].status,
         crate::opensymphony_orchestrator::ParentAttemptStatus::Failed
+    );
+    assert_eq!(
+        scheduler
+            .executions()
+            .get(&parent_id)
+            .and_then(|execution| execution.retry())
+            .and_then(|retry| retry.error.as_deref()),
+        Some("parent success lacked matching orchestrator-owned command evidence"),
+        "untrusted worker success is downgraded before scheduler retry classification"
     );
     assert_eq!(
         controller.state,
@@ -1414,6 +1424,214 @@ async fn terminal_recovery_prunes_run_boundary_after_cleanup() {
     )
     .expect("durable state should decode");
     assert!(!state.run_started_at_by_issue.contains_key(&issue_id));
+}
+
+#[tokio::test]
+async fn terminal_recovery_does_not_trust_success_before_parent_controller_finalization() {
+    let issue_id = IssueId::new("terminal-parent-recovery").expect("issue id");
+    let recovered_worker_id = WorkerId::new("worker-terminal-parent-recovery").expect("worker id");
+    let repository_id = CanonicalRepositoryId::new("github:parent-recovery").expect("repo");
+    let child_id = IssueId::new("terminal-parent-child").expect("child id");
+    let mut terminal_parent =
+        tracker_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done", 0);
+    terminal_parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-PARENT-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut hierarchy = HierarchySnapshot::new(&terminal_parent);
+    hierarchy.mark_dispatched();
+    let recovered_workspace =
+        workspace_record("COE-PARENT-TERMINAL", "/tmp/recovered/COE-PARENT-TERMINAL");
+    let mut controller =
+        crate::opensymphony_orchestrator::ParentIntegrationController::new(issue_id.clone(), 1)
+            .expect("controller");
+    controller
+        .admit("hierarchy:1", ts(1))
+        .expect("admit parent");
+    controller
+        .record_workspace_prepared(
+            [crate::opensymphony_orchestrator::ParentRepositoryTarget {
+                repository_id: repository_id.clone(),
+                checkout_handle: "checkout-parent".to_owned(),
+                relative_path: PathBuf::from("repositories/parent"),
+                target_commit: "target-parent".to_owned(),
+            }],
+            "targets:1",
+            ts(2),
+        )
+        .expect("prepare parent");
+    let attempt = controller
+        .start_attempt(
+            "parent integration",
+            "attempt:1",
+            crate::opensymphony_orchestrator::ParentAttemptRoot::ParentRoot,
+            "conversation-parent",
+            100,
+            "targets:1",
+            ts(3),
+        )
+        .expect("attempt");
+    controller
+        .finish_attempt(
+            &attempt,
+            crate::opensymphony_orchestrator::ParentAttemptStatus::Passed,
+            Some(0),
+            crate::opensymphony_orchestrator::ParentCleanupReceipt {
+                status: crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded,
+                occurred_at: ts(4),
+                detail: None,
+            },
+            ts(4),
+        )
+        .expect("attempt receipt");
+    assert_ne!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(issue_id.clone(), hierarchy)]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::AncestorIntegration,
+            resource: LeaseResource {
+                issue_id: child_id,
+                repository_id,
+                checkout_generation: "checkout-parent".to_owned(),
+            },
+            owner: LeaseOwner::ancestor(&issue_id),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        parent_integrations: BTreeMap::from([(issue_id.clone(), controller)]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done"),
+            workspace: recovered_workspace,
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: None,
+            }),
+        }],
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent.clone()],
+            ..Default::default()
+        },
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler.bootstrap(ts(100)).await.expect("recovery");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert!(!state.terminal_orchestrator_issues.contains(&issue_id));
+    assert!(state.leases.iter().any(LeaseRecord::active));
+    assert!(
+        state.parent_integrations.contains_key(&issue_id),
+        "unfinalized controller was discarded: {state:?}"
+    );
+    assert_ne!(
+        state.parent_integrations[&issue_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    assert!(
+        scheduler.workspace().cleaned.is_empty(),
+        "unfinalized parent workspace was cleaned: {:?}",
+        scheduler.workspace().cleaned
+    );
+    assert_eq!(
+        scheduler.executions()[&issue_id].status(),
+        SchedulerStatus::Released
+    );
+
+    let mut missing_controller_state = state;
+    missing_controller_state.parent_integrations.clear();
+    let mut missing_controller_scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(
+                serde_json::to_value(&missing_controller_state).expect("missing-controller state"),
+            ),
+            recoveries: vec![RecoveryRecord {
+                issue: normalized_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done"),
+                workspace: workspace_record(
+                    "COE-PARENT-TERMINAL",
+                    "/tmp/recovered/COE-PARENT-TERMINAL",
+                ),
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: false,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: None,
+                interrupt_reason: None,
+                recovered_run: None,
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    missing_controller_scheduler
+        .bootstrap(ts(101))
+        .await
+        .expect("missing parent controller remains fenced");
+    let missing_controller_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            missing_controller_scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("missing-controller durable state"),
+        )
+        .expect("decode missing-controller state");
+    assert!(
+        !missing_controller_state
+            .terminal_orchestrator_issues
+            .contains(&issue_id)
+    );
+    assert!(
+        missing_controller_state
+            .leases
+            .iter()
+            .any(LeaseRecord::active)
+    );
+    assert!(missing_controller_scheduler.workspace().cleaned.is_empty());
 }
 
 #[tokio::test]

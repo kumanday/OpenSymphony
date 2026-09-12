@@ -66,9 +66,11 @@ Why fakes matter:
 - parent integration launch-intent persistence before worker start, exact
   run-bound final-verification receipts, missing/stale receipt rejection,
   production-shaped Codex and OpenHands command start/completion events,
-  orchestrator-owned deadlines, bounded command logs/resources, rejection of
-  prompt-authored execution claims, uncertain cleanup fences, and retry after
-  a failed durable outcome write
+  observed parent-root and checkout working directories, orchestrator-owned
+  deadlines, bounded command logs/resources, rejection of prompt-authored
+  execution claims, uncertain cleanup fences, metadata-only prelaunch crash
+  recovery, authenticated same-conversation parent grants after restart, terminal-success
+  finalization gates, and retry after a failed durable outcome write
 
 ## 2.4 Live local tests
 

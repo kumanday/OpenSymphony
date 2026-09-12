@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, ParentVerificationEvidence, TimestampMs,
@@ -79,9 +79,10 @@ pub struct ParentTransition {
     pub occurred_at: TimestampMs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParentAttemptRoot {
+    #[default]
     ParentRoot,
     CheckoutHandle(String),
 }
@@ -146,6 +147,8 @@ pub struct ParentCleanupReceipt {
 pub struct ParentCommandReceipt {
     pub command_id: String,
     pub command: String,
+    #[serde(default)]
+    pub root: ParentAttemptRoot,
     pub started_at: TimestampMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<TimestampMs>,
@@ -187,6 +190,8 @@ pub struct ParentVerificationAttempt {
 pub struct ParentRepositoryTarget {
     pub repository_id: CanonicalRepositoryId,
     pub checkout_handle: String,
+    #[serde(default)]
+    pub relative_path: PathBuf,
     pub target_commit: String,
 }
 
@@ -551,25 +556,16 @@ impl ParentIntegrationController {
             ));
         }
         let attempt = self.attempt_mut(attempt_id)?;
-        let root_matches = match &attempt.root {
-            ParentAttemptRoot::ParentRoot => evidence.root == "parent_root",
-            ParentAttemptRoot::CheckoutHandle(handle) => evidence.root == *handle,
-        };
-        if !root_matches {
-            return Err(ParentIntegrationError::InvalidVerificationEvidence(
-                "command root does not match the scheduled attempt root".to_owned(),
-            ));
-        }
-        let selected_exit_code = attempt
-            .commands
-            .iter()
-            .rev()
-            .find(|command| {
-                command.command == evidence.command
-                    && command.finished_at.is_some()
-                    && command.exit_code.is_some()
-            })
-            .and_then(|command| command.exit_code);
+        let selected_command = attempt.commands.iter().rev().find(|command| {
+            command.command == evidence.command
+                && match &command.root {
+                    ParentAttemptRoot::ParentRoot => evidence.root == "parent_root",
+                    ParentAttemptRoot::CheckoutHandle(handle) => evidence.root == *handle,
+                }
+                && command.finished_at.is_some()
+                && command.exit_code.is_some()
+        });
+        let selected_exit_code = selected_command.and_then(|command| command.exit_code);
         if evidence.command.trim().is_empty() || selected_exit_code.is_none() {
             return Err(ParentIntegrationError::InvalidVerificationEvidence(
                 "selected command does not match a completed runtime command".to_owned(),
@@ -590,6 +586,7 @@ impl ParentIntegrationController {
         attempt_id: &str,
         command_id: &str,
         command: &str,
+        root: ParentAttemptRoot,
         observed_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
         if command_id.trim().is_empty() || command.trim().is_empty() {
@@ -611,7 +608,7 @@ impl ParentIntegrationController {
             .iter()
             .find(|receipt| receipt.command_id == command_id)
         {
-            return if existing.command == command {
+            return if existing.command == command && existing.root == root {
                 Ok(())
             } else {
                 Err(ParentIntegrationError::InvalidVerificationEvidence(
@@ -663,6 +660,7 @@ impl ParentIntegrationController {
         attempt.commands.push(ParentCommandReceipt {
             command_id: command_id.to_owned(),
             command: command.to_owned(),
+            root,
             started_at: observed_at,
             finished_at: None,
             exit_code: None,
@@ -966,19 +964,63 @@ impl ParentIntegrationController {
             return Ok(());
         }
         let attempt_id = self.attempts[index].id.clone();
+        let launch_never_attached = self.attempts[index].conversation_id.is_none()
+            && self.attempts[index].commands.is_empty()
+            && active_resource_keys(&self.attempts[index]).is_empty();
         self.attempts[index].status = ParentAttemptStatus::Indeterminate;
         self.attempts[index].finished_at = Some(occurred_at);
         self.attempts[index].cleanup = Some(ParentCleanupReceipt {
-            status: ParentCleanupStatus::Pending,
+            status: if launch_never_attached {
+                ParentCleanupStatus::Succeeded
+            } else {
+                ParentCleanupStatus::Pending
+            },
             occurred_at,
-            detail: Some(
-                "harness state and attempt-owned teardown were unavailable after restart"
-                    .to_owned(),
-            ),
+            detail: Some(if launch_never_attached {
+                "attempt intent persisted before worker launch; no conversation, command, or resource was attached".to_owned()
+            } else {
+                "harness state and attempt-owned teardown were unavailable after restart".to_owned()
+            }),
         });
         self.prepare_retry(
             &attempt_id,
             "nonterminal parent attempt became indeterminate after restart",
+            occurred_at,
+        )
+    }
+
+    pub fn reconcile_terminal_run_after_restart(
+        &mut self,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let Some(index) = self
+            .attempts
+            .iter()
+            .rposition(|attempt| attempt.status == ParentAttemptStatus::Running)
+        else {
+            return Ok(());
+        };
+        let attempt_id = self.attempts[index].id.clone();
+        let resources_released = active_resource_keys(&self.attempts[index]).is_empty();
+        self.attempts[index].status = ParentAttemptStatus::Indeterminate;
+        self.attempts[index].finished_at = Some(occurred_at);
+        self.attempts[index].cleanup = Some(ParentCleanupReceipt {
+            status: if resources_released {
+                ParentCleanupStatus::Succeeded
+            } else {
+                ParentCleanupStatus::Pending
+            },
+            occurred_at,
+            detail: Some(if resources_released {
+                "durable run manifest recorded a terminal harness state before controller outcome persistence".to_owned()
+            } else {
+                "durable run manifest is terminal but named attempt resources still require cleanup"
+                    .to_owned()
+            }),
+        });
+        self.prepare_retry(
+            &attempt_id,
+            "terminal harness outcome was not durably applied before restart",
             occurred_at,
         )
     }
@@ -1285,6 +1327,7 @@ mod tests {
                         ))
                         .expect("repository"),
                         checkout_handle: format!("checkout-{repo}"),
+                        relative_path: PathBuf::from(format!("repositories/{repo}")),
                         target_commit: format!("commit-{repo}"),
                     }),
                 "targets:1",
@@ -1296,7 +1339,13 @@ mod tests {
 
     fn finish_passed(controller: &mut ParentIntegrationController, id: &str) {
         controller
-            .observe_command_started(id, "command-final", "cargo test", TimestampMs::new(3))
+            .observe_command_started(
+                id,
+                "command-final",
+                "cargo test",
+                ParentAttemptRoot::ParentRoot,
+                TimestampMs::new(3),
+            )
             .expect("command start");
         controller
             .observe_command_finished(
@@ -1512,6 +1561,7 @@ mod tests {
                 &stopped,
                 "command-running",
                 "cargo test",
+                ParentAttemptRoot::ParentRoot,
                 TimestampMs::new(4),
             )
             .expect("command start");
@@ -1582,6 +1632,84 @@ mod tests {
         restarted
             .record_baseline_verified("targets:2", TimestampMs::new(7))
             .expect("explicit cleanup permits verified rerun");
+
+        let mut prelaunch = controller();
+        let intent = prelaunch
+            .start_attempt_intent(
+                "integration",
+                "attempt:prelaunch",
+                ParentAttemptRoot::ParentRoot,
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("persisted launch intent");
+        prelaunch
+            .reconcile_restart(false, TimestampMs::new(4))
+            .expect("metadata-only intent reconciliation");
+        let attempt = prelaunch
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == intent)
+            .expect("attempt");
+        assert_eq!(attempt.status, ParentAttemptStatus::Indeterminate);
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Succeeded)
+        );
+        prelaunch
+            .record_baseline_verified("targets:2", TimestampMs::new(5))
+            .expect("metadata-only crash does not block the retry baseline");
+    }
+
+    #[test]
+    fn terminal_run_manifest_recovers_lost_controller_outcome_without_rotating_conversation() {
+        let mut controller = controller();
+        let attempt_id = controller
+            .start_attempt(
+                "integration",
+                "attempt:terminal-before-outcome",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+
+        controller
+            .reconcile_terminal_run_after_restart(TimestampMs::new(10))
+            .expect("terminal run reconciliation");
+
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt");
+        assert_eq!(attempt.status, ParentAttemptStatus::Indeterminate);
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Succeeded)
+        );
+        assert_eq!(
+            controller.conversation_id.as_deref(),
+            Some("conversation-1")
+        );
+        controller
+            .record_baseline_verified("targets:2", TimestampMs::new(11))
+            .expect("terminal harness evidence permits baseline refresh");
+        let next_attempt = controller
+            .start_attempt(
+                "integration",
+                "attempt:after-terminal-recovery",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:2",
+                TimestampMs::new(12),
+            )
+            .expect("retry stays on the authoritative conversation");
+        assert_ne!(next_attempt, attempt_id);
     }
 
     #[test]
@@ -1603,6 +1731,7 @@ mod tests {
                 &attempt,
                 "command-verify",
                 "cargo test",
+                ParentAttemptRoot::ParentRoot,
                 TimestampMs::new(4),
             )
             .expect("verification start");
@@ -1611,6 +1740,7 @@ mod tests {
                 &attempt,
                 "command-verify",
                 "cargo test",
+                ParentAttemptRoot::ParentRoot,
                 TimestampMs::new(4),
             )
             .expect("duplicate start is idempotent");
@@ -1637,6 +1767,7 @@ mod tests {
                 &attempt,
                 "command-receipt",
                 "write final-verification.json",
+                ParentAttemptRoot::ParentRoot,
                 TimestampMs::new(6),
             )
             .expect("receipt write start");

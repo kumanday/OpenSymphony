@@ -226,13 +226,26 @@ hierarchy generation, command root, and exact repository commit map, and
 reopens the checkouts at those commits. The selected command must match start
 and completion events observed from the Codex or OpenHands runtime. Those
 events, rather than fields supplied by the parent, provide the orchestrator's
-deadline, exit result, bounded output, foreground-process ownership, and
-teardown receipt. Missing, stale, unobserved, late, or still-active evidence
+deadline, working directory, exit result, bounded output, foreground-process
+ownership, and teardown receipt. A reported working directory maps only to the
+parent root or an exact verified checkout path, and the selector must name that
+observed root. Missing, stale, unobserved, late, or still-active evidence
 converts a generic successful harness turn into a failed parent attempt.
 An acknowledged interrupt counts as foreground-process teardown only after the
 harness has reconciled a stopped state. It does not release separately named
 ports or resources, which continue to fence refresh and retry until their own
 cleanup receipts succeed.
+After a daemon restart, a parent memory grant restores the bearer already held
+by the bound OpenHands conversation into the reconstructed registry, preserving
+the one-conversation controller binding. An attempt
+intent persisted before worker launch has no process to tear down; recovery
+records that fact and refreshes the verified baseline before retrying. A
+terminal harness manifest with no durable controller outcome proves foreground
+teardown but never proves verification success; the attempt becomes
+indeterminate and reruns after named-resource cleanup and baseline refresh. Terminal
+tracker state cannot publish orchestrator success, release descendant leases,
+or remove the parent workspace until the durable controller reaches
+`completed` through accepted final verification.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful
