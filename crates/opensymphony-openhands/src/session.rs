@@ -89,6 +89,7 @@ pub struct IssueSessionRunnerConfig {
     pub memory: Option<MemoryWorkerAccess>,
     pub repository_instructions: Option<String>,
     pub terminal_prompt: Option<String>,
+    pub continuation_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,10 +102,9 @@ pub struct MemoryWorkerAccess {
     pub authorized_repositories: Vec<String>,
     pub run_id: Option<String>,
     pub attempt: Option<u32>,
-    /// The token is issued by this process's memory server. A recovered
-    /// supervised server may require a replacement conversation because its
-    /// reconstructed grant registry cannot update the bearer stored by the
-    /// existing server-side MCP configuration.
+    /// The token is issued by this process's memory server. A recovered leaf
+    /// run may require a replacement conversation when its bearer rotated;
+    /// parent recovery restores the persisted bearer and keeps this false.
     pub requires_fresh_conversation: bool,
 }
 
@@ -359,6 +359,7 @@ impl Default for IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 }
@@ -385,6 +386,7 @@ impl IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 
@@ -1314,6 +1316,11 @@ impl IssueSessionRunner {
         self
     }
 
+    pub fn with_continuation_prompt(mut self, prompt: Option<String>) -> Self {
+        self.config.continuation_prompt = prompt;
+        self
+    }
+
     pub fn client(&self) -> &OpenHandsClient {
         &self.client
     }
@@ -1540,7 +1547,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return Err(IssueSessionError::RehydrationFailed(format!(
@@ -2152,7 +2159,7 @@ impl IssueSessionRunner {
         run: &RunAttempt,
         mut active_session: ActiveSession,
         launch_reported: bool,
-        observer: &mut O,
+        _observer: &mut O,
     ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError>
     where
         O: IssueSessionObserver,
@@ -2162,7 +2169,7 @@ impl IssueSessionRunner {
             && turn_is_in_progress(status)
         {
             if let Err(error) = self
-                .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                .wait_for_active_turn_to_finish(&mut active_session.stream)
                 .await
             {
                 return self
@@ -2382,7 +2389,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return self
@@ -3459,21 +3466,23 @@ impl IssueSessionRunner {
                     })
                     .map_err(|error| error.to_string())
             }
-            IssueSessionPromptKind::Continuation => Ok(append_memory_scope_guidance(
-                build_continuation_guidance(issue, run),
-                self.config.memory.as_ref(),
-            )),
+            IssueSessionPromptKind::Continuation => {
+                let prompt = append_memory_scope_guidance(
+                    build_continuation_guidance(issue, run),
+                    self.config.memory.as_ref(),
+                );
+                Ok(append_attempt_continuation(
+                    prompt,
+                    self.config.continuation_prompt.as_deref(),
+                ))
+            }
         }
     }
 
-    async fn wait_for_active_turn_to_finish<O>(
+    async fn wait_for_active_turn_to_finish(
         &self,
         stream: &mut RuntimeEventStream,
-        observer: &mut O,
-    ) -> Result<(), OpenHandsError>
-    where
-        O: IssueSessionObserver,
-    {
+    ) -> Result<(), OpenHandsError> {
         if stream
             .state_mirror()
             .execution_status()
@@ -3506,7 +3515,10 @@ impl IssueSessionRunner {
                         ),
                     });
                 }
-                Ok(Ok(Some(event))) => observe_event(observer, &event),
+                // This is a prior turn. The stream mirror and event cache
+                // still consume its events, but the current worker observer
+                // must not attribute its commands to the new parent attempt.
+                Ok(Ok(Some(_event))) => {}
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     if stream
@@ -3726,10 +3738,21 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        let previously_observed = session
+            .stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
         if let Ok(inserted) = session.stream.reconcile_events().await
             && inserted > 0
         {
-            observe_latest_event(observer, &session.stream);
+            observe_reconciled_events(
+                observer,
+                session.stream.event_cache().items(),
+                &previously_observed,
+            );
             if let Some(tracker) = tracker {
                 tracker.record_reconciled_events(
                     inserted as u64,
@@ -4354,13 +4377,27 @@ where
     );
 }
 
-fn observe_latest_event<O>(observer: &mut O, stream: &RuntimeEventStream)
-where
+fn observe_reconciled_events<O>(
+    observer: &mut O,
+    events: &[EventEnvelope],
+    previously_observed: &HashSet<String>,
+) where
     O: IssueSessionObserver,
 {
-    if let Some(event) = stream.event_cache().items().last() {
+    for event in events
+        .iter()
+        .filter(|event| !previously_observed.contains(&event.id))
+    {
         observe_event(observer, event);
     }
+}
+
+fn append_attempt_continuation(mut prompt: String, continuation: Option<&str>) -> String {
+    if let Some(continuation) = continuation {
+        prompt.push_str("\n\n");
+        prompt.push_str(continuation);
+    }
+    prompt
 }
 
 fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> NormalizedOutcome {
@@ -4759,6 +4796,152 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[derive(Default)]
+    struct ReconciledEventObserver {
+        event_ids: Vec<String>,
+    }
+
+    impl IssueSessionObserver for ReconciledEventObserver {
+        fn on_runtime_event(
+            &mut self,
+            _observed_at: TimestampMs,
+            event_id: Option<String>,
+            _event_kind: Option<String>,
+            _summary: Option<String>,
+            _payload: Option<Value>,
+        ) {
+            if let Some(event_id) = event_id {
+                self.event_ids.push(event_id);
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_forwards_every_new_event_in_cache_order() {
+        let timestamp = Utc::now();
+        let events = vec![
+            EventEnvelope::new("prior", timestamp, "runtime", "MessageEvent", json!({})),
+            EventEnvelope::new(
+                "command-start",
+                timestamp + chrono::Duration::milliseconds(1),
+                "agent",
+                "ActionEvent",
+                json!({"command":"cargo test"}),
+            ),
+            EventEnvelope::new(
+                "command-finish",
+                timestamp + chrono::Duration::milliseconds(2),
+                "tool",
+                "ObservationEvent",
+                json!({"exit_code":0}),
+            ),
+        ];
+        let mut observer = ReconciledEventObserver::default();
+        observe_reconciled_events(&mut observer, &events, &HashSet::from(["prior".to_owned()]));
+
+        assert_eq!(
+            observer.event_ids,
+            vec!["command-start".to_owned(), "command-finish".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn prior_turn_wait_keeps_its_commands_out_of_the_current_attempt() {
+        let server = FakeOpenHandsServer::start()
+            .await
+            .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-prior-turn",
+                "/tmp/opensymphony-prior-turn/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let mut stream = client
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_secs(2),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+            )
+            .await
+            .expect("runtime stream should attach");
+        server
+            .emit_state_update(conversation.conversation_id, "running")
+            .await
+            .expect("prior turn should run");
+        stream
+            .next_event()
+            .await
+            .expect("running event")
+            .expect("running event payload");
+        let prior_command = EventEnvelope::new(
+            "prior-command",
+            Utc::now(),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test prior"}),
+        );
+        server
+            .insert_event(conversation.conversation_id, prior_command)
+            .await
+            .expect("prior command should be delivered");
+        server
+            .emit_state_update(conversation.conversation_id, "finished")
+            .await
+            .expect("prior turn should finish");
+
+        let config = IssueSessionRunnerConfig {
+            terminal_wait_timeout: Duration::from_secs(2),
+            ..IssueSessionRunnerConfig::default()
+        };
+        let runner = IssueSessionRunner::new(client, config);
+        runner
+            .wait_for_active_turn_to_finish(&mut stream)
+            .await
+            .expect("prior turn should drain");
+
+        let baseline_event_ids = stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+        assert!(baseline_event_ids.contains("prior-command"));
+        let current_command = EventEnvelope::new(
+            "current-command",
+            Utc::now() + chrono::Duration::milliseconds(1),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test current"}),
+        );
+        let mut observer = ReconciledEventObserver::default();
+        let mut events = stream.event_cache().items().to_vec();
+        events.push(current_command);
+        observe_reconciled_events(&mut observer, &events, &baseline_event_ids);
+        assert_eq!(observer.event_ids, vec!["current-command".to_owned()]);
+    }
+
+    #[test]
+    fn reused_conversation_receives_current_attempt_guidance() {
+        let prompt = append_attempt_continuation(
+            "Continue work on the existing issue conversation.".to_owned(),
+            Some("run_id=run-parent-2 attempt=2 receipt=evidence/final-verification.json"),
+        );
+
+        assert!(prompt.contains("Continue work on the existing issue conversation."));
+        assert!(prompt.contains("run_id=run-parent-2"));
+        assert!(prompt.contains("attempt=2"));
+        assert!(prompt.contains("evidence/final-verification.json"));
     }
 
     #[test]
@@ -5406,6 +5589,7 @@ mod tests {
                 memory: None,
                 repository_instructions: None,
                 terminal_prompt: None,
+                continuation_prompt: None,
             },
         );
 

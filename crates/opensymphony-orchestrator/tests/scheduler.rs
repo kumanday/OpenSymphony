@@ -6,9 +6,9 @@ use std::{
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, DurationMs, HarnessInterruptCommand, HarnessInterruptReason,
-    HarnessInterruptStatus, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
-    RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint,
-    TrackerErrorCategory, TrackerIssueRef,
+    HarnessInterruptStatus, ParentVerificationEvidence, RepositoryBinding,
+    RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting,
+    RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory, TrackerIssueRef,
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
@@ -317,6 +317,26 @@ fn conversation(worker_id: &WorkerId) -> ConversationMetadata {
     }
 }
 
+fn parent_verification_evidence(
+    run_id: &str,
+    hierarchy_generation: u64,
+    repository_id: CanonicalRepositoryId,
+    target_commit: &str,
+) -> ParentVerificationEvidence {
+    ParentVerificationEvidence {
+        schema_version: 1,
+        run_id: run_id.to_owned(),
+        attempt: 1,
+        hierarchy_generation,
+        repository_commits: BTreeMap::from([(repository_id, target_commit.to_owned())]),
+        command: "cargo test-system-duckdb --test integration".to_owned(),
+        command_hash: crate::opensymphony_orchestrator::parent_command_identity(
+            "cargo test-system-duckdb --test integration",
+        ),
+        root: "parent_root".to_owned(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FakeError {
     message: String,
@@ -493,6 +513,7 @@ struct FakeWorkspace {
     persisted_durable_states: Vec<serde_json::Value>,
     persist_durable_state_results: VecDeque<Result<(), FakeError>>,
     recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
+    parent_targets: Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -522,6 +543,14 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn parent_workspace_targets(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>, Self::Error> {
+        Ok(self.parent_targets.clone())
     }
 
     async fn recovered_run_started_at(
@@ -762,6 +791,892 @@ async fn parent_provider_cooldown_stops_later_lookups_in_the_same_dispatch_pass(
     assert_eq!(scheduler.tracker().parent_evidence_requests, 1);
 }
 
+async fn launched_parent_scheduler(
+    suffix: &str,
+) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
+    launched_parent_scheduler_with_config(suffix, scheduler_config()).await
+}
+
+async fn launched_parent_scheduler_with_config(
+    suffix: &str,
+    config: SchedulerConfig,
+) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
+    let parent_id = IssueId::new(format!("parent-{suffix}")).expect("parent id");
+    let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
+    let parent_identifier = format!("COE-PARENT-{suffix}");
+    let child_identifier = format!("COE-CHILD-{suffix}");
+    let mut parent = tracker_issue(parent_id.as_str(), &parent_identifier, "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: child_identifier,
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let snapshot = HierarchySnapshot::new(&parent);
+    let repository_id =
+        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id");
+    let resource = LeaseResource {
+        issue_id: child_id.clone(),
+        repository_id: repository_id.clone(),
+        checkout_generation: format!("checkout-{suffix}"),
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot.clone())]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: resource.clone(),
+            owner: LeaseOwner::leaf_worker(&child_id),
+            hierarchy_generation: snapshot.generation,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        terminal_orchestrator_issues: [child_id.clone()].into_iter().collect(),
+        ..Default::default()
+    };
+    let evidence = ParentEligibilityEvidence {
+        hierarchy_generation: snapshot.generation,
+        children: vec![ChildEligibilityEvidence {
+            child_id,
+            hierarchy_generation: snapshot.generation,
+            orchestrator_terminal: true,
+            provider_merge_confirmed: true,
+            merge_required: true,
+            merge_result_commit: Some(format!("commit-{suffix}")),
+            merge_result_commits: Vec::new(),
+            merge_result_commits_by_repository: vec![RequiredMergeCommit {
+                repository_id: Some(repository_id.clone()),
+                commit: format!("commit-{suffix}"),
+            }],
+            merge_repository_id: Some(repository_id.clone()),
+            merge_repository_ids: vec![repository_id.clone()],
+            provider_evidence_at: None,
+            provider_evidence_by_issue: Vec::new(),
+            resource: Some(resource),
+            resources: Vec::new(),
+            unresolved_failure: None,
+        }],
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![parent],
+            parent_evidence: Some(evidence),
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&durable_state).expect("durable state")),
+            parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
+                repository_id,
+                checkout_handle: format!("checkout-{suffix}"),
+                relative_path: PathBuf::from(format!("repositories/{suffix}")),
+                target_commit: format!("commit-{suffix}"),
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        config,
+    );
+    scheduler.tick(ts(100)).await.expect("launch parent");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    (scheduler, parent_id)
+}
+
+fn enqueue_successful_parent_completion(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    suffix: &str,
+    finished_at: u64,
+) {
+    let run = scheduler.worker().launches[0].run.clone();
+    let command = "cargo test-system-duckdb --test integration";
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: run.worker_id.clone(),
+            observed_at: ts(finished_at - 20),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("final verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {"item": {
+                    "id": "command-final",
+                    "type": "commandExecution",
+                    "command": command
+                }}
+            })),
+        });
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: run.worker_id.clone(),
+            observed_at: ts(finished_at - 10),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/completed".to_owned()),
+            summary: Some("final verification passed".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {"item": {
+                    "id": "command-final",
+                    "type": "commandExecution",
+                    "command": command,
+                    "exitCode": 0,
+                    "aggregatedOutput": "integration passed"
+                }}
+            })),
+        });
+    let mut outcome = WorkerOutcomeRecord::from_run(
+        &run,
+        WorkerOutcomeKind::Succeeded,
+        ts(finished_at),
+        Some("parent integration verified".to_owned()),
+        None,
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let hierarchy_generation = state
+        .parent_integrations
+        .get(&run.issue_id)
+        .expect("parent controller")
+        .hierarchy_generation;
+    outcome.parent_verification = Some(parent_verification_evidence(
+        run.worker_id.as_str(),
+        hierarchy_generation,
+        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id"),
+        &format!("commit-{suffix}"),
+    ));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id,
+            outcome,
+        });
+}
+
+#[tokio::test]
+async fn parent_runtime_command_event_is_persisted_before_worker_completion() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("EVENT-PERSIST").await;
+    let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id,
+            observed_at: ts(120),
+            event_id: Some("command-persist".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "startedAtMs": 120,
+                    "item": {
+                        "id": "command-persist",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration"
+                    }
+                }
+            })),
+        });
+
+    scheduler
+        .tick(ts(120))
+        .await
+        .expect("runtime event should persist independently");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let attempt = state.parent_integrations[&parent_id]
+        .attempts
+        .last()
+        .expect("parent attempt");
+    assert_eq!(attempt.commands.len(), 1, "{attempt:?}");
+    assert_eq!(attempt.commands[0].command_id, "command-persist");
+    assert!(attempt.finished_at.is_none());
+}
+
+#[tokio::test]
+async fn dry_run_parent_preview_does_not_bind_its_conversation() {
+    let mut config = scheduler_config();
+    config.routing.dry_run = true;
+    let (mut scheduler, parent_id) = launched_parent_scheduler_with_config("DRY-RUN", config).await;
+
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.worker().launches[0].route.dry_run);
+    assert!(
+        scheduler.worker().launches[0]
+            .expected_parent_conversation_id
+            .is_none()
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(controller.conversation_id.is_none());
+    assert!(controller.attempts.is_empty());
+
+    let preview_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: preview_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &preview_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(120),
+                Some("routing preview completed".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(120))
+        .await
+        .expect("dry-run completion must stay outside the parent controller");
+
+    let execution = scheduler
+        .execution(&parent_id)
+        .expect("preview execution remains observable");
+    assert_eq!(execution.status(), SchedulerStatus::Released);
+    assert!(execution.retry().is_none());
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(controller.attempts.is_empty());
+    assert!(!matches!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn completed_parent_stays_materialized_across_later_capture_retries() {
+    let suffix = "CAPTURE-WINDOW";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let launch = scheduler.worker().launches[0].clone();
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("terminal parent outcome should complete");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    assert!(
+        scheduler.workspace().cleaned.is_empty(),
+        "the run loop must be able to load completed bindings after this tick"
+    );
+    assert!(state.leases.iter().any(LeaseRecord::active));
+
+    scheduler.tracker_mut().active.clear();
+    let mut terminal_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        0,
+    );
+    terminal_parent.sub_issues = vec![TrackerIssueRef {
+        id: format!("child-{suffix}"),
+        identifier: format!("COE-CHILD-{suffix}"),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    scheduler.tracker_mut().terminal = vec![terminal_parent.clone()];
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("later reconciliation should retain the capturable parent");
+    assert!(
+        scheduler.workspace().cleaned.is_empty(),
+        "OSYM-893 owns durable parent cleanup after capture acknowledgement"
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert!(
+        state.leases.iter().any(LeaseRecord::active),
+        "OSYM-893 owns ordered lease release after capture acknowledgement"
+    );
+
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&state).expect("persisted state")),
+            recoveries: vec![RecoveryRecord {
+                issue: normalized_issue(
+                    parent_id.as_str(),
+                    &format!("COE-PARENT-{suffix}"),
+                    "Done",
+                ),
+                workspace: workspace_record(
+                    &format!("COE-PARENT-{suffix}"),
+                    &format!("/tmp/recovered/COE-PARENT-{suffix}"),
+                ),
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: true,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: Some(launch.route.harness_kind.clone()),
+                interrupt_reason: None,
+                recovered_run: Some(RecoveredRun {
+                    worker_id: launch.run.worker_id.clone(),
+                    conversation: conversation(&launch.run.worker_id),
+                    normal_retry_count: 0,
+                    repository_binding: launch.run.repository_binding.clone(),
+                }),
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    restarted
+        .bootstrap(ts(3_600_300))
+        .await
+        .expect("restart should preserve completed parent evidence");
+    assert!(
+        restarted.workspace().cleaned.is_empty(),
+        "restart recovery must retain the parent root for another capture attempt"
+    );
+    let restarted_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            restarted
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("restarted state"),
+        )
+        .expect("decode restarted state");
+    assert!(
+        restarted_state.leases.iter().any(LeaseRecord::active),
+        "restart must retain the leases that protect parent evidence"
+    );
+}
+
+#[tokio::test]
+async fn passed_parent_survives_tracker_refresh_failure_until_terminal_reconciliation() {
+    let suffix = "PASSED-REFRESH";
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let (mut scheduler, parent_id) =
+        launched_parent_scheduler_with_config(suffix, config.clone()).await;
+    scheduler.tracker_mut().state_errors.push_back(FakeError {
+        message: "temporary tracker refresh failure".to_owned(),
+        category: None,
+        retry_after: None,
+    });
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("verified outcome should remain durable despite tracker refresh failure");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].attempts[0].status,
+        crate::opensymphony_orchestrator::ParentAttemptStatus::Passed
+    );
+    assert!(
+        state.parent_integrations[&parent_id]
+            .current_attempt_id()
+            .is_none(),
+        "a passed attempt must not be converted into a retrying attempt"
+    );
+    assert!(matches!(
+        scheduler
+            .execution(&parent_id)
+            .expect("passed parent execution remains observable")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::Completed,
+            ..
+        }
+    ));
+    let launch_count = scheduler.worker().launches.len();
+    scheduler
+        .tick(ts(1_200))
+        .await
+        .expect("active refresh should keep the passed parent parked");
+    assert_eq!(
+        scheduler.worker().launches.len(),
+        launch_count,
+        "tracker confirmation must not start another parent attempt"
+    );
+
+    let recovered_issue = scheduler
+        .execution(&parent_id)
+        .expect("passed parent execution")
+        .issue()
+        .clone();
+    let recovered_workspace = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.workspace())
+        .cloned()
+        .expect("passed parent workspace");
+    let mut durable_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("passed controller state"),
+        )
+        .expect("decode passed controller state");
+    durable_state.leases.clear();
+    let active_parent = scheduler.tracker().active[0].clone();
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![active_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            recoveries: vec![RecoveryRecord {
+                issue: recovered_issue,
+                workspace: recovered_workspace,
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: false,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: None,
+                interrupt_reason: None,
+                recovered_run: None,
+            }],
+            durable_state: Some(serde_json::to_value(durable_state).expect("passed state")),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        config,
+    );
+    scheduler
+        .tick(ts(1_300))
+        .await
+        .expect("restart should preserve tracker-confirmation wait");
+    assert!(scheduler.worker().launches.is_empty());
+    assert!(matches!(
+        scheduler
+            .execution(&parent_id)
+            .expect("recovered passed parent")
+            .state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::Completed,
+            ..
+        }
+    ));
+
+    scheduler.tracker_mut().active.clear();
+    let mut terminal_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        0,
+    );
+    terminal_parent.sub_issues = vec![TrackerIssueRef {
+        id: format!("child-{suffix}"),
+        identifier: format!("COE-CHILD-{suffix}"),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    scheduler.tracker_mut().terminal = vec![terminal_parent];
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("later terminal refresh should complete the preserved attempt");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+}
+
+#[tokio::test]
+async fn stale_completed_parent_does_not_release_changed_hierarchy() {
+    let suffix = "STALE-COMPLETED";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("terminal parent outcome should complete");
+
+    let mut changed_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        0,
+    );
+    changed_parent.sub_issues = vec![TrackerIssueRef {
+        id: format!("replacement-child-{suffix}"),
+        identifier: format!("COE-REPLACEMENT-{suffix}"),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    scheduler.tracker_mut().terminal = vec![changed_parent];
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("changed terminal hierarchy should remain fenced");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(state.hierarchy[&parent_id].generation, 2);
+    assert_eq!(
+        state.hierarchy[&parent_id].blocked_reason,
+        Some(crate::opensymphony_orchestrator::HierarchyBlockedReason::HierarchyChanged)
+    );
+    assert!(
+        state.leases.iter().any(LeaseRecord::active),
+        "a completed controller from the prior generation must not release current leases"
+    );
+    assert!(scheduler.workspace().cleaned.is_empty());
+    assert!(!state.terminal_orchestrator_issues.contains(&parent_id));
+}
+
+#[tokio::test]
+async fn accepted_hierarchy_change_reopens_a_completed_parent_execution() {
+    let suffix = "COMPLETED-REPLAN";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("parent integration should complete");
+    assert!(matches!(
+        scheduler.execution(&parent_id).expect("parent").state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::Completed,
+            ..
+        }
+    ));
+
+    let replacement_id = IssueId::new("replacement-completed-replan").expect("replacement id");
+    let mut changed_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "In Progress",
+        0,
+    );
+    changed_parent.sub_issues = vec![TrackerIssueRef {
+        id: replacement_id.to_string(),
+        identifier: "COE-REPLACEMENT-COMPLETED-REPLAN".to_owned(),
+        title: Some("Replacement child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    scheduler.tracker_mut().active = vec![changed_parent];
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("changed frozen hierarchy should be blocked");
+    let blocked_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        blocked_state.hierarchy[&parent_id].blocked_reason,
+        Some(crate::opensymphony_orchestrator::HierarchyBlockedReason::HierarchyChanged)
+    );
+    scheduler
+        .replan_parent(&parent_id, ts(3_600_210))
+        .await
+        .expect("replan")
+        .then_some(())
+        .expect("changed hierarchy should be accepted");
+    let replanned_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert!(
+        replanned_state.hierarchy[&parent_id]
+            .blocked_reason
+            .is_none()
+    );
+    assert_ne!(
+        replanned_state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    assert_eq!(
+        replanned_state.parent_integrations[&parent_id].hierarchy_generation,
+        replanned_state.hierarchy[&parent_id].generation
+    );
+    assert_eq!(
+        scheduler.execution(&parent_id).expect("parent").status(),
+        SchedulerStatus::Unclaimed
+    );
+}
+
+#[tokio::test]
+async fn parent_release_restores_execution_and_controller_when_persistence_fails() {
+    let suffix = "RELEASE-ROLLBACK";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let before: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        200,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "injected release persistence failure".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect_err("release must surface the durable controller write failure");
+
+    assert_eq!(
+        scheduler
+            .execution(&parent_id)
+            .expect("execution must be restored")
+            .status(),
+        SchedulerStatus::Running
+    );
+    let after: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        after.parent_integrations[&parent_id],
+        before.parent_integrations[&parent_id]
+    );
+    assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_in_flight_parent_migrates_controller_before_reattachment() {
+    let (scheduler, parent_id) = launched_parent_scheduler("LEGACY-MIGRATION").await;
+    let launch = scheduler.worker().launches[0].clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    let active = scheduler.tracker().active.clone();
+    let parent_evidence = scheduler.tracker().parent_evidence.clone();
+    let parent_targets = scheduler.workspace().parent_targets.clone();
+    let mut durable_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    durable_state.parent_integrations.remove(&parent_id);
+
+    let recovery = RecoveryRecord {
+        issue: launch.issue.clone(),
+        workspace: launch.workspace.clone(),
+        successful_run: false,
+        cancelled_run: false,
+        completed_run: false,
+        had_in_flight_run: true,
+        pending_retry: false,
+        normal_retry_count: 0,
+        retry_scheduled_at: None,
+        retry_due_at: None,
+        retry_reason: None,
+        retry_error: None,
+        harness_kind: Some(launch.route.harness_kind.clone()),
+        interrupt_reason: None,
+        recovered_run: Some(RecoveredRun {
+            worker_id: launch.run.worker_id.clone(),
+            conversation: conversation.clone(),
+            normal_retry_count: 0,
+            repository_binding: launch.run.repository_binding.clone(),
+        }),
+    };
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            active,
+            parent_evidence,
+            ..Default::default()
+        },
+        FakeWorkspace {
+            recoveries: vec![recovery],
+            durable_state: Some(serde_json::to_value(durable_state).expect("legacy state")),
+            recovered_run_started_at: BTreeMap::from([(parent_id.clone(), ts(100))]),
+            parent_targets,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    restarted
+        .tick(ts(200))
+        .await
+        .expect("legacy parent should migrate before reattachment");
+    assert_eq!(restarted.worker().launches.len(), 1);
+    assert_eq!(
+        restarted.worker().launches[0]
+            .expected_parent_conversation_id
+            .as_deref(),
+        Some(conversation.conversation_id.as_str())
+    );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(restarted.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.conversation_id.as_deref(),
+        Some(conversation.conversation_id.as_str())
+    );
+    assert_eq!(controller.attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn recovered_parent_is_stopped_and_reinserted_when_attachment_persistence_fails() {
+    let (scheduler, parent_id) = launched_parent_scheduler("RECOVERY-PERSIST-FAILURE").await;
+    let launch = scheduler.worker().launches[0].clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    let recovery = RecoveryRecord {
+        issue: launch.issue.clone(),
+        workspace: launch.workspace.clone(),
+        successful_run: false,
+        cancelled_run: false,
+        completed_run: false,
+        had_in_flight_run: true,
+        pending_retry: false,
+        normal_retry_count: 0,
+        retry_scheduled_at: None,
+        retry_due_at: None,
+        retry_reason: None,
+        retry_error: None,
+        harness_kind: Some(launch.route.harness_kind.clone()),
+        interrupt_reason: None,
+        recovered_run: Some(RecoveredRun {
+            worker_id: launch.run.worker_id.clone(),
+            conversation,
+            normal_retry_count: 0,
+            repository_binding: launch.run.repository_binding.clone(),
+        }),
+    };
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            active: scheduler.tracker().active.clone(),
+            parent_evidence: scheduler.tracker().parent_evidence.clone(),
+            ..Default::default()
+        },
+        FakeWorkspace {
+            recoveries: vec![recovery],
+            durable_state: scheduler.workspace().durable_state.clone(),
+            persist_durable_state_results: VecDeque::from([
+                Ok(()),
+                Ok(()),
+                Ok(()),
+                Err(FakeError {
+                    message: "recovered attachment persistence failed".to_owned(),
+                    category: None,
+                    retry_after: None,
+                }),
+            ]),
+            recovered_run_started_at: BTreeMap::from([(parent_id.clone(), ts(100))]),
+            parent_targets: scheduler.workspace().parent_targets.clone(),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    let error = restarted
+        .tick(ts(200))
+        .await
+        .expect_err("failed recovered attachment persistence must surface");
+
+    assert_eq!(restarted.worker().launches.len(), 1, "{error:?}");
+    assert_eq!(restarted.worker().interrupts.len(), 1, "{error:?}");
+    assert_eq!(restarted.worker().aborted.len(), 1);
+    let execution = restarted
+        .execution(&parent_id)
+        .expect("the recovered execution must remain registered");
+    assert!(matches!(
+        execution.state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::TrackerInactive,
+            ..
+        }
+    ));
+    assert_eq!(
+        execution
+            .last_worker_outcome()
+            .and_then(|outcome| outcome.error.as_deref()),
+        Some("workspace backend failed: recovered attachment persistence failed")
+    );
+}
+
 #[tokio::test]
 async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
     let child_id = IssueId::new("child-1").expect("child id should be valid");
@@ -898,6 +1813,12 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
     };
     let workspace = FakeWorkspace {
         durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
+            repository_id: resource.repository_id.clone(),
+            checkout_handle: "checkout-repo".to_owned(),
+            relative_path: PathBuf::from("repositories/repo"),
+            target_commit: "merge-commit".to_owned(),
+        }],
         ..Default::default()
     };
     let worker = FakeWorker::default();
@@ -908,6 +1829,33 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("eligible parent should dispatch");
     assert_eq!(scheduler.worker().launches.len(), 1);
+    let parent_run = scheduler.worker().launches[0].run.clone();
+    let persisted_after_launch: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("parent attempt state"),
+        )
+        .expect("parent attempt state should decode");
+    assert_eq!(
+        persisted_after_launch.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-1")
+    );
+    assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            state.clone(),
+        )
+        .ok()
+        .and_then(|state| {
+            state.parent_integrations[&parent_id]
+                .attempts
+                .first()
+                .cloned()
+        })
+        .is_some_and(|attempt| attempt.conversation_id.is_none())
+    }), "attempt intent must be durable before the worker launch receipt attaches a conversation");
     assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
         serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
             state.clone(),
@@ -945,6 +1893,125 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             .any(|lease| { lease.kind == LeaseKind::LeafWorker && lease.released_at.is_some() })
     );
 
+    let mut failed_outcome = WorkerOutcomeRecord::from_run(
+        &parent_run,
+        WorkerOutcomeKind::Succeeded,
+        ts(150),
+        Some("worker claimed success despite failed verification".to_owned()),
+        None,
+    );
+    failed_outcome.parent_verification = Some(parent_verification_evidence(
+        parent_run.worker_id.as_str(),
+        snapshot.generation,
+        resource.repository_id.clone(),
+        "merge-commit",
+    ));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: parent_run.worker_id.clone(),
+            observed_at: ts(120),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("final verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "startedAtMs": 120,
+                    "item": {
+                        "id": "command-final",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration"
+                    }
+                }
+            })),
+        });
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: parent_run.worker_id.clone(),
+            observed_at: ts(140),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/completed".to_owned()),
+            summary: Some("final verification failed".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "completedAtMs": 140,
+                    "item": {
+                        "id": "command-final",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration",
+                        "exitCode": 1,
+                        "aggregatedOutput": "integration test failed token=secret"
+                    }
+                }
+            })),
+        });
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: parent_run.worker_id.clone(),
+            outcome: failed_outcome,
+        });
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "injected parent outcome persistence failure".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect_err("parent outcome persistence failure must remain retryable");
+    let durable_after_failed_write: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("pre-outcome controller remains durable"),
+        )
+        .expect("durable controller should decode");
+    assert_eq!(
+        durable_after_failed_write.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-1"),
+        "failed persistence must retain the durable running attempt"
+    );
+    scheduler
+        .tick(ts(151))
+        .await
+        .expect("pending parent outcome should persist on retry");
+    durable_state = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("parent outcome state"),
+    )
+    .expect("parent outcome state should decode");
+    let controller = &durable_state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.attempts[0].status,
+        crate::opensymphony_orchestrator::ParentAttemptStatus::Failed
+    );
+    assert_eq!(
+        scheduler
+            .executions()
+            .get(&parent_id)
+            .and_then(|execution| execution.retry())
+            .and_then(|retry| retry.error.as_deref()),
+        Some("parent success lacked matching orchestrator-owned command evidence"),
+        "untrusted worker success is downgraded before scheduler retry classification"
+    );
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+    );
+
     let tracker = FakeTracker {
         active: vec![parent],
         parent_evidence: Some(evidence),
@@ -965,6 +2032,188 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("restart should respect the durable dispatch claim");
     assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("FAILED-NO-COMMAND").await;
+    let first_run = scheduler.worker().launches[0].run.clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(150),
+                Some("runner failed before the first command".to_owned()),
+                None,
+            ),
+        });
+    scheduler.tick(ts(150)).await.expect("record failed turn");
+
+    let retry_due_at = scheduler.executions()[&parent_id]
+        .retry()
+        .expect("retry")
+        .due_at;
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.attempts[0]
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.status),
+        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded)
+    );
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+    );
+
+    let retry_dispatch_at = retry_due_at.max(ts(3_600_100));
+    scheduler
+        .worker_mut()
+        .launch_results
+        .push_back(Ok(WorkerLaunch {
+            conversation: conversation.clone(),
+            started_at: Some(retry_dispatch_at),
+        }));
+    scheduler
+        .tick(retry_dispatch_at)
+        .await
+        .expect("retry after stopped failed turn");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-2")
+    );
+}
+
+#[tokio::test]
+async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("CANCELLED").await;
+    let first_run = scheduler.worker().launches[0].run.clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Cancelled,
+                ts(150),
+                Some("runtime cancelled the active turn".to_owned()),
+                None,
+            ),
+        });
+    scheduler.tick(ts(150)).await.expect("record cancellation");
+
+    let retry = scheduler.executions()[&parent_id]
+        .retry()
+        .cloned()
+        .expect("cancelled turn retry");
+    assert_eq!(retry.reason, RetryReason::Cancelled);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+    );
+
+    let retry_dispatch_at = retry.due_at.max(ts(3_600_100));
+    scheduler
+        .worker_mut()
+        .launch_results
+        .push_back(Ok(WorkerLaunch {
+            conversation: conversation.clone(),
+            started_at: Some(retry_dispatch_at),
+        }));
+    scheduler
+        .tick(retry_dispatch_at)
+        .await
+        .expect("retry cancelled parent turn");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1]
+            .expected_parent_conversation_id
+            .as_deref(),
+        Some(conversation.conversation_id.as_str()),
+        "the backend must reject a missing or different manifest before retry launch"
+    );
+}
+
+#[tokio::test]
+async fn reopened_completed_parent_resets_controller_without_scope_change() {
+    let parent_id = IssueId::new("reopened-parent").expect("parent id");
+    let child_id = IssueId::new("reopened-child").expect("child id");
+    let mut parent = tracker_issue("reopened-parent", "COE-REOPENED", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-REOPENED-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut snapshot = HierarchySnapshot::new(&parent);
+    snapshot.freeze().expect("freeze hierarchy");
+    snapshot.mark_dispatched();
+    let mut completed = crate::opensymphony_orchestrator::ParentIntegrationController::new(
+        parent_id.clone(),
+        snapshot.generation,
+    )
+    .expect("controller");
+    completed.state = crate::opensymphony_orchestrator::ParentIntegrationState::Completed;
+    completed.conversation_id = Some("old-parent-conversation".to_owned());
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+        parent_integrations: BTreeMap::from([(parent_id.clone(), completed)]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("reconcile reopened parent");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::WaitingForChildren
+    );
+    assert!(controller.conversation_id.is_none());
+    assert_eq!(controller.hierarchy_generation, 1);
 }
 
 #[tokio::test]
@@ -1246,6 +2495,214 @@ async fn terminal_recovery_prunes_run_boundary_after_cleanup() {
     )
     .expect("durable state should decode");
     assert!(!state.run_started_at_by_issue.contains_key(&issue_id));
+}
+
+#[tokio::test]
+async fn terminal_recovery_does_not_trust_success_before_parent_controller_finalization() {
+    let issue_id = IssueId::new("terminal-parent-recovery").expect("issue id");
+    let recovered_worker_id = WorkerId::new("worker-terminal-parent-recovery").expect("worker id");
+    let repository_id = CanonicalRepositoryId::new("github:parent-recovery").expect("repo");
+    let child_id = IssueId::new("terminal-parent-child").expect("child id");
+    let mut terminal_parent =
+        tracker_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done", 0);
+    terminal_parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-PARENT-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut hierarchy = HierarchySnapshot::new(&terminal_parent);
+    hierarchy.mark_dispatched();
+    let recovered_workspace =
+        workspace_record("COE-PARENT-TERMINAL", "/tmp/recovered/COE-PARENT-TERMINAL");
+    let mut controller =
+        crate::opensymphony_orchestrator::ParentIntegrationController::new(issue_id.clone(), 1)
+            .expect("controller");
+    controller
+        .admit("hierarchy:1", ts(1))
+        .expect("admit parent");
+    controller
+        .record_workspace_prepared(
+            [crate::opensymphony_orchestrator::ParentRepositoryTarget {
+                repository_id: repository_id.clone(),
+                checkout_handle: "checkout-parent".to_owned(),
+                relative_path: PathBuf::from("repositories/parent"),
+                target_commit: "target-parent".to_owned(),
+            }],
+            "targets:1",
+            ts(2),
+        )
+        .expect("prepare parent");
+    let attempt = controller
+        .start_attempt(
+            "parent integration",
+            "attempt:1",
+            crate::opensymphony_orchestrator::ParentAttemptRoot::ParentRoot,
+            "conversation-parent",
+            100,
+            "targets:1",
+            ts(3),
+        )
+        .expect("attempt");
+    controller
+        .finish_attempt(
+            &attempt,
+            crate::opensymphony_orchestrator::ParentAttemptStatus::Passed,
+            Some(0),
+            crate::opensymphony_orchestrator::ParentCleanupReceipt {
+                status: crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded,
+                occurred_at: ts(4),
+                detail: None,
+            },
+            ts(4),
+        )
+        .expect("attempt receipt");
+    assert_ne!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(issue_id.clone(), hierarchy)]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::AncestorIntegration,
+            resource: LeaseResource {
+                issue_id: child_id,
+                repository_id,
+                checkout_generation: "checkout-parent".to_owned(),
+            },
+            owner: LeaseOwner::ancestor(&issue_id),
+            hierarchy_generation: 1,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        parent_integrations: BTreeMap::from([(issue_id.clone(), controller)]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done"),
+            workspace: recovered_workspace,
+            successful_run: true,
+            cancelled_run: false,
+            completed_run: true,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 0,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: None,
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 0,
+                repository_binding: None,
+            }),
+        }],
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent.clone()],
+            ..Default::default()
+        },
+        workspace,
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    scheduler.bootstrap(ts(100)).await.expect("recovery");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert!(!state.terminal_orchestrator_issues.contains(&issue_id));
+    assert!(state.leases.iter().any(LeaseRecord::active));
+    assert!(
+        state.parent_integrations.contains_key(&issue_id),
+        "unfinalized controller was discarded: {state:?}"
+    );
+    assert_ne!(
+        state.parent_integrations[&issue_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    );
+    assert!(
+        scheduler.workspace().cleaned.is_empty(),
+        "unfinalized parent workspace was cleaned: {:?}",
+        scheduler.workspace().cleaned
+    );
+    assert_eq!(
+        scheduler.executions()[&issue_id].status(),
+        SchedulerStatus::Released
+    );
+
+    let mut missing_controller_state = state;
+    missing_controller_state.parent_integrations.clear();
+    let mut missing_controller_scheduler = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(
+                serde_json::to_value(&missing_controller_state).expect("missing-controller state"),
+            ),
+            recoveries: vec![RecoveryRecord {
+                issue: normalized_issue("terminal-parent-recovery", "COE-PARENT-TERMINAL", "Done"),
+                workspace: workspace_record(
+                    "COE-PARENT-TERMINAL",
+                    "/tmp/recovered/COE-PARENT-TERMINAL",
+                ),
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: false,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: None,
+                interrupt_reason: None,
+                recovered_run: None,
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    missing_controller_scheduler
+        .bootstrap(ts(101))
+        .await
+        .expect("missing parent controller remains fenced");
+    let missing_controller_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            missing_controller_scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("missing-controller durable state"),
+        )
+        .expect("decode missing-controller state");
+    assert!(
+        !missing_controller_state
+            .terminal_orchestrator_issues
+            .contains(&issue_id)
+    );
+    assert!(
+        missing_controller_state
+            .leases
+            .iter()
+            .any(LeaseRecord::active)
+    );
+    assert!(missing_controller_scheduler.workspace().cleaned.is_empty());
 }
 
 #[tokio::test]

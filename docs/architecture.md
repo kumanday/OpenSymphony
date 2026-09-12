@@ -108,6 +108,62 @@ once with this root as `cwd`, a relative checkout-handle map, and a generic
 `parent_multi_checkout` envelope; neither the directory layout nor the prompt
 assigns repository roles.
 
+The scheduler persists one generation-bound parent integration controller with
+the hierarchy state. Its versioned transitions cover admission, lease
+acquisition, workspace preparation, repository refresh, harness integration,
+final verification, and finalization. Each harness turn is one bounded attempt
+on the shared parent conversation and records its input version, root or opaque
+checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
+a reconciled running attempt attached; an unreconciled attempt becomes
+indeterminate and must pass cleanup and repository refresh before rerun. Final
+verification binds the worker-authored exact command to a trusted SHA-256
+identity before redaction; durable evidence retains that identity and a redacted
+diagnostic, while events older than the current attempt are ignored. Final
+admission identity is stored separately from the compact transition tail so an
+unbounded retry history cannot replay the initial admission transitions. If a
+completed parent reopens, the scheduler creates a new controller lifecycle even
+when its child-edge generation did not change. A bound parent conversation also
+fixes the harness choice for that lifecycle; a configured harness switch fails
+before the replacement session starts.
+Final evidence is accepted only from the run-bound
+`evidence/final-verification.json` receipt. The runtime reopens every checkout
+at its exact prepared commit and uses the file only to select an actual command
+observed through the Codex or OpenHands event stream. The controller maps the
+observed command working directory to the parent root or an exact checkout
+handle and supplies the deadline, exit result, bounded log,
+foreground-process ownership, and
+teardown from those runtime events before it can pass the attempt. Generic
+harness success or a prompt-authored claim without matching events is
+insufficient. Each accepted command or resource event is persisted with the
+controller before the worker reaches a terminal outcome. On timeout or cancellation, a reconciled harness stopped state
+releases the foreground-process receipt; any other named resource remains an
+explicit cleanup fence. The durable final record maps every canonical repository to the
+exact verified commit so a higher ancestor can consume the completed parent
+without assigning repository roles.
+When admission produces no repository targets, the same observed final command
+can complete with an empty commit map. This represents a repository-neutral
+parent and does not weaken command, deadline, cleanup, or controller gates.
+Recovery treats a persisted launch intent with no attached conversation,
+command, or resource as a metadata-only crash and safely returns through
+cleanup and baseline refresh. A terminal harness manifest whose controller
+outcome was lost becomes indeterminate and reruns after resource cleanup and
+baseline refresh. Recovered parent memory grants restore the bearer
+already held by the bound conversation into the reconstructed registry.
+Legacy in-flight parent runs that predate controller persistence reconstruct
+and persist that controller from the durable hierarchy, workspace envelope,
+run identity, and existing conversation before backend reattachment. Route
+preview conversations never become controller bindings.
+Every recovered parent dispatch carries that expected conversation identity
+into the worker launch boundary. A missing or different conversation manifest
+fails before a replacement harness session can start. Reused turns receive a
+small continuation prompt containing the current run, attempt, generation,
+exact commit map, and receipt contract; the original workflow and repository
+instructions remain in the bound conversation rather than being replayed.
+Terminal success is gated by the durable controller's completed state in both
+live and recovery release paths. Completed parent roots and their descendant
+leases remain durable for capture retry; OSYM-893 consumes that terminal state
+for ordered worktree cleanup and lease release.
+
 ### 3.2 OpenHands is the execution adapter
 
 OpenHands provides:

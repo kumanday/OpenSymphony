@@ -1,4 +1,5 @@
 mod hierarchy;
+mod parent_integration;
 mod scheduler;
 mod selection;
 
@@ -19,6 +20,13 @@ pub use hierarchy::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchyBlockedReason, HierarchyChildEdge,
     HierarchyReconciliation, HierarchySnapshot, LeaseError, LeaseKind, LeaseOwner, LeaseRecord,
     LeaseResource, ParentEligibilityEvidence, ProviderEvidenceBoundary, RequiredMergeCommit,
+};
+pub use parent_integration::{
+    ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt, ParentCleanupStatus,
+    ParentCommandReceipt, ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
+    ParentIntegrationState, ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus,
+    ParentRetryClassification, ParentSideEffectIntent, ParentSideEffectReceipt, ParentTransition,
+    ParentVerificationAttempt, parent_command_identity,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,

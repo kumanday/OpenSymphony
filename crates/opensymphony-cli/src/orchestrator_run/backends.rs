@@ -13,7 +13,7 @@ use std::{
 
 use crate::opensymphony_cli::{
     BlockedEnvironment,
-    memory::{MemoryScopeGrant, MemoryScopeGrantRegistry},
+    memory::{MemoryLiveOverlayGrant, MemoryScopeGrant, MemoryScopeGrantRegistry},
 };
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
@@ -24,27 +24,28 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
-    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome,
-    RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
-    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, ParentVerificationEvidence,
+    RepositoryBindingOutcome, RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
-    ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest, IssueSessionError,
-    IssueSessionObserver, IssueSessionPromptKind, IssueSessionResult, IssueSessionRunner,
-    IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, MemoryWorkerAccess,
-    OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
-    OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
-    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource, build_continuation_guidance,
-    pending_conversation_manifest_path, superseded_conversation_manifests_path,
+    Conversation, ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
+    IssueSessionError, IssueSessionObserver, IssueSessionPromptKind, IssueSessionResult,
+    IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling,
+    MemoryWorkerAccess, OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient,
+    OpenHandsConversationStorePaths, OpenHandsError, SupervisedServerConfig, SupervisorConfig,
+    TransportConfig, WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
+    build_continuation_guidance, pending_conversation_manifest_path,
+    superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
-    ParentEligibilityEvidence, ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord,
-    RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    ParentEligibilityEvidence, ParentRepositoryTarget, ProviderEvidenceBoundary, RecoveredRun,
+    RecoveryRecord, RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
     WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, parent_command_identity,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -52,8 +53,9 @@ use crate::opensymphony_workspace::{
     IssueLifecycleState, ParentCheckoutRequest, ParentRuntimeDescriptor, ParentRuntimeEnvelope,
     RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
     WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
-    checkout_credential_environment_variables, compose_parent_prompt, compose_terminal_prompt,
-    environment_variable_names_equal,
+    checkout_credential_environment_variables, compose_parent_continuation_prompt,
+    compose_parent_prompt, compose_terminal_prompt, environment_variable_names_equal,
+    redact_runtime_diagnostic,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -66,6 +68,7 @@ use tokio::{
     time::{timeout, timeout_at},
 };
 use url::Url;
+use uuid::Uuid;
 
 use super::{
     RunCommandError, RuntimeMemoryEnv,
@@ -83,6 +86,185 @@ const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
 const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
+const PARENT_FINAL_VERIFICATION_PATH: &str = "evidence/final-verification.json";
+const MAX_PARENT_VERIFICATION_RECEIPT_BYTES: u64 = 64 * 1024;
+
+async fn parent_verification_receipt_path(workspace: &Path) -> Result<PathBuf, String> {
+    let canonical_workspace = fs::canonicalize(workspace).await.map_err(|error| {
+        format!(
+            "failed to verify parent root {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let evidence_directory = workspace.join("evidence");
+    let metadata = fs::symlink_metadata(&evidence_directory)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to verify parent evidence directory {}: {error}",
+                evidence_directory.display()
+            )
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "parent evidence directory {} must be a real directory",
+            evidence_directory.display()
+        ));
+    }
+    let canonical_evidence = fs::canonicalize(&evidence_directory)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to resolve parent evidence directory {}: {error}",
+                evidence_directory.display()
+            )
+        })?;
+    if !canonical_evidence.starts_with(&canonical_workspace) {
+        return Err("parent evidence directory escapes the verified parent root".to_owned());
+    }
+    Ok(canonical_evidence.join(
+        Path::new(PARENT_FINAL_VERIFICATION_PATH)
+            .file_name()
+            .expect("verification receipt path has a file name"),
+    ))
+}
+
+async fn clear_parent_verification_receipt(workspace: &Path) -> Result<(), String> {
+    let path = parent_verification_receipt_path(workspace).await?;
+    match fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to clear stale parent verification receipt {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+async fn load_parent_verification_receipt(
+    workspace: &Path,
+    envelope: &ParentRuntimeEnvelope,
+) -> Result<ParentVerificationEvidence, String> {
+    let path = parent_verification_receipt_path(workspace).await?;
+    let metadata = fs::symlink_metadata(&path)
+        .await
+        .map_err(|error| format!("parent harness did not write {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "parent verification receipt {} must be a regular file",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_PARENT_VERIFICATION_RECEIPT_BYTES {
+        return Err(format!(
+            "parent verification receipt {} exceeds {} bytes",
+            path.display(),
+            MAX_PARENT_VERIFICATION_RECEIPT_BYTES
+        ));
+    }
+    let bytes = fs::read(&path).await.map_err(|error| {
+        format!(
+            "failed to read parent verification receipt {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut evidence: ParentVerificationEvidence =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "parent verification receipt {} is invalid JSON: {error}",
+                path.display()
+            )
+        })?;
+    if evidence.run_id != envelope.run_id
+        || evidence.attempt != envelope.attempt
+        || evidence.hierarchy_generation != envelope.hierarchy_generation
+    {
+        return Err(
+            "parent verification receipt does not match the current run envelope".to_owned(),
+        );
+    }
+    let expected_commits = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            CanonicalRepositoryId::new(checkout.repository_id.clone())
+                .map(|repository_id| (repository_id, checkout.target_commit.clone()))
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if evidence.repository_commits != expected_commits {
+        return Err(
+            "parent verification receipt repository commits do not match the runtime envelope"
+                .to_owned(),
+        );
+    }
+    if evidence.root != "parent_root"
+        && !envelope
+            .checkouts
+            .values()
+            .any(|checkout| checkout.checkout_handle == evidence.root)
+    {
+        return Err(
+            "parent verification command root is not a verified checkout handle".to_owned(),
+        );
+    }
+    if evidence.command.trim().is_empty() {
+        return Err("parent verification command selector is empty".to_owned());
+    }
+    evidence.command_hash = parent_command_identity(&evidence.command);
+    evidence.command = redact_runtime_diagnostic(&evidence.command);
+    Ok(evidence)
+}
+
+async fn attach_parent_verification_receipt(
+    outcome: &mut WorkerOutcomeRecord,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+    envelope: Option<&ParentRuntimeEnvelope>,
+) {
+    let Some(envelope) = envelope else {
+        return;
+    };
+    let result = async {
+        let verified_parent = workspace_manager
+            .open_parent_execution_root_at(&issue_descriptor(issue), workspace.workspace_path())
+            .await
+            .map_err(|error| {
+                format!(
+                    "parent checkouts no longer match their exact verification targets: {error}"
+                )
+            })?;
+        workspace_manager
+            .verify_parent_runtime_envelope(&verified_parent, envelope)
+            .map_err(|error| {
+                format!("parent runtime envelope changed before completion: {error}")
+            })?;
+        load_parent_verification_receipt(workspace.workspace_path(), envelope).await
+    }
+    .await;
+    apply_parent_verification_receipt_result(outcome, result);
+}
+
+fn apply_parent_verification_receipt_result(
+    outcome: &mut WorkerOutcomeRecord,
+    result: Result<ParentVerificationEvidence, String>,
+) {
+    match result {
+        Ok(evidence) => outcome.parent_verification = Some(evidence),
+        Err(error) => {
+            if outcome.outcome == WorkerOutcomeKind::Succeeded {
+                outcome.outcome = WorkerOutcomeKind::Failed;
+                outcome.summary =
+                    Some("parent final verification evidence was rejected".to_owned());
+            }
+            outcome.error = Some(match outcome.error.take() {
+                Some(existing) => format!("{existing}; {error}"),
+                None => error,
+            });
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -90,6 +272,8 @@ pub(super) enum CliWorkspaceError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
+    #[error(transparent)]
+    RepositoryIdentity(#[from] crate::opensymphony_domain::RepositoryIdentityError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
     #[error("OpenHands lifecycle recovery failed: {0}")]
@@ -3010,6 +3194,33 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(state.active_for(&resource))
     }
 
+    async fn parent_workspace_targets(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<Vec<ParentRepositoryTarget>, Self::Error> {
+        if issue.sub_issues.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent = self
+            .manager
+            .open_parent_execution_root_at_for_retry(&issue_descriptor(issue), &workspace.path)
+            .await?;
+        parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .map(|checkout| {
+                Ok(ParentRepositoryTarget {
+                    repository_id: CanonicalRepositoryId::new(checkout.repository_id.clone())?,
+                    checkout_handle: checkout.checkout_handle.clone(),
+                    relative_path: checkout.relative_path.clone(),
+                    target_commit: checkout.target_commit.clone(),
+                })
+            })
+            .collect()
+    }
+
     async fn recover_retry_exhaustion(
         &mut self,
     ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
@@ -3840,6 +4051,7 @@ impl RuntimeWorkerBackend {
     fn spawn_worker_task(&mut self, request: WorkerStartRequest, recovered: bool) -> PendingLaunch {
         let issue = request.issue.clone();
         let memory_grant_registry_recovered = request.memory_grant_registry_recovered;
+        let expected_parent_conversation_id = request.expected_parent_conversation_id.clone();
         let mut runner_config = self.runner_config.clone();
         let mut worker_env = self.worker_env.clone();
         if let Some(memory) = runner_config.memory.as_mut() {
@@ -4047,10 +4259,25 @@ impl RuntimeWorkerBackend {
                 Ok(manifest) => manifest,
                 Err(_) => return,
             };
+            if let Some(error) = expected_parent_conversation_error(
+                expected_parent_conversation_id.as_deref(),
+                recovered_conversation
+                    .as_ref()
+                    .map(|manifest| manifest.conversation_id.as_str()),
+            ) {
+                report_launch_failure(&mut launch_tx, error);
+                return;
+            }
             let target_is_codex = route.harness_kind == CODEX_APP_SERVER_KIND;
             let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
                 conversation_manifest_is_codex(manifest) != target_is_codex
             });
+            if let Some(error) =
+                parent_harness_switch_error(parent_execution.is_some(), switching_harness)
+            {
+                report_launch_failure(&mut launch_tx, error);
+                return;
+            }
             let superseded_harness_manifest = switching_harness.then(|| {
                 recovered_conversation
                     .as_ref()
@@ -4209,70 +4436,216 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
+            let recovered_parent_memory_bearer = if memory_grant_registry_recovered
+                && parent_runtime_envelope.is_some()
+                && route.harness_kind == OPENHANDS_AGENT_SERVER_KIND
+                && memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.as_ref())
+                    .is_some()
+            {
+                match recovered_conversation
+                    .as_ref()
+                    .filter(|_| !switching_harness)
+                {
+                    Some(manifest) => match recover_parent_memory_bearer(
+                        &client,
+                        manifest,
+                        memory_env
+                            .as_ref()
+                            .expect("memory environment checked above")
+                            .endpoint
+                            .as_str(),
+                        ensured.handle.workspace_path(),
+                    )
+                    .await
+                    {
+                        Ok(bearer) => Some(bearer),
+                        Err(error) => {
+                            report_launch_failure(&mut launch_tx, error);
+                            return;
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let parent_authorized_work_items = if parent_execution.is_some()
+                && memory_env
+                    .as_ref()
+                    .is_some_and(|memory| memory.scope_grants.is_some())
+            {
+                let mut work_items = issue
+                    .sub_issues
+                    .iter()
+                    .flat_map(|child| [child.id.to_string(), child.identifier.to_string()])
+                    .collect::<BTreeSet<_>>();
+                let state = match workspace_manager
+                    .load_orchestrator_state::<DurableOrchestratorState>()
+                    .await
+                {
+                    Ok(Some(state)) => state,
+                    Ok(None) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            "parent memory authorization requires durable hierarchy state",
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!(
+                                "failed to load parent hierarchy for memory authorization: {error}"
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = state.validate() {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!(
+                            "invalid durable parent hierarchy for memory authorization: {error}"
+                        ),
+                    );
+                    return;
+                }
+                work_items.extend(parent_descendant_work_items(&state, &issue.id));
+                work_items
+            } else {
+                BTreeSet::new()
+            };
             let mut memory_grant_requires_fresh_conversation = false;
-            let worker_memory_env = memory_env
-                .as_ref()
-                .filter(|_| parent_execution.is_none())
-                .map(|memory| {
-                    let mut scoped = memory.clone();
-                    scoped.project = worker_memory_project(&issue, &memory.project);
-                    scoped.execution_repo = runtime_envelope
+            let mut memory_grant_error = None;
+            let worker_memory_env = memory_env.as_ref().map(|memory| {
+                let mut scoped = memory.clone();
+                scoped.project = worker_memory_project(&issue, &memory.project);
+                scoped.parent_scope = parent_runtime_envelope.is_some();
+                scoped.execution_repo = if scoped.parent_scope {
+                    String::new()
+                } else {
+                    runtime_envelope
                         .as_ref()
                         .map(|envelope| envelope.repository_binding.repository.id.to_string())
-                        .unwrap_or_else(|| memory.execution_repo.clone());
-                    scoped.run_id = runtime_envelope
+                        .unwrap_or_else(|| memory.execution_repo.clone())
+                };
+                scoped.run_id = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.run_id.clone())
+                    .or_else(|| {
+                        parent_runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.run_id.clone())
+                    });
+                scoped.attempt = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.attempt)
+                    .or_else(|| {
+                        parent_runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.attempt)
+                    });
+                scoped.target_commit = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.target_commit.clone());
+                scoped.checkout_head = initially_verified_checkout
+                    .as_ref()
+                    .map(|checkout| checkout.head.clone());
+                let authorized_repositories = parent_runtime_envelope
+                    .as_ref()
+                    .map(parent_authorized_repositories)
+                    .unwrap_or_else(|| {
+                        scoped
+                            .authorized_repositories_by_project
+                            .get(&scoped.project)
+                            .cloned()
+                            .or_else(|| {
+                                scoped
+                                    .authorized_repositories_by_project
+                                    .iter()
+                                    .find(|(project, _)| {
+                                        project.eq_ignore_ascii_case(&scoped.project)
+                                    })
+                                    .map(|(_, repositories)| repositories.clone())
+                            })
+                            .filter(|repositories| !repositories.is_empty())
+                            .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]))
+                    });
+                scoped.authorized_repositories = authorized_repositories.clone();
+                if let Some(grants) = &scoped.scope_grants {
+                    let mut authorized_work_items = parent_authorized_work_items.clone();
+                    authorized_work_items.extend(
+                        parent_execution
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|parent| parent.child_checkout_map.repositories.values())
+                            .flat_map(|checkout| checkout.retained_checkouts.iter())
+                            .flat_map(|checkout| {
+                                [checkout.issue_id.clone(), checkout.identifier.clone()]
+                            }),
+                    );
+                    let live_overlays = parent_runtime_envelope
                         .as_ref()
-                        .map(|envelope| envelope.run_id.clone());
-                    scoped.attempt = runtime_envelope.as_ref().map(|envelope| envelope.attempt);
-                    scoped.target_commit = runtime_envelope
-                        .as_ref()
-                        .map(|envelope| envelope.target_commit.clone());
-                    scoped.checkout_head = initially_verified_checkout
-                        .as_ref()
-                        .map(|checkout| checkout.head.clone());
-                    let authorized_repositories = scoped
-                        .authorized_repositories_by_project
-                        .get(&scoped.project)
-                        .cloned()
-                        .or_else(|| {
-                            scoped
-                                .authorized_repositories_by_project
-                                .iter()
-                                .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
-                                .map(|(_, repositories)| repositories.clone())
-                        })
-                        .filter(|repositories| !repositories.is_empty())
-                        .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
-                    scoped.authorized_repositories = authorized_repositories.clone();
-                    if let Some(grants) = &scoped.scope_grants {
-                        let (token, requires_fresh_conversation) = grants
-                            .issue_or_refresh_with_claims(MemoryScopeGrant {
-                                project: scoped.project.clone(),
-                                project_set: scoped.project_set.clone(),
-                                execution_repo: scoped.execution_repo.clone(),
-                                authorized_repositories,
-                                issue: issue.identifier.to_string(),
-                                run_id: scoped.run_id.clone(),
-                                attempt: scoped.attempt,
-                                checkout_generation: runtime_envelope
-                                    .as_ref()
-                                    .map(|envelope| envelope.checkout_generation.clone()),
-                                target_commit: scoped.target_commit.clone(),
-                                checkout_head: scoped.checkout_head.clone(),
-                                visibility: scoped.visibility,
-                                capabilities: BTreeSet::new(),
-                            });
+                        .map(parent_live_overlays)
+                        .unwrap_or_default();
+                    let grant = MemoryScopeGrant {
+                        project: scoped.project.clone(),
+                        project_set: scoped.project_set.clone(),
+                        execution_repo: scoped.execution_repo.clone(),
+                        authorized_repositories,
+                        authorized_work_items,
+                        live_overlays,
+                        issue: issue.identifier.to_string(),
+                        run_id: scoped.run_id.clone(),
+                        attempt: scoped.attempt,
+                        checkout_generation: runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.checkout_generation.clone()),
+                        target_commit: scoped.target_commit.clone(),
+                        checkout_head: scoped.checkout_head.clone(),
+                        visibility: scoped.visibility,
+                        capabilities: BTreeSet::new(),
+                    };
+                    let token = if scoped.parent_scope {
+                        if let Some(bearer) = recovered_parent_memory_bearer.as_deref() {
+                            match grants.restore_parent_claims(bearer, grant) {
+                                Ok(token) => token,
+                                Err(error) => {
+                                    memory_grant_error = Some(error);
+                                    String::new()
+                                }
+                            }
+                        } else {
+                            let (token, requires_fresh_conversation) =
+                                grants.issue_or_refresh_parent_claims(grant);
+                            memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                            token
+                        }
+                    } else {
+                        let (token, requires_fresh_conversation) =
+                            grants.issue_or_refresh_with_claims(grant);
                         memory_grant_requires_fresh_conversation = requires_fresh_conversation;
-                        scoped.token = Some(token.clone());
-                    }
-                    scoped.authorized_repositories_by_project.clear();
-                    scoped
-                });
+                        token
+                    };
+                    scoped.token = Some(token.clone());
+                }
+                scoped.authorized_repositories_by_project.clear();
+                scoped
+            });
+            if let Some(error) = memory_grant_error {
+                report_launch_failure(
+                    &mut launch_tx,
+                    format!("failed to restore parent memory authorization: {error}"),
+                );
+                return;
+            }
             let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
                 || (memory_grant_registry_recovered
-                    && worker_memory_env
-                        .as_ref()
-                        .is_some_and(|memory| memory.scope_grants.is_some()));
+                    && worker_memory_env.as_ref().is_some_and(|memory| {
+                        memory.scope_grants.is_some() && !memory.parent_scope
+                    }));
             let mut worker_environment = worker_env.clone();
             if let Some(memory) = &worker_memory_env {
                 inject_memory_env(&mut worker_environment, memory);
@@ -4642,6 +5015,13 @@ impl RuntimeWorkerBackend {
                 let parent_envelope = parent_runtime_envelope
                     .as_ref()
                     .expect("parent execution always creates a runtime envelope");
+                if !recovered
+                    && let Err(error) =
+                        clear_parent_verification_receipt(ensured.handle.workspace_path()).await
+                {
+                    report_launch_failure(&mut launch_tx, error);
+                    return;
+                }
                 terminal_prompt = Some(compose_parent_prompt(
                     &central_procedure,
                     &format!(
@@ -4660,7 +5040,11 @@ impl RuntimeWorkerBackend {
                     &parent_repository_instructions,
                 ));
             }
+            let continuation_prompt = parent_runtime_envelope
+                .as_ref()
+                .map(compose_parent_continuation_prompt);
             runner = runner.with_terminal_prompt(terminal_prompt.clone());
+            runner = runner.with_continuation_prompt(continuation_prompt.clone());
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
@@ -4718,7 +5102,7 @@ impl RuntimeWorkerBackend {
                     .as_ref()
                     .and_then(|memory| memory.scope_grants.clone())
                     .filter(|_| memory_grant_requires_fresh_conversation);
-                let outcome = run_codex_stdio_issue_with_mode(
+                let mut outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -4727,6 +5111,7 @@ impl RuntimeWorkerBackend {
                     &run,
                     &workflow,
                     terminal_prompt.as_deref(),
+                    continuation_prompt.as_deref(),
                     &codex_bin,
                     &codex_schema_validators,
                     &codex_interrupts,
@@ -4738,6 +5123,14 @@ impl RuntimeWorkerBackend {
                     memory_grant_requires_fresh_conversation,
                     fresh_conversation_grants,
                     issue.identifier.as_str(),
+                )
+                .await;
+                attach_parent_verification_receipt(
+                    &mut outcome,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &issue,
+                    parent_runtime_envelope.as_ref(),
                 )
                 .await;
                 if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -4810,7 +5203,7 @@ impl RuntimeWorkerBackend {
                 return;
             }
 
-            let outcome = match result {
+            let mut outcome = match result {
                 Ok(result) => result.worker_outcome,
                 Err(error) => WorkerOutcomeRecord::from_run(
                     &run,
@@ -4820,6 +5213,14 @@ impl RuntimeWorkerBackend {
                     Some(error.to_string()),
                 ),
             };
+            attach_parent_verification_receipt(
+                &mut outcome,
+                &workspace_manager,
+                &ensured.handle,
+                &issue,
+                parent_runtime_envelope.as_ref(),
+            )
+            .await;
             if let Some(previous) = superseded_harness_manifest.as_ref()
                 && let Err(error) = retire_replaced_harness_session_if_durable(
                     &workspace_manager,
@@ -4906,6 +5307,132 @@ impl RuntimeWorkerBackend {
             self.launch_timeout
         }
     }
+}
+
+fn parent_authorized_repositories(envelope: &ParentRuntimeEnvelope) -> BTreeSet<String> {
+    envelope
+        .checkouts
+        .values()
+        .map(|checkout| checkout.repository_id.clone())
+        .collect()
+}
+
+fn parent_descendant_work_items(
+    state: &DurableOrchestratorState,
+    parent_id: &IssueId,
+) -> BTreeSet<String> {
+    let mut work_items = BTreeSet::new();
+    let mut visited = BTreeSet::from([parent_id.clone()]);
+    let mut pending = vec![parent_id.clone()];
+    while let Some(issue_id) = pending.pop() {
+        let Some(snapshot) = state.hierarchy.get(&issue_id) else {
+            continue;
+        };
+        for edge in snapshot
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+        {
+            work_items.insert(edge.child_id.to_string());
+            work_items.insert(edge.child_identifier.to_string());
+            if visited.insert(edge.child_id.clone()) {
+                pending.push(edge.child_id.clone());
+            }
+        }
+    }
+    work_items
+}
+
+fn parent_live_overlays(
+    envelope: &ParentRuntimeEnvelope,
+) -> BTreeMap<String, MemoryLiveOverlayGrant> {
+    envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            (
+                checkout.repository_id.clone(),
+                MemoryLiveOverlayGrant {
+                    parent_workspace_path: envelope.workspace_path.clone(),
+                    checkout_handle: checkout.checkout_handle.clone(),
+                    relative_path: checkout.relative_path.clone(),
+                    target_commit: checkout.target_commit.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+async fn recover_parent_memory_bearer(
+    client: &OpenHandsClient,
+    manifest: &IssueConversationManifest,
+    expected_endpoint: &str,
+    expected_workspace: &Path,
+) -> Result<String, String> {
+    let conversation_id = Uuid::parse_str(manifest.conversation_id.as_str())
+        .map_err(|_| "persisted parent conversation id is invalid".to_owned())?;
+    let conversation = client
+        .get_conversation(conversation_id)
+        .await
+        .map_err(|_| "failed to inspect recovered parent conversation".to_owned())?;
+    let expected_workspace = fs::canonicalize(expected_workspace)
+        .await
+        .map_err(|error| format!("failed to verify parent workspace: {error}"))?;
+    let actual_workspace = fs::canonicalize(&conversation.workspace.working_dir)
+        .await
+        .map_err(|error| {
+            format!("failed to verify recovered parent conversation workspace: {error}")
+        })?;
+    if actual_workspace != expected_workspace {
+        return Err("recovered parent conversation is bound to another workspace".to_owned());
+    }
+    parent_memory_bearer_from_conversation(&conversation, expected_endpoint)
+}
+
+fn parent_memory_bearer_from_conversation(
+    conversation: &Conversation,
+    expected_endpoint: &str,
+) -> Result<String, String> {
+    let server = conversation
+        .agent
+        .mcp_config
+        .as_ref()
+        .and_then(|config| config.get("mcpServers"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|servers| servers.get("opensymphony-memory"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            "recovered parent conversation has no OpenSymphony memory configuration".to_owned()
+        })?;
+    let endpoint = server
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "recovered parent conversation has no OpenSymphony memory endpoint".to_owned()
+        })?;
+    if endpoint.trim_end_matches('/') != expected_endpoint.trim_end_matches('/') {
+        return Err(
+            "recovered parent conversation memory endpoint does not match this daemon".to_owned(),
+        );
+    }
+    let authorization = server
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|headers| {
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.as_str())
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| {
+            "recovered parent conversation has no memory authorization bearer".to_owned()
+        })?;
+    authorization
+        .strip_prefix("Bearer ")
+        .filter(|token| token.starts_with("opensymphony-worker-"))
+        .map(str::to_owned)
+        .ok_or_else(|| "recovered parent conversation memory authorization is invalid".to_owned())
 }
 
 fn annotate_route_decision(
@@ -5002,10 +5529,14 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
             project_set.clone(),
         );
     }
-    env.insert(
-        "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
-        memory.execution_repo.clone(),
-    );
+    if memory.parent_scope {
+        env.remove("OPENSYMPHONY_MEMORY_EXECUTION_REPO");
+    } else {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+            memory.execution_repo.clone(),
+        );
+    }
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
@@ -5032,7 +5563,14 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
 }
 
 fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
-    let mut prompt = memory_scope_prompt_values(&memory.project, &memory.execution_repo);
+    let mut prompt = if memory.parent_scope {
+        format!(
+            "Memory scope is repository-neutral for project {} and requires an explicit repository for code access.",
+            memory.project
+        )
+    } else {
+        memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+    };
     if let Some(project_set) = &memory.project_set {
         prompt.push_str(&format!(" Project set is {project_set}."));
     }
@@ -5117,9 +5655,9 @@ fn memory_access_from_runtime(
         authorized_repositories: memory.authorized_repositories.iter().cloned().collect(),
         run_id: memory.run_id.clone(),
         attempt: memory.attempt,
-        // A recovered supervised memory server has a newly reconstructed grant
-        // registry, so its bearer differs from the one stored in a reusable
-        // OpenHands conversation. In-process retries keep their conversation.
+        // Leaf recovery can rotate a process-local bearer. Parent recovery
+        // restores the persisted conversation bearer into this registry and
+        // keeps this false so the authoritative conversation is reattached.
         requires_fresh_conversation,
         project_set: memory.project_set.clone(),
     }
@@ -5157,6 +5695,7 @@ async fn run_codex_stdio_issue(
         run,
         workflow,
         None,
+        None,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
@@ -5182,6 +5721,7 @@ async fn run_codex_stdio_issue_with_mode(
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
     terminal_prompt: Option<&str>,
+    continuation_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -5203,6 +5743,7 @@ async fn run_codex_stdio_issue_with_mode(
         run,
         workflow,
         terminal_prompt,
+        continuation_prompt,
         codex_bin,
         codex_schema_validators,
         codex_interrupts,
@@ -5285,6 +5826,7 @@ async fn try_run_codex_stdio_issue(
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
     terminal_prompt: Option<&str>,
+    continuation_prompt: Option<&str>,
     codex_bin: &str,
     codex_schema_validators: &CodexSchemaValidatorCache,
     codex_interrupts: &CodexInterruptRegistry,
@@ -5856,11 +6398,7 @@ async fn try_run_codex_stdio_issue(
                 format!("failed to render workflow prompt for Codex route: {source}")
             })?,
         (IssueSessionPromptKind::Continuation, _) => {
-            let mut prompt = build_continuation_guidance(issue, run);
-            if let Some(scope) = memory_scope_prompt_from_environment(worker_env) {
-                prompt.push_str(&scope);
-            }
-            prompt
+            codex_continuation_prompt(issue, run, continuation_prompt, worker_env)
         }
     };
     let turn_start = adapter
@@ -6005,6 +6543,23 @@ async fn try_run_codex_stdio_issue(
         WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
         terminal.status,
     ))
+}
+
+fn codex_continuation_prompt(
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    continuation: Option<&str>,
+    worker_env: &BTreeMap<String, String>,
+) -> String {
+    let mut prompt = build_continuation_guidance(issue, run);
+    if let Some(continuation) = continuation {
+        prompt.push_str("\n\n");
+        prompt.push_str(continuation);
+    }
+    if let Some(scope) = memory_scope_prompt_from_environment(worker_env) {
+        prompt.push_str(&scope);
+    }
+    prompt
 }
 
 fn scrub_checkout_credentials(command: &mut Command, checkout_credential_envs: &BTreeSet<String>) {
@@ -7471,6 +8026,29 @@ fn report_launch_failure(
     }
 }
 
+fn parent_harness_switch_error(is_parent: bool, switching_harness: bool) -> Option<String> {
+    (is_parent && switching_harness).then(|| {
+        "parent integration cannot switch harnesses while its authoritative conversation is bound"
+            .to_owned()
+    })
+}
+
+fn expected_parent_conversation_error(
+    expected: Option<&str>,
+    recovered: Option<&str>,
+) -> Option<String> {
+    let expected = expected?;
+    match recovered {
+        Some(actual) if actual == expected => None,
+        Some(actual) => Some(format!(
+            "parent integration requires conversation `{expected}`, but the persisted manifest binds `{actual}`"
+        )),
+        None => Some(format!(
+            "parent integration requires conversation `{expected}`, but its persisted manifest is missing"
+        )),
+    }
+}
+
 async fn read_verified_integration_instructions(
     instructions: Option<&ResolvedIntegrationInstructions>,
 ) -> Result<Option<String>, String> {
@@ -7880,6 +8458,300 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    fn parent_envelope(workspace: &Path) -> ParentRuntimeEnvelope {
+        ParentRuntimeEnvelope {
+            parent_issue_id: "parent-id".to_owned(),
+            parent_identifier: "COE-PARENT".to_owned(),
+            run_id: "run-parent-1".to_owned(),
+            attempt: 1,
+            hierarchy_generation: 7,
+            workspace_path: workspace.to_path_buf(),
+            checkouts: BTreeMap::from([(
+                "checkout-one".to_owned(),
+                crate::opensymphony_workspace::ParentRuntimeCheckout {
+                    repository_id: "github:repository:one".to_owned(),
+                    checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                    instruction_path: PathBuf::from("repositories/one/AGENTS.md"),
+                    instruction_hash: "sha256:test".to_owned(),
+                },
+            )]),
+            integration_instruction_path: None,
+            integration_instruction_hash: None,
+            harness: "codex_app_server".to_owned(),
+            model_profile: "default".to_owned(),
+            model: None,
+            requested_execution_scope: "parent_multi_checkout".to_owned(),
+            effective_containment: "trusted_host".to_owned(),
+            conversation_binding: None,
+        }
+    }
+
+    fn parent_evidence() -> ParentVerificationEvidence {
+        ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent-1".to_owned(),
+            attempt: 1,
+            hierarchy_generation: 7,
+            repository_commits: BTreeMap::from([(
+                CanonicalRepositoryId::new("github:repository:one").expect("repository id"),
+                "abc123".to_owned(),
+            )]),
+            command: "cargo test".to_owned(),
+            command_hash: String::new(),
+            root: "parent_root".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_verification_receipt_is_bound_to_exact_run_and_commits() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let evidence_dir = tempdir.path().join("evidence");
+        fs::create_dir_all(&evidence_dir).expect("evidence directory");
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&parent_evidence()).expect("encode evidence"),
+        )
+        .expect("write evidence");
+        let envelope = parent_envelope(tempdir.path());
+        let loaded = load_parent_verification_receipt(tempdir.path(), &envelope)
+            .await
+            .expect("valid receipt");
+        assert_eq!(loaded.command, "cargo test");
+        assert_eq!(loaded.command_hash, parent_command_identity("cargo test"));
+
+        let mut stale = parent_evidence();
+        stale.repository_commits.insert(
+            CanonicalRepositoryId::new("github:repository:one").expect("repository id"),
+            "different".to_owned(),
+        );
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&stale).expect("encode stale evidence"),
+        )
+        .expect("write stale evidence");
+        assert!(
+            load_parent_verification_receipt(tempdir.path(), &envelope)
+                .await
+                .expect_err("stale commit must be rejected")
+                .contains("repository commits")
+        );
+
+        let mut secret_command = parent_evidence();
+        secret_command.command = "cargo   test token=secret".to_owned();
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&secret_command).expect("encode secret command evidence"),
+        )
+        .expect("write secret command evidence");
+        let loaded_secret = load_parent_verification_receipt(tempdir.path(), &envelope)
+            .await
+            .expect("exact command identity is retained without persisting credentials");
+        assert_ne!(loaded_secret.command, secret_command.command);
+        assert_eq!(
+            loaded_secret.command_hash,
+            parent_command_identity(&secret_command.command)
+        );
+    }
+
+    #[test]
+    fn parent_harness_switch_is_rejected_before_session_launch() {
+        assert!(parent_harness_switch_error(true, true).is_some());
+        assert!(parent_harness_switch_error(true, false).is_none());
+        assert!(parent_harness_switch_error(false, true).is_none());
+    }
+
+    #[test]
+    fn bound_parent_requires_its_manifest_before_session_launch() {
+        assert!(
+            expected_parent_conversation_error(Some("conversation-1"), None)
+                .is_some_and(|error| error.contains("manifest is missing"))
+        );
+        assert!(
+            expected_parent_conversation_error(Some("conversation-1"), Some("conversation-2"))
+                .is_some_and(|error| error.contains("conversation-2"))
+        );
+        assert_eq!(
+            expected_parent_conversation_error(Some("conversation-1"), Some("conversation-1")),
+            None
+        );
+        assert_eq!(expected_parent_conversation_error(None, None), None);
+    }
+
+    #[test]
+    fn codex_parent_retry_appends_current_receipt_instructions() {
+        let issue = sample_issue();
+        let run = RunAttempt::new(
+            WorkerId::new("worker-parent-retry").expect("worker id"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            PathBuf::from("/parent"),
+            TimestampMs::new(1),
+            Some(RetryAttempt::new(1).expect("retry")),
+            8,
+        );
+        let prompt = codex_continuation_prompt(
+            &issue,
+            &run,
+            Some(
+                "run_id=run-worker-parent-retry attempt=2 receipt=evidence/final-verification.json",
+            ),
+            &BTreeMap::new(),
+        );
+
+        assert!(prompt.contains("Continue working on issue"));
+        assert!(prompt.contains("run_id=run-worker-parent-retry"));
+        assert!(prompt.contains("attempt=2"));
+        assert!(prompt.contains("evidence/final-verification.json"));
+    }
+
+    #[test]
+    fn parent_memory_scope_uses_canonical_repository_ids_not_checkout_handles() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let envelope = parent_envelope(tempdir.path());
+
+        assert_eq!(
+            parent_authorized_repositories(&envelope),
+            BTreeSet::from(["github:repository:one".to_owned()])
+        );
+        let overlays = parent_live_overlays(&envelope);
+        assert_eq!(
+            overlays.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["github:repository:one".to_owned()])
+        );
+        assert_eq!(
+            overlays["github:repository:one"].checkout_handle,
+            "checkout-one"
+        );
+    }
+
+    #[test]
+    fn parent_memory_work_items_include_intermediate_descendants() {
+        fn child(id: &str, identifier: &str) -> crate::opensymphony_domain::TrackerIssueRef {
+            crate::opensymphony_domain::TrackerIssueRef {
+                id: id.to_owned(),
+                identifier: identifier.to_owned(),
+                title: None,
+                url: None,
+                state: "Done".to_owned(),
+                state_kind: TrackerIssueStateKind::Completed,
+            }
+        }
+
+        let mut root = sample_tracker_issue(&sample_issue());
+        root.sub_issues = vec![child("parent-2", "COE-PARENT-2")];
+        let mut intermediate = root.clone();
+        intermediate.id = "parent-2".to_owned();
+        intermediate.identifier = "COE-PARENT-2".to_owned();
+        intermediate.sub_issues = vec![child("parent-3", "COE-PARENT-3")];
+        let mut lower = root.clone();
+        lower.id = "parent-3".to_owned();
+        lower.identifier = "COE-PARENT-3".to_owned();
+        lower.sub_issues = vec![child("leaf-4", "COE-LEAF-4")];
+        let root_id = IssueId::new(root.id.clone()).expect("root id");
+        let state = DurableOrchestratorState {
+            hierarchy: BTreeMap::from([
+                (root_id.clone(), HierarchySnapshot::new(&root)),
+                (
+                    IssueId::new("parent-2").expect("parent 2 id"),
+                    HierarchySnapshot::new(&intermediate),
+                ),
+                (
+                    IssueId::new("parent-3").expect("parent 3 id"),
+                    HierarchySnapshot::new(&lower),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            parent_descendant_work_items(&state, &root_id),
+            BTreeSet::from([
+                "parent-2".to_owned(),
+                "COE-PARENT-2".to_owned(),
+                "parent-3".to_owned(),
+                "COE-PARENT-3".to_owned(),
+                "leaf-4".to_owned(),
+                "COE-LEAF-4".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn recovered_parent_conversation_bearer_is_reused_without_rotation() {
+        let conversation: Conversation = serde_json::from_value(serde_json::json!({
+            "conversation_id": Uuid::new_v4(),
+            "workspace": {"working_dir": "/parent", "kind": "LocalWorkspace"},
+            "persistence_dir": "/parent/.openhands",
+            "max_iterations": 100,
+            "stuck_detection": true,
+            "execution_status": "idle",
+            "confirmation_policy": {"kind": "NeverConfirm"},
+            "agent": {
+                "kind": "Agent",
+                "llm": {"model": "openai/test"},
+                "mcp_config": {
+                    "mcpServers": {
+                        "opensymphony-memory": {
+                            "url": "http://127.0.0.1:4812/",
+                            "headers": {
+                                "authorization": "Bearer opensymphony-worker-parent-before-restart"
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("conversation");
+
+        assert_eq!(
+            parent_memory_bearer_from_conversation(&conversation, "http://127.0.0.1:4812")
+                .expect("recover bearer"),
+            "opensymphony-worker-parent-before-restart"
+        );
+        assert!(
+            parent_memory_bearer_from_conversation(&conversation, "http://127.0.0.1:9999").is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_parent_turn_without_receipt_becomes_failed() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut outcome = WorkerOutcomeRecord {
+            worker_id: WorkerId::new("parent-worker").expect("worker id"),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: TimestampMs::new(10),
+            finished_at: TimestampMs::new(20),
+            turn_count: 1,
+            summary: Some("generic harness success".to_owned()),
+            error: None,
+            parent_verification: None,
+        };
+
+        apply_parent_verification_receipt_result(
+            &mut outcome,
+            Err(format!(
+                "parent harness did not write {}",
+                tempdir
+                    .path()
+                    .join(PARENT_FINAL_VERIFICATION_PATH)
+                    .display()
+            )),
+        );
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("did not write"))
+        );
+        assert!(outcome.parent_verification.is_none());
+    }
 
     #[tokio::test]
     async fn integration_instructions_are_revalidated_from_current_bytes_before_attach() {
@@ -9895,6 +10767,7 @@ mod tests {
             &run,
             &workflow,
             Some("COMPOSED TERMINAL PROMPT WITH CHECKOUT FACTS AND PINNED INSTRUCTIONS"),
+            None,
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
@@ -9991,6 +10864,7 @@ mod tests {
             &run,
             &workflow,
             None,
+            None,
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
@@ -10086,6 +10960,7 @@ mod tests {
             &issue,
             &run,
             &workflow,
+            None,
             None,
             fake_codex
                 .to_str()
@@ -10187,6 +11062,7 @@ mod tests {
             &issue,
             &run,
             &workflow,
+            None,
             None,
             fake_codex
                 .to_str()
@@ -10858,6 +11734,7 @@ mod tests {
                 run,
                 route: codex_test_route(true),
                 memory_grant_registry_recovered: false,
+                expected_parent_conversation_id: None,
             })
             .await
             .expect("dry-run worker should launch");
@@ -11018,6 +11895,7 @@ mod tests {
                 run,
                 route: codex_test_route(true),
                 memory_grant_registry_recovered: false,
+                expected_parent_conversation_id: None,
             })
             .await
             .expect("recovered dry-run worker should launch");
@@ -11157,6 +12035,7 @@ mod tests {
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
             execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            parent_scope: false,
             authorized_repositories: BTreeSet::from(["repo-alpha".to_string()]),
             authorized_repositories_by_project: BTreeMap::new(),
             scope_grants: None,
@@ -11276,6 +12155,7 @@ mod tests {
                     user_override: false,
                 },
                 memory_grant_registry_recovered: false,
+                expected_parent_conversation_id: None,
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");

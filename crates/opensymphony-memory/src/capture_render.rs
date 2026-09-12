@@ -606,6 +606,7 @@ fn render_issue_capsule(
                 .filter_map(|pr| pr.merge_sha.clone())
                 .collect(),
             terminal_runtime: terminal_runtime_source_ref(&plan.issue),
+            parent_terminal_runtime: parent_terminal_runtime_source_refs(&plan.issue),
         },
         timestamp: plan
             .issue
@@ -769,6 +770,8 @@ struct SourceRefs {
     github_merge_shas: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_runtime: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    parent_terminal_runtime: Vec<String>,
 }
 
 fn terminal_runtime_source_ref(issue: &IssueEvidence) -> Option<String> {
@@ -782,6 +785,31 @@ fn terminal_runtime_source_ref(issue: &IssueEvidence) -> Option<String> {
         issue.checkout_head.as_deref().unwrap_or(""),
         issue.instruction_hash.as_deref().unwrap_or(""),
     ))
+}
+
+fn parent_terminal_runtime_source_refs(issue: &IssueEvidence) -> Vec<String> {
+    if !issue.parent_integration {
+        return Vec::new();
+    }
+    let Some(run_id) = issue.execution_run_id.as_deref() else {
+        return Vec::new();
+    };
+    if issue.verified_repository_commits.is_empty() {
+        return vec![format!(
+            "run={run_id};attempt={};repo=;target_commit=",
+            issue.execution_attempt.unwrap_or_default()
+        )];
+    }
+    issue
+        .verified_repository_commits
+        .iter()
+        .map(|(repository_id, commit)| {
+            format!(
+                "run={run_id};attempt={};repo={repository_id};target_commit={commit}",
+                issue.execution_attempt.unwrap_or_default()
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]

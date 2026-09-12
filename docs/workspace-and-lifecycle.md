@@ -192,6 +192,32 @@ one repository share one handle;
 the target must contain every provider merge-result commit, while replaced
 feature commits from squash or rebase are not required.
 
+Parent integration attempts execute only in the parent root or in a checkout
+named by `child-checkouts.json`. The durable controller records an intent before
+each state-changing operation and stores its receipt before advancing. Attempt
+timeouts, interrupt uncertainty, resource collisions, and cleanup failures are
+retained with bounded diagnostics. After restart, an attempt without a
+reconciled harness is marked indeterminate; repository refresh cannot proceed
+until its recorded resources are released and cleanup succeeds. An empty
+resource list does not prove teardown after an uncertain restart. The attempt
+intent is persisted before the worker starts, and the conversation identity is
+attached as a later launch receipt, so a crash cannot leave an unowned parent
+harness. Cleanup and workspace deletion policy remain owned by the workspace
+manager.
+Once that conversation is bound, a parent harness change is rejected before a
+replacement session starts. A runtime-terminal successful, failed, or canceled
+turn supplies stopped-turn evidence and releases its foreground-process receipt;
+timeout, stall, detach, and failed-cancel paths still require explicit stopped
+state reconciliation. An ordinary cancellation while the tracker parent remains
+active returns through cleanup and baseline refresh. Operator and tracker
+terminal cancellation remains terminal.
+
+The final-verification receipt selects an exact harness-observed foreground
+command. The trusted loader computes its SHA-256 identity from the transient
+exact text, then persists only the identity and a bounded redacted diagnostic.
+Command start and completion events preceding the current attempt's start time
+cannot contribute to its result.
+
 The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
 target remains an ancestor of the current integration HEAD, preserving
@@ -204,6 +230,59 @@ runtime revalidates the parent root, envelope, and instructions after the
 and prompt content both exclude its front matter. Project-set integration
 instructions are also re-read and hash-checked after `before_run`; the parent
 prompt is composed only from those final verified bytes.
+
+Before a fresh parent turn, the runtime removes any stale
+`evidence/final-verification.json`. The parent writes a new bounded selector for
+the command whose result should count as final verification. At completion the
+runtime requires a regular file no larger than 64 KiB, checks its run, attempt,
+hierarchy generation, command root, and exact repository commit map, and
+reopens the checkouts at those commits. The selected command must match start
+and completion events observed from the Codex or OpenHands runtime. Those
+events, rather than fields supplied by the parent, provide the orchestrator's
+deadline, working directory, exit result, bounded output, foreground-process
+ownership, and teardown receipt. A reported working directory maps only to the
+parent root or an exact verified checkout path, and the selector must name that
+observed root. Missing, stale, unobserved, late, or still-active evidence
+converts a generic successful harness turn into a failed parent attempt.
+An acknowledged interrupt counts as foreground-process teardown only after the
+harness has reconciled a stopped state. It does not release separately named
+ports or resources, which continue to fence refresh and retry until their own
+cleanup receipts succeed.
+After a daemon restart, a parent memory grant restores the bearer already held
+by the bound OpenHands conversation into the reconstructed registry, preserving
+the one-conversation controller binding. An attempt
+intent persisted before worker launch has no process to tear down; recovery
+records that fact and refreshes the verified baseline before retrying. A
+terminal harness manifest with no durable controller outcome proves foreground
+teardown but never proves verification success; the attempt becomes
+indeterminate and reruns after named-resource cleanup and baseline refresh. Terminal
+tracker state cannot publish orchestrator success, release descendant leases,
+or remove the parent workspace until the durable controller reaches
+`completed` through accepted final verification.
+A verified passed attempt remains parked while the tracker still reports the
+parent active or its refresh is unavailable. Restart recovery preserves that
+tracker-confirmation wait and does not launch a second attempt. A completed
+controller authorizes terminal success only while its hierarchy generation
+still matches the current unblocked snapshot. COE-554 retains the completed
+parent root and its evidence-protecting leases across later reconciliation and
+daemon restart so automatic capture can retry without losing its runtime
+envelope or source checkouts. OSYM-893 owns durable capture acknowledgement,
+ordered lease release, cleanup intent, tombstones, and deletion.
+A recovered parent worker must find the exact conversation manifest recorded by
+the controller. Its expected identity crosses the scheduler-to-worker request,
+and a missing or different manifest fails before any harness session is
+created. The reused conversation receives current run-bound receipt guidance
+without replaying the full workflow prompt. When terminal cleanup removes a
+parent root, the manager first unregisters each contained integration worktree
+from its retained source repository with isolated Git configuration. Cleanup is
+idempotent after partial progress, and the same hierarchy generation can be
+materialized again without stale Git worktree registrations.
+A reopened completed parent starts a new controller lifecycle even when the
+child-edge generation is unchanged. Admission idempotency is retained outside
+the compact transition history, so retry history pruning cannot replay initial
+admission. Parents with no recorded checkout targets still require an observed
+successful final command and successful cleanup; their final repository commit
+map is empty by definition.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

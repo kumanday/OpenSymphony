@@ -8,6 +8,8 @@ use crate::opensymphony_domain::{
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use super::parent_integration::ParentIntegrationController;
+
 pub const HIERARCHY_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_INACTIVE_LEASE_HISTORY: usize = 256;
 
@@ -664,6 +666,11 @@ pub struct DurableOrchestratorState {
     /// parents after the completed workspace has been cleaned up.
     #[serde(default)]
     pub terminal_orchestrator_issues: BTreeSet<IssueId>,
+    /// One restart-safe integration controller per repository-neutral parent.
+    /// Completed records remain available as descendant evidence for higher
+    /// ancestors; cleanup policy is handled by the later subtree-cleanup slice.
+    #[serde(default)]
+    pub parent_integrations: BTreeMap<IssueId, ParentIntegrationController>,
 }
 
 impl Default for DurableOrchestratorState {
@@ -675,6 +682,7 @@ impl Default for DurableOrchestratorState {
             run_hierarchy_generations: BTreeMap::new(),
             run_started_at_by_issue: BTreeMap::new(),
             terminal_orchestrator_issues: BTreeSet::new(),
+            parent_integrations: BTreeMap::new(),
         }
     }
 }
@@ -691,6 +699,21 @@ impl DurableOrchestratorState {
             parent_id != &snapshot.parent_id || snapshot.generation == 0
         }) {
             return Err("durable hierarchy snapshot has invalid identity or generation".to_owned());
+        }
+        if self
+            .parent_integrations
+            .iter()
+            .any(|(parent_id, controller)| {
+                parent_id != &controller.parent_id
+                    || controller.hierarchy_generation == 0
+                    || controller.state_version
+                        < controller
+                            .transitions
+                            .last()
+                            .map_or(0, |transition| transition.state_version)
+            })
+        {
+            return Err("durable parent integration controller is inconsistent".to_owned());
         }
         Ok(())
     }

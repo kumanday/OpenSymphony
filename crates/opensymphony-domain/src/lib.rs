@@ -37,9 +37,10 @@ pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason,
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptState, HarnessInterruptStatus, HistorySyncStatus, LivenessState,
-    ReconnectStatus, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
-    RetryReason, RunAttempt, RuntimeLivenessPhase, RuntimeProgressSnapshot, RuntimeStreamState,
-    StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    ParentVerificationEvidence, ReconnectStatus, ReleaseReason, RetryAttempt,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeLivenessPhase,
+    RuntimeProgressSnapshot, RuntimeStreamState, StallMetadata, StreamHealth, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
     ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, HierarchyStateSnapshot, IssueSnapshot,
@@ -804,6 +805,7 @@ mod tests {
             turn_count: 0,
             summary: None,
             error: Some("boom".to_owned()),
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,
@@ -1311,6 +1313,7 @@ mod tests {
             turn_count: 0,
             summary: Some("stale worker".to_owned()),
             error: Some("boom".to_owned()),
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,
@@ -1365,6 +1368,7 @@ mod tests {
             turn_count: 1,
             summary: Some("old attempt".to_owned()),
             error: Some("boom".to_owned()),
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,

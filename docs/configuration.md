@@ -813,6 +813,14 @@ When archive succeeds and the repo uses the managed local OpenHands server,
 OpenSymphony also moves the issue's persisted conversation from the repo-scoped
 `active/` store to `archived/`.
 
+When `memory.serve` uses the default `127.0.0.1:0` bind, the first successful
+run records the selected loopback address in
+`<workspace-root>/.opensymphony-memory-bind.json`. Later daemon starts reuse
+that exact address so a recovered parent conversation keeps the memory endpoint
+associated with its restored bearer. If the recorded port is unavailable or
+the configured interface changes, startup fails instead of silently assigning
+a different endpoint. An explicit nonzero `memory.bind` remains unchanged.
+
 Initialize the shared memory policy and learned ontology file with:
 
 ```bash

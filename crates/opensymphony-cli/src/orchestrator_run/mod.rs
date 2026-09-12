@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::atomic::{AtomicU64, Ordering},
@@ -41,7 +42,7 @@ use crate::opensymphony_workflow::ProcessEnvironment;
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tokio::{
@@ -65,6 +66,15 @@ use self::{
         terminal_state_set,
     },
 };
+
+const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MemoryServerBindState {
+    schema_version: u32,
+    configured_ip: String,
+    selected_addr: String,
+}
 
 #[derive(Debug, Args, Clone)]
 pub struct RunArgs {
@@ -1078,6 +1088,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         target_commit: None,
         checkout_head: None,
         execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
+        parent_scope: false,
         authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
         authorized_repositories_by_project: runtime
             .repository_routing
@@ -1242,7 +1253,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             }
         },
     };
-    let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let mut auto_capture_completed_issues = initial_auto_capture_completed_issues(
+        &startup_terminal_issues,
+        runtime.memory.auto_capture,
+    );
     push_recent_event(
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
@@ -1291,13 +1306,6 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             result = async {
                 ticker.tick().await;
                 let observed_at = now_timestamp();
-                let capture_bindings_before_tick = if runtime.memory.auto_capture {
-                    super::memory::load_all_terminal_capture_bindings(
-                        &runtime.workflow.config.workspace.root,
-                    )
-                } else {
-                    Ok(BTreeMap::new())
-                };
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
@@ -1307,9 +1315,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, capture_bindings_before_tick, result)
+                (observed_at, result)
             } => {
-                let (observed_at, capture_bindings_before_tick, result) = result;
+                let (observed_at, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1338,7 +1346,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &recent_events,
                         )).await;
                         if !auto_capture_candidates.is_empty() {
-                            let auto_capture_result = match capture_bindings_before_tick {
+                            // Parent completion and its exact commit evidence
+                            // can become durable in this scheduler tick. Load
+                            // bindings afterward so capture does not use the
+                            // pre-finalization controller snapshot.
+                            let capture_bindings = super::memory::load_all_terminal_capture_bindings(
+                                &runtime.workflow.config.workspace.root,
+                            );
+                            let auto_capture_result = match capture_bindings {
                                 Ok(capture_bindings) => {
                                     super::memory::auto_capture_terminal(
                                         &runtime.target_repo,
@@ -1607,6 +1622,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) target_commit: Option<String>,
     pub(super) checkout_head: Option<String>,
     pub(super) execution_repo: String,
+    pub(super) parent_scope: bool,
     pub(super) authorized_repositories: BTreeSet<String>,
     pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
     pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,
@@ -1619,9 +1635,14 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = load_runtime_memory_config(runtime)?;
-    super::memory::start_memory_server_with_resolved_config(
+    let configured_bind = server.bind;
+    let selected_bind = resolve_runtime_memory_server_bind(
+        &runtime.workflow.config.workspace.root,
+        configured_bind,
+    )?;
+    let handle = super::memory::start_memory_server_with_resolved_config(
         config,
-        server.bind,
+        selected_bind,
         server.token.clone(),
         Some(runtime.workflow.config.workspace.root.clone()),
         runtime.config_path.clone(),
@@ -1629,8 +1650,114 @@ async fn start_runtime_memory_server(
         Some(runtime.config_generation.clone()),
     )
     .await
-    .map(Some)
-    .map_err(RunCommandError::MemoryServer)
+    .map_err(RunCommandError::MemoryServer)?;
+    if configured_bind.port() == 0 {
+        persist_runtime_memory_server_bind(
+            &runtime.workflow.config.workspace.root,
+            configured_bind,
+            handle.local_addr(),
+        )?;
+    }
+    Ok(Some(handle))
+}
+
+fn resolve_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+) -> Result<SocketAddr, RunCommandError> {
+    if configured.port() != 0 {
+        return Ok(configured);
+    }
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(configured),
+        Err(error) => {
+            return Err(RunCommandError::MemoryServer(
+                crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                    "failed to read persisted memory server bind {}: {error}",
+                    path.display()
+                )),
+            ));
+        }
+    };
+    let state: MemoryServerBindState = serde_json::from_str(&raw).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to decode persisted memory server bind {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    let selected: SocketAddr = state.selected_addr.parse().map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "persisted memory server bind {} is invalid: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    if state.schema_version != 1
+        || state.configured_ip != configured.ip().to_string()
+        || selected.ip() != configured.ip()
+        || selected.port() == 0
+    {
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "persisted memory server bind {} does not match the configured interface",
+                path.display()
+            )),
+        ));
+    }
+    Ok(selected)
+}
+
+fn persist_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+    selected: SocketAddr,
+) -> Result<(), RunCommandError> {
+    fs::create_dir_all(workspace_root).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to create workspace root {} for memory bind persistence: {error}",
+                workspace_root.display()
+            ),
+        ))
+    })?;
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let state = MemoryServerBindState {
+        schema_version: 1,
+        configured_ip: configured.ip().to_string(),
+        selected_addr: selected.to_string(),
+    };
+    let payload = serde_json::to_vec_pretty(&state).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!("failed to encode persisted memory server bind: {error}"),
+        ))
+    })?;
+    let temporary = workspace_root.join(format!(
+        "{MEMORY_SERVER_BIND_STATE}.{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+    fs::write(&temporary, payload).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to write persisted memory server bind {}: {error}",
+                temporary.display()
+            ),
+        ))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "failed to publish persisted memory server bind {}: {error}",
+                path.display()
+            )),
+        ));
+    }
+    Ok(())
 }
 
 fn load_runtime_memory_config(
@@ -1871,6 +1998,17 @@ fn auto_capture_candidates(
         .collect()
 }
 
+fn initial_auto_capture_completed_issues(
+    startup_terminal_issues: &BTreeSet<String>,
+    auto_capture_enabled: bool,
+) -> BTreeSet<String> {
+    if auto_capture_enabled {
+        BTreeSet::new()
+    } else {
+        startup_terminal_issues.clone()
+    }
+}
+
 fn mark_auto_capture_completed(
     completed_issues: &mut BTreeSet<String>,
     candidates: &[String],
@@ -1906,6 +2044,32 @@ mod tests {
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn ephemeral_memory_bind_reuses_its_persisted_port_after_restart() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let configured: SocketAddr = "127.0.0.1:0".parse().expect("configured bind");
+        let selected: SocketAddr = "127.0.0.1:48123".parse().expect("selected bind");
+
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("initial bind"),
+            configured
+        );
+        persist_runtime_memory_server_bind(root.path(), configured, selected)
+            .expect("persist selected bind");
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("recovered bind"),
+            selected
+        );
+        assert!(
+            resolve_runtime_memory_server_bind(
+                root.path(),
+                "0.0.0.0:0".parse().expect("changed interface")
+            )
+            .is_err(),
+            "a changed interface must not silently rotate a bound parent endpoint"
+        );
     }
 
     #[test]
@@ -2351,6 +2515,16 @@ mod tests {
 
         let retry_candidates = auto_capture_candidates(&current, &mut completed, true);
         assert_eq!(retry_candidates, vec!["COE-2".to_string()]);
+    }
+
+    #[test]
+    fn startup_terminal_issues_retry_capture_after_daemon_restart() {
+        let terminal = issue_set(&["COE-1", "COE-2"]);
+        assert!(initial_auto_capture_completed_issues(&terminal, true).is_empty());
+        assert_eq!(
+            initial_auto_capture_completed_issues(&terminal, false),
+            terminal
+        );
     }
 
     #[test]

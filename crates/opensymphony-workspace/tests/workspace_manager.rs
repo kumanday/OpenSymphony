@@ -10,7 +10,8 @@ use crate::opensymphony_workspace::{
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, ParentCheckoutRequest,
     ParentRuntimeDescriptor, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunManifest,
     RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
-    compose_parent_prompt, compose_terminal_prompt, parent_workspace_key,
+    compose_parent_continuation_prompt, compose_parent_prompt, compose_terminal_prompt,
+    parent_workspace_key,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -852,7 +853,58 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     );
     assert!(prompt.contains(binding_a.repository_id().as_str()));
     assert!(prompt.contains("project-set instructions"));
+    assert!(prompt.contains("evidence/final-verification.json"));
+    assert!(
+        prompt.contains("A successful harness turn or an unobserved command does not complete")
+    );
     assert!(!prompt.contains("frontend repository"));
+    let continuation = compose_parent_continuation_prompt(&codex);
+    assert!(continuation.contains("run-parent"));
+    assert!(continuation.contains("attempt 1"));
+    assert!(continuation.contains(binding_a.repository_id().as_str()));
+    assert!(continuation.contains("evidence/final-verification.json"));
+    assert!(!continuation.contains("generic lifecycle policy"));
+    assert!(!continuation.contains("project-set instructions"));
+
+    let cleanup_parent = manager
+        .prepare_parent_execution_root(&parent, 9, repeat_requests.clone())
+        .await
+        .expect("cleanup parent generation should prepare");
+    let cleanup_worktrees = cleanup_parent
+        .child_checkout_map
+        .repositories
+        .values()
+        .map(|checkout| {
+            cleanup_parent
+                .handle
+                .workspace_path()
+                .join(&checkout.relative_path)
+        })
+        .collect::<Vec<_>>();
+    manager
+        .cleanup_failed_terminal_workspace(&cleanup_parent.handle)
+        .await
+        .expect("terminal parent cleanup should unregister integration worktrees");
+    assert!(!cleanup_parent.handle.workspace_path().exists());
+    let registered_worktrees = [
+        child_a1.handle.workspace_path(),
+        child_b.handle.workspace_path(),
+        child_c.handle.workspace_path(),
+    ]
+    .into_iter()
+    .map(|source| git(source, &["worktree", "list", "--porcelain"]))
+    .collect::<Vec<_>>()
+    .join("\n");
+    for worktree in &cleanup_worktrees {
+        assert!(
+            !registered_worktrees.contains(worktree.to_string_lossy().as_ref()),
+            "terminal cleanup must remove the Git worktree registration"
+        );
+    }
+    manager
+        .prepare_parent_execution_root(&parent, 9, repeat_requests.clone())
+        .await
+        .expect("the same generation should recreate after terminal cleanup");
 
     #[cfg(unix)]
     {

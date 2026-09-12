@@ -63,6 +63,24 @@ Why fakes matter:
 - disconnect and reconnect behavior
 - server restart scenarios
 - scheduler recovery on daemon restart
+- parent integration launch-intent persistence before worker start, exact
+  run-bound final-verification receipts, missing/stale receipt rejection,
+  exact command hashing before durable redaction, prior-attempt event rejection,
+  production-shaped Codex and OpenHands command start/completion events,
+  observed parent-root and checkout working directories, orchestrator-owned
+  deadlines, bounded command logs/resources, rejection of prompt-authored
+  execution claims, uncertain cleanup fences, metadata-only prelaunch crash
+  recovery, authenticated same-conversation parent grants after restart,
+  prelaunch rejection of missing or changed bound conversation manifests and
+  parent harness switches, attempt-specific continuation prompts for Codex and
+  OpenHands, terminal-turn cleanup before retry, retryable active cancellation,
+  completed-parent reopen with unchanged child edges, compacted admission
+  idempotency, empty-target verification, recursive intermediate-descendant
+  memory grants, durable-controller-gated parent capture, stable default memory
+  endpoint recovery, event-only command-receipt persistence, dry-run preview
+  isolation, legacy missing-controller migration before same-conversation
+  reattachment, terminal-success finalization gates, and retry after a failed
+  durable outcome write
 
 ## 2.4 Live local tests
 
@@ -90,6 +108,8 @@ Current implementation:
 - `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, lightweight dispatch-summary reads, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, long rate-limit reset return-without-sleep behavior with the 30s inline cap, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh with bounded unscoped fallback for moved issues, and tracker error mapping against a local stub server
 - `cargo test --test linear_client live_linear_client_reads_opensymphony_project -- --ignored --nocapture` is a read-only live evidence probe for PRs that need to show the actual Linear HTTP/GraphQL client path against the OpenSymphony project
 - `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, child-edge generation reconciliation and freeze fencing, owner-identified lease acquisition, provider-evidence parent eligibility, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, Linear cooldown behavior, separated Linear polling cadences, manifest-backed workspace recovery against fake tracker/workspace/worker backends, external retry-marker proof, metadata-only workspace recovery, binding-drift workspace rematerialization, legacy parent neutrality, same-ID generation retention, independent running/discovery cadences, and adoption of every launched worker after persistence errors
+- `cargo test --lib parent_integration` exercises the restart-safe parent state machine, exact multi-repository and empty-target evidence, topology-neutral checkout handles, idempotent admission after transition compaction, bounded diagnostics, timeout and indeterminate cleanup gates, resource collisions, and higher-ancestor serialization
+- the memory scope and terminal capture tests cover parent grants across exact descendants, denial of unrelated repositories and work items, parent runtime-envelope capture, and preservation of every verified repository commit
 - `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
 - `cargo test --test workspace_manager` covers durable checkout/staging ownership-marker sweeps, preservation of foreign generation-shaped directories and staging content, receipt-owned recovery, and the retry verification mode that permits legitimate worker changes while retaining checkout provenance checks
 - `cargo test --lib opensymphony_workspace::manager::tests::discover_agents` and the memory scope tests cover bounded tracked-instruction probes, failure propagation, canonical project-ID filtering, and project-scoped direct capsule reads
@@ -518,7 +538,9 @@ parent identifiers remain distinct; and `after_create` cannot turn a parent
 root into a Git repository. It also covers parent `after_create`
 receipt/reuse/failure behavior and proves a child-controlled direct or
 worktree-conditional fsmonitor executable is rejected without running before
-the incomplete parent root is rolled back. A lower-level regression proves the
+the incomplete parent root is rolled back. Terminal cleanup also unregisters
+the real integration worktrees and proves the same generation can be prepared
+again without a stale Git registration. A lower-level regression proves the
 orchestrator Git command overrides checkout-controlled fsmonitor configuration
 and default repository hooks at execution time. Focused
 OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope
