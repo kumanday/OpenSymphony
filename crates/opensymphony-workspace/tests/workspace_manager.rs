@@ -874,7 +874,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     git(&source_a, &["commit", "-m", "squash parent repair"]);
     git(&source_a, &["push", "origin", "main"]);
     let merge_result = git(&source_a, &["rev-parse", "HEAD"]);
-    let (refreshed, refreshed_instructions) = manager
+    let (refreshed, refreshed_instruction_path, refreshed_instructions) = manager
         .refresh_parent_repair_target(
             &parent,
             prepared.handle.workspace_path(),
@@ -889,6 +889,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         refreshed_instructions,
         repository_a.instruction.content_hash
     );
+    assert_eq!(refreshed_instruction_path, repository_a.instruction.path);
     assert_ne!(
         repair_commit, refreshed,
         "squash result replaces repair commit"

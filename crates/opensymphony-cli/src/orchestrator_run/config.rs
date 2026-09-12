@@ -1099,9 +1099,7 @@ fn resolve_central_config(
                 merge_method.to_ascii_lowercase().as_str(),
                 "merge" | "squash" | "rebase"
             );
-            let unsupported_github_method = profile.provider.eq_ignore_ascii_case("github")
-                && !merge_method.eq_ignore_ascii_case("merge");
-            if !known_method || unsupported_github_method {
+            if !known_method {
                 return Err(CentralConfigError::InvalidReference {
                     field: format!("review_profiles.{profile_id}.merge_method"),
                 });
@@ -1363,15 +1361,16 @@ fn resolve_central_config(
             || repository.remote.provider.eq_ignore_ascii_case("github")
             || review_profile.required_checks
             || review_profile.required_review;
-        if github_merge_evidence_required && !review_profile.provider.eq_ignore_ascii_case("github")
-        {
+        let github_backed_review = matches!(
+            review_profile.provider.to_ascii_lowercase().as_str(),
+            "github" | "codex"
+        );
+        if github_merge_evidence_required && !github_backed_review {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("review_profiles.{}.provider", repository.review_profile),
             });
         }
-        if repository.remote.provider.eq_ignore_ascii_case("github")
-            || review_profile.provider.eq_ignore_ascii_case("github")
-        {
+        if repository.remote.provider.eq_ignore_ascii_case("github") || github_backed_review {
             let credential = config
                 .credentials
                 .get(&review_profile.credential)

@@ -1079,6 +1079,11 @@ pub struct ParentVerificationEvidence {
     pub command_hash: String,
     /// `parent_root` or one checkout handle from the verified parent envelope.
     pub root: String,
+    /// Optional canonical repository selected for a repair after a failed
+    /// integration command. This is a worker request; provider and Git
+    /// receipts remain orchestrator-owned and independently verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_repository_id: Option<CanonicalRepositoryId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

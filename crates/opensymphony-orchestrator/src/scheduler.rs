@@ -36,8 +36,8 @@ use super::{
     DurableOrchestratorState, HierarchyBlockedReason, HierarchySnapshot, LeaseRecord,
     LeaseResource, ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt,
     ParentCleanupStatus, ParentEligibilityEvidence, ParentIntegrationController,
-    ParentIntegrationError, ParentProviderOperationKind, ParentRepairAttempt, ParentRepairStatus,
-    ParentRepositoryTarget,
+    ParentIntegrationError, ParentProviderOperationKind, ParentRepairAttempt, ParentRepairPolicy,
+    ParentRepairStatus, ParentRepositoryTarget,
 };
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
@@ -238,6 +238,9 @@ pub struct WorkerStartRequest {
     /// A parent retry must attach this durable controller-owned conversation.
     /// The backend rejects a missing or different manifest before session launch.
     pub expected_parent_conversation_id: Option<String>,
+    /// Active requested-change repair resumed in the existing parent
+    /// conversation. Provider receipts remain scheduler-owned.
+    pub parent_repair: Option<ParentRepairAttempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,7 +501,7 @@ pub trait WorkspaceBackend {
         _workspace: &WorkspaceRecord,
         _target: &ParentRepositoryTarget,
         _repair: &ParentRepairAttempt,
-    ) -> Result<Option<Option<String>>, Self::Error> {
+    ) -> Result<Option<(String, Option<String>)>, Self::Error> {
         Ok(None)
     }
 
@@ -518,7 +521,7 @@ pub trait WorkspaceBackend {
         _workspace: &WorkspaceRecord,
         _target: &ParentRepositoryTarget,
         _repair: &ParentRepairAttempt,
-    ) -> Result<Option<(String, String)>, Self::Error> {
+    ) -> Result<Option<(String, PathBuf, String)>, Self::Error> {
         Ok(None)
     }
 
@@ -806,6 +809,39 @@ where
             .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
                 detail: format!("parent {parent_id} has no active workspace"),
             })?;
+        let legacy_target = self
+            .hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .and_then(|controller| controller.targets.get(repository_id))
+            .is_some_and(|target| {
+                target.target_branch.is_empty()
+                    && target.repair_policy == ParentRepairPolicy::default()
+            });
+        if legacy_target {
+            let current_target = self
+                .workspace
+                .parent_workspace_targets(&parent, &workspace)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+                .into_iter()
+                .find(|target| target.repository_id == *repository_id)
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: format!("parent {parent_id} has no migrated target {repository_id}"),
+                })?;
+            let previous = self.hierarchy_state.clone();
+            self.hierarchy_state
+                .parent_integrations
+                .get_mut(parent_id)
+                .expect("controller was checked")
+                .migrate_legacy_repair_target(current_target)?;
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous;
+                return Err(error);
+            }
+        }
         let (target, input_version) = {
             let controller = self
                 .hierarchy_state
@@ -984,15 +1020,19 @@ where
     ) -> Result<String, SchedulerError> {
         let (parent, workspace) = self.parent_context(parent_id)?;
         let (target, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        let publication_input_version = format!(
+            "{input_version};repair-cycle:{}",
+            repair.requested_change_count
+        );
         self.persist_repair_intent(
             parent_id,
             repair_id,
             ParentProviderOperationKind::ReconcilePush,
-            &input_version,
+            &publication_input_version,
             observed_at,
         )
         .await?;
-        let remote_commit = self
+        let (local_commit, remote_commit) = self
             .workspace
             .reconcile_parent_repair_push(&parent, &workspace, &target, &repair)
             .await
@@ -1014,21 +1054,26 @@ where
             observed_at,
         )
         .await?;
-        let commit = if let Some(remote_commit) = remote_commit {
-            if let Some(expected) = repair.pushed_commit.as_deref()
-                && expected != remote_commit
+        if local_commit == repair.target_commit {
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: "repair branch has no commit beyond its recorded target".to_owned(),
+            });
+        }
+        let commit = if remote_commit.as_deref() == Some(local_commit.as_str()) {
+            local_commit
+        } else {
+            if let Some(remote_commit) = remote_commit.as_deref()
+                && repair.pushed_commit.as_deref() != Some(remote_commit)
             {
                 return Err(SchedulerError::ParentRepairUnavailable {
                     detail: "remote repair branch was force-pushed".to_owned(),
                 });
             }
-            remote_commit
-        } else {
             self.persist_repair_intent(
                 parent_id,
                 repair_id,
                 ParentProviderOperationKind::Push,
-                &input_version,
+                &publication_input_version,
                 observed_at,
             )
             .await?;
@@ -1058,7 +1103,7 @@ where
                 .parent_integrations
                 .get_mut(parent_id)
                 .expect("controller was checked")
-                .record_repair_push(repair_id, &commit, &input_version, observed_at)?;
+                .record_repair_push(repair_id, &commit, &publication_input_version, observed_at)?;
             if let Err(error) = self.persist_orchestrator_state().await {
                 self.hierarchy_state = previous;
                 return Err(error);
@@ -1069,7 +1114,7 @@ where
             parent_id,
             repair_id,
             ParentProviderOperationKind::ReconcilePullRequest,
-            &input_version,
+            &publication_input_version,
             observed_at,
         )
         .await?;
@@ -1117,7 +1162,7 @@ where
                     parent_id,
                     repair_id,
                     ParentProviderOperationKind::CreatePullRequest,
-                    &input_version,
+                    &publication_input_version,
                     observed_at,
                 )
                 .await?;
@@ -1142,7 +1187,7 @@ where
             repair_id,
             &pull_request.0,
             &pull_request.1,
-            &input_version,
+            &publication_input_version,
             observed_at,
         )?;
         if controller
@@ -1187,11 +1232,15 @@ where
         observed_at: TimestampMs,
     ) -> Result<ParentRepairStatus, SchedulerError> {
         let (_, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        let review_input_version = format!(
+            "{input_version};repair-head:{}",
+            repair.pushed_commit.as_deref().unwrap_or("missing")
+        );
         self.persist_repair_intent(
             parent_id,
             repair_id,
             ParentProviderOperationKind::ReconcileReview,
-            &input_version,
+            &review_input_version,
             observed_at,
         )
         .await?;
@@ -1205,8 +1254,9 @@ where
             .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
                 detail: "provider backend does not support repair review reconciliation".to_owned(),
             })?;
-        let already_reviewed =
-            snapshot.review_approved || snapshot.review_rejected || snapshot.changes_requested;
+        let already_reviewed = snapshot.review_head_commit.as_deref()
+            == repair.pushed_commit.as_deref()
+            && (snapshot.review_approved || snapshot.review_rejected || snapshot.changes_requested);
         self.complete_repair_operation(
             parent_id,
             repair_id,
@@ -1222,10 +1272,11 @@ where
                 parent_id,
                 repair_id,
                 ParentProviderOperationKind::RequestReview,
-                &input_version,
+                &review_input_version,
                 observed_at,
             )
             .await?;
+            let repair = self.repair(parent_id, repair_id)?.clone();
             let snapshot = self
                 .tracker
                 .request_parent_repair_review(&repair)
@@ -1254,6 +1305,137 @@ where
             observed_at,
         )
         .await
+    }
+
+    async fn advance_parent_repairs(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let repairs = self
+            .hierarchy_state
+            .parent_integrations
+            .iter()
+            .flat_map(|(parent_id, controller)| {
+                controller
+                    .repair_attempts
+                    .iter()
+                    .filter(|repair| repair.status != ParentRepairStatus::Completed)
+                    .map(move |repair| {
+                        (
+                            parent_id.clone(),
+                            repair.id.clone(),
+                            repair.repository_id.clone(),
+                            repair.status,
+                            repair
+                                .operations
+                                .first()
+                                .map(|operation| operation.idempotency_key.clone())
+                                .unwrap_or_default(),
+                            repair.pushed_commit.clone(),
+                            repair.operations.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (parent_id, repair_id, repository_id, status, defect_key, pushed, operations) in repairs
+        {
+            if self
+                .executions
+                .get(&parent_id)
+                .and_then(IssueExecution::workspace)
+                .is_none()
+            {
+                continue;
+            }
+            match status {
+                ParentRepairStatus::PreparingBranch => {
+                    self.begin_parent_repair(&parent_id, &repository_id, &defect_key, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::Implementing => {
+                    self.publish_parent_repair(&parent_id, &repair_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::AwaitingPullRequest => {
+                    self.publish_parent_repair(&parent_id, &repair_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::AwaitingReview => {
+                    let (_, _, input_version) = self.repair_context(&parent_id, &repair_id)?;
+                    let review_input_version = format!(
+                        "{input_version};repair-head:{}",
+                        pushed.as_deref().unwrap_or("missing")
+                    );
+                    let requested = operations.iter().any(|operation| {
+                        operation.kind == ParentProviderOperationKind::RequestReview
+                            && operation.input_version == review_input_version
+                            && operation.receipt.is_some()
+                    });
+                    if requested {
+                        self.reconcile_parent_repair(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    } else {
+                        self.request_parent_repair_review(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    }
+                }
+                ParentRepairStatus::AwaitingMerge => {
+                    self.merge_parent_repair(&parent_id, &repair_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::Refreshing => {
+                    self.refresh_parent_repair(&parent_id, &repair_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::ChangesRequested => {
+                    self.queue_parent_repair_retry(&parent_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::FailedChecks
+                | ParentRepairStatus::ReviewRejected
+                | ParentRepairStatus::ProviderUnavailable
+                | ParentRepairStatus::ExternallyClosed
+                | ParentRepairStatus::ForcePushed
+                | ParentRepairStatus::MergeConflict => {
+                    self.reconcile_parent_repair(&parent_id, &repair_id, observed_at)
+                        .await?;
+                }
+                ParentRepairStatus::Completed => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn queue_parent_repair_retry(
+        &mut self,
+        parent_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(execution) = self.remove_execution(parent_id) else {
+            return Ok(());
+        };
+        if execution.status() == SchedulerStatus::RetryQueued {
+            self.insert_execution(parent_id.clone(), execution);
+            return Ok(());
+        }
+        if execution.status() != SchedulerStatus::Released {
+            self.insert_execution(parent_id.clone(), execution);
+            return Ok(());
+        }
+        let previous_attempt = execution
+            .last_worker_outcome()
+            .and_then(|outcome| outcome.attempt);
+        let normal_retry_count = previous_attempt.map_or(0, RetryAttempt::get);
+        let retry = RetryEntry::continuation(
+            execution.issue(),
+            previous_attempt,
+            normal_retry_count,
+            observed_at,
+            self.config.retry_policy,
+        )?;
+        let execution = execution.reopen(observed_at)?.restore_retry(retry)?;
+        self.insert_execution(parent_id.clone(), execution);
+        self.persist_retry_if_queued(parent_id).await
     }
 
     pub async fn reconcile_parent_repair(
@@ -1315,15 +1497,27 @@ where
             observed_at,
         )
         .await?;
-        if let Some(snapshot) =
-            self.tracker
-                .parent_repair_snapshot(&repair)
-                .await
-                .map_err(|error| SchedulerError::Tracker {
-                    detail: error.to_string(),
-                })?
-            && snapshot.merged
-        {
+        let snapshot = match self.tracker.parent_repair_snapshot(&repair).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self
+                    .apply_parent_repair_snapshot(
+                        parent_id,
+                        repair_id,
+                        unavailable_provider_snapshot(&repair),
+                        &input_version,
+                        observed_at,
+                    )
+                    .await
+                    .and(Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    }));
+            }
+        }
+        .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+            detail: "provider backend does not support repair merge reconciliation".to_owned(),
+        })?;
+        if snapshot.merged {
             self.complete_repair_operation(
                 parent_id,
                 repair_id,
@@ -1350,6 +1544,18 @@ where
             observed_at,
         )
         .await?;
+        let current_status = self
+            .apply_parent_repair_snapshot(
+                parent_id,
+                repair_id,
+                snapshot,
+                &input_version,
+                observed_at,
+            )
+            .await?;
+        if current_status != ParentRepairStatus::AwaitingMerge {
+            return Ok(current_status);
+        }
         self.persist_repair_intent(
             parent_id,
             repair_id,
@@ -1407,7 +1613,7 @@ where
             observed_at,
         )
         .await?;
-        let (refreshed, refreshed_instruction_hash) = self
+        let (refreshed, refreshed_instruction_path, refreshed_instruction_hash) = self
             .workspace
             .refresh_parent_repair(&parent, &workspace, &target, &repair)
             .await
@@ -1444,14 +1650,30 @@ where
         controller.record_repair_refresh(
             repair_id,
             &refreshed,
+            &refreshed_instruction_path,
             &refreshed_instruction_hash,
             &input_version,
             observed_at,
         )?;
+        if let Some(attempt_id) = controller
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.status != ParentAttemptStatus::Running)
+            .map(|attempt| attempt.id.clone())
+        {
+            controller.prepare_retry(
+                &attempt_id,
+                "merged parent repair refreshed; run final verification on the new target",
+                observed_at,
+            )?;
+        }
         if let Err(error) = self.persist_orchestrator_state().await {
             self.hierarchy_state = previous;
             return Err(error);
         }
+        self.queue_parent_repair_retry(parent_id, observed_at)
+            .await?;
         Ok(refreshed)
     }
 
@@ -1758,6 +1980,7 @@ where
                 detail: error.to_string(),
             })?;
         self.apply_worker_updates(updates).await?;
+        self.advance_parent_repairs(observed_at).await?;
 
         let mut dispatch_candidates = None;
         if let Some(tracker_snapshot) = pre_update_full_snapshot.as_ref() {
@@ -4411,6 +4634,18 @@ where
             route: route.clone(),
             memory_grant_registry_recovered: self.recovered_memory_issue_ids.contains(issue_id),
             expected_parent_conversation_id,
+            parent_repair: self
+                .hierarchy_state
+                .parent_integrations
+                .get(issue_id)
+                .and_then(|controller| {
+                    controller
+                        .repair_attempts
+                        .iter()
+                        .rev()
+                        .find(|repair| repair.status == ParentRepairStatus::ChangesRequested)
+                        .cloned()
+                }),
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -4873,7 +5108,17 @@ where
                 continue;
             }
 
-            if !normalized.sub_issues.is_empty() {
+            let parent_repair_retry = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(|controller| {
+                    matches!(
+                        controller.state,
+                        super::ParentIntegrationState::Fixing { .. }
+                    )
+                });
+            if !normalized.sub_issues.is_empty() && !parent_repair_retry {
                 let parent_retry = self
                     .executions
                     .get(&issue_id)
@@ -4943,7 +5188,7 @@ where
                 }
             };
 
-            if !normalized.sub_issues.is_empty() {
+            if !normalized.sub_issues.is_empty() && !parent_repair_retry {
                 let targets = match self
                     .workspace
                     .parent_workspace_targets(&normalized, &workspace)
@@ -5144,6 +5389,18 @@ where
                             .and_then(|controller| controller.conversation_id.clone())
                     })
                     .flatten(),
+                parent_repair: self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .and_then(|controller| {
+                        controller
+                            .repair_attempts
+                            .iter()
+                            .rev()
+                            .find(|repair| repair.status == ParentRepairStatus::ChangesRequested)
+                            .cloned()
+                    }),
             };
 
             if !normalized.sub_issues.is_empty() && !start_request.route.dry_run {
@@ -5454,7 +5711,27 @@ where
             .find(|attempt| attempt.id == attempt_id)
             .and_then(|attempt| attempt.exit_code);
         controller.finish_attempt(&attempt_id, status, exit_code, cleanup, outcome.finished_at)?;
+        if status == ParentAttemptStatus::Passed
+            && matches!(
+                controller.state,
+                super::ParentIntegrationState::Fixing { .. }
+            )
+            && let Some(repair_id) = controller
+                .repair_attempts
+                .iter()
+                .rev()
+                .find(|repair| repair.status == ParentRepairStatus::ChangesRequested)
+                .map(|repair| repair.id.clone())
+        {
+            controller.record_repair_branch_ready(&repair_id)?;
+        }
         let input_version = parent_controller_input_version(controller);
+        let repair_requested = status == ParentAttemptStatus::Failed
+            && outcome
+                .parent_verification
+                .as_ref()
+                .and_then(|evidence| evidence.repair_repository_id.as_ref())
+                .is_some();
         if status == ParentAttemptStatus::Passed
             && execution.issue().state.category == IssueStateCategory::Terminal
         {
@@ -5484,6 +5761,10 @@ where
                 status == ParentAttemptStatus::Canceled,
                 outcome.finished_at,
             )?;
+        } else if repair_requested {
+            // The failed, harness-observed check selected a verified repository
+            // for repair. Keep the controller in Integrating so the
+            // orchestrator can atomically create the repair attempt below.
         } else {
             controller.prepare_retry(
                 &attempt_id,
@@ -6246,6 +6527,75 @@ where
 
         self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
             .await?;
+        let repair_implementation_ready = self
+            .hierarchy_state
+            .parent_integrations
+            .get(&issue_id)
+            .is_some_and(|controller| {
+                matches!(
+                    controller.state,
+                    super::ParentIntegrationState::Fixing { .. }
+                ) && controller
+                    .repair_attempts
+                    .iter()
+                    .any(|repair| repair.status == ParentRepairStatus::Implementing)
+            });
+        if repair_implementation_ready {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
+        let repair_repository_id = (outcome.outcome == WorkerOutcomeKind::Failed)
+            .then(|| {
+                outcome
+                    .parent_verification
+                    .as_ref()
+                    .and_then(|evidence| evidence.repair_repository_id.clone())
+            })
+            .flatten();
+        if let Some(repository_id) = repair_repository_id {
+            let defect_key = format!(
+                "parent-repair:{}:{}",
+                issue_id,
+                outcome
+                    .parent_verification
+                    .as_ref()
+                    .map(|evidence| evidence.command_hash.as_str())
+                    .unwrap_or("unknown")
+            );
+            self.insert_execution(issue_id.clone(), execution.clone());
+            let repair_result = async {
+                let repair_id = self
+                    .begin_parent_repair(
+                        &issue_id,
+                        &repository_id,
+                        &defect_key,
+                        outcome.finished_at,
+                    )
+                    .await?;
+                self.publish_parent_repair(&issue_id, &repair_id, outcome.finished_at)
+                    .await?;
+                Ok::<_, SchedulerError>(())
+            }
+            .await;
+            let execution = self
+                .remove_execution(&issue_id)
+                .expect("parent execution was temporarily restored");
+            repair_result?;
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
         if self.parent_waiting_for_tracker_confirmation(&issue_id) {
             return self
                 .release_finished_execution(
@@ -6607,6 +6957,23 @@ where
         allow_retry: bool,
         reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<bool, SchedulerError> {
+        if allow_retry
+            && self
+                .hierarchy_state
+                .parent_integrations
+                .get(&normalized.id)
+                .is_some_and(|controller| {
+                    matches!(
+                        controller.state,
+                        super::ParentIntegrationState::Fixing { .. }
+                    ) && controller
+                        .repair_attempts
+                        .iter()
+                        .any(|repair| repair.status == ParentRepairStatus::ChangesRequested)
+                })
+        {
+            return Ok(true);
+        }
         if self.linear_cooldown_active(observed_at) {
             return Ok(false);
         }
@@ -8229,6 +8596,7 @@ fn unavailable_provider_snapshot(
         pull_request_id: repair.pull_request_id.clone(),
         pull_request_url: repair.pull_request_url.clone(),
         head_commit: repair.pushed_commit.clone(),
+        review_head_commit: None,
         open: false,
         checks_passed: false,
         checks_failed: false,
@@ -8570,6 +8938,7 @@ mod tests {
                     .expect("repository id"),
                     checkout_handle: "checkout-one".to_owned(),
                     relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
                     target_commit: "abc123".to_owned(),
                     instruction_path: PathBuf::from("AGENTS.md"),
                     instruction_hash: "instructions-1".to_owned(),
@@ -8682,6 +9051,7 @@ mod tests {
                     .expect("repository id"),
                     checkout_handle: "checkout-one".to_owned(),
                     relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
                     target_commit: "abc123".to_owned(),
                     instruction_path: PathBuf::from("AGENTS.md"),
                     instruction_hash: "instructions-1".to_owned(),

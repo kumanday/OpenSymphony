@@ -290,12 +290,17 @@ reloads the pinned instruction provenance, and creates a fresh
 `fix/<parent>-repair-<attempt>` branch at the recorded target. Managed Git
 operations isolate hooks and reject checkout-controlled transport settings.
 Pushes use the configured credential path and reconcile the exact remote branch
-before mutation. One repair does not open or modify another repository's
-checkout.
+and local intended head before mutation. Requested-change commits reuse that
+branch and pull request, while old-head review results cannot advance the new
+head. One repair does not open or modify another repository's checkout.
 
 The repair lease and completed parent root remain durable after refresh. Final
 verification resumes only after every affected checkout and both copies of its
-generation-bound map contain a reachable post-merge target. Capture
+generation-bound map contain a reachable post-merge target and refreshed
+instruction path and hash. A failed harness-observed parent check may request
+one canonical repository repair; the scheduler verifies the repository and
+owns branch, pull-request, review, merge, and refresh receipts before it queues
+the next final-verification turn. Capture
 acknowledgement and ordered release of evidence-protecting roots and leases
 remain part of the later cleanup lifecycle.
 

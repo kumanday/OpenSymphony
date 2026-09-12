@@ -698,6 +698,23 @@ impl WorkspaceManager {
             child_checkout_map = pending_refresh.clone();
             pinned_child_checkout_map = pending_refresh;
         }
+        let child_policy_migrated =
+            self.migrate_parent_checkout_review_policy(&mut child_checkout_map)?;
+        let pin_policy_migrated =
+            self.migrate_parent_checkout_review_policy(&mut pinned_child_checkout_map)?;
+        if child_policy_migrated || pin_policy_migrated {
+            let pin_path = self
+                .parent_child_checkout_pin_path(handle.workspace_key(), hierarchy_generation)
+                .await?;
+            self.write_parent_child_checkout_pin(&pin_path, &pinned_child_checkout_map)
+                .await?;
+            self.write_manifest_atomically(
+                &handle,
+                &handle.child_checkouts_path(),
+                &child_checkout_map,
+            )
+            .await?;
+        }
         if manifest.schema_version != 1
             || manifest.parent_issue_id != issue.issue_id
             || manifest.parent_identifier != issue.identifier
@@ -750,6 +767,41 @@ impl WorkspaceManager {
             child_checkout_map,
             created: false,
         })
+    }
+
+    fn migrate_parent_checkout_review_policy(
+        &self,
+        map: &mut ParentChildCheckoutMap,
+    ) -> Result<bool, WorkspaceError> {
+        let mut migrated = false;
+        for record in map.repositories.values_mut() {
+            if !record.review_profile.is_empty()
+                || !record.review_provider.is_empty()
+                || !record.review_policy_generation.is_empty()
+                || record.required_checks
+                || record.required_review
+                || record.merge_method.is_some()
+            {
+                continue;
+            }
+            let repository = self
+                .checkout_repositories
+                .get(&record.repository_id)
+                .ok_or_else(|| {
+                    checkout_verification(
+                        &self.config.root,
+                        "legacy parent checkout review policy repository is unavailable",
+                    )
+                })?;
+            record.review_profile = repository.review_profile.clone();
+            record.review_provider = repository.review_provider.clone();
+            record.review_policy_generation = repository.review_policy_generation.clone();
+            record.required_checks = repository.required_checks;
+            record.required_review = repository.required_review;
+            record.merge_method = repository.merge_method.clone();
+            migrated = true;
+        }
+        Ok(migrated)
     }
 
     pub async fn open_parent_execution_root_at(
@@ -1152,7 +1204,7 @@ impl WorkspaceManager {
         checkout_handle: &str,
         repository_id: &str,
         merge_result_commit: &str,
-    ) -> Result<(String, String), WorkspaceError> {
+    ) -> Result<(String, PathBuf, String), WorkspaceError> {
         let mut parent = self
             .open_parent_execution_root_at_for_retry(issue, parent_root)
             .await?;
@@ -1213,6 +1265,7 @@ impl WorkspaceManager {
         let instruction = self
             .load_instruction_provenance(&checkout, repository, &target_commit)
             .await?;
+        let instruction_path = instruction.path.clone();
         let instruction_hash = instruction.content_hash.clone();
         let record = parent
             .child_checkout_map
@@ -1246,7 +1299,7 @@ impl WorkspaceManager {
             parent.manifest.hierarchy_generation,
         )
         .await;
-        Ok((target_commit, instruction_hash))
+        Ok((target_commit, instruction_path, instruction_hash))
     }
 
     pub async fn write_parent_runtime_envelope(
@@ -6329,7 +6382,7 @@ pub fn compose_parent_prompt(
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nUse the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
+        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, make the smallest required edits in that verified checkout and replace `null` with its exact canonical repository ID. This field is only a repair request; OpenSymphony verifies the checkout and owns every Git and provider receipt. Use the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
         envelope.workspace_path.display(),
         envelope.hierarchy_generation,
         checkout_map,
@@ -6362,7 +6415,7 @@ pub fn compose_parent_continuation_prompt(envelope: &ParentRuntimeEnvelope) -> S
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nThe file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
+        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, make the smallest required edits in that verified checkout and replace `null` with its exact canonical repository ID. This field is only a repair request; OpenSymphony verifies the checkout and owns every Git and provider receipt. The file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
         envelope.run_id,
         envelope.attempt,
         envelope.hierarchy_generation,

@@ -90,6 +90,21 @@ const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
 const PARENT_FINAL_VERIFICATION_PATH: &str = "evidence/final-verification.json";
 const MAX_PARENT_VERIFICATION_RECEIPT_BYTES: u64 = 64 * 1024;
 
+fn compose_parent_repair_continuation_prompt(
+    repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    envelope: &ParentRuntimeEnvelope,
+) -> String {
+    format!(
+        "{}\n## Active Parent Repair\n\nRepair `{}` targets repository `{}` in checkout `{}` on branch `{}` (requested-change cycle {}). Read the current pull-request feedback, make only the smallest required edits in that verified checkout, and run the relevant focused checks. Then run the parent verification command and write the final-verification receipt with `repair_repository_id` set to `null`. OpenSymphony owns branch publication, review requests, merge, refresh, and all Git/provider receipts; do not perform those operations yourself.\n",
+        compose_parent_continuation_prompt(envelope),
+        repair.id,
+        repair.repository_id,
+        repair.checkout_handle,
+        repair.branch,
+        repair.requested_change_count,
+    )
+}
+
 async fn parent_verification_receipt_path(workspace: &Path) -> Result<PathBuf, String> {
     let canonical_workspace = fs::canonicalize(workspace).await.map_err(|error| {
         format!(
@@ -208,6 +223,18 @@ async fn load_parent_verification_receipt(
         return Err(
             "parent verification command root is not a verified checkout handle".to_owned(),
         );
+    }
+    if evidence
+        .repair_repository_id
+        .as_ref()
+        .is_some_and(|requested| {
+            !envelope
+                .checkouts
+                .values()
+                .any(|checkout| checkout.repository_id == requested.as_str())
+        })
+    {
+        return Err("parent repair request names an unverified repository".to_owned());
     }
     if evidence.command.trim().is_empty() {
         return Err("parent verification command selector is empty".to_owned());
@@ -1274,7 +1301,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
         let body = serde_json::json!({
             "title": title,
             "head": repair.branch,
-            "base": repository.target_branch,
+            "base": repair.target_branch,
             "body": format!("{marker}\n\nDurable OpenSymphony parent repair attempt."),
         });
         let pull_request = self
@@ -1285,6 +1312,12 @@ impl TrackerBackend for RuntimeTrackerBackend {
                 Some(&body),
             )
             .await?;
+        validate_github_parent_repair_pull_request(
+            &pull_request,
+            repair,
+            &owner,
+            &repository_name,
+        )?;
         Ok(Some((
             pull_request.number.to_string(),
             pull_request.html_url,
@@ -1296,8 +1329,53 @@ impl TrackerBackend for RuntimeTrackerBackend {
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
     ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
     {
-        // GitHub review automation is configured to start when the repair PR
-        // opens. Reconciliation is the idempotent acknowledgement boundary.
+        if repair.requested_change_count > 0
+            && repair.policy.review_provider.eq_ignore_ascii_case("codex")
+        {
+            let repository = self.repository_for_repair(repair)?;
+            let (api_root, owner, repository_name) = github_repository_api(repository)?;
+            let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
+                LinearError::InvalidResponse("repair pull request identity is missing".to_owned())
+            })?;
+            let intended_at = repair
+                .operations
+                .iter()
+                .rev()
+                .find(|operation| {
+                    operation.kind
+                        == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
+                        && operation.receipt.is_none()
+                })
+                .map(|operation| operation.intended_at)
+                .ok_or_else(|| {
+                    LinearError::InvalidResponse(
+                        "repair review request has no durable pending intent".to_owned(),
+                    )
+                })?;
+            let comments = self
+                .github_issue_comments(&api_root, &owner, &repository_name, pull_number, repository)
+                .await?;
+            let already_requested = comments.iter().any(|comment| {
+                comment.body.trim() == "@codex review"
+                    && github_provider_evidence_timestamp_ms(&comment.created_at)
+                        .is_some_and(|created| created >= intended_at)
+            });
+            if !already_requested {
+                let endpoint = format!(
+                    "{api_root}/repos/{owner}/{repository_name}/issues/{pull_number}/comments"
+                );
+                let body = serde_json::json!({"body": "@codex review"});
+                self.github_send_json::<GitHubIssueComment>(
+                    reqwest::Method::POST,
+                    &endpoint,
+                    repository,
+                    Some(&body),
+                )
+                .await?;
+            }
+        }
+        // PR opening starts the initial configured review. Later Codex reviews
+        // use the exact repository-supported trigger above.
         self.github_parent_repair_snapshot(repair).await.map(Some)
     }
 
@@ -1396,10 +1474,11 @@ impl RuntimeTrackerBackend {
         if let Some(pull_number) = repair.pull_request_id.as_deref() {
             let endpoint =
                 format!("{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}");
-            return self
+            let pull = self
                 .github_get_json::<GitHubPullRequest>(&endpoint, repository)
-                .await
-                .map(Some);
+                .await?;
+            validate_github_parent_repair_pull_request(&pull, repair, &owner, &repository_name)?;
+            return Ok(Some(pull));
         }
         let mut endpoint = Url::parse(&format!("{api_root}/repos/{owner}/{repository_name}/pulls"))
             .map_err(|error| LinearError::InvalidResponse(error.to_string()))?;
@@ -1407,7 +1486,7 @@ impl RuntimeTrackerBackend {
             .query_pairs_mut()
             .append_pair("state", "all")
             .append_pair("head", &format!("{owner}:{}", repair.branch))
-            .append_pair("base", &repository.target_branch)
+            .append_pair("base", &repair.target_branch)
             .append_pair("per_page", "100");
         let pulls = self
             .github_get_json::<Vec<GitHubPullRequest>>(endpoint.as_ref(), repository)
@@ -1416,7 +1495,12 @@ impl RuntimeTrackerBackend {
             .into_iter()
             .filter(|pull| {
                 pull.head.ref_name == repair.branch
-                    && pull.base.ref_name == repository.target_branch
+                    && pull.base.ref_name == repair.target_branch
+                    && pull
+                        .base
+                        .repo
+                        .full_name
+                        .eq_ignore_ascii_case(&format!("{owner}/{repository_name}"))
             })
             .collect::<Vec<_>>();
         matching.sort_by_key(|pull| pull.number);
@@ -1435,7 +1519,10 @@ impl RuntimeTrackerBackend {
     ) -> Result<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot, LinearError> {
         let repository = self.repository_for_repair(repair)?;
         if !repository.provider.eq_ignore_ascii_case("github")
-            || !repair.policy.review_provider.eq_ignore_ascii_case("github")
+            || !matches!(
+                repair.policy.review_provider.to_ascii_lowercase().as_str(),
+                "github" | "codex"
+            )
         {
             return Err(LinearError::InvalidConfiguration(
                 "parent repair requires a GitHub repository and review provider".to_owned(),
@@ -1451,6 +1538,7 @@ impl RuntimeTrackerBackend {
                     pull_request_id: None,
                     pull_request_url: None,
                     head_commit: None,
+                    review_head_commit: None,
                     open: false,
                     checks_passed: false,
                     checks_failed: false,
@@ -1467,6 +1555,7 @@ impl RuntimeTrackerBackend {
             );
         };
         let pull_number = pull.number.to_string();
+        let head_commit = pull.head.sha.clone();
         let reviews = self
             .github_reviews(
                 &api_root,
@@ -1476,24 +1565,65 @@ impl RuntimeTrackerBackend {
                 repository,
             )
             .await?;
-        let latest_reviews = latest_github_review_states(reviews);
-        let review_approved = latest_reviews
-            .values()
-            .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
-        let changes_requested = latest_reviews
-            .values()
-            .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
-        let review_rejected = latest_reviews
-            .values()
-            .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
-        let head_commit = pull.head.sha.clone();
-        let (checks_passed, checks_failed) = if repository.required_checks {
+        let latest_reviews = latest_github_review_states(
+            reviews
+                .into_iter()
+                .filter(|review| review.commit_id.as_deref() == head_commit.as_deref()),
+        );
+        let (review_head_commit, review_approved, review_rejected, changes_requested) =
+            if repair.policy.review_provider.eq_ignore_ascii_case("codex") {
+                let comments = self
+                    .github_issue_comments(
+                        &api_root,
+                        &owner,
+                        &repository_name,
+                        &pull_number,
+                        repository,
+                    )
+                    .await?;
+                let review_comments = self
+                    .github_pull_request_review_comments(
+                        &api_root,
+                        &owner,
+                        &repository_name,
+                        &pull_number,
+                        repository,
+                    )
+                    .await?;
+                codex_review_state_for_head(head_commit.as_deref(), &comments, &review_comments)
+            } else {
+                let review_head_commit = (!latest_reviews.is_empty())
+                    .then(|| head_commit.clone())
+                    .flatten();
+                let review_approved = latest_reviews
+                    .values()
+                    .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
+                let changes_requested = latest_reviews
+                    .values()
+                    .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
+                let review_rejected = latest_reviews
+                    .values()
+                    .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
+                (
+                    review_head_commit,
+                    review_approved,
+                    review_rejected,
+                    changes_requested,
+                )
+            };
+        let (checks_passed, checks_failed) = if repair.policy.required_checks {
             if let Some(head) = head_commit.as_deref() {
                 let (total_count, check_runs) = self
                     .github_check_runs(&api_root, &owner, &repository_name, head, repository)
                     .await?;
                 let required = self
-                    .github_required_check_contexts(&api_root, &owner, &repository_name, repository)
+                    .github_required_check_contexts(
+                        &api_root,
+                        &owner,
+                        &repository_name,
+                        &repair.target_branch,
+                        repository,
+                    )
                     .await?;
                 let statuses = self
                     .github_commit_statuses(&api_root, &owner, &repository_name, head, repository)
@@ -1534,7 +1664,7 @@ impl RuntimeTrackerBackend {
                 &api_root,
                 &owner,
                 &repository_name,
-                &repository.target_branch,
+                &repair.target_branch,
                 pull.merge_commit_sha.as_deref(),
                 repository,
             )
@@ -1548,6 +1678,7 @@ impl RuntimeTrackerBackend {
                 pull_request_id: Some(pull.number.to_string()),
                 pull_request_url: Some(pull.html_url),
                 head_commit,
+                review_head_commit,
                 open: pull.state.eq_ignore_ascii_case("open"),
                 checks_passed,
                 checks_failed,
@@ -2023,7 +2154,13 @@ impl RuntimeTrackerBackend {
                 )
                 .await?;
             let required_checks = self
-                .github_required_check_contexts(api_root, owner, repository_name, repository)
+                .github_required_check_contexts(
+                    api_root,
+                    owner,
+                    repository_name,
+                    &repository.target_branch,
+                    repository,
+                )
                 .await?;
             let commit_statuses = if required_checks.is_some() {
                 self.github_commit_statuses(
@@ -2072,6 +2209,58 @@ impl RuntimeTrackerBackend {
             reviews.extend(page_reviews);
             if page_count == 0 || page_count < 100 || page >= 1000 {
                 return Ok(reviews);
+            }
+            page += 1;
+        }
+    }
+
+    async fn github_issue_comments(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        issue_number: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubIssueComment>, LinearError> {
+        let mut page = 1;
+        let mut comments = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/issues/{issue_number}/comments?per_page=100&page={page}"
+            );
+            let page_comments = self
+                .github_get_json::<Vec<GitHubIssueComment>>(&endpoint, repository)
+                .await?;
+            let page_count = page_comments.len();
+            comments.extend(page_comments);
+            if page_count < 100 || page >= 1000 {
+                return Ok(comments);
+            }
+            page += 1;
+        }
+    }
+
+    async fn github_pull_request_review_comments(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        pull_number: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubPullRequestReviewComment>, LinearError> {
+        let mut page = 1;
+        let mut comments = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/comments?per_page=100&page={page}"
+            );
+            let page_comments = self
+                .github_get_json::<Vec<GitHubPullRequestReviewComment>>(&endpoint, repository)
+                .await?;
+            let page_count = page_comments.len();
+            comments.extend(page_comments);
+            if page_count < 100 || page >= 1000 {
+                return Ok(comments);
             }
             page += 1;
         }
@@ -2143,13 +2332,14 @@ impl RuntimeTrackerBackend {
         api_root: &str,
         owner: &str,
         repository_name: &str,
+        target_branch: &str,
         repository: &CheckoutRepository,
     ) -> Result<Option<GitHubRequiredStatusChecks>, LinearError> {
         let endpoint = github_required_status_checks_endpoint(
             api_root,
             owner,
             repository_name,
-            &repository.target_branch,
+            target_branch,
         )?;
         match self
             .github_get_json::<GitHubRequiredStatusChecks>(&endpoint, repository)
@@ -2698,6 +2888,31 @@ struct GitHubPullRequest {
     mergeable_state: Option<String>,
 }
 
+fn validate_github_parent_repair_pull_request(
+    pull: &GitHubPullRequest,
+    repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    owner: &str,
+    repository_name: &str,
+) -> Result<(), LinearError> {
+    let expected_repository = format!("{owner}/{repository_name}");
+    if pull.number == 0
+        || pull.head.ref_name != repair.branch
+        || pull.base.ref_name != repair.target_branch
+        || !pull
+            .base
+            .repo
+            .full_name
+            .eq_ignore_ascii_case(&expected_repository)
+        || pull.html_url.trim().is_empty()
+    {
+        return Err(LinearError::InvalidResponse(format!(
+            "GitHub pull request does not match durable parent repair {}",
+            repair.id
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct GitHubMergeResult {
     #[serde(default)]
@@ -2732,6 +2947,28 @@ struct GitHubPullRequestReview {
     state: String,
     #[serde(default)]
     submitted_at: Option<String>,
+    #[serde(default)]
+    commit_id: Option<String>,
+    #[serde(default)]
+    user: Option<GitHubReviewUser>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubIssueComment {
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    user: Option<GitHubReviewUser>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestReviewComment {
+    #[serde(default)]
+    commit_id: Option<String>,
+    #[serde(default)]
+    original_commit_id: Option<String>,
     #[serde(default)]
     user: Option<GitHubReviewUser>,
 }
@@ -2769,6 +3006,47 @@ fn latest_github_review_states(
         }
     }
     latest_by_reviewer
+}
+
+fn codex_review_state_for_head(
+    head_commit: Option<&str>,
+    issue_comments: &[GitHubIssueComment],
+    review_comments: &[GitHubPullRequestReviewComment],
+) -> (Option<String>, bool, bool, bool) {
+    let Some(head_commit) = head_commit.filter(|head| !head.is_empty()) else {
+        return (None, false, false, false);
+    };
+    let short_head = &head_commit[..head_commit.len().min(7)];
+    let completed = issue_comments.iter().any(|comment| {
+        comment
+            .user
+            .as_ref()
+            .and_then(|user| user.login.as_deref())
+            .is_some_and(|login| login == "chatgpt-codex-connector")
+            && comment
+                .body
+                .contains("<!-- codex-pull-request-review-summary -->")
+            && comment.body.contains("✅ **Completed**")
+            && comment.body.contains(&format!("`{short_head}"))
+    });
+    let findings = review_comments.iter().any(|comment| {
+        comment
+            .user
+            .as_ref()
+            .and_then(|user| user.login.as_deref())
+            .is_some_and(|login| login == "chatgpt-codex-connector")
+            && comment
+                .original_commit_id
+                .as_deref()
+                .or(comment.commit_id.as_deref())
+                == Some(head_commit)
+    });
+    (
+        (completed || findings).then(|| head_commit.to_owned()),
+        completed && !findings,
+        false,
+        findings,
+    )
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3598,6 +3876,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     repository_id: CanonicalRepositoryId::new(checkout.repository_id.clone())?,
                     checkout_handle: checkout.checkout_handle.clone(),
                     relative_path: checkout.relative_path.clone(),
+                    target_branch: checkout.target_branch.clone(),
                     target_commit: checkout.target_commit.clone(),
                     instruction_path: checkout.instruction.path.clone(),
                     instruction_hash: checkout.instruction.content_hash.clone(),
@@ -3663,8 +3942,25 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         _target: &ParentRepositoryTarget,
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
-    ) -> Result<Option<Option<String>>, Self::Error> {
-        self.manager
+    ) -> Result<Option<(String, Option<String>)>, Self::Error> {
+        let local_commit = self
+            .manager
+            .reconcile_parent_repair_branch(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                &repair.branch,
+                &repair.target_commit,
+            )
+            .await?
+            .0
+            .ok_or_else(|| {
+                CliWorkspaceError::RetryState(
+                    "repair branch is missing during push reconciliation".to_owned(),
+                )
+            })?;
+        let remote_commit = self
+            .manager
             .reconcile_parent_repair_push(
                 &issue_descriptor(parent),
                 &workspace.path,
@@ -3672,9 +3968,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 repair.repository_id.as_str(),
                 &repair.branch,
             )
-            .await
-            .map(Some)
-            .map_err(Into::into)
+            .await?;
+        Ok(Some((local_commit, remote_commit)))
     }
 
     async fn publish_parent_repair(
@@ -3704,11 +3999,12 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         _target: &ParentRepositoryTarget,
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
-    ) -> Result<Option<(String, String)>, Self::Error> {
+    ) -> Result<Option<(String, PathBuf, String)>, Self::Error> {
         let merge_result = repair.merge_result_commit.as_deref().ok_or_else(|| {
             CliWorkspaceError::RetryState("repair merge result is missing".to_owned())
         })?;
-        self.manager
+        let (commit, instruction_path, instruction_hash) = self
+            .manager
             .refresh_parent_repair_target(
                 &issue_descriptor(parent),
                 &workspace.path,
@@ -3716,9 +4012,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 repair.repository_id.as_str(),
                 merge_result,
             )
-            .await
-            .map(Some)
-            .map_err(Into::into)
+            .await?;
+        Ok(Some((commit, instruction_path, instruction_hash)))
     }
 
     async fn recover_retry_exhaustion(
@@ -4552,6 +4847,7 @@ impl RuntimeWorkerBackend {
         let issue = request.issue.clone();
         let memory_grant_registry_recovered = request.memory_grant_registry_recovered;
         let expected_parent_conversation_id = request.expected_parent_conversation_id.clone();
+        let parent_repair = request.parent_repair.clone();
         let mut runner_config = self.runner_config.clone();
         let mut worker_env = self.worker_env.clone();
         if let Some(memory) = runner_config.memory.as_mut() {
@@ -5540,9 +5836,17 @@ impl RuntimeWorkerBackend {
                     &parent_repository_instructions,
                 ));
             }
-            let continuation_prompt = parent_runtime_envelope
+            let continuation_prompt = parent_repair
                 .as_ref()
-                .map(compose_parent_continuation_prompt);
+                .zip(parent_runtime_envelope.as_ref())
+                .map(|(repair, envelope)| {
+                    compose_parent_repair_continuation_prompt(repair, envelope)
+                })
+                .or_else(|| {
+                    parent_runtime_envelope
+                        .as_ref()
+                        .map(compose_parent_continuation_prompt)
+                });
             runner = runner.with_terminal_prompt(terminal_prompt.clone());
             runner = runner.with_continuation_prompt(continuation_prompt.clone());
 
@@ -9003,6 +9307,7 @@ mod tests {
             command: "cargo test".to_owned(),
             command_hash: String::new(),
             root: "parent_root".to_owned(),
+            repair_repository_id: None,
         }
     }
 
@@ -12235,6 +12540,7 @@ mod tests {
                 route: codex_test_route(true),
                 memory_grant_registry_recovered: false,
                 expected_parent_conversation_id: None,
+                parent_repair: None,
             })
             .await
             .expect("dry-run worker should launch");
@@ -12396,6 +12702,7 @@ mod tests {
                 route: codex_test_route(true),
                 memory_grant_registry_recovered: false,
                 expected_parent_conversation_id: None,
+                parent_repair: None,
             })
             .await
             .expect("recovered dry-run worker should launch");
@@ -12656,6 +12963,7 @@ mod tests {
                 },
                 memory_grant_registry_recovered: false,
                 expected_parent_conversation_id: None,
+                parent_repair: None,
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");
@@ -13662,12 +13970,14 @@ Run the scheduler.
                 id: 22,
                 state: "changes_requested".to_owned(),
                 submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                commit_id: None,
                 user: reviewer.clone(),
             },
             GitHubPullRequestReview {
                 id: 21,
                 state: "approved".to_owned(),
                 submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                commit_id: None,
                 user: reviewer,
             },
         ]);
@@ -13679,6 +13989,37 @@ Run the scheduler.
                 "2026-08-14T15:00:00Z".to_owned(),
                 22,
             ))
+        );
+    }
+
+    #[test]
+    fn codex_review_requires_a_completed_clean_scan_for_the_current_head() {
+        let connector = Some(GitHubReviewUser {
+            login: Some("chatgpt-codex-connector".to_owned()),
+        });
+        let comments = vec![GitHubIssueComment {
+            body: "<!-- codex-pull-request-review-summary -->\n| ✅ **Completed** | `abcdef1` |"
+                .to_owned(),
+            created_at: "2026-09-12T22:14:35Z".to_owned(),
+            user: connector.clone(),
+        }];
+        assert_eq!(
+            codex_review_state_for_head(Some("abcdef123456"), &comments, &[]),
+            (Some("abcdef123456".to_owned()), true, false, false)
+        );
+
+        let findings = vec![GitHubPullRequestReviewComment {
+            commit_id: Some("abcdef123456".to_owned()),
+            original_commit_id: Some("abcdef123456".to_owned()),
+            user: connector,
+        }];
+        assert_eq!(
+            codex_review_state_for_head(Some("abcdef123456"), &comments, &findings),
+            (Some("abcdef123456".to_owned()), false, false, true)
+        );
+        assert_eq!(
+            codex_review_state_for_head(Some("different-head"), &comments, &findings),
+            (None, false, false, false)
         );
     }
 

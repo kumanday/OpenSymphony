@@ -722,6 +722,7 @@ impl DurableOrchestratorState {
                     || !repair_ids.insert(repair.id.as_str())
                     || !repair_numbers.insert(repair.number)
                     || repair.checkout_handle != target.checkout_handle
+                    || repair.target_branch != target.target_branch
                     || repair.instruction_path != target.instruction_path
                     || repair.policy != target.repair_policy
                 {

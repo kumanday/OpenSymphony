@@ -69,6 +69,13 @@ hash, review profile, review provider, review-policy generation, required-check
 and required-review flags, and merge method. Repository instructions guide the
 repair but cannot weaken that central policy. GitHub PR creation and merge use
 the review credential; branch fetch and push use the checkout credential.
+GitHub and Codex review profiles are supported for repair PRs. A Codex profile
+uses PR opening for its initial scan and the exact `@codex review` comment only
+after a requested-change repair produces a new head. The completed review
+summary and current-head inline findings determine the durable review result.
+Parent checkout maps written before these review fields existed are migrated
+from the current central repository profile before reuse and written back to
+both generation-bound copies.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before
