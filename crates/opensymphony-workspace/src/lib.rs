@@ -18,6 +18,6 @@ pub use models::{
     environment_variable_names_equal, redact_runtime_diagnostic,
 };
 pub use paths::{
-    checkout_workspace_key, resolve_path_within_root, sanitize_workspace_key,
+    checkout_workspace_key, parent_workspace_key, resolve_path_within_root, sanitize_workspace_key,
     workspace_path_for_root,
 };

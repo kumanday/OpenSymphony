@@ -10,7 +10,7 @@ use crate::opensymphony_workspace::{
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, ParentCheckoutRequest,
     ParentRuntimeDescriptor, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunManifest,
     RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
-    compose_parent_prompt, compose_terminal_prompt,
+    compose_parent_prompt, compose_terminal_prompt, parent_workspace_key,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -39,6 +39,22 @@ fn manager_config(
         hooks,
         cleanup,
     }
+}
+
+fn parent_generation_path(
+    manager: &WorkspaceManager,
+    parent: &IssueDescriptor,
+    generation: u64,
+) -> std::path::PathBuf {
+    manager
+        .config()
+        .root
+        .join("parents")
+        .join(
+            parent_workspace_key(&parent.identifier, &parent.issue_id)
+                .expect("parent workspace key should be valid"),
+        )
+        .join(generation.to_string())
 }
 
 fn git(path: &std::path::Path, args: &[&str]) -> String {
@@ -251,25 +267,40 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         &["commit", "-m", "retain child feature commit"],
     );
     #[cfg(unix)]
-    let credential_exfil_path = {
+    let (credential_exfil_path, worktree_hook_exfil_path) = {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = temp_dir.path().join("retained-hook-credential.txt");
-        let hook = child_a1
+        let credential_path = temp_dir.path().join("retained-hook-credential.txt");
+        let reference_hook = child_a1
             .handle
             .workspace_path()
             .join(".git/hooks/reference-transaction");
         std::fs::write(
-            &hook,
+            &reference_hook,
             format!(
                 "#!/bin/sh\nif [ -n \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ]; then printf '%s' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" > {}; fi\n",
-                shell_quote(&path)
+                shell_quote(&credential_path)
             ),
         )
         .expect("retained checkout hook should be written");
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&reference_hook, std::fs::Permissions::from_mode(0o755))
             .expect("retained checkout hook should be executable");
-        path
+        let worktree_path = temp_dir.path().join("retained-worktree-hook.txt");
+        let post_checkout_hook = child_a1
+            .handle
+            .workspace_path()
+            .join(".git/hooks/post-checkout");
+        std::fs::write(
+            &post_checkout_hook,
+            format!(
+                "#!/bin/sh\nprintf invoked > {}\n",
+                shell_quote(&worktree_path)
+            ),
+        )
+        .expect("retained post-checkout hook should be written");
+        std::fs::set_permissions(&post_checkout_hook, std::fs::Permissions::from_mode(0o755))
+            .expect("retained post-checkout hook should be executable");
+        (credential_path, worktree_path)
     };
     let child_a1_head = git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]);
     let merge_a2 = rebase_merge_fixture(&source_a);
@@ -404,13 +435,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     ));
     std::fs::remove_file(child_b.handle.workspace_path().join("dirty.txt"))
         .expect("dirty marker should be removed");
-    assert!(
-        !manager
-            .config()
-            .root
-            .join("parents/parent-COE-PARENT/5")
-            .exists()
-    );
+    assert!(!parent_generation_path(&manager, &parent, 5).exists());
 
     let expected_remote = git(
         child_c.handle.workspace_path(),
@@ -449,11 +474,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             if reason.contains("checkout-controlled Git transport configuration")
     ));
     assert!(
-        !manager
-            .config()
-            .root
-            .join("parents/parent-COE-PARENT/7")
-            .exists(),
+        !parent_generation_path(&manager, &parent, 7).exists(),
         "a rejected transport configuration must roll back the partial parent root"
     );
     #[cfg(unix)]
@@ -469,6 +490,24 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         child_a1.handle.workspace_path(),
         &["config", "--unset-all", "http.sslVerify"],
     );
+    git(
+        child_a1.handle.workspace_path(),
+        &[
+            "config",
+            "filter.opensymphony-test.process",
+            "unused-process-filter",
+        ],
+    );
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 7, requests.clone()).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("process-filter configuration")
+    ));
+    assert!(!parent_generation_path(&manager, &parent, 7).exists());
+    git(
+        child_a1.handle.workspace_path(),
+        &["config", "--unset-all", "filter.opensymphony-test.process"],
+    );
 
     let repeat_requests = requests.clone();
     let prepared = manager
@@ -480,6 +519,11 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     assert!(
         !credential_exfil_path.exists(),
         "authenticated parent fetches must not run retained-checkout hooks"
+    );
+    #[cfg(unix)]
+    assert!(
+        !worktree_hook_exfil_path.exists(),
+        "parent worktree creation must not run retained-checkout hooks"
     );
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
@@ -854,6 +898,41 @@ async fn parent_execution_root_supports_no_required_child_checkouts() {
 }
 
 #[tokio::test]
+async fn parent_execution_roots_keep_colliding_sanitized_identifiers_distinct() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let mut slash_parent = sample_issue("TEAM/A");
+    slash_parent.issue_id = "parent-one".to_owned();
+    let mut underscore_parent = sample_issue("TEAM_A");
+    underscore_parent.issue_id = "parent-two".to_owned();
+
+    let slash = manager
+        .prepare_parent_execution_root(&slash_parent, 1, Vec::new())
+        .await
+        .expect("slash parent should prepare");
+    let underscore = manager
+        .prepare_parent_execution_root(&underscore_parent, 1, Vec::new())
+        .await
+        .expect("underscore parent should prepare independently");
+
+    assert_ne!(
+        slash.handle.workspace_key(),
+        underscore.handle.workspace_key()
+    );
+    assert_ne!(
+        slash.handle.workspace_path(),
+        underscore.handle.workspace_path()
+    );
+    assert_eq!(slash.manifest.parent_issue_id, "parent-one");
+    assert_eq!(underscore.manifest.parent_issue_id, "parent-two");
+}
+
+#[tokio::test]
 async fn parent_execution_root_rolls_back_after_create_failure() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(
@@ -874,13 +953,32 @@ async fn parent_execution_root_rolls_back_after_create_failure() {
             .await,
         Err(WorkspaceError::HookFailed { .. })
     ));
-    assert!(
-        !manager
-            .config()
-            .root
-            .join("parents/parent-COE-FAILED-PARENT/1")
-            .exists()
-    );
+    assert!(!parent_generation_path(&manager, &parent, 1).exists());
+}
+
+#[tokio::test]
+async fn parent_execution_root_rolls_back_when_after_create_initializes_git() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell("git init -b parent-hook")),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let mut parent = sample_issue("COE-GIT-PARENT");
+    parent.issue_id = "git-parent-id".to_owned();
+
+    assert!(matches!(
+        manager
+            .prepare_parent_execution_root(&parent, 1, Vec::new())
+            .await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("root-level Git repository")
+    ));
+    assert!(!parent_generation_path(&manager, &parent, 1).exists());
 }
 
 #[cfg(unix)]
@@ -949,11 +1047,7 @@ async fn parent_preparation_times_out_stalled_integration_verification() {
         error.to_string().contains("timed out"),
         "unexpected integration timeout error: {error}"
     );
-    assert!(
-        !workspace_root
-            .join("parents/parent-COE-TIMEOUT-PARENT/1")
-            .exists()
-    );
+    assert!(!parent_generation_path(&manager, &parent, 1).exists());
 }
 
 #[cfg(unix)]

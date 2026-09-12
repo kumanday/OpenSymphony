@@ -42,8 +42,8 @@ use super::{
         redact_runtime_diagnostic,
     },
     paths::{
-        checkout_workspace_key, normalize_absolute_path, resolve_path_within_root,
-        sanitize_workspace_key,
+        checkout_workspace_key, normalize_absolute_path, parent_workspace_key,
+        resolve_path_within_root, sanitize_workspace_key,
     },
 };
 use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
@@ -286,7 +286,7 @@ impl WorkspaceManager {
                 "parent preparation requires a repository-neutral issue and a hierarchy generation",
             ));
         }
-        let workspace_key = format!("parent-{}", sanitize_workspace_key(&issue.identifier)?);
+        let workspace_key = parent_workspace_key(&issue.identifier, &issue.issue_id)?;
         let parent_relative = PathBuf::from("parents").join(&workspace_key);
         self.reject_symlinked_path_components(&self.config.root, &parent_relative)
             .await?;
@@ -318,6 +318,12 @@ impl WorkspaceManager {
                 Ok(Some(_)) => self.write_after_create_receipt(issue, &handle).await?,
                 Ok(None) => {}
                 Err(failure) => return Err(failure.error),
+            }
+            if path_exists(&handle.workspace_path().join(".git")).await? {
+                return Err(checkout_verification(
+                    handle.workspace_path(),
+                    "parent after_create hook created a root-level Git repository",
+                ));
             }
             self.bootstrap_workspace_layout(&handle).await?;
             self.create_managed_directory(&handle, &handle.workspace_path().join("evidence"))
@@ -484,8 +490,15 @@ impl WorkspaceManager {
             checkout_operation_with_timeout(
                 checkout_time_remaining(integration_deadline),
                 source_handle.workspace_path(),
+                "validate parent worktree process-filter configuration",
+                self.reject_checkout_controlled_process_filters(source_handle.workspace_path()),
+            )
+            .await?;
+            checkout_operation_with_timeout(
+                checkout_time_remaining(integration_deadline),
+                source_handle.workspace_path(),
                 "create parent integration worktree",
-                self.git(
+                self.git_with_isolated_hooks_and_global_config(
                     source_handle.workspace_path(),
                     &[
                         "worktree",
@@ -602,10 +615,7 @@ impl WorkspaceManager {
         self.reject_symlinked_path_components(
             &self.config.root,
             &PathBuf::from("parents")
-                .join(format!(
-                    "parent-{}",
-                    sanitize_workspace_key(&issue.identifier)?
-                ))
+                .join(parent_workspace_key(&issue.identifier, &issue.issue_id)?)
                 .join(hierarchy_generation.to_string()),
         )
         .await?;
@@ -617,7 +627,7 @@ impl WorkspaceManager {
         let handle = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
-            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            parent_workspace_key(&issue.identifier, &issue.issue_id)?,
             canonical_root,
         );
         let expected_root = self
@@ -716,7 +726,7 @@ impl WorkspaceManager {
         let handle = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
-            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            parent_workspace_key(&issue.identifier, &issue.issue_id)?,
             canonical_root,
         );
         let manifest = self
@@ -738,7 +748,7 @@ impl WorkspaceManager {
         let handle = WorkspaceHandle::new(
             issue.issue_id.clone(),
             issue.identifier.clone(),
-            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            parent_workspace_key(&issue.identifier, &issue.issue_id)?,
             canonical_root,
         );
         let manifest = self
@@ -1056,6 +1066,53 @@ impl WorkspaceManager {
         &self,
         checkout: &Path,
     ) -> Result<(), WorkspaceError> {
+        let names = self.checkout_controlled_config_names(checkout).await?;
+        if let Some(name) = names.iter().find(|name| {
+            let name = name.trim().to_ascii_lowercase();
+            name.starts_with("http.")
+                || name.starts_with("credential.")
+                || name == "core.gitproxy"
+                || name == "core.sshcommand"
+                || name == "ssh.variant"
+                || name.starts_with("protocol.")
+                || (name.starts_with("url.")
+                    && (name.ends_with(".insteadof") || name.ends_with(".pushinsteadof")))
+        }) {
+            return Err(checkout_verification(
+                checkout,
+                &format!(
+                    "checkout-controlled Git transport configuration `{}` is not allowed for authenticated parent fetches",
+                    name.trim()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn reject_checkout_controlled_process_filters(
+        &self,
+        checkout: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let names = self.checkout_controlled_config_names(checkout).await?;
+        if let Some(name) = names
+            .iter()
+            .find(|name| name.trim().to_ascii_lowercase().starts_with("filter."))
+        {
+            return Err(checkout_verification(
+                checkout,
+                &format!(
+                    "checkout-controlled Git process-filter configuration `{}` is not allowed for parent worktree creation",
+                    name.trim()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn checkout_controlled_config_names(
+        &self,
+        checkout: &Path,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let local_names = self
             .git(
                 checkout,
@@ -1085,10 +1142,9 @@ impl WorkspaceManager {
         } else {
             false
         };
-        let mut scopes = vec![("--local", local_names)];
+        let mut names = local_names.lines().map(str::to_owned).collect::<Vec<_>>();
         if worktree_config_enabled {
-            scopes.push((
-                "--worktree",
+            names.extend(
                 self.git(
                     checkout,
                     &[
@@ -1099,31 +1155,12 @@ impl WorkspaceManager {
                         "--list",
                     ],
                 )
-                .await?,
-            ));
+                .await?
+                .lines()
+                .map(str::to_owned),
+            );
         }
-        for (_, names) in scopes {
-            if let Some(name) = names.lines().find(|name| {
-                let name = name.trim().to_ascii_lowercase();
-                name.starts_with("http.")
-                    || name.starts_with("credential.")
-                    || name == "core.gitproxy"
-                    || name == "core.sshcommand"
-                    || name == "ssh.variant"
-                    || name.starts_with("protocol.")
-                    || (name.starts_with("url.")
-                        && (name.ends_with(".insteadof") || name.ends_with(".pushinsteadof")))
-            }) {
-                return Err(checkout_verification(
-                    checkout,
-                    &format!(
-                        "checkout-controlled Git transport configuration `{}` is not allowed for authenticated parent fetches",
-                        name.trim()
-                    ),
-                ));
-            }
-        }
-        Ok(())
+        Ok(names)
     }
 
     async fn run_authenticated_git(
@@ -1240,7 +1277,7 @@ impl WorkspaceManager {
         configure_process_group(&mut command);
         command.kill_on_drop(true);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(source) => {
                 if let Some(path) = askpass_path.as_ref() {
@@ -1256,34 +1293,83 @@ impl WorkspaceManager {
         let process_id = child.id();
         #[cfg(unix)]
         let mut process_group_guard = ProcessGroupGuard::new(process_id);
-        let output = timeout(
-            RETAINED_CHECKOUT_VERIFICATION_TIMEOUT,
-            child.wait_with_output(),
-        )
-        .await;
-        if let Some(path) = askpass_path.as_ref() {
-            let _ = fs::remove_file(path).await;
-        }
-        let output = output
-            .map_err(|_| WorkspaceError::CheckoutOperation {
-                operation: args.first().copied().unwrap_or("git").to_owned(),
-                path: checkout.to_path_buf(),
-                detail: format!(
-                    "operation timed out after {:?}",
-                    RETAINED_CHECKOUT_VERIFICATION_TIMEOUT
-                ),
-            })?
-            .map_err(|source| WorkspaceError::CheckoutOperation {
+        let stdout_task = tokio::spawn(read_child_pipe(child.stdout.take()));
+        let stderr_task = tokio::spawn(read_child_pipe(child.stderr.take()));
+        let status = match timeout(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(source)) => {
+                let terminate = terminate_process_tree(&mut child, process_id).await;
+                let _ = child.wait().await;
+                #[cfg(unix)]
+                process_group_guard.disarm();
+                let _ = join_child_pipe(stdout_task).await;
+                let _ = join_child_pipe(stderr_task).await;
+                if let Some(path) = askpass_path.as_ref() {
+                    let _ = fs::remove_file(path).await;
+                }
+                if let Err(error) = terminate {
+                    return Err(WorkspaceError::CheckoutOperation {
+                        operation: "terminate authenticated Git process tree".to_owned(),
+                        path: checkout.to_path_buf(),
+                        detail: error.to_string(),
+                    });
+                }
+                return Err(WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                });
+            }
+            Err(_) => {
+                let terminate = terminate_process_tree(&mut child, process_id).await;
+                let _ = child.wait().await;
+                #[cfg(unix)]
+                process_group_guard.disarm();
+                let _ = join_child_pipe(stdout_task).await;
+                let _ = join_child_pipe(stderr_task).await;
+                if let Some(path) = askpass_path.as_ref() {
+                    let _ = fs::remove_file(path).await;
+                }
+                if let Err(error) = terminate {
+                    return Err(WorkspaceError::CheckoutOperation {
+                        operation: "terminate authenticated Git process tree".to_owned(),
+                        path: checkout.to_path_buf(),
+                        detail: error.to_string(),
+                    });
+                }
+                return Err(WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: format!(
+                        "operation timed out after {:?}",
+                        RETAINED_CHECKOUT_VERIFICATION_TIMEOUT
+                    ),
+                });
+            }
+        };
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        let _stdout = join_child_pipe(stdout_task).await.map_err(|source| {
+            WorkspaceError::CheckoutOperation {
                 operation: args.first().copied().unwrap_or("git").to_owned(),
                 path: checkout.to_path_buf(),
                 detail: source.to_string(),
-            })?;
-        #[cfg(unix)]
-        process_group_guard.disarm();
-        if output.status.success() {
+            }
+        })?;
+        let stderr = join_child_pipe(stderr_task).await.map_err(|source| {
+            WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            }
+        })?;
+        if let Some(path) = askpass_path.as_ref() {
+            let _ = fs::remove_file(path).await;
+        }
+        if status.success() {
             return Ok(());
         }
-        let mut detail = redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr));
+        let mut detail = redact_runtime_diagnostic(&String::from_utf8_lossy(&stderr));
         if let Some(value) = environment_credential_value.as_deref() {
             detail = detail.replace(value, "<redacted>");
         }
@@ -3497,6 +3583,75 @@ impl WorkspaceManager {
             }
         }
         Ok(())
+    }
+
+    async fn git_with_isolated_hooks_and_global_config(
+        &self,
+        checkout: &Path,
+        args: &[&str],
+    ) -> Result<String, WorkspaceError> {
+        let isolated_config = tempfile::Builder::new()
+            .prefix("opensymphony-isolated-git-")
+            .tempdir()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "isolate Git worktree creation".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let mut hooks_config = OsString::from("core.hooksPath=");
+        hooks_config.push(isolated_config.path());
+        let mut command = Command::new("git");
+        command
+            .arg("-c")
+            .arg(hooks_config)
+            .arg("-C")
+            .arg(checkout)
+            .args(args);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        sanitize_git_environment(&mut command);
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                isolated_config.path().join("global.gitconfig"),
+            )
+            .env("GIT_NO_REPLACE_OBJECTS", "1");
+        configure_process_group(&mut command);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let process_id = child.id();
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(process_id);
+        let output =
+            child
+                .wait_with_output()
+                .await
+                .map_err(|source| WorkspaceError::CheckoutOperation {
+                    operation: args.first().copied().unwrap_or("git").to_owned(),
+                    path: checkout.to_path_buf(),
+                    detail: source.to_string(),
+                })?;
+        #[cfg(unix)]
+        process_group_guard.disarm();
+        if !output.status.success() {
+            return Err(WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr)),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
     async fn git(&self, checkout: &Path, args: &[&str]) -> Result<String, WorkspaceError> {

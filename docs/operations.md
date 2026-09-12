@@ -720,11 +720,15 @@ longer matches policy, or a contained worktree fails its shared-storage and
 path checks. Parent preparation also rejects retained-checkout local/worktree
 HTTP, credential, transport, SSH-command, protocol, and URL-rewrite settings
 before an authenticated fetch; remove or reconcile those settings before
-retrying. Do not repair generated parent files or substitute a filesystem path
-for the recorded opaque handle; reconcile the hierarchy/lease evidence or
-retained checkout and rematerialize the generation. A configured
+retrying. Checkout-controlled process filters are rejected before integration
+worktree creation, while retained hooks and host-level Git configuration are
+disabled for that operation. Do not repair generated parent files or substitute
+a filesystem path for the recorded opaque handle; reconcile the hierarchy/lease
+evidence or retained checkout and rematerialize the generation. A configured
 `after_create` hook is required for parent roots too; its failure rolls back the
-incomplete root, and reuse requires its completion receipt.
+incomplete root, a hook-created root-level Git repository also fails and rolls
+back, and reuse requires the hook completion receipt. Parent paths include a
+stable issue-identity digest after the sanitized identifier.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before

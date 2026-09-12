@@ -4161,37 +4161,7 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let (parent_runtime_envelope, parent_integration_instructions) = if let Some(parent) =
-                parent_execution.as_ref()
-            {
-                let integration_content = match integration_instructions.as_ref() {
-                    Some(instructions) => match fs::read(&instructions.path).await {
-                        Ok(content) => {
-                            let mut hasher = Sha256::new();
-                            hasher.update(&content);
-                            let actual = format!("sha256:{:x}", hasher.finalize());
-                            if actual != instructions.content_hash {
-                                report_launch_failure(
-                                        &mut launch_tx,
-                                        "project-set integration instructions changed after configuration was resolved"
-                                            .to_owned(),
-                                    );
-                                return;
-                            }
-                            Some(String::from_utf8_lossy(&content).into_owned())
-                        }
-                        Err(error) => {
-                            report_launch_failure(
-                                &mut launch_tx,
-                                format!(
-                                    "failed to read project-set integration instructions: {error}"
-                                ),
-                            );
-                            return;
-                        }
-                    },
-                    None => None,
-                };
+            let parent_runtime_envelope = if let Some(parent) = parent_execution.as_ref() {
                 let mut envelope = workspace_manager.parent_runtime_envelope(
                     parent,
                     ParentRuntimeDescriptor {
@@ -4235,9 +4205,9 @@ impl RuntimeWorkerBackend {
                     );
                     return;
                 }
-                (Some(envelope), integration_content)
+                Some(envelope)
             } else {
-                (None, None)
+                None
             };
             let mut memory_grant_requires_fresh_conversation = false;
             let worker_memory_env = memory_env
@@ -4377,7 +4347,7 @@ impl RuntimeWorkerBackend {
             };
             let central_procedure =
                 || workflow.render_prompt(&issue, run.attempt.map(|attempt| attempt.get()));
-            let terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
+            let mut terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
                 let central_procedure = match central_procedure() {
                     Ok(prompt) => prompt,
                     Err(error) => {
@@ -4420,38 +4390,9 @@ impl RuntimeWorkerBackend {
                         checkout.effective_containment
                     ),
                 ))
-            } else if let Some(parent_envelope) = parent_runtime_envelope.as_ref() {
-                let central_procedure = match central_procedure() {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        report_launch_failure(
-                            &mut launch_tx,
-                            format!("failed to render workflow prompt: {error}"),
-                        );
-                        return;
-                    }
-                };
-                Some(compose_parent_prompt(
-                    &central_procedure,
-                    &format!(
-                        "Issue: {}\nTitle: {}\nAttempt: {}\nAcceptance and task description:\n{}",
-                        issue.identifier,
-                        issue.title,
-                        attempt,
-                        issue
-                            .description
-                            .as_deref()
-                            .filter(|description| !description.trim().is_empty())
-                            .unwrap_or("No tracker description provided."),
-                    ),
-                    parent_envelope,
-                    parent_integration_instructions.as_deref(),
-                    &parent_repository_instructions,
-                ))
             } else {
                 None
             };
-            runner = runner.with_terminal_prompt(terminal_prompt.clone());
             let run_descriptor = RunDescriptor::new(run_id, attempt)
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
@@ -4678,7 +4619,48 @@ impl RuntimeWorkerBackend {
                     );
                     return;
                 }
+                let parent_integration_instructions =
+                    match read_verified_integration_instructions(integration_instructions.as_ref())
+                        .await
+                    {
+                        Ok(instructions) => instructions,
+                        Err(error) => {
+                            report_launch_failure(&mut launch_tx, error);
+                            return;
+                        }
+                    };
+                let central_procedure = match central_procedure() {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to render workflow prompt: {error}"),
+                        );
+                        return;
+                    }
+                };
+                let parent_envelope = parent_runtime_envelope
+                    .as_ref()
+                    .expect("parent execution always creates a runtime envelope");
+                terminal_prompt = Some(compose_parent_prompt(
+                    &central_procedure,
+                    &format!(
+                        "Issue: {}\nTitle: {}\nAttempt: {}\nAcceptance and task description:\n{}",
+                        issue.identifier,
+                        issue.title,
+                        attempt,
+                        issue
+                            .description
+                            .as_deref()
+                            .filter(|description| !description.trim().is_empty())
+                            .unwrap_or("No tracker description provided."),
+                    ),
+                    parent_envelope,
+                    parent_integration_instructions.as_deref(),
+                    &parent_repository_instructions,
+                ));
             }
+            runner = runner.with_terminal_prompt(terminal_prompt.clone());
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
@@ -7489,6 +7471,28 @@ fn report_launch_failure(
     }
 }
 
+async fn read_verified_integration_instructions(
+    instructions: Option<&ResolvedIntegrationInstructions>,
+) -> Result<Option<String>, String> {
+    let Some(instructions) = instructions else {
+        return Ok(None);
+    };
+    let content = fs::read(&instructions.path).await.map_err(|error| {
+        format!(
+            "failed to read project-set integration instructions before harness attach: {error}"
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    let actual = format!("sha256:{:x}", hasher.finalize());
+    if actual != instructions.content_hash {
+        return Err(
+            "project-set integration instructions changed before harness attach".to_owned(),
+        );
+    }
+    Ok(Some(String::from_utf8_lossy(&content).into_owned()))
+}
+
 fn pending_launch_failure_detail(result: &Result<IssueSessionResult, IssueSessionError>) -> String {
     match result {
         Ok(result) => {
@@ -7876,6 +7880,37 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[tokio::test]
+    async fn integration_instructions_are_revalidated_from_current_bytes_before_attach() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let path = tempdir.path().join("integration.md");
+        fs::write(&path, "verified integration instructions\n")
+            .expect("integration instructions should be written");
+        let mut hasher = Sha256::new();
+        hasher.update(fs::read(&path).expect("instruction bytes should be readable"));
+        let instructions = ResolvedIntegrationInstructions {
+            path: path.clone(),
+            content_hash: format!("sha256:{:x}", hasher.finalize()),
+        };
+
+        assert_eq!(
+            read_verified_integration_instructions(Some(&instructions))
+                .await
+                .expect("current instruction bytes should verify")
+                .as_deref(),
+            Some("verified integration instructions\n")
+        );
+
+        fs::write(&path, "changed by before_run\n")
+            .expect("integration instructions should be changed");
+        assert!(
+            read_verified_integration_instructions(Some(&instructions))
+                .await
+                .expect_err("post-hook instruction drift must fail before attach")
+                .contains("changed before harness attach")
+        );
+    }
 
     #[test]
     fn cleared_superseded_harness_evidence_is_an_empty_sentinel() {

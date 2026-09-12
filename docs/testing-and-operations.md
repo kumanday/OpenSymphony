@@ -511,12 +511,18 @@ and rejection of stale generations, missing ancestor leases, ambiguous merge
 evidence, dirty children, wrong remotes, arbitrary handles, changed root
 requests, runtime-map target repinning, and symlink escapes. It also proves
 checkout-local HTTP transport configuration is rejected before credential
-exposure, parent `after_create` receipt/reuse/failure behavior, and uses a
-blocking integration-only Git fsmonitor hook under paused time to prove the
-complete integration verification path times out and rolls back. Focused
+exposure, checkout-controlled process filters are rejected, retained
+`post-checkout` hooks do not run during worktree creation, colliding sanitized
+parent identifiers remain distinct, and `after_create` cannot turn a parent root
+into a Git repository. It also covers parent `after_create` receipt/reuse/failure
+behavior and uses a blocking integration-only Git fsmonitor hook under paused
+time to prove the complete integration verification path times out and rolls
+back. Focused
 OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope
 while preserving truthful `trusted_host` containment and omitting a leaf runtime
 envelope.
+The parent launch tests re-read project-set integration instructions after the
+lifecycle hook boundary and reject changed bytes before harness attachment.
 
 ### Scenario B: conversation reuse
 

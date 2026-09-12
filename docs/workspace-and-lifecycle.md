@@ -127,7 +127,7 @@ changed edges, so rejecting a stale replan cannot discard reparented evidence.
 A frozen parent hierarchy uses a separate non-Git root:
 
 ```text
-<workspace.root>/parents/parent-<sanitized-identifier>/<hierarchy-generation>/
+<workspace.root>/parents/parent-<sanitized-identifier>-<identity-digest>/<hierarchy-generation>/
   parent-manifest.json
   child-checkouts.json
   integration-plan.md
@@ -155,8 +155,11 @@ checks against the pinned target.
 Parent roots follow the same `after_create` contract as leaf workspaces. A new
 empty root runs the configured hook before metadata bootstrap, writes the
 root-scoped completion receipt, and publishes repository artifacts only after
-the hook succeeds. Hook failure removes the incomplete generation. Reuse
-requires the matching receipt and does not rerun the hook.
+the hook succeeds. The manager rechecks that the hook did not initialize a
+root-level Git repository before publication. Hook failure or invariant drift
+removes the incomplete generation. Reuse requires the matching receipt and does
+not rerun the hook. Parent workspace keys include an issue-identity digest so
+identifiers that sanitize to the same display value remain distinct.
 
 Parent preparation verifies retained child identity and cleanliness without
 moving a child branch or HEAD. It can accept a recorded shallow generation,
@@ -173,7 +176,11 @@ checkout-local and worktree HTTP, credential, transport, SSH-command, protocol,
 and URL-rewrite settings before exposing the configured secret, disable
 repository-local credential helpers, and route Git hooks to a fresh empty
 directory. Git receives credentials only through the orchestrator-owned askpass
-process. The new worktree must
+process. Timed-out authenticated Git process trees are terminated and awaited
+before askpass state is removed on every supported platform. Integration
+worktree creation uses an empty hooks directory and isolated system/global Git
+configuration, and rejects retained-checkout process-filter configuration. The
+new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both the provider identity and locator fingerprints for fetch and push
 remotes, be clean, and point at the recorded target commit. Several children in
@@ -190,7 +197,9 @@ the pinned repository instructions so any path that creates a fresh conversation
 has a complete prompt; reused conversations consume continuation guidance. The
 runtime revalidates the parent root, envelope, and instructions after the
 `before_run` hook and before harness attachment. `WORKFLOW.md` instruction hashes
-and prompt content both exclude its front matter.
+and prompt content both exclude its front matter. Project-set integration
+instructions are also re-read and hash-checked after `before_run`; the parent
+prompt is composed only from those final verified bytes.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful
