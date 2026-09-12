@@ -156,8 +156,9 @@ retry. Credentialed fetches disable repository-local credential helpers before
 exposing the configured secret to Git's orchestrator-owned askpass process. The
 new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
-match both fetch and push remote fingerprints, be clean, and point at the
-recorded target commit. Several children in one repository share one handle;
+match both the provider identity and locator fingerprints for fetch and push
+remotes, be clean, and point at the recorded target commit. Several children in
+one repository share one handle;
 the target must contain every provider merge-result commit, while replaced
 feature commits from squash or rebase are not required.
 
@@ -165,10 +166,11 @@ The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
 target remains an ancestor of the current integration HEAD, preserving
 parent-owned committed and uncommitted work. Repository instruction bytes share
-one aggregate size budget across the entire parent prompt. Fresh conversations
-always reload the pinned repository instructions; reused conversations rely on
-their existing full prompt. The runtime revalidates the parent root and envelope
-after the `before_run` hook and before harness attachment.
+one aggregate size budget across the entire parent prompt. Every launch reloads
+the pinned repository instructions so any path that creates a fresh conversation
+has a complete prompt; reused conversations consume continuation guidance. The
+runtime revalidates the parent root, envelope, and instructions after the
+`before_run` hook and before harness attachment.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

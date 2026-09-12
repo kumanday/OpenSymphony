@@ -1214,30 +1214,62 @@ impl WorkspaceManager {
             &repository.remote,
         )
         .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
-        for args in [
-            ["remote", "get-url", "--all", "origin"].as_slice(),
-            ["remote", "get-url", "--all", "--push", "origin"].as_slice(),
+        let expected_locator = SafeRemoteFingerprint::from_remote(
+            &repository.provider,
+            None,
+            &repository.remote_locator,
+        )
+        .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
+        for (kind, args) in [
+            ("fetch", ["remote", "get-url", "--all", "origin"].as_slice()),
+            (
+                "push",
+                ["remote", "get-url", "--all", "--push", "origin"].as_slice(),
+            ),
         ] {
-            let remotes = self.git(&integration, args).await?;
-            if remotes.lines().all(|remote| remote.trim().is_empty()) {
-                return Err(checkout_verification(
+            let remotes = self.git(&integration, args).await.map_err(|_| {
+                checkout_verification(
                     &integration,
-                    "origin remote is unavailable",
-                ));
-            }
-            for remote in remotes.lines() {
+                    &format!("origin {kind} remote is unavailable"),
+                )
+            })?;
+            let mut found = false;
+            for remote in remotes
+                .lines()
+                .map(str::trim)
+                .filter(|remote| !remote.is_empty())
+            {
+                found = true;
+                if remote_contains_credentials(remote) {
+                    return Err(checkout_verification(
+                        &integration,
+                        "observed remote contains credentials",
+                    ));
+                }
                 let actual = SafeRemoteFingerprint::from_remote(
                     &repository.provider,
                     repository.provider_id.as_deref(),
                     remote,
                 )
                 .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
-                if actual != expected || actual.as_str() != record.safe_remote_fingerprint {
+                let actual_locator =
+                    SafeRemoteFingerprint::from_remote(&repository.provider, None, remote)
+                        .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
+                if actual != expected
+                    || actual.as_str() != record.safe_remote_fingerprint
+                    || actual_locator != expected_locator
+                {
                     return Err(checkout_verification(
                         &integration,
                         "origin remote fingerprint mismatch",
                     ));
                 }
+            }
+            if !found {
+                return Err(checkout_verification(
+                    &integration,
+                    &format!("origin {kind} remote is unavailable"),
+                ));
             }
         }
         if !allow_worker_changes {

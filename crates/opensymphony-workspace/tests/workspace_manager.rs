@@ -57,6 +57,11 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn configure_git_identity(path: &std::path::Path) {
+    git(path, &["config", "user.email", "test@example.invalid"]);
+    git(path, &["config", "user.name", "OpenSymphony Test"]);
+}
+
 #[test]
 fn terminal_prompt_keeps_repository_instructions_in_one_section() {
     let prompt = compose_terminal_prompt(
@@ -193,9 +198,17 @@ fn rebase_merge_fixture(source: &std::path::Path) -> String {
 #[tokio::test]
 async fn parent_execution_root_reuses_three_repositories_and_preserves_children() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
-    let (source_a, binding_a, repository_a) = repository_fixture(temp_dir.path(), "repository-a");
+    let (source_a, mut binding_a, mut repository_a) =
+        repository_fixture(temp_dir.path(), "repository-a");
     let (source_b, binding_b, repository_b) = repository_fixture(temp_dir.path(), "repository-b");
     let (source_c, binding_c, repository_c) = repository_fixture(temp_dir.path(), "repository-c");
+    repository_a.provider_id = Some("repository-a-native-id".to_owned());
+    binding_a.repository.safe_remote_fingerprint = SafeRemoteFingerprint::from_remote(
+        &repository_a.provider,
+        repository_a.provider_id.as_deref(),
+        &repository_a.remote,
+    )
+    .expect("native repository fingerprint should be valid");
     let merge_a1 = squash_merge_fixture(&source_a);
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
@@ -215,6 +228,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .ensure(&child_a1)
         .await
         .expect("first repository-a child should exist");
+    configure_git_identity(child_a1.handle.workspace_path());
     std::fs::write(
         child_a1.handle.workspace_path().join("child-a1-work.txt"),
         "retained child feature commit\n",
@@ -237,6 +251,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .ensure(&child_a2)
         .await
         .expect("second repository-a child should exist");
+    configure_git_identity(child_a2.handle.workspace_path());
     let mut child_b = sample_issue("COE-B");
     child_b.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding_b.clone()));
     let child_b = manager
@@ -517,6 +532,38 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .handle
         .workspace_path()
         .join(&repository_a.relative_path);
+    git(
+        &integration,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    git(
+        &integration,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.pushurl",
+            source_b.to_str().expect("wrong push remote path"),
+        ],
+    );
+    let remote_drift_error = manager
+        .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+        .await
+        .expect_err("a worktree-specific wrong push remote must invalidate the parent root");
+    assert!(
+        remote_drift_error
+            .to_string()
+            .contains("remote fingerprint"),
+        "unexpected integration remote error: {remote_drift_error}"
+    );
+    git(
+        &integration,
+        &[
+            "config",
+            "--worktree",
+            "--unset-all",
+            "remote.origin.pushurl",
+        ],
+    );
     std::fs::write(
         integration.join("parent-change.txt"),
         "preserve across retry\n",

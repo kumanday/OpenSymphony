@@ -4358,9 +4358,7 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref()
-                && persisted_conversation_binding.is_none()
-            {
+            let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref() {
                 match workspace_manager
                     .parent_repository_instructions(parent)
                     .await
@@ -4658,30 +4656,27 @@ impl RuntimeWorkerBackend {
                     );
                     return;
                 }
-                if persisted_conversation_binding.is_none() {
-                    let final_instructions = match workspace_manager
-                        .parent_repository_instructions(&verified_parent)
-                        .await
-                    {
-                        Ok(instructions) => instructions,
-                        Err(error) => {
-                            report_launch_failure(
-                                &mut launch_tx,
-                                format!(
-                                    "parent repository instructions changed before harness attach: {error}"
-                                ),
-                            );
-                            return;
-                        }
-                    };
-                    if parent_repository_instructions != final_instructions {
+                let final_instructions = match workspace_manager
+                    .parent_repository_instructions(&verified_parent)
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
                         report_launch_failure(
                             &mut launch_tx,
-                            "parent repository instructions changed before harness attach"
-                                .to_owned(),
+                            format!(
+                                "parent repository instructions changed before harness attach: {error}"
+                            ),
                         );
                         return;
                     }
+                };
+                if parent_repository_instructions != final_instructions {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        "parent repository instructions changed before harness attach".to_owned(),
+                    );
+                    return;
                 }
             }
 
