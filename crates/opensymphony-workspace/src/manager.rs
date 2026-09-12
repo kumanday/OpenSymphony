@@ -293,6 +293,9 @@ impl WorkspaceManager {
         let parent_base = resolve_path_within_root(&self.config.root, &parent_relative)?;
         self.create_directory(&parent_base).await?;
         let root = parent_base.join(hierarchy_generation.to_string());
+        let parent_pin_path = self
+            .parent_child_checkout_pin_path(&workspace_key, hierarchy_generation)
+            .await?;
         self.reject_symlinked_workspace_root(&root).await?;
         if path_exists(&root).await? {
             let parent = self
@@ -311,6 +314,11 @@ impl WorkspaceManager {
                 workspace_key,
                 root,
             );
+            match self.execute_hook(HookKind::AfterCreate, &handle).await {
+                Ok(Some(_)) => self.write_after_create_receipt(issue, &handle).await?,
+                Ok(None) => {}
+                Err(failure) => return Err(failure.error),
+            }
             self.bootstrap_workspace_layout(&handle).await?;
             self.create_managed_directory(&handle, &handle.workspace_path().join("evidence"))
                 .await?;
@@ -468,11 +476,13 @@ impl WorkspaceManager {
             let checkout_handle = parent_checkout_handle(&repository_id, hierarchy_generation);
             let relative_path = PathBuf::from("repositories").join(&checkout_handle);
             let integration_path = handle.workspace_path().join(&relative_path);
+            let integration_deadline =
+                checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
             let integration_path_text = integration_path.to_str().ok_or_else(|| {
                 checkout_verification(&integration_path, "integration checkout path is not UTF-8")
             })?;
             checkout_operation_with_timeout(
-                Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+                checkout_time_remaining(integration_deadline),
                 source_handle.workspace_path(),
                 "create parent integration worktree",
                 self.git(
@@ -487,9 +497,13 @@ impl WorkspaceManager {
                 ),
             )
             .await?;
-            let instruction = self
-                .load_instruction_provenance(&integration_path, repository, &target_commit)
-                .await?;
+            let instruction = checkout_operation_with_timeout(
+                checkout_time_remaining(integration_deadline),
+                &integration_path,
+                "load parent integration instructions",
+                self.load_instruction_provenance(&integration_path, repository, &target_commit),
+            )
+            .await?;
             let record = ParentIntegrationCheckout {
                 checkout_handle: checkout_handle.clone(),
                 repository_id: repository_id.clone(),
@@ -502,8 +516,13 @@ impl WorkspaceManager {
                 required_merge_commits: required_merge_commits.into_iter().collect(),
                 instruction,
             };
-            self.verify_parent_integration_checkout(&handle, &record, &source_handle, false)
-                .await?;
+            checkout_operation_with_timeout(
+                checkout_time_remaining(integration_deadline),
+                &integration_path,
+                "verify parent integration worktree",
+                self.verify_parent_integration_checkout(&handle, &record, &source_handle, false),
+            )
+            .await?;
                 repositories.insert(repository_id, record);
             }
 
@@ -532,6 +551,11 @@ impl WorkspaceManager {
             &child_checkout_map,
         )
             .await?;
+            self.write_parent_child_checkout_pin(
+                &parent_pin_path,
+                &child_checkout_map,
+            )
+            .await?;
             self.write_bytes_artifact_atomically(
             &handle,
             &handle.workspace_path().join("integration-plan.md"),
@@ -552,6 +576,8 @@ impl WorkspaceManager {
         .await;
         if result.is_err() {
             self.rollback_parent_preparation(&root).await;
+            self.remove_parent_child_checkout_pin(&parent_pin_path)
+                .await;
         }
         result
     }
@@ -618,6 +644,15 @@ impl WorkspaceManager {
             .ok_or_else(|| {
                 checkout_verification(handle.workspace_path(), "child checkout map is missing")
             })?;
+        let pinned_child_checkout_map = self
+            .load_parent_child_checkout_pin(handle.workspace_key(), hierarchy_generation)
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(
+                    handle.workspace_path(),
+                    "orchestrator-owned parent checkout pin is missing",
+                )
+            })?;
         if manifest.schema_version != 1
             || manifest.parent_issue_id != issue.issue_id
             || manifest.parent_identifier != issue.identifier
@@ -629,6 +664,7 @@ impl WorkspaceManager {
             || manifest.repositories_directory != Path::new("repositories")
             || child_checkout_map.schema_version != 1
             || child_checkout_map.hierarchy_generation != hierarchy_generation
+            || child_checkout_map != pinned_child_checkout_map
             || path_exists(&handle.workspace_path().join(".git")).await?
         {
             return Err(checkout_verification(
@@ -636,10 +672,32 @@ impl WorkspaceManager {
                 "parent execution root identity is inconsistent",
             ));
         }
+        if self.config.hooks.after_create.is_some()
+            && !matches!(
+                self.inspect_after_create_receipt_state(issue, &handle)
+                    .await?,
+                ExistingReceiptState::Owned
+            )
+        {
+            return Err(checkout_verification(
+                handle.workspace_path(),
+                "parent after_create hook completion receipt is missing or invalid",
+            ));
+        }
         for record in child_checkout_map.repositories.values() {
             let source = self.validate_parent_retained_checkouts(record).await?;
-            self.verify_parent_integration_checkout(&handle, record, &source, allow_worker_changes)
-                .await?;
+            checkout_operation_with_timeout(
+                Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+                handle.workspace_path(),
+                "verify retained parent integration worktree",
+                self.verify_parent_integration_checkout(
+                    &handle,
+                    record,
+                    &source,
+                    allow_worker_changes,
+                ),
+            )
+            .await?;
         }
         Ok(ParentExecutionRoot {
             handle,
@@ -715,8 +773,13 @@ impl WorkspaceManager {
                 )
             })?;
         let source = self.validate_parent_retained_checkouts(record).await?;
-        self.verify_parent_integration_checkout(&parent.handle, record, &source, true)
-            .await?;
+        checkout_operation_with_timeout(
+            Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+            parent.handle.workspace_path(),
+            "verify resolved parent integration worktree",
+            self.verify_parent_integration_checkout(&parent.handle, record, &source, true),
+        )
+        .await?;
         Ok(parent.handle.workspace_path().join(&record.relative_path))
     }
 
@@ -1208,6 +1271,27 @@ impl WorkspaceManager {
             ));
         }
         let head = self.git(&integration, &["rev-parse", "HEAD"]).await?;
+        for required in &record.required_merge_commits {
+            if !self
+                .git_is_ancestor(
+                    &integration,
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        required,
+                        &record.target_commit,
+                    ],
+                )
+                .await?
+            {
+                return Err(checkout_verification(
+                    &integration,
+                    &format!(
+                        "provider merge result {required} is not reachable from the pinned target commit"
+                    ),
+                ));
+            }
+        }
         if (!allow_worker_changes && head != record.target_commit)
             || (allow_worker_changes
                 && !self
@@ -1324,9 +1408,9 @@ impl WorkspaceManager {
         &self,
         record: &ParentIntegrationCheckout,
     ) -> Result<WorkspaceHandle, WorkspaceError> {
-        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
         let mut source = None;
         for retained in &record.retained_checkouts {
+            let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
             let child = self
                 .find_retained_checkout(
                     &record.repository_id,
@@ -4246,6 +4330,54 @@ impl WorkspaceManager {
 
     fn orchestrator_state_path(&self, canonical_root: &Path) -> PathBuf {
         canonical_root.join(".opensymphony-orchestrator-state.json")
+    }
+
+    async fn parent_child_checkout_pin_path(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        Ok(canonical_root
+            .join(".opensymphony-parent-pins")
+            .join(workspace_key)
+            .join(format!("{hierarchy_generation}.json")))
+    }
+
+    async fn write_parent_child_checkout_pin(
+        &self,
+        path: &Path,
+        map: &ParentChildCheckoutMap,
+    ) -> Result<(), WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root);
+        self.write_json_artifact_atomically(&handle, path, map)
+            .await
+    }
+
+    async fn load_parent_child_checkout_pin(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+    ) -> Result<Option<ParentChildCheckoutMap>, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root);
+        let path = self
+            .parent_child_checkout_pin_path(workspace_key, hierarchy_generation)
+            .await?;
+        self.load_manifest(&handle, &path).await
+    }
+
+    async fn remove_parent_child_checkout_pin(&self, path: &Path) {
+        if let Err(error) = fs::remove_file(path).await
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to remove incomplete parent checkout pin"
+            );
+        }
     }
 
     pub async fn load_conversation_manifest(

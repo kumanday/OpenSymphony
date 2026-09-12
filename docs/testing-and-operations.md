@@ -509,7 +509,10 @@ root, one shared-object worktree per canonical repository, exact target and
 provider merge-result reachability, unchanged child HEAD/status/manifest bytes,
 and rejection of stale generations, missing ancestor leases, ambiguous merge
 evidence, dirty children, wrong remotes, arbitrary handles, changed root
-requests, and symlink escapes. Focused OpenHands and Codex tests bind the same
+requests, runtime-map target repinning, and symlink escapes. It also proves
+parent `after_create` receipt/reuse/failure behavior and uses a blocking
+integration-only Git fsmonitor hook under paused time to prove the complete
+integration verification path times out and rolls back. Focused OpenHands and Codex tests bind the same
 logical `parent_multi_checkout` envelope while preserving truthful
 `trusted_host` containment and omitting a leaf runtime envelope.
 

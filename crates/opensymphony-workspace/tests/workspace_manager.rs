@@ -632,6 +632,37 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     std::fs::remove_file(integration.join("parent-change.txt"))
         .expect("parent change should be removed before manifest mismatch validation");
 
+    let child_checkout_map_path = prepared.handle.child_checkouts_path();
+    let original_child_checkout_map =
+        std::fs::read(&child_checkout_map_path).expect("child checkout map should remain readable");
+    let mut tampered_child_checkout_map: serde_json::Value =
+        serde_json::from_slice(&original_child_checkout_map)
+            .expect("child checkout map should decode");
+    let older_target = git(&integration, &["rev-parse", "HEAD^"]);
+    tampered_child_checkout_map["repositories"][binding_a.repository_id().as_str()]["target_commit"] =
+        serde_json::Value::String(older_target.clone());
+    std::fs::write(
+        &child_checkout_map_path,
+        serde_json::to_vec_pretty(&tampered_child_checkout_map)
+            .expect("tampered child checkout map should encode"),
+    )
+    .expect("tampered child checkout map should be writable");
+    git(&integration, &["reset", "--hard", &older_target]);
+    let repin_error = manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect_err("an agent-writable target pin must not authorize an older integration head");
+    assert!(
+        repin_error.to_string().contains("identity is inconsistent"),
+        "unexpected parent-map repin error: {repin_error}"
+    );
+    std::fs::write(&child_checkout_map_path, original_child_checkout_map)
+        .expect("trusted child checkout map should be restored");
+    git(
+        &integration,
+        &["reset", "--hard", &repository_a.target_commit],
+    );
+
     let mut changed_requests = prepared
         .child_checkout_map
         .repositories
@@ -729,7 +760,10 @@ async fn parent_execution_root_supports_no_required_child_checkouts() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
-        HookConfig::default(),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(parent_after_create_once_command())),
+            ..HookConfig::default()
+        },
         CleanupConfig::default(),
     ))
     .expect("manager should build");
@@ -749,6 +783,141 @@ async fn parent_execution_root_supports_no_required_child_checkouts() {
             .workspace_path()
             .join("repositories")
             .is_dir()
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            prepared
+                .handle
+                .workspace_path()
+                .join("parent-after-create.txt")
+        )
+        .expect("parent after_create output should exist")
+        .trim(),
+        "created"
+    );
+    let after_create_receipt = prepared
+        .handle
+        .workspace_path()
+        .join(".opensymphony.after_create.json");
+    assert!(after_create_receipt.is_file());
+
+    let reopened = manager
+        .prepare_parent_execution_root(&parent, 1, Vec::new())
+        .await
+        .expect("a completed parent after_create hook must not rerun on reuse");
+    assert!(!reopened.created);
+
+    std::fs::remove_file(after_create_receipt)
+        .expect("parent after_create receipt should be removable for validation");
+    assert!(matches!(
+        manager
+            .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+            .await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("after_create")
+    ));
+}
+
+#[tokio::test]
+async fn parent_execution_root_rolls_back_after_create_failure() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig {
+            after_create: Some(HookDefinition::shell(failing_parent_after_create_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let mut parent = sample_issue("COE-FAILED-PARENT");
+    parent.issue_id = "failed-parent-id".to_owned();
+
+    assert!(matches!(
+        manager
+            .prepare_parent_execution_root(&parent, 1, Vec::new())
+            .await,
+        Err(WorkspaceError::HookFailed { .. })
+    ));
+    assert!(
+        !manager
+            .config()
+            .root
+            .join("parents/parent-COE-FAILED-PARENT/1")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn parent_preparation_times_out_stalled_integration_verification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let (source, binding, repository) = repository_fixture(temp_dir.path(), "timeout-repository");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository,
+    )]));
+    let mut child = sample_issue("COE-TIMEOUT-CHILD");
+    child.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let child = manager.ensure(&child).await.expect("child should exist");
+
+    let fsmonitor = temp_dir
+        .path()
+        .join("stall-parent-integration-fsmonitor.sh");
+    std::fs::write(
+        &fsmonitor,
+        "#!/bin/sh\ncase \"$PWD\" in */parents/*/repositories/*) sleep 300 ;; esac\nexit 0\n",
+    )
+    .expect("fsmonitor hook should be written");
+    std::fs::set_permissions(&fsmonitor, std::fs::Permissions::from_mode(0o755))
+        .expect("fsmonitor hook should be executable");
+    git(
+        child.handle.workspace_path(),
+        &[
+            "config",
+            "core.fsmonitor",
+            fsmonitor.to_str().expect("fsmonitor path"),
+        ],
+    );
+
+    let mut parent = sample_issue("COE-TIMEOUT-PARENT");
+    parent.issue_id = "timeout-parent-id".to_owned();
+    let error = manager
+        .prepare_parent_execution_root(
+            &parent,
+            1,
+            vec![ParentCheckoutRequest {
+                issue_id: child.handle.issue_id().to_owned(),
+                repository_id: binding.repository_id().to_string(),
+                checkout_generation: child
+                    .handle
+                    .checkout_generation()
+                    .expect("generation")
+                    .to_owned(),
+                lease_owner: "ancestor-integration:timeout-parent-id".to_owned(),
+                required_merge_commits: vec![git(&source, &["rev-parse", "HEAD"])],
+            }],
+        )
+        .await
+        .expect_err("stalled integration verification must time out");
+
+    assert!(
+        error.to_string().contains("timed out"),
+        "unexpected integration timeout error: {error}"
+    );
+    assert!(
+        !workspace_root
+            .join("parents/parent-COE-TIMEOUT-PARENT/1")
+            .exists()
     );
 }
 
@@ -801,6 +970,26 @@ fn current_dir_command(output_path: &str) -> String {
 #[cfg(windows)]
 fn current_dir_command(output_path: &str) -> String {
     format!("cd > {output_path}")
+}
+
+#[cfg(unix)]
+fn parent_after_create_once_command() -> &'static str {
+    "if [ -e parent-after-create.txt ]; then exit 41; fi; echo created > parent-after-create.txt"
+}
+
+#[cfg(windows)]
+fn parent_after_create_once_command() -> &'static str {
+    "if exist parent-after-create.txt (exit /b 41) else (echo created> parent-after-create.txt)"
+}
+
+#[cfg(unix)]
+fn failing_parent_after_create_command() -> &'static str {
+    "exit 23"
+}
+
+#[cfg(windows)]
+fn failing_parent_after_create_command() -> &'static str {
+    "exit /b 23"
 }
 
 #[cfg(unix)]

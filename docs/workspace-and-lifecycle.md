@@ -133,6 +133,9 @@ A frozen parent hierarchy uses a separate non-Git root:
   integration-plan.md
   evidence/
   repositories/<opaque-checkout-handle>/
+
+<workspace.root>/.opensymphony-parent-pins/
+  parent-<sanitized-identifier>/<hierarchy-generation>.json
 ```
 
 `child-checkouts.json` is the durable handle boundary. It groups every leased
@@ -143,16 +146,29 @@ the incoming generation, lease owners, children, and merge results still match
 that map, then revalidates every retained child generation before use. A parent
 whose children are all canceled still gets a valid root with an empty checkout
 map. Arbitrary paths and handles that are absent from the map are rejected.
+The workspace manager publishes an exact orchestrator-owned copy outside the
+parent runtime root and requires the runtime-visible map to match it on every
+reopen. A parent turn therefore cannot authorize an older integration target by
+rewriting its local map. Reopen also repeats provider merge-result reachability
+checks against the pinned target.
+
+Parent roots follow the same `after_create` contract as leaf workspaces. A new
+empty root runs the configured hook before metadata bootstrap, writes the
+root-scoped completion receipt, and publishes repository artifacts only after
+the hook succeeds. Hook failure removes the incomplete generation. Reuse
+requires the matching receipt and does not rerun the hook.
 
 Parent preparation verifies retained child identity and cleanliness without
 moving a child branch or HEAD. It can accept a recorded shallow generation,
 then fetch and deepen the configured target through the repository credential
 provider before adding a detached integration worktree. A shallow-to-complete
 storage transition remains valid against the immutable child manifest on later
-parent generations and ordinary child retry/reuse. Preparation bounds both
-authenticated fetches and worktree creation, terminates their process groups on
-timeout, and rolls back incomplete roots so the same hierarchy generation can
-retry. Credentialed fetches disable repository-local credential helpers before
+parent generations and ordinary child retry/reuse. Preparation gives every
+retained child generation an independent verification deadline. It also applies
+one deadline to integration worktree creation, instruction loading, and every
+final Git verification probe. Timed-out Git process groups are terminated and
+incomplete roots are rolled back so the same hierarchy generation can retry.
+Credentialed fetches disable repository-local credential helpers before
 exposing the configured secret to Git's orchestrator-owned askpass process and
 route Git hooks to a fresh empty directory. The new worktree must
 remain below `repositories/`, share the selected child's Git common directory,

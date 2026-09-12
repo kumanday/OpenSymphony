@@ -710,13 +710,18 @@ trusted host, not a sandbox boundary.
 Parent runs publish a separate generation-scoped root below
 `workspace.root/parents/`. Inspect `parent-manifest.json`,
 `child-checkouts.json`, and `.opensymphony/parent-runtime.json` together when a
-parent cannot launch. Preparation blocks before a repository operation when a
+parent cannot launch. The workspace manager also keeps the authoritative copy
+of each generation's checkout map below
+`workspace.root/.opensymphony-parent-pins/`; a mismatch means the runtime copy
+was modified and must not be repaired in place. Preparation blocks before a repository operation when a
 required child subtree lacks an active ancestor lease, a retained generation is
 stale or dirty, merge evidence is ambiguous across repositories, a remote no
 longer matches policy, or a contained worktree fails its shared-storage and
 path checks. Do not repair those files or substitute a filesystem path for the
 recorded opaque handle; reconcile the hierarchy/lease evidence or retained
-checkout and retry the same generation.
+checkout and rematerialize the generation. A configured `after_create` hook is
+required for parent roots too; its failure rolls back the incomplete root, and
+reuse requires its completion receipt.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
