@@ -1025,6 +1025,13 @@ impl WorkspaceManager {
         source: &WorkspaceHandle,
         repository: &CheckoutRepository,
     ) -> Result<(), WorkspaceError> {
+        checkout_operation_with_timeout(
+            Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+            source.workspace_path(),
+            "validate parent fetch transport configuration",
+            self.reject_checkout_controlled_transport_config(source.workspace_path()),
+        )
+        .await?;
         let shallow = self
             .git(
                 source.workspace_path(),
@@ -1040,9 +1047,83 @@ impl WorkspaceManager {
             "+refs/heads/{0}:refs/remotes/origin/{0}",
             repository.target_branch
         );
-        args.extend(["origin", refspec.as_str()]);
+        args.extend([repository.remote.as_str(), refspec.as_str()]);
         self.run_authenticated_git(source.workspace_path(), repository, &args)
             .await
+    }
+
+    async fn reject_checkout_controlled_transport_config(
+        &self,
+        checkout: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let local_names = self
+            .git(
+                checkout,
+                &["config", "--local", "--includes", "--name-only", "--list"],
+            )
+            .await?;
+        let worktree_config_enabled = if local_names.lines().any(|name| {
+            name.trim()
+                .eq_ignore_ascii_case("extensions.worktreeConfig")
+        }) {
+            matches!(
+                self.git(
+                    checkout,
+                    &[
+                        "config",
+                        "--local",
+                        "--includes",
+                        "--bool",
+                        "--get",
+                        "extensions.worktreeConfig",
+                    ],
+                )
+                .await?
+                .as_str(),
+                "true"
+            )
+        } else {
+            false
+        };
+        let mut scopes = vec![("--local", local_names)];
+        if worktree_config_enabled {
+            scopes.push((
+                "--worktree",
+                self.git(
+                    checkout,
+                    &[
+                        "config",
+                        "--worktree",
+                        "--includes",
+                        "--name-only",
+                        "--list",
+                    ],
+                )
+                .await?,
+            ));
+        }
+        for (_, names) in scopes {
+            if let Some(name) = names.lines().find(|name| {
+                let name = name.trim().to_ascii_lowercase();
+                name.starts_with("http.")
+                    || name.starts_with("credential.")
+                    || name == "core.gitproxy"
+                    || name == "core.sshcommand"
+                    || name == "ssh.variant"
+                    || name.starts_with("protocol.")
+                    || (name.starts_with("url.")
+                        && (name.ends_with(".insteadof") || name.ends_with(".pushinsteadof")))
+            }) {
+                return Err(checkout_verification(
+                    checkout,
+                    &format!(
+                        "checkout-controlled Git transport configuration `{}` is not allowed for authenticated parent fetches",
+                        name.trim()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn run_authenticated_git(

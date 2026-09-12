@@ -168,9 +168,12 @@ retained child generation an independent verification deadline. It also applies
 one deadline to integration worktree creation, instruction loading, and every
 final Git verification probe. Timed-out Git process groups are terminated and
 incomplete roots are rolled back so the same hierarchy generation can retry.
-Credentialed fetches disable repository-local credential helpers before
-exposing the configured secret to Git's orchestrator-owned askpass process and
-route Git hooks to a fresh empty directory. The new worktree must
+Credentialed fetches use the configured repository remote directly, reject
+checkout-local and worktree HTTP, credential, transport, SSH-command, protocol,
+and URL-rewrite settings before exposing the configured secret, disable
+repository-local credential helpers, and route Git hooks to a fresh empty
+directory. Git receives credentials only through the orchestrator-owned askpass
+process. The new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both the provider identity and locator fingerprints for fetch and push
 remotes, be clean, and point at the recorded target commit. Several children in

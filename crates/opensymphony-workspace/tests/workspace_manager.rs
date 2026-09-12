@@ -435,6 +435,41 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         &["remote", "set-url", "origin", &expected_remote],
     );
 
+    git(
+        child_a1.handle.workspace_path(),
+        &["config", "http.proxy", "http://127.0.0.1:9"],
+    );
+    git(
+        child_a1.handle.workspace_path(),
+        &["config", "http.sslVerify", "false"],
+    );
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 7, requests.clone()).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("checkout-controlled Git transport configuration")
+    ));
+    assert!(
+        !manager
+            .config()
+            .root
+            .join("parents/parent-COE-PARENT/7")
+            .exists(),
+        "a rejected transport configuration must roll back the partial parent root"
+    );
+    #[cfg(unix)]
+    assert!(
+        !credential_exfil_path.exists(),
+        "checkout-controlled transport configuration must be rejected before credential exposure"
+    );
+    git(
+        child_a1.handle.workspace_path(),
+        &["config", "--unset-all", "http.proxy"],
+    );
+    git(
+        child_a1.handle.workspace_path(),
+        &["config", "--unset-all", "http.sslVerify"],
+    );
+
     let repeat_requests = requests.clone();
     let prepared = manager
         .prepare_parent_execution_root(&parent, 5, requests)

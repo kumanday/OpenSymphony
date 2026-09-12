@@ -717,11 +717,14 @@ was modified and must not be repaired in place. Preparation blocks before a repo
 required child subtree lacks an active ancestor lease, a retained generation is
 stale or dirty, merge evidence is ambiguous across repositories, a remote no
 longer matches policy, or a contained worktree fails its shared-storage and
-path checks. Do not repair those files or substitute a filesystem path for the
-recorded opaque handle; reconcile the hierarchy/lease evidence or retained
-checkout and rematerialize the generation. A configured `after_create` hook is
-required for parent roots too; its failure rolls back the incomplete root, and
-reuse requires its completion receipt.
+path checks. Parent preparation also rejects retained-checkout local/worktree
+HTTP, credential, transport, SSH-command, protocol, and URL-rewrite settings
+before an authenticated fetch; remove or reconcile those settings before
+retrying. Do not repair generated parent files or substitute a filesystem path
+for the recorded opaque handle; reconcile the hierarchy/lease evidence or
+retained checkout and rematerialize the generation. A configured
+`after_create` hook is required for parent roots too; its failure rolls back the
+incomplete root, and reuse requires its completion receipt.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
