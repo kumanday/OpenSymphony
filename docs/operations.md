@@ -456,6 +456,8 @@ Operational implications:
   issue details hourly after startup/dispatch
 - if Linear returns a long rate-limit reset, the scheduler pauses all Linear
   reads behind one shared cooldown but continues processing worker updates; the
+  same cooldown also suppresses later parent-provider eligibility lookups in
+  the current dispatch pass without discarding prepared leaf launches. The
   Linear client only sleeps inline for short rate-limit retry windows up to the
   lower of `tracker.retry_policy.max_backoff` and 30 seconds
 - the checked-in helper lives at

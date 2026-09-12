@@ -149,12 +149,12 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("attachments {")
+            .contains("attachments(first: 32, orderBy: updatedAt, filter: { url: { contains: \"/pull/\" } }) {")
     );
 }
 
 #[tokio::test]
-async fn issue_lookup_paginates_nested_children() {
+async fn issue_lookup_bounds_attachments_but_paginates_nested_children() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(
             r#"{
@@ -188,17 +188,6 @@ async fn issue_lookup_paginates_nested_children() {
             r#"{
               "data": {"issue": {
                 "id": "parent-id",
-                "attachments": {
-                  "nodes": [{"url":"https://github.com/example/repo/pull/2","sourceType":"github"}],
-                  "pageInfo": {"hasNextPage": false, "endCursor": null}
-                }
-              }}
-            }"#,
-        ),
-        QueuedResponse::json(
-            r#"{
-              "data": {"issue": {
-                "id": "parent-id",
                 "children": {
                   "nodes": [{"id":"child-2","identifier":"COE-3","state":{"name":"Done"}}],
                   "pageInfo": {"hasNextPage": false, "endCursor": null}
@@ -217,24 +206,26 @@ async fn issue_lookup_paginates_nested_children() {
         .expect("issue lookup should fetch all child pages");
 
     assert_eq!(issues[0].sub_issues.len(), 2);
-    assert_eq!(issues[0].pr_urls.len(), 2);
+    assert_eq!(issues[0].pr_urls.len(), 1);
     let requests = server.recorded_requests().await;
-    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests.len(),
+        2,
+        "attachment pagination must not issue requests"
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("issue query should be a string")
+            .contains("attachments(first: 32, orderBy: updatedAt, filter: { url: { contains: \"/pull/\" } }) {")
+    );
     assert!(
         requests[1].body["query"]
             .as_str()
             .expect("child page query should be a string")
-            .contains("query IssueAttachments")
-    );
-    assert_eq!(requests[1].body["variables"]["issueId"], "parent-id");
-    assert_eq!(requests[1].body["variables"]["after"], "attachment-cursor");
-    assert!(
-        requests[2].body["query"]
-            .as_str()
-            .expect("child page query should be a string")
             .contains("query IssueChildren")
     );
-    assert_eq!(requests[2].body["variables"]["after"], "child-cursor");
+    assert_eq!(requests[1].body["variables"]["after"], "child-cursor");
 }
 
 #[tokio::test]

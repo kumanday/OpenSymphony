@@ -111,8 +111,8 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.dispatchAction(action);
   }
 
-  cancelRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.cancelRun(runId);
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.cancelRun(runId, operationId);
   }
 
   replanParent(
@@ -123,16 +123,16 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.replanParent(parentId, hierarchyGeneration, operationId);
   }
 
-  retryRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.retryRun(runId);
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.retryRun(runId, operationId);
   }
 
-  resumeRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.resumeRun(runId);
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.resumeRun(runId, operationId);
   }
 
-  rehydrateRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.rehydrateRun(runId);
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.rehydrateRun(runId, operationId);
   }
 
   commentRun(runId: string, text: string): Promise<ActionReceipt> {

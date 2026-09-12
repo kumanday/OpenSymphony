@@ -4900,6 +4900,9 @@ where
         allow_retry: bool,
         reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<bool, SchedulerError> {
+        if self.linear_cooldown_active(observed_at) {
+            return Ok(false);
+        }
         let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
             return Ok(false);
         };

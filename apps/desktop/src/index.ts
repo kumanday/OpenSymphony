@@ -334,8 +334,8 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.actionInner.dispatchAction(action);
   }
 
-  cancelRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.cancelRun(runId);
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.cancelRun(runId, operationId);
   }
 
   replanParent(
@@ -346,16 +346,16 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.actionInner.replanParent(parentId, hierarchyGeneration, operationId);
   }
 
-  retryRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.retryRun(runId);
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.retryRun(runId, operationId);
   }
 
-  resumeRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.resumeRun(runId);
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.resumeRun(runId, operationId);
   }
 
-  rehydrateRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.rehydrateRun(runId);
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.rehydrateRun(runId, operationId);
   }
 
   commentRun(runId: string, text: string): Promise<ActionReceipt> {

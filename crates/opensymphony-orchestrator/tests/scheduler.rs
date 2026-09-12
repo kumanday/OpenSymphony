@@ -367,6 +367,8 @@ struct FakeTracker {
     detail_requests: Vec<Vec<String>>,
     state_requests: Vec<Vec<String>>,
     parent_evidence: Option<ParentEligibilityEvidence>,
+    parent_evidence_errors: VecDeque<FakeError>,
+    parent_evidence_requests: usize,
 }
 
 impl TrackerBackend for FakeTracker {
@@ -440,6 +442,10 @@ impl TrackerBackend for FakeTracker {
         _parent: &TrackerIssue,
         _hierarchy: &HierarchySnapshot,
     ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        self.parent_evidence_requests += 1;
+        if let Some(error) = self.parent_evidence_errors.pop_front() {
+            return Err(error);
+        }
         Ok(self
             .parent_evidence
             .clone()
@@ -704,6 +710,56 @@ impl WorkerBackend for FakeWorker {
                 timed_out: false,
             }))
     }
+}
+
+#[tokio::test]
+async fn parent_provider_cooldown_stops_later_lookups_in_the_same_dispatch_pass() {
+    let mut parent_a = tracker_issue("parent-a", "COE-A", "In Progress", 1);
+    parent_a.sub_issues = vec![TrackerIssueRef {
+        id: "child".to_owned(),
+        identifier: "COE-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut parent_b = parent_a.clone();
+    parent_b.id = "parent-b".to_owned();
+    parent_b.identifier = "COE-B".to_owned();
+    let tracker = FakeTracker {
+        active: vec![
+            tracker_issue("leaf", "COE-LEAF", "In Progress", 0),
+            parent_a,
+            parent_b,
+        ],
+        parent_evidence_errors: VecDeque::from([FakeError {
+            message: "provider rate limit".to_owned(),
+            category: Some(TrackerErrorCategory::RateLimited),
+            retry_after: Some(Duration::from_secs(60)),
+        }]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("rate limit should defer parent dispatch");
+    assert_eq!(scheduler.tracker().parent_evidence_requests, 1);
+    assert_eq!(
+        scheduler.worker().launches.len(),
+        1,
+        "prepared leaf launch must survive"
+    );
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("cooldown tick should still run");
+    assert_eq!(scheduler.tracker().parent_evidence_requests, 1);
 }
 
 #[tokio::test]
