@@ -493,6 +493,7 @@ struct FakeWorkspace {
     persisted_durable_states: Vec<serde_json::Value>,
     persist_durable_state_results: VecDeque<Result<(), FakeError>>,
     recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
+    parent_targets: Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -522,6 +523,14 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn parent_workspace_targets(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>, Self::Error> {
+        Ok(self.parent_targets.clone())
     }
 
     async fn recovered_run_started_at(
@@ -898,6 +907,11 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
     };
     let workspace = FakeWorkspace {
         durable_state: Some(serde_json::to_value(&durable_state).expect("state should encode")),
+        parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
+            repository_id: resource.repository_id.clone(),
+            checkout_handle: "checkout-repo".to_owned(),
+            target_commit: "merge-commit".to_owned(),
+        }],
         ..Default::default()
     };
     let worker = FakeWorker::default();
@@ -908,6 +922,20 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("eligible parent should dispatch");
     assert_eq!(scheduler.worker().launches.len(), 1);
+    let parent_run = scheduler.worker().launches[0].run.clone();
+    let persisted_after_launch: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("parent attempt state"),
+        )
+        .expect("parent attempt state should decode");
+    assert_eq!(
+        persisted_after_launch.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-1")
+    );
     assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
         serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
             state.clone(),
@@ -943,6 +971,41 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             .leases
             .iter()
             .any(|lease| { lease.kind == LeaseKind::LeafWorker && lease.released_at.is_some() })
+    );
+
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: parent_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &parent_run,
+                WorkerOutcomeKind::Failed,
+                ts(150),
+                Some("parent verification failed".to_owned()),
+                None,
+            ),
+        });
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("parent failure should persist before retry");
+    durable_state = serde_json::from_value(
+        scheduler
+            .workspace()
+            .durable_state
+            .clone()
+            .expect("parent outcome state"),
+    )
+    .expect("parent outcome state should decode");
+    let controller = &durable_state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.attempts[0].status,
+        crate::opensymphony_orchestrator::ParentAttemptStatus::Failed
+    );
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
     );
 
     let tracker = FakeTracker {

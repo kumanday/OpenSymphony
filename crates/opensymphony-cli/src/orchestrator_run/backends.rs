@@ -4323,26 +4323,35 @@ impl RuntimeWorkerBackend {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let (token, requires_fresh_conversation) =
-                        grants.issue_or_refresh_with_claims(MemoryScopeGrant {
-                            project: scoped.project.clone(),
-                            project_set: scoped.project_set.clone(),
-                            execution_repo: scoped.execution_repo.clone(),
-                            authorized_repositories,
-                            authorized_work_items,
-                            live_overlays,
-                            issue: issue.identifier.to_string(),
-                            run_id: scoped.run_id.clone(),
-                            attempt: scoped.attempt,
-                            checkout_generation: runtime_envelope
-                                .as_ref()
-                                .map(|envelope| envelope.checkout_generation.clone()),
-                            target_commit: scoped.target_commit.clone(),
-                            checkout_head: scoped.checkout_head.clone(),
-                            visibility: scoped.visibility,
-                            capabilities: BTreeSet::new(),
-                        });
-                    memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                    let grant = MemoryScopeGrant {
+                        project: scoped.project.clone(),
+                        project_set: scoped.project_set.clone(),
+                        execution_repo: scoped.execution_repo.clone(),
+                        authorized_repositories,
+                        authorized_work_items,
+                        live_overlays,
+                        issue: issue.identifier.to_string(),
+                        run_id: scoped.run_id.clone(),
+                        attempt: scoped.attempt,
+                        checkout_generation: runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.checkout_generation.clone()),
+                        target_commit: scoped.target_commit.clone(),
+                        checkout_head: scoped.checkout_head.clone(),
+                        visibility: scoped.visibility,
+                        capabilities: BTreeSet::new(),
+                    };
+                    let token = if scoped.parent_scope {
+                        let (token, requires_fresh_conversation) =
+                            grants.issue_or_refresh_parent_claims(grant);
+                        memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                        token
+                    } else {
+                        let (token, requires_fresh_conversation) =
+                            grants.issue_or_refresh_with_claims(grant);
+                        memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                        token
+                    };
                     scoped.token = Some(token.clone());
                 }
                 scoped.authorized_repositories_by_project.clear();

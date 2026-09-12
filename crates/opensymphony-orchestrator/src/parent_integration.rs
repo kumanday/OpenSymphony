@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::opensymphony_domain::{CanonicalRepositoryId, IssueId, TimestampMs};
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,10 @@ pub struct ParentRepositoryTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentFinalEvidence {
     pub attempt_id: String,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub input_version: String,
     pub repository_commits: BTreeMap<CanonicalRepositoryId, String>,
     pub recorded_at: TimestampMs,
 }
@@ -181,6 +185,8 @@ pub struct ParentIntegrationController {
     pub hierarchy_generation: u64,
     pub state_version: u64,
     pub state: ParentIntegrationState,
+    #[serde(default)]
+    pub next_attempt_sequence: u64,
     #[serde(default)]
     pub transitions: Vec<ParentTransition>,
     #[serde(default)]
@@ -233,6 +239,7 @@ impl ParentIntegrationController {
             hierarchy_generation,
             state_version: 0,
             state: ParentIntegrationState::WaitingForChildren,
+            next_attempt_sequence: 0,
             transitions: Vec::new(),
             targets: BTreeMap::new(),
             conversation_id: None,
@@ -339,19 +346,23 @@ impl ParentIntegrationController {
                 "baseline-refresh".to_owned(),
             ));
         }
+        let refresh_cycle = self
+            .attempts
+            .last()
+            .map_or_else(|| "initial".to_owned(), |attempt| attempt.id.clone());
         self.transition(
             ParentIntegrationState::Integrating,
-            "all parent integration checkouts match their recorded target commits",
+            "all parent integration checkouts retain their recorded target commits as verified baselines",
             format!(
-                "parent:{}:{}:refresh:{input_version}",
-                self.parent_id, self.hierarchy_generation
+                "parent:{}:{}:refresh:{refresh_cycle}:{input_version}",
+                self.parent_id, self.hierarchy_generation,
             ),
             input_version,
             Some(intent(
                 "refresh_verified_baseline",
                 format!(
-                    "parent:{}:{}:refresh:{input_version}",
-                    self.parent_id, self.hierarchy_generation
+                    "parent:{}:{}:refresh:{refresh_cycle}:{input_version}",
+                    self.parent_id, self.hierarchy_generation,
                 ),
             )),
             Some(receipt("succeeded", None)),
@@ -409,7 +420,8 @@ impl ParentIntegrationController {
         {
             return Ok(existing.id.clone());
         }
-        let id = format!("parent-attempt-{}", self.attempts.len().saturating_add(1));
+        self.next_attempt_sequence = self.next_attempt_sequence.saturating_add(1);
+        let id = format!("parent-attempt-{}", self.next_attempt_sequence);
         self.attempts.push(ParentVerificationAttempt {
             id: id.clone(),
             name,
@@ -474,11 +486,11 @@ impl ParentIntegrationController {
         let kind = kind.into();
         let identifier = identifier.into();
         let collision = self.attempts.iter().any(|attempt| {
-            attempt.resources.iter().rev().any(|resource| {
-                resource.kind == kind
-                    && resource.identifier == identifier
-                    && resource.status == ParentResourceStatus::Allocated
-            })
+            active_resource_keys(attempt)
+                .into_iter()
+                .any(|(active_kind, active_identifier)| {
+                    active_kind == kind && active_identifier == identifier
+                })
         });
         if collision {
             self.attempt_mut(attempt_id)?
@@ -615,7 +627,7 @@ impl ParentIntegrationController {
             return Ok(());
         }
         let attempt_id = self.attempts[index].id.clone();
-        let has_allocated_resources = active_resource_keys(&self.attempts[index]).next().is_some();
+        let has_allocated_resources = !active_resource_keys(&self.attempts[index]).is_empty();
         self.attempts[index].status = ParentAttemptStatus::Indeterminate;
         self.attempts[index].finished_at = Some(occurred_at);
         self.attempts[index].cleanup = Some(ParentCleanupReceipt {
@@ -641,10 +653,11 @@ impl ParentIntegrationController {
         occurred_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
         if self.targets.is_empty()
-            || !self
-                .attempts
-                .iter()
-                .any(|attempt| attempt.id == attempt_id && attempt.status.passed())
+            || !self.attempts.iter().any(|attempt| {
+                attempt.id == attempt_id
+                    && attempt.status.passed()
+                    && attempt.input_version == input_version
+            })
         {
             return Err(ParentIntegrationError::FinalVerificationIncomplete);
         }
@@ -654,7 +667,7 @@ impl ParentIntegrationController {
             format!("{attempt_id}:final-verification"),
             input_version,
             Some(intent(
-                "run_final_verification",
+                "accept_harness_final_verification",
                 format!("{attempt_id}:final-verification"),
             )),
             Some(receipt("passed", None)),
@@ -668,6 +681,8 @@ impl ParentIntegrationController {
             .collect();
         self.final_evidence = Some(ParentFinalEvidence {
             attempt_id: attempt_id.to_owned(),
+            conversation_id: self.conversation_id.clone().unwrap_or_default(),
+            input_version: input_version.to_owned(),
             repository_commits,
             recorded_at: occurred_at,
         });
@@ -744,6 +759,21 @@ impl ParentIntegrationController {
             .map(|attempt| attempt.id.as_str())
     }
 
+    pub fn current_attempt_deadline(&self) -> Option<TimestampMs> {
+        self.attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.status == ParentAttemptStatus::Running)
+            .map(|attempt| {
+                TimestampMs::new(
+                    attempt
+                        .started_at
+                        .as_u64()
+                        .saturating_add(attempt.timeout_ms),
+                )
+            })
+    }
+
     fn cleanup_complete(&self) -> bool {
         self.attempts.iter().all(|attempt| {
             if matches!(
@@ -756,7 +786,7 @@ impl ParentIntegrationController {
                     .cleanup
                     .as_ref()
                     .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
-                    && active_resource_keys(attempt).next().is_none()
+                    && active_resource_keys(attempt).is_empty()
             } else {
                 true
             }
@@ -830,24 +860,26 @@ impl ParentIntegrationController {
     }
 }
 
-fn active_resource_keys(attempt: &ParentVerificationAttempt) -> impl Iterator<Item = (&str, &str)> {
-    let released = attempt
-        .resources
-        .iter()
-        .filter(|resource| {
-            matches!(
+fn active_resource_keys(attempt: &ParentVerificationAttempt) -> Vec<(String, String)> {
+    let mut latest = BTreeMap::new();
+    for resource in &attempt.resources {
+        if resource.status != ParentResourceStatus::Collision {
+            latest.insert(
+                (resource.kind.clone(), resource.identifier.clone()),
                 resource.status,
-                ParentResourceStatus::Released | ParentResourceStatus::CleanupFailed
+            );
+        }
+    }
+    latest
+        .into_iter()
+        .filter_map(|(key, status)| {
+            matches!(
+                status,
+                ParentResourceStatus::Allocated | ParentResourceStatus::CleanupFailed
             )
+            .then_some(key)
         })
-        .map(|resource| (resource.kind.as_str(), resource.identifier.as_str()))
-        .collect::<BTreeSet<_>>();
-    attempt
-        .resources
-        .iter()
-        .filter(|resource| resource.status == ParentResourceStatus::Allocated)
-        .map(|resource| (resource.kind.as_str(), resource.identifier.as_str()))
-        .filter(move |resource| !released.contains(resource))
+        .collect()
 }
 
 fn allowed_transition(from: &ParentIntegrationState, to: &ParentIntegrationState) -> bool {
@@ -1128,6 +1160,97 @@ mod tests {
             .expect("attempt");
         assert_eq!(attempt.bounded_log.len(), MAX_LOG_BYTES);
         assert!(attempt.log_truncated);
+
+        controller
+            .release_resource(&first, "port", "24001", true, None, TimestampMs::new(4))
+            .expect("release port");
+        assert!(
+            controller
+                .allocate_resource(&second, "port", "24001", TimestampMs::new(5))
+                .is_ok()
+        );
+        controller
+            .release_resource(
+                &second,
+                "port",
+                "24001",
+                false,
+                Some("still listening".to_owned()),
+                TimestampMs::new(6),
+            )
+            .expect("record failed cleanup");
+        assert!(matches!(
+            controller.allocate_resource(&first, "port", "24001", TimestampMs::new(7)),
+            Err(ParentIntegrationError::ResourceCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn attempt_ids_remain_monotonic_after_retention() {
+        let mut controller = controller();
+        controller.next_attempt_sequence = 64;
+        let attempt = controller
+            .start_attempt(
+                "integration",
+                "attempt:65",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                1_000,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+        assert_eq!(attempt, "parent-attempt-65");
+        assert_eq!(controller.next_attempt_sequence, 65);
+    }
+
+    #[test]
+    fn unchanged_targets_refresh_again_before_a_retry_attempt() {
+        let mut controller = controller();
+        let first = controller
+            .start_attempt(
+                "integration",
+                "attempt:first",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                1_000,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("first attempt");
+        controller
+            .finish_attempt(
+                &first,
+                ParentAttemptStatus::Failed,
+                Some(1),
+                ParentCleanupReceipt {
+                    status: ParentCleanupStatus::Succeeded,
+                    occurred_at: TimestampMs::new(4),
+                    detail: None,
+                },
+                TimestampMs::new(4),
+            )
+            .expect("failed attempt");
+        controller
+            .prepare_retry(&first, "retry", TimestampMs::new(5))
+            .expect("retry transition");
+        controller
+            .record_baseline_verified("targets:1", TimestampMs::new(6))
+            .expect("refresh unchanged targets");
+
+        assert!(
+            controller
+                .start_attempt(
+                    "integration retry",
+                    "attempt:second",
+                    ParentAttemptRoot::ParentRoot,
+                    "conversation-1",
+                    1_000,
+                    "targets:1",
+                    TimestampMs::new(7),
+                )
+                .is_ok()
+        );
     }
 
     #[test]

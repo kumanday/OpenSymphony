@@ -2289,6 +2289,23 @@ impl MemoryScopeGrantRegistry {
         (token, rotated || requires_fresh_conversation)
     }
 
+    pub(crate) fn issue_or_refresh_parent_claims(&self, grant: MemoryScopeGrant) -> (String, bool) {
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let requires_fresh_conversation = state.revoked_issues.contains(&grant.issue);
+        if let Some(token) = state
+            .grants
+            .iter()
+            .find(|(_, existing)| existing.issue == grant.issue)
+            .map(|(token, _)| token.clone())
+        {
+            state.grants.insert(token.clone(), grant);
+            return (token, requires_fresh_conversation);
+        }
+        let token = format!("opensymphony-worker-{}", Uuid::new_v4());
+        state.grants.insert(token.clone(), grant);
+        (token, requires_fresh_conversation)
+    }
+
     pub(crate) fn acknowledge_fresh_conversation(&self, issue: &str) {
         self.state
             .write()
@@ -13876,6 +13893,37 @@ Public memory concept.
                 .checkout_generation
                 .as_deref(),
             Some("generation-2")
+        );
+    }
+
+    #[test]
+    fn parent_memory_grant_refresh_keeps_conversation_bearer() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let (first, first_requires_fresh) =
+            registry.issue_or_refresh_parent_claims(MemoryScopeGrant {
+                issue: "COE-554".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                attempt: Some(1),
+                ..MemoryScopeGrant::default()
+            });
+        let (refreshed, refreshed_requires_fresh) =
+            registry.issue_or_refresh_parent_claims(MemoryScopeGrant {
+                issue: "COE-554".to_owned(),
+                run_id: Some("run-2".to_owned()),
+                attempt: Some(2),
+                ..MemoryScopeGrant::default()
+            });
+
+        assert_eq!(refreshed, first);
+        assert!(!first_requires_fresh);
+        assert!(!refreshed_requires_fresh);
+        assert_eq!(
+            registry
+                .get(Some(&refreshed))
+                .expect("refreshed parent grant")
+                .run_id
+                .as_deref(),
+            Some("run-2")
         );
     }
 

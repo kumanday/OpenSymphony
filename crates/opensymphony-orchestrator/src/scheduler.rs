@@ -4319,13 +4319,6 @@ where
                         }
                     };
                     if let Err(error) = self
-                        .record_parent_worker_outcome(&issue_id, &execution, &finished_outcome)
-                        .await
-                        && first_error.is_none()
-                    {
-                        first_error = Some(error);
-                    }
-                    if let Err(error) = self
                         .rebind_finished_child_hierarchy_generation(&issue_id)
                         .await
                     {
@@ -4442,17 +4435,25 @@ where
         let stalled = self
             .executions
             .iter()
-            .filter_map(|(issue_id, execution)| match execution.state() {
-                crate::opensymphony_domain::SchedulerState::Running { stall, .. }
-                    if stall.stalled_at <= observed_at =>
-                {
-                    Some(issue_id.clone())
+            .filter_map(|(issue_id, execution)| {
+                let absolute_timeout = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(issue_id)
+                    .and_then(ParentIntegrationController::current_attempt_deadline)
+                    .is_some_and(|deadline| deadline <= observed_at);
+                match execution.state() {
+                    crate::opensymphony_domain::SchedulerState::Running { stall, .. }
+                        if stall.stalled_at <= observed_at || absolute_timeout =>
+                    {
+                        Some((issue_id.clone(), absolute_timeout))
+                    }
+                    _ => None,
                 }
-                _ => None,
             })
             .collect::<Vec<_>>();
 
-        for issue_id in stalled {
+        for (issue_id, absolute_timeout) in stalled {
             let Some(mut execution) = self.remove_execution(&issue_id) else {
                 continue;
             };
@@ -4478,14 +4479,24 @@ where
             }
             let outcome = WorkerOutcomeRecord::from_run(
                 &run,
-                if remote_stopped {
+                if absolute_timeout {
+                    WorkerOutcomeKind::TimedOut
+                } else if remote_stopped {
                     WorkerOutcomeKind::Stalled
                 } else {
                     WorkerOutcomeKind::Detached
                 },
                 observed_at,
-                Some("worker exceeded the configured stall timeout".to_string()),
-                Some("scheduler stall timeout reached".to_string()),
+                Some(if absolute_timeout {
+                    "parent integration attempt exceeded its absolute timeout".to_owned()
+                } else {
+                    "worker exceeded the configured stall timeout".to_owned()
+                }),
+                Some(if absolute_timeout {
+                    "parent integration command deadline reached".to_owned()
+                } else {
+                    "scheduler stall timeout reached".to_owned()
+                }),
             );
             execution = self
                 .resolve_finished_execution(execution, outcome, observed_at)
@@ -4589,6 +4600,29 @@ where
             );
             self.insert_execution(issue_id, execution);
             return Ok(());
+        }
+        if let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(&issue_id)
+            && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
+        {
+            controller.finish_attempt(
+                &attempt_id,
+                ParentAttemptStatus::Canceled,
+                None,
+                ParentCleanupReceipt {
+                    status: ParentCleanupStatus::Succeeded,
+                    occurred_at: observed_at,
+                    detail: Some(format!("scheduler release: {reason:?}")),
+                },
+                observed_at,
+            )?;
+            let input_version = parent_controller_input_version(controller);
+            controller.cancel(
+                format!("scheduler released parent integration: {reason:?}"),
+                &input_version,
+                true,
+                observed_at,
+            )?;
+            self.persist_orchestrator_state().await?;
         }
         self.workspace
             .revoke_issue_resources(execution.issue().identifier.as_str());
@@ -4765,7 +4799,10 @@ where
         outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
     ) -> Result<IssueExecution, SchedulerError> {
+        let issue_id = execution.issue().id.clone();
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                .await?;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
@@ -4779,6 +4816,8 @@ where
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
         ) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                .await?;
             return self
                 .release_finished_execution(
                     execution,
@@ -4789,6 +4828,8 @@ where
                 .await;
         }
         if acknowledged_operator_cancel_terminal(&execution, &outcome) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                .await?;
             return self
                 .release_finished_execution(
                     execution,
@@ -4799,7 +4840,6 @@ where
                 .await;
         }
 
-        let issue_id = execution.issue().id.clone();
         if let Some(state) = self
             .refresh_finished_issue_state(&issue_id, observed_at)
             .await
@@ -4810,6 +4850,8 @@ where
             if let Some(reason) =
                 non_active_release_reason(execution.issue().state.category.clone())
             {
+                self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                    .await?;
                 return self
                     .release_finished_execution(execution, observed_at, reason, Some(outcome))
                     .await;
@@ -4830,11 +4872,15 @@ where
             // the refresh failed), park the exhausted run rather than making
             // a successful worker turn look like a completed Linear task.
             let reason = ReleaseReason::RetryExhausted;
+            self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+                .await?;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
         }
 
+        self.record_parent_worker_outcome(&issue_id, &execution, &outcome)
+            .await?;
         self.queue_retry_for_outcome(execution, outcome, observed_at)
             .await
     }
