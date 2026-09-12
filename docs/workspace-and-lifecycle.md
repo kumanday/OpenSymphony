@@ -153,8 +153,8 @@ parent generations and ordinary child retry/reuse. Preparation bounds both
 authenticated fetches and worktree creation, terminates their process groups on
 timeout, and rolls back incomplete roots so the same hierarchy generation can
 retry. Credentialed fetches disable repository-local credential helpers before
-exposing the configured secret to Git's orchestrator-owned askpass process. The
-new worktree must
+exposing the configured secret to Git's orchestrator-owned askpass process and
+route Git hooks to a fresh empty directory. The new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both the provider identity and locator fingerprints for fetch and push
 remotes, be clean, and point at the recorded target commit. Several children in
@@ -170,7 +170,8 @@ one aggregate size budget across the entire parent prompt. Every launch reloads
 the pinned repository instructions so any path that creates a fresh conversation
 has a complete prompt; reused conversations consume continuation guidance. The
 runtime revalidates the parent root, envelope, and instructions after the
-`before_run` hook and before harness attachment.
+`before_run` hook and before harness attachment. `WORKFLOW.md` instruction hashes
+and prompt content both exclude its front matter.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

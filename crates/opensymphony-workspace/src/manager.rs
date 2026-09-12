@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     future::Future,
     io,
     path::{Path, PathBuf},
@@ -380,31 +381,51 @@ impl WorkspaceManager {
                             "retained child checkout generation is unavailable",
                         )
                     })?;
-                let checkout = self.verify_checkout_for_parent(&child_handle).await?;
+                let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
+                let checkout = self
+                    .verify_checkout_with_worker_changes_timeout(
+                        &child_handle,
+                        true,
+                        true,
+                        deadline,
+                    )
+                    .await?;
                 if checkout.repository_binding.repository_id().as_str() != repository_id {
                     return Err(checkout_verification(
                         child_handle.workspace_path(),
                         "retained child checkout has the wrong canonical repository",
                     ));
                 }
-                let status = self
-                    .git(
+                let status = checkout_operation_with_timeout(
+                    checkout_time_remaining(deadline),
+                    child_handle.workspace_path(),
+                    "verify retained child cleanliness",
+                    self.git(
                         child_handle.workspace_path(),
                         &["status", "--porcelain", "--untracked-files=all"],
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 if !status.is_empty() {
                     return Err(checkout_verification(
                         child_handle.workspace_path(),
                         "retained child checkout is dirty",
                     ));
                 }
-                let child_branch = self
-                    .git(child_handle.workspace_path(), &["branch", "--show-current"])
-                    .await?;
-                let child_head = self
-                    .git(child_handle.workspace_path(), &["rev-parse", "HEAD"])
-                    .await?;
+                let child_branch = checkout_operation_with_timeout(
+                    checkout_time_remaining(deadline),
+                    child_handle.workspace_path(),
+                    "verify retained child branch",
+                    self.git(child_handle.workspace_path(), &["branch", "--show-current"]),
+                )
+                .await?;
+                let child_head = checkout_operation_with_timeout(
+                    checkout_time_remaining(deadline),
+                    child_handle.workspace_path(),
+                    "verify retained child head",
+                    self.git(child_handle.workspace_path(), &["rev-parse", "HEAD"]),
+                )
+                .await?;
                 source.get_or_insert((child_handle.clone(), checkout.clone()));
                 required_merge_commits.extend(
                     request
@@ -784,19 +805,20 @@ impl WorkspaceManager {
                 })?;
             self.reject_symlinked_path_components(parent.handle.workspace_path(), relative)
                 .await?;
-            let (hash, bytes) =
+            let (hash, mut bytes) =
                 read_bounded_instruction_file(&path, &mut total_bytes, true).await?;
+            let hash = if is_workflow_instruction_path(&record.instruction.path) {
+                bytes = workflow_body(&bytes);
+                hash_bytes(&bytes)
+            } else {
+                hash
+            };
             if hash != record.instruction.content_hash {
                 return Err(checkout_verification(
                     &path,
                     "repository instruction hash does not match the parent checkout map",
                 ));
             }
-            let bytes = if is_workflow_instruction_path(&record.instruction.path) {
-                workflow_body(&bytes)
-            } else {
-                bytes
-            };
             instructions.insert(
                 record.repository_id.clone(),
                 String::from_utf8_lossy(&bytes).into_owned(),
@@ -1019,10 +1041,22 @@ impl WorkspaceManager {
             None
         };
 
+        let hooks_directory = tempfile::Builder::new()
+            .prefix("opensymphony-empty-git-hooks-")
+            .tempdir()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "isolate Git hooks".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let mut hooks_config = OsString::from("core.hooksPath=");
+        hooks_config.push(hooks_directory.path());
         let mut command = Command::new("git");
         command
             .arg("-c")
             .arg("credential.helper=")
+            .arg("-c")
+            .arg(hooks_config)
             .arg("-C")
             .arg(checkout)
             .args(args);
@@ -2081,15 +2115,6 @@ impl WorkspaceManager {
     ) -> Result<CheckoutManifest, WorkspaceError> {
         let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
         self.verify_checkout_with_worker_changes_timeout(workspace, true, false, deadline)
-            .await
-    }
-
-    async fn verify_checkout_for_parent(
-        &self,
-        workspace: &WorkspaceHandle,
-    ) -> Result<CheckoutManifest, WorkspaceError> {
-        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
-        self.verify_checkout_with_worker_changes_timeout(workspace, true, true, deadline)
             .await
     }
 
@@ -5889,7 +5914,7 @@ async fn tracked_instruction_paths(
 fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
     use std::os::unix::ffi::OsStringExt;
 
-    PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
 }
 
 #[cfg(not(unix))]

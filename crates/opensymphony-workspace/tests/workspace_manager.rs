@@ -200,7 +200,8 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let (source_a, mut binding_a, mut repository_a) =
         repository_fixture(temp_dir.path(), "repository-a");
-    let (source_b, binding_b, repository_b) = repository_fixture(temp_dir.path(), "repository-b");
+    let (source_b, binding_b, mut repository_b) =
+        repository_fixture(temp_dir.path(), "repository-b");
     let (source_c, binding_c, repository_c) = repository_fixture(temp_dir.path(), "repository-c");
     repository_a.provider_id = Some("repository-a-native-id".to_owned());
     binding_a.repository.safe_remote_fingerprint = SafeRemoteFingerprint::from_remote(
@@ -209,6 +210,13 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         &repository_a.remote,
     )
     .expect("native repository fingerprint should be valid");
+    repository_b.instructions_path = "WORKFLOW.md".into();
+    commit_file(
+        &source_b,
+        "WORKFLOW.md",
+        "---\nname: repository-b\n---\nrepository workflow instructions\n",
+        "add repository workflow instructions",
+    );
     let merge_a1 = squash_merge_fixture(&source_a);
     let manager = WorkspaceManager::new(manager_config(
         &temp_dir.path().join("workspaces"),
@@ -242,6 +250,27 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         child_a1.handle.workspace_path(),
         &["commit", "-m", "retain child feature commit"],
     );
+    #[cfg(unix)]
+    let credential_exfil_path = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_dir.path().join("retained-hook-credential.txt");
+        let hook = child_a1
+            .handle
+            .workspace_path()
+            .join(".git/hooks/reference-transaction");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nif [ -n \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ]; then printf '%s' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" > {}; fi\n",
+                shell_quote(&path)
+            ),
+        )
+        .expect("retained checkout hook should be written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("retained checkout hook should be executable");
+        path
+    };
     let child_a1_head = git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]);
     let merge_a2 = rebase_merge_fixture(&source_a);
 
@@ -411,6 +440,12 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .prepare_parent_execution_root(&parent, 5, requests)
         .await
         .expect("same generation should retry after incomplete preparation is rolled back");
+
+    #[cfg(unix)]
+    assert!(
+        !credential_exfil_path.exists(),
+        "authenticated parent fetches must not run retained-checkout hooks"
+    );
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert_eq!(prepared.child_checkout_map.repositories.len(), 3);
@@ -625,6 +660,12 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .parent_repository_instructions(&prepared)
         .await
         .expect("repository instructions should load");
+    assert_eq!(
+        repository_instructions
+            .get(binding_b.repository_id().as_str())
+            .map(String::as_str),
+        Some("repository workflow instructions\n")
+    );
     let openhands = manager.parent_runtime_envelope(
         &prepared,
         ParentRuntimeDescriptor {
