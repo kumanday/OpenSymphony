@@ -45,7 +45,7 @@ use crate::opensymphony_orchestrator::{
     ParentEligibilityEvidence, ParentRepositoryTarget, ProviderEvidenceBoundary, RecoveredRun,
     RecoveryRecord, RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
     WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, parent_command_identity,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -168,12 +168,13 @@ async fn load_parent_verification_receipt(
             path.display()
         )
     })?;
-    let evidence: ParentVerificationEvidence = serde_json::from_slice(&bytes).map_err(|error| {
-        format!(
-            "parent verification receipt {} is invalid JSON: {error}",
-            path.display()
-        )
-    })?;
+    let mut evidence: ParentVerificationEvidence =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "parent verification receipt {} is invalid JSON: {error}",
+                path.display()
+            )
+        })?;
     if evidence.run_id != envelope.run_id
         || evidence.attempt != envelope.attempt
         || evidence.hierarchy_generation != envelope.hierarchy_generation
@@ -207,11 +208,11 @@ async fn load_parent_verification_receipt(
             "parent verification command root is not a verified checkout handle".to_owned(),
         );
     }
-    if redact_runtime_diagnostic(&evidence.command) != evidence.command {
-        return Err(
-            "parent verification command selector contains credential-like material".to_owned(),
-        );
+    if evidence.command.trim().is_empty() {
+        return Err("parent verification command selector is empty".to_owned());
     }
+    evidence.command_hash = parent_command_identity(&evidence.command);
+    evidence.command = redact_runtime_diagnostic(&evidence.command);
     Ok(evidence)
 }
 
@@ -8500,6 +8501,7 @@ mod tests {
                 "abc123".to_owned(),
             )]),
             command: "cargo test".to_owned(),
+            command_hash: String::new(),
             root: "parent_root".to_owned(),
         }
     }
@@ -8515,12 +8517,11 @@ mod tests {
         )
         .expect("write evidence");
         let envelope = parent_envelope(tempdir.path());
-        assert_eq!(
-            load_parent_verification_receipt(tempdir.path(), &envelope)
-                .await
-                .expect("valid receipt"),
-            parent_evidence()
-        );
+        let loaded = load_parent_verification_receipt(tempdir.path(), &envelope)
+            .await
+            .expect("valid receipt");
+        assert_eq!(loaded.command, "cargo test");
+        assert_eq!(loaded.command_hash, parent_command_identity("cargo test"));
 
         let mut stale = parent_evidence();
         stale.repository_commits.insert(
@@ -8540,17 +8541,19 @@ mod tests {
         );
 
         let mut secret_command = parent_evidence();
-        secret_command.command = "cargo test token=secret".to_owned();
+        secret_command.command = "cargo   test token=secret".to_owned();
         fs::write(
             evidence_dir.join("final-verification.json"),
             serde_json::to_vec(&secret_command).expect("encode secret command evidence"),
         )
         .expect("write secret command evidence");
-        assert!(
-            load_parent_verification_receipt(tempdir.path(), &envelope)
-                .await
-                .expect_err("credential-like command must be rejected")
-                .contains("credential-like")
+        let loaded_secret = load_parent_verification_receipt(tempdir.path(), &envelope)
+            .await
+            .expect("exact command identity is retained without persisting credentials");
+        assert_ne!(loaded_secret.command, secret_command.command);
+        assert_eq!(
+            loaded_secret.command_hash,
+            parent_command_identity(&secret_command.command)
         );
     }
 

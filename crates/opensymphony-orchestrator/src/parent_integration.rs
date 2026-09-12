@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, ParentVerificationEvidence, TimestampMs,
 };
+use crate::opensymphony_workspace::redact_runtime_diagnostic;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const MAX_TRANSITIONS: usize = 256;
@@ -146,7 +148,11 @@ pub struct ParentCleanupReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentCommandReceipt {
     pub command_id: String,
+    /// Bounded redacted display for diagnostics.
     pub command: String,
+    /// SHA-256 identity of the exact transient harness command.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command_hash: String,
     #[serde(default)]
     pub root: ParentAttemptRoot,
     pub started_at: TimestampMs,
@@ -580,7 +586,8 @@ impl ParentIntegrationController {
         }
         let attempt = self.attempt_mut(attempt_id)?;
         let selected_command = attempt.commands.iter().rev().find(|command| {
-            command.command == evidence.command
+            !evidence.command_hash.is_empty()
+                && command.command_hash == evidence.command_hash
                 && match &command.root {
                     ParentAttemptRoot::ParentRoot => evidence.root == "parent_root",
                     ParentAttemptRoot::CheckoutHandle(handle) => evidence.root == *handle,
@@ -589,7 +596,7 @@ impl ParentIntegrationController {
                 && command.exit_code.is_some()
         });
         let selected_exit_code = selected_command.and_then(|command| command.exit_code);
-        if evidence.command.trim().is_empty() || selected_exit_code.is_none() {
+        if evidence.command_hash.is_empty() || selected_exit_code.is_none() {
             return Err(ParentIntegrationError::InvalidVerificationEvidence(
                 "selected command does not match a completed runtime command".to_owned(),
             ));
@@ -621,6 +628,11 @@ impl ParentIntegrationController {
             ));
         }
         let attempt = self.attempt_mut(attempt_id)?;
+        if observed_at < attempt.started_at {
+            return Ok(());
+        }
+        let command_hash = parent_command_identity(command);
+        let command = redact_runtime_diagnostic(command);
         if attempt.status != ParentAttemptStatus::Running {
             return Err(ParentIntegrationError::AttemptAlreadyTerminal(
                 attempt_id.to_owned(),
@@ -631,7 +643,7 @@ impl ParentIntegrationController {
             .iter()
             .find(|receipt| receipt.command_id == command_id)
         {
-            return if existing.command == command && existing.root == root {
+            return if existing.command_hash == command_hash && existing.root == root {
                 Ok(())
             } else {
                 Err(ParentIntegrationError::InvalidVerificationEvidence(
@@ -682,7 +694,8 @@ impl ParentIntegrationController {
         }
         attempt.commands.push(ParentCommandReceipt {
             command_id: command_id.to_owned(),
-            command: command.to_owned(),
+            command,
+            command_hash,
             root,
             started_at: observed_at,
             finished_at: None,
@@ -706,6 +719,9 @@ impl ParentIntegrationController {
         observed_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
         let attempt = self.attempt_mut(attempt_id)?;
+        if observed_at < attempt.started_at {
+            return Ok(());
+        }
         let Some(command_index) = attempt
             .commands
             .iter()
@@ -713,6 +729,9 @@ impl ParentIntegrationController {
         else {
             return Ok(());
         };
+        if observed_at < attempt.commands[command_index].started_at {
+            return Ok(());
+        }
         if let Some(finished_at) = attempt.commands[command_index].finished_at {
             return if attempt.commands[command_index].exit_code == Some(exit_code) {
                 Ok(())
@@ -1327,6 +1346,12 @@ fn receipt(status: impl Into<String>, detail: Option<String>) -> ParentSideEffec
     }
 }
 
+pub fn parent_command_identity(command: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(command.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,6 +1415,7 @@ mod tests {
                 })
                 .collect(),
             command: "cargo test".to_owned(),
+            command_hash: parent_command_identity("cargo test"),
             root: "parent_root".to_owned(),
         };
         assert!(
@@ -1809,6 +1835,7 @@ mod tests {
                 })
                 .collect(),
             command: "cargo test".to_owned(),
+            command_hash: parent_command_identity("cargo test"),
             root: "parent_root".to_owned(),
         };
         assert!(
@@ -1824,6 +1851,114 @@ mod tests {
         assert_eq!(attempt.commands.len(), 2);
         assert_eq!(attempt.resources.len(), 4);
         assert_eq!(attempt.exit_code, Some(0));
+    }
+
+    #[test]
+    fn verification_uses_exact_command_identity_while_persisting_redacted_text() {
+        let mut controller = controller();
+        let attempt = controller
+            .start_attempt(
+                "integration",
+                "attempt:exact-command",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(10),
+            )
+            .expect("attempt");
+        let exact_command = "cargo   test token=secret";
+        controller
+            .observe_command_started(
+                &attempt,
+                "command-exact",
+                exact_command,
+                ParentAttemptRoot::ParentRoot,
+                TimestampMs::new(11),
+            )
+            .expect("command start");
+        controller
+            .observe_command_finished(
+                &attempt,
+                "command-exact",
+                0,
+                Some("passed"),
+                TimestampMs::new(12),
+            )
+            .expect("command finish");
+        let receipt = controller
+            .attempts
+            .last()
+            .expect("attempt")
+            .commands
+            .last()
+            .expect("command");
+        assert_ne!(receipt.command, exact_command);
+        assert_eq!(receipt.command_hash, parent_command_identity(exact_command));
+
+        let evidence = ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".to_owned(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: redact_runtime_diagnostic(exact_command),
+            command_hash: parent_command_identity(exact_command),
+            root: "parent_root".to_owned(),
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt, &evidence)
+                .expect("exact command hash selects the observed command")
+        );
+    }
+
+    #[test]
+    fn command_events_before_the_current_attempt_are_ignored() {
+        let mut controller = controller();
+        let attempt = controller
+            .start_attempt(
+                "integration",
+                "attempt:current-turn",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(10),
+            )
+            .expect("attempt");
+        controller
+            .observe_command_started(
+                &attempt,
+                "command-old-turn",
+                "cargo test",
+                ParentAttemptRoot::ParentRoot,
+                TimestampMs::new(9),
+            )
+            .expect("stale start is ignored");
+        controller
+            .observe_command_finished(
+                &attempt,
+                "command-old-turn",
+                0,
+                Some("old completion"),
+                TimestampMs::new(9),
+            )
+            .expect("stale completion is ignored");
+        assert!(
+            controller
+                .attempts
+                .last()
+                .expect("attempt")
+                .commands
+                .is_empty()
+        );
     }
 
     #[test]

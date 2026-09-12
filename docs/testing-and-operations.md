@@ -65,6 +65,7 @@ Why fakes matter:
 - scheduler recovery on daemon restart
 - parent integration launch-intent persistence before worker start, exact
   run-bound final-verification receipts, missing/stale receipt rejection,
+  exact command hashing before durable redaction, prior-attempt event rejection,
   production-shaped Codex and OpenHands command start/completion events,
   observed parent-root and checkout working directories, orchestrator-owned
   deadlines, bounded command logs/resources, rejection of prompt-authored

@@ -1069,10 +1069,14 @@ pub struct ParentVerificationEvidence {
     pub attempt: u32,
     pub hierarchy_generation: u64,
     pub repository_commits: BTreeMap<CanonicalRepositoryId, String>,
-    /// Exact command text selected from an observed harness command-completion
-    /// event. The file selects runtime evidence; it does not supply exit,
-    /// timing, log, resource, or cleanup facts.
+    /// Exact command text in the worker-authored receipt. The trusted loader
+    /// replaces this with a redacted diagnostic before the evidence enters
+    /// durable orchestrator state.
     pub command: String,
+    /// Non-reversible identity computed by the trusted loader from the exact
+    /// receipt command. Worker-authored values are ignored and overwritten.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command_hash: String,
     /// `parent_root` or one checkout handle from the verified parent envelope.
     pub root: String,
 }

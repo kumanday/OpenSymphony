@@ -116,6 +116,9 @@ on the shared parent conversation and records its input version, root or opaque
 checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
 a reconciled running attempt attached; an unreconciled attempt becomes
 indeterminate and must pass cleanup and repository refresh before rerun. Final
+verification binds the worker-authored exact command to a trusted SHA-256
+identity before redaction; durable evidence retains that identity and a redacted
+diagnostic, while events older than the current attempt are ignored. Final
 admission identity is stored separately from the compact transition tail so an
 unbounded retry history cannot replay the initial admission transitions. If a
 completed parent reopens, the scheduler creates a new controller lifecycle even
@@ -156,9 +159,10 @@ fails before a replacement harness session can start. Reused turns receive a
 small continuation prompt containing the current run, attempt, generation,
 exact commit map, and receipt contract; the original workflow and repository
 instructions remain in the bound conversation rather than being replayed.
-Terminal success and descendant lease release are
-gated by the durable controller's completed state in both live and recovery
-release paths.
+Terminal success is gated by the durable controller's completed state in both
+live and recovery release paths. Completed parent roots and their descendant
+leases remain durable for capture retry; OSYM-893 consumes that terminal state
+for ordered worktree cleanup and lease release.
 
 ### 3.2 OpenHands is the execution adapter
 

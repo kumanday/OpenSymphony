@@ -26,7 +26,7 @@ pub use parent_integration::{
     ParentCommandReceipt, ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
     ParentIntegrationState, ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus,
     ParentRetryClassification, ParentSideEffectIntent, ParentSideEffectReceipt, ParentTransition,
-    ParentVerificationAttempt,
+    ParentVerificationAttempt, parent_command_identity,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,

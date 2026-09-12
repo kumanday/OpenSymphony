@@ -212,6 +212,12 @@ state reconciliation. An ordinary cancellation while the tracker parent remains
 active returns through cleanup and baseline refresh. Operator and tracker
 terminal cancellation remains terminal.
 
+The final-verification receipt selects an exact harness-observed foreground
+command. The trusted loader computes its SHA-256 identity from the transient
+exact text, then persists only the identity and a bounded redacted diagnostic.
+Command start and completion events preceding the current attempt's start time
+cannot contribute to its result.
+
 The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
 target remains an ancestor of the current integration HEAD, preserving
@@ -256,11 +262,12 @@ or remove the parent workspace until the durable controller reaches
 A verified passed attempt remains parked while the tracker still reports the
 parent active or its refresh is unavailable. Restart recovery preserves that
 tracker-confirmation wait and does not launch a second attempt. A completed
-controller authorizes terminal success and lease release only while its
-hierarchy generation still matches the current unblocked snapshot. COE-554
-retains the completed parent root across later reconciliation and daemon restart
-so automatic capture can retry without losing its runtime envelope. OSYM-893
-owns durable capture acknowledgement, cleanup intent, tombstones, and deletion.
+controller authorizes terminal success only while its hierarchy generation
+still matches the current unblocked snapshot. COE-554 retains the completed
+parent root and its evidence-protecting leases across later reconciliation and
+daemon restart so automatic capture can retry without losing its runtime
+envelope or source checkouts. OSYM-893 owns durable capture acknowledgement,
+ordered lease release, cleanup intent, tombstones, and deletion.
 A recovered parent worker must find the exact conversation manifest recorded by
 the controller. Its expected identity crosses the scheduler-to-worker request,
 and a missing or different manifest fails before any harness session is
