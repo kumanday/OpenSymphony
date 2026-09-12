@@ -65,6 +65,14 @@ Rust owns:
 
 OpenHands conversation state is informative, not authoritative.
 
+Parent admission derives child terminal status from scheduler-owned durable
+outcomes or released executions. Provider-supplied terminal flags cannot
+approve dispatch. A current execution supersedes any older success receipt;
+unclaimed, claimed, running, and retry-queued children remain ineligible,
+including when a subtree no longer requires merge evidence. Reopening or
+recovering nonterminal work invalidates its durable success receipt before
+batched launch preparation.
+
 Repository routing is also orchestrator-owned: terminal child metadata carries
 one alias, the central inventory resolves it to a canonical provider identity,
 and the scheduler persists that identity plus its config and inventory

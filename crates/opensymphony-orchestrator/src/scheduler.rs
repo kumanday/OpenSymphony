@@ -1602,8 +1602,6 @@ where
                     reachable_child_edges,
                     current_epoch_millis(),
                 );
-                self.hierarchy_state
-                    .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
                 return Ok(true);
             }
             return Ok(false);
@@ -1740,8 +1738,6 @@ where
                 reachable_child_edges,
                 current_epoch_millis(),
             );
-            self.hierarchy_state
-                .release_obsolete_leaf_leases(&removed_child_ids, current_epoch_millis());
             for child_id in &retained_child_ids {
                 self.hierarchy_state
                     .run_hierarchy_generations
@@ -4977,30 +4973,30 @@ where
         };
         let mut released_canceled_subtree_holds = false;
         for child in &mut evidence.children {
-            let child_execution_is_not_terminal =
-                self.executions
-                    .get(&child.child_id)
-                    .is_some_and(|execution| {
-                        matches!(
-                            execution.status(),
-                            SchedulerStatus::Claimed
-                                | SchedulerStatus::Running
-                                | SchedulerStatus::RetryQueued
-                        )
-                    });
-            let child_orchestrator_terminal = child.orchestrator_terminal
-                || self
-                    .hierarchy_state
-                    .terminal_orchestrator_issues
-                    .contains(&child.child_id);
+            // A current execution supersedes an older durable success receipt.
+            // Provider terminal flags never authorize parent admission.
+            child.orchestrator_terminal = self.executions.get(&child.child_id).map_or_else(
+                || {
+                    self.hierarchy_state
+                        .terminal_orchestrator_issues
+                        .contains(&child.child_id)
+                },
+                |execution| {
+                    matches!(
+                        execution.state(),
+                        crate::opensymphony_orchestrator::SchedulerState::Released {
+                            reason: ReleaseReason::TrackerTerminal | ReleaseReason::Completed,
+                            ..
+                        }
+                    )
+                },
+            );
             if !child.merge_required {
-                if child_execution_is_not_terminal || !child_orchestrator_terminal {
-                    child.orchestrator_terminal = false;
+                if !child.orchestrator_terminal {
                     child.unresolved_failure =
                         Some("child orchestrator outcome is not durably terminal".to_owned());
                     continue;
                 }
-                child.orchestrator_terminal = true;
                 if let Some(reachable_child_edges) = reachable_child_edges {
                     released_canceled_subtree_holds |= self
                         .hierarchy_state
@@ -5036,22 +5032,6 @@ where
                 child.unresolved_failure =
                     Some("child has an unresolved worker failure or retry".to_owned());
                 continue;
-            }
-            if !child.orchestrator_terminal {
-                child.orchestrator_terminal = child_orchestrator_terminal
-                    || self
-                        .executions
-                        .get(&child.child_id)
-                        .is_some_and(|execution| {
-                            matches!(
-                                execution.state(),
-                                crate::opensymphony_orchestrator::SchedulerState::Released {
-                                    reason: ReleaseReason::TrackerTerminal
-                                        | ReleaseReason::Completed,
-                                    ..
-                                }
-                            )
-                        });
             }
             let direct_provider_evidence_is_stale =
                 child.provider_evidence_at.is_some_and(|evidence_at| {
@@ -5752,6 +5732,14 @@ where
     }
 
     fn insert_execution(&mut self, issue_id: IssueId, execution: IssueExecution) {
+        // Reopened/recovered work invalidates old success before launch
+        // preparation can temporarily remove the execution from this map.
+        if execution.status() != SchedulerStatus::Released {
+            self.hierarchy_state_dirty |= self
+                .hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(&issue_id);
+        }
         let current_key = running_state_key_for_execution(&execution);
         if let Some(previous) = self.executions.insert(issue_id, execution) {
             self.decrement_running_count(&previous);

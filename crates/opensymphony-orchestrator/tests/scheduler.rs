@@ -818,6 +818,79 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             unresolved_failure: None,
         }],
     };
+    // Provider terminal flags cannot substitute for scheduler-owned outcomes,
+    // including when a canceled child no longer requires merge evidence.
+    for merge_required in [true, false] {
+        let mut forged_evidence = evidence.clone();
+        forged_evidence.children[0].merge_required = merge_required;
+        if !merge_required {
+            let child = &mut forged_evidence.children[0];
+            child.merge_result_commit = None;
+            child.merge_result_commits_by_repository.clear();
+            child.merge_repository_id = None;
+            child.merge_repository_ids.clear();
+            child.resource = None;
+        }
+        let mut scheduler = Scheduler::new(
+            FakeTracker {
+                active: vec![parent.clone()],
+                parent_evidence: Some(forged_evidence),
+                ..Default::default()
+            },
+            FakeWorkspace {
+                durable_state: Some(
+                    serde_json::to_value(&durable_state).expect("state should encode"),
+                ),
+                ..Default::default()
+            },
+            FakeWorker::default(),
+            scheduler_config(),
+        );
+        scheduler.tick(ts(100)).await.expect("parent should defer");
+        assert!(
+            scheduler.worker().launches.is_empty(),
+            "provider supplied terminal authority"
+        );
+    }
+    durable_state
+        .terminal_orchestrator_issues
+        .insert(child_id.clone());
+    // An old success receipt must not admit the parent while a reopened child
+    // is unclaimed or already prepared in the same launch batch.
+    for child_first in [true, false] {
+        let mut reopened_child = tracker_issue("child-1", "COE-1-child", "In Progress", 0);
+        reopened_child.parent_id = Some(parent_id.to_string());
+        reopened_child.priority = Some(if child_first { 0 } else { 2 });
+        let mut scheduler = Scheduler::new(
+            FakeTracker {
+                active: vec![parent.clone(), reopened_child],
+                parent_evidence: Some(evidence.clone()),
+                ..Default::default()
+            },
+            FakeWorkspace {
+                durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+                ..Default::default()
+            },
+            FakeWorker::default(),
+            scheduler_config(),
+        );
+        scheduler
+            .tick(ts(100))
+            .await
+            .expect("reopened child dispatch");
+        assert_eq!(
+            scheduler.worker().launches.len(),
+            1,
+            "old receipt admitted parent beside reopened child"
+        );
+        assert_eq!(scheduler.worker().launches[0].issue.id, child_id);
+        let persisted: crate::opensymphony_orchestrator::DurableOrchestratorState =
+            serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+                .expect("durable state");
+        assert!(!persisted.terminal_orchestrator_issues.contains(&child_id));
+    }
+    let mut evidence = evidence;
+    evidence.children[0].orchestrator_terminal = false;
     let tracker = FakeTracker {
         active: vec![parent.clone()],
         parent_evidence: Some(evidence.clone()),
@@ -892,6 +965,91 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("restart should respect the durable dispatch claim");
     assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn hierarchy_reconciliation_preserves_reparented_leases_and_releases_terminal_roots() {
+    let child_id = IssueId::new("child").expect("child");
+    let mut old_parent = tracker_issue("old-parent", "COE-OLD", "In Progress", 0);
+    old_parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    for reparented in [true, false] {
+        let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+            hierarchy: BTreeMap::from([(
+                IssueId::new("old-parent").expect("parent"),
+                HierarchySnapshot::new(&old_parent),
+            )]),
+            leases: vec![LeaseRecord {
+                kind: LeaseKind::LeafWorker,
+                resource: LeaseResource {
+                    issue_id: child_id.clone(),
+                    repository_id: CanonicalRepositoryId::new("github:repo").expect("repo"),
+                    checkout_generation: "checkout-1".to_owned(),
+                },
+                owner: LeaseOwner::leaf_worker(&child_id),
+                hierarchy_generation: 1,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            }],
+            ..Default::default()
+        };
+        let mut tracker = FakeTracker::default();
+        if reparented {
+            let mut current_parent = old_parent.clone();
+            current_parent.sub_issues.clear();
+            let mut child = tracker_issue("child", "COE-CHILD", "Done", 0);
+            child.parent_id = Some("new-parent".to_owned());
+            tracker.active = vec![current_parent];
+            tracker.terminal = vec![child];
+        } else {
+            let mut terminal_parent = old_parent.clone();
+            terminal_parent.state = "Canceled".to_owned();
+            terminal_parent.state_kind = TrackerIssueStateKind::Canceled;
+            tracker.terminal = vec![terminal_parent];
+            // A new active hierarchy must not short-circuit terminal reconciliation.
+            let mut active_parent = tracker_issue("active-parent", "COE-ACTIVE", "In Progress", 0);
+            active_parent.sub_issues = vec![TrackerIssueRef {
+                id: "unrelated".to_owned(),
+                identifier: "COE-UNRELATED".to_owned(),
+                title: None,
+                url: None,
+                state: "In Progress".to_owned(),
+                state_kind: TrackerIssueStateKind::Started,
+            }];
+            tracker.active = vec![active_parent];
+        }
+        let mut scheduler = Scheduler::new(
+            tracker,
+            FakeWorkspace {
+                durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+                ..Default::default()
+            },
+            FakeWorker::default(),
+            scheduler_config(),
+        );
+        scheduler.tick(ts(100)).await.expect("reconcile hierarchy");
+        let persisted: crate::opensymphony_orchestrator::DurableOrchestratorState =
+            serde_json::from_value(
+                scheduler
+                    .workspace()
+                    .durable_state
+                    .clone()
+                    .expect("persisted state"),
+            )
+            .expect("state");
+        assert_eq!(
+            persisted.leases.iter().any(LeaseRecord::active),
+            reparented,
+            "reparented={reparented}"
+        );
+    }
 }
 
 #[tokio::test]

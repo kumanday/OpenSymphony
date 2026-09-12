@@ -110,6 +110,14 @@ failed, forced, and restart-recovery cleanup, checks the active owner-identified
 leases before removal. A leased checkout and its conversation evidence remain
 present until all applicable review and ancestor leases are released.
 
+When a nested issue moves to another parent, release checks preserve leases
+through its required descendant edges, including when the new parent exists
+only in the current tracker observation. Removing or canceling the old root
+must not release a still-required descendant's leaf, review, or ancestor leases.
+The old parent's review ownership can be released independently; a later
+leaf-only cleanup pass must not override the reachability decision.
+
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:

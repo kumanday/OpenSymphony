@@ -953,6 +953,53 @@ impl DurableOrchestratorState {
         self.compact_lease_history();
     }
 
+    // Preserve the complete required subtree when any of its roots is still
+    // needed by another parent, including parents not materialized locally yet.
+    fn retained_subtree_issue_ids(
+        &self,
+        parent_id: &IssueId,
+        subtree: &BTreeSet<IssueId>,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
+    ) -> BTreeSet<IssueId> {
+        let mut children = BTreeMap::<&IssueId, BTreeSet<&IssueId>>::new();
+        for (parent, child) in self
+            .hierarchy
+            .iter()
+            .flat_map(|(parent, snapshot)| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(move |edge| (parent, &edge.child_id))
+            })
+            .chain(
+                reachable_child_edges
+                    .into_iter()
+                    .flatten()
+                    .map(|(parent, child)| (parent, child)),
+            )
+        {
+            if parent != parent_id {
+                children.entry(parent).or_default().insert(child);
+            }
+        }
+        let mut pending = children
+            .iter()
+            .filter(|(parent, _)| !subtree.contains(*parent))
+            .flat_map(|(_, children)| children.iter().copied())
+            .collect::<Vec<_>>();
+        let mut retained = BTreeSet::new();
+        while let Some(issue_id) = pending.pop() {
+            if subtree.contains(issue_id)
+                && retained.insert(issue_id.clone())
+                && let Some(descendants) = children.get(issue_id)
+            {
+                pending.extend(descendants.iter().copied());
+            }
+        }
+        retained
+    }
+
     /// Release evidence owned by child subtrees removed from a parent's
     /// frozen scope. Owners are intentionally scoped to the removed subtree;
     /// leases held by the still-retained parent or siblings remain active.
@@ -983,16 +1030,8 @@ impl DurableOrchestratorState {
             return false;
         }
 
-        let retained_child_ids = self
-            .hierarchy
-            .iter()
-            .filter(|(candidate_parent_id, _)| {
-                *candidate_parent_id != parent_id && !subtree.contains(*candidate_parent_id)
-            })
-            .flat_map(|(_, snapshot)| snapshot.required_child_edges.iter())
-            .filter(|edge| edge.required)
-            .map(|edge| edge.child_id.clone())
-            .collect::<BTreeSet<_>>();
+        let retained_child_ids =
+            self.retained_subtree_issue_ids(parent_id, &subtree, reachable_child_edges);
 
         let mut review_prefixes = removed_child_ids
             .iter()
@@ -1001,23 +1040,13 @@ impl DurableOrchestratorState {
         review_prefixes.extend(
             self.hierarchy
                 .keys()
-                .filter(|issue_id| subtree.contains(*issue_id))
+                .filter(|issue_id| {
+                    subtree.contains(*issue_id) && !retained_child_ids.contains(*issue_id)
+                })
                 .map(|issue_id| format!("review:{issue_id}")),
         );
 
         let mut released = false;
-        let still_reachable = |issue_id: &IssueId| {
-            retained_child_ids.contains(issue_id)
-                || reachable_child_edges.is_some_and(|edges| {
-                    edges
-                        .iter()
-                        .any(|(candidate_parent_id, candidate_child_id)| {
-                            candidate_child_id == issue_id
-                                && candidate_parent_id != parent_id
-                                && !subtree.contains(candidate_parent_id)
-                        })
-                })
-        };
         for lease in &mut self.leases {
             if !lease.active() {
                 continue;
@@ -1025,10 +1054,11 @@ impl DurableOrchestratorState {
             let owned_by_removed_subtree = match lease.kind {
                 LeaseKind::LeafWorker => {
                     subtree.contains(&lease.resource.issue_id)
-                        && !still_reachable(&lease.resource.issue_id)
+                        && !retained_child_ids.contains(&lease.resource.issue_id)
                 }
                 LeaseKind::AncestorIntegration => subtree.iter().any(|issue_id| {
-                    lease.owner == LeaseOwner::ancestor(issue_id) && !still_reachable(issue_id)
+                    lease.owner == LeaseOwner::ancestor(issue_id)
+                        && !retained_child_ids.contains(issue_id)
                 }),
                 LeaseKind::Review => review_prefixes.iter().any(|prefix| {
                     lease.owner.id == *prefix || lease.owner.id.starts_with(&format!("{prefix}:"))
@@ -1115,26 +1145,20 @@ impl DurableOrchestratorState {
             }
         }
 
+        let retained_child_ids =
+            self.retained_subtree_issue_ids(parent_id, &subtree, reachable_child_edges);
+
         let mut review_prefixes = vec![format!("review:{parent_id}:")];
         review_prefixes.extend(
             self.hierarchy
                 .keys()
-                .filter(|issue_id| subtree.contains(*issue_id))
+                .filter(|issue_id| {
+                    subtree.contains(*issue_id) && !retained_child_ids.contains(*issue_id)
+                })
                 .map(|issue_id| format!("review:{issue_id}:"))
                 .collect::<Vec<_>>(),
         );
         let parent_ancestor_owner = LeaseOwner::ancestor(parent_id);
-        let still_reachable = |issue_id: &IssueId| {
-            reachable_child_edges.is_some_and(|edges| {
-                edges
-                    .iter()
-                    .any(|(candidate_parent_id, candidate_child_id)| {
-                        candidate_child_id == issue_id
-                            && candidate_parent_id != parent_id
-                            && !subtree.contains(candidate_parent_id)
-                    })
-            })
-        };
         let mut released = false;
         for lease in &mut self.leases {
             if !lease.active() {
@@ -1143,13 +1167,13 @@ impl DurableOrchestratorState {
             let owned_by_subtree = match lease.kind {
                 LeaseKind::LeafWorker => {
                     subtree.contains(&lease.resource.issue_id)
-                        && !still_reachable(&lease.resource.issue_id)
+                        && !retained_child_ids.contains(&lease.resource.issue_id)
                 }
                 LeaseKind::AncestorIntegration => {
                     lease.owner == parent_ancestor_owner
                         || subtree.iter().any(|issue_id| {
                             lease.owner == LeaseOwner::ancestor(issue_id)
-                                && !still_reachable(issue_id)
+                                && !retained_child_ids.contains(issue_id)
                         })
                 }
                 LeaseKind::Review => review_prefixes
@@ -1667,6 +1691,122 @@ mod tests {
             2,
         ));
         assert!(state.leases.iter().all(LeaseRecord::active));
+    }
+
+    #[test]
+    fn reparented_subtree_preserves_required_descendant_leases() {
+        let parent_a = IssueId::new("parent-a").expect("parent a");
+        let parent_b = IssueId::new("parent-b").expect("parent b");
+        let nested_id = IssueId::new("nested").expect("nested");
+        let leaf_id = IssueId::new("leaf").expect("leaf");
+        let canceled_id = IssueId::new("canceled").expect("canceled");
+        let mut nested = parent(vec![child("leaf", "Done"), child("canceled", "Canceled")]);
+        nested.id = nested_id.to_string();
+        let resource = |issue_id: &IssueId| LeaseResource {
+            issue_id: issue_id.clone(),
+            repository_id: CanonicalRepositoryId::new("github:repo").expect("repository"),
+            checkout_generation: "checkout-1".to_owned(),
+        };
+        for materialized_parent in [false, true] {
+            for undispatched in [false, true] {
+                let mut state = DurableOrchestratorState {
+                    hierarchy: BTreeMap::from([
+                        (
+                            parent_a.clone(),
+                            HierarchySnapshot::new(&parent(vec![child("nested", "Done")])),
+                        ),
+                        (nested_id.clone(), HierarchySnapshot::new(&nested)),
+                    ]),
+                    ..Default::default()
+                };
+                if materialized_parent {
+                    state.hierarchy.insert(
+                        parent_b.clone(),
+                        HierarchySnapshot::new(&parent(vec![child("nested", "Done")])),
+                    );
+                }
+                for (parent_id, snapshot) in &mut state.hierarchy {
+                    snapshot.parent_id = parent_id.clone();
+                }
+                state.validate().expect("valid durable hierarchy");
+                // Include the canceled leaf in the old removed scope, but never
+                // connect it to the retained nested parent by a required edge.
+                for issue_id in [&leaf_id, &canceled_id] {
+                    state
+                        .acquire_leases(vec![LeaseRecord {
+                            kind: LeaseKind::LeafWorker,
+                            resource: resource(issue_id),
+                            owner: LeaseOwner::leaf_worker(issue_id),
+                            hierarchy_generation: 1,
+                            acquired_at: 1,
+                            expires_at: None,
+                            released_at: None,
+                        }])
+                        .expect("leaf lease");
+                }
+                for (kind, owner) in [
+                    (
+                        LeaseKind::AncestorIntegration,
+                        LeaseOwner::ancestor(&nested_id),
+                    ),
+                    (
+                        LeaseKind::Review,
+                        LeaseOwner::review_for_parent(&nested_id, &leaf_id),
+                    ),
+                ] {
+                    state
+                        .acquire_leases(vec![LeaseRecord {
+                            kind,
+                            owner,
+                            resource: resource(&leaf_id),
+                            hierarchy_generation: 1,
+                            acquired_at: 1,
+                            expires_at: None,
+                            released_at: None,
+                        }])
+                        .expect("descendant evidence");
+                }
+                state
+                    .hierarchy
+                    .get_mut(&parent_a)
+                    .expect("parent a")
+                    .required_child_edges
+                    .push(HierarchyChildEdge::from(&child("canceled", "Done")));
+                let edges = BTreeSet::from([
+                    (parent_b.clone(), nested_id.clone()),
+                    (nested_id.clone(), leaf_id.clone()),
+                ]);
+                let reachable = (!materialized_parent).then_some(&edges);
+                if undispatched {
+                    state.release_subtree_evidence_for_undispatched_parent_with_reachability(
+                        &parent_a, reachable, 2,
+                    );
+                } else {
+                    state.release_removed_subtree_leases(
+                        &parent_a,
+                        &[nested_id.clone(), canceled_id.clone()],
+                        reachable,
+                        2,
+                    );
+                }
+                assert!(
+                    state.active_for(&resource(&leaf_id)),
+                    "required descendant lost its only lease"
+                );
+                assert!(
+                    state
+                        .leases
+                        .iter()
+                        .filter(|lease| lease.resource.issue_id == leaf_id)
+                        .all(LeaseRecord::active),
+                    "retained descendant owner was released"
+                );
+                assert!(
+                    !state.active_for(&resource(&canceled_id)),
+                    "canceled edge retained evidence"
+                );
+            }
+        }
     }
 
     #[test]
