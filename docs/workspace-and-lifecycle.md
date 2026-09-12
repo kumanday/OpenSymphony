@@ -192,6 +192,15 @@ one repository share one handle;
 the target must contain every provider merge-result commit, while replaced
 feature commits from squash or rebase are not required.
 
+Parent integration attempts execute only in the parent root or in a checkout
+named by `child-checkouts.json`. The durable controller records an intent before
+each state-changing operation and stores its receipt before advancing. Attempt
+timeouts, interrupt uncertainty, resource collisions, and cleanup failures are
+retained with bounded diagnostics. After restart, an attempt without a
+reconciled harness is marked indeterminate; repository refresh cannot proceed
+until its recorded resources are released and cleanup succeeds. Cleanup and
+workspace deletion policy remain owned by the workspace manager.
+
 The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
 target remains an ancestor of the current integration HEAD, preserving

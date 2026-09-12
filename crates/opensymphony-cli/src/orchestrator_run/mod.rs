@@ -1078,6 +1078,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         target_commit: None,
         checkout_head: None,
         execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
+        parent_scope: false,
         authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
         authorized_repositories_by_project: runtime
             .repository_routing
@@ -1607,6 +1608,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) target_commit: Option<String>,
     pub(super) checkout_head: Option<String>,
     pub(super) execution_repo: String,
+    pub(super) parent_scope: bool,
     pub(super) authorized_repositories: BTreeSet<String>,
     pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
     pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,

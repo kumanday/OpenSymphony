@@ -18,7 +18,9 @@ use crate::opensymphony_domain::{
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
-use crate::opensymphony_workspace::{checkout_workspace_key, sanitize_workspace_key};
+use crate::opensymphony_workspace::{
+    checkout_workspace_key, redact_runtime_diagnostic, sanitize_workspace_key,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,7 +33,9 @@ use tracing::{debug, warn};
 use super::filter_issues_for_dispatch;
 use super::{
     DurableOrchestratorState, HierarchyBlockedReason, HierarchySnapshot, LeaseRecord,
-    LeaseResource, ParentEligibilityEvidence,
+    LeaseResource, ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt,
+    ParentCleanupStatus, ParentEligibilityEvidence, ParentIntegrationController,
+    ParentIntegrationError, ParentRepositoryTarget,
 };
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
@@ -426,6 +430,14 @@ pub trait WorkspaceBackend {
         Ok(false)
     }
 
+    async fn parent_workspace_targets(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Vec<ParentRepositoryTarget>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     async fn recover_retry_exhaustion(
         &mut self,
     ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
@@ -574,6 +586,8 @@ pub enum SchedulerError {
     RetryCalculation(#[from] RetryCalculationError),
     #[error(transparent)]
     Identifier(#[from] IdentifierError),
+    #[error(transparent)]
+    ParentIntegration(#[from] ParentIntegrationError),
 }
 
 pub struct Scheduler<T, W, M> {
@@ -1612,6 +1626,9 @@ where
             self.hierarchy_state
                 .run_hierarchy_generations
                 .remove(&normalized.id);
+            self.hierarchy_state
+                .parent_integrations
+                .remove(&normalized.id);
             if let Some(snapshot) = self.hierarchy_state.hierarchy.remove(&normalized.id) {
                 let removed_child_ids = snapshot
                     .required_child_edges
@@ -1644,6 +1661,10 @@ where
             self.hierarchy_state
                 .hierarchy
                 .insert(normalized.id.clone(), snapshot);
+            self.hierarchy_state.parent_integrations.insert(
+                normalized.id.clone(),
+                ParentIntegrationController::new(normalized.id.clone(), 1)?,
+            );
             if terminal_undispatched {
                 self.hierarchy_state
                     .release_subtree_evidence_for_undispatched_parent_with_reachability(
@@ -1766,6 +1787,17 @@ where
                     .run_hierarchy_generations
                     .insert(child_id.clone(), generation);
             }
+            if self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| snapshot.blocked_reason.is_none())
+            {
+                self.hierarchy_state.parent_integrations.insert(
+                    normalized.id.clone(),
+                    ParentIntegrationController::new(normalized.id.clone(), generation)?,
+                );
+            }
             return Ok(true);
         }
         Ok(released_terminal_parent_evidence || reactivated_parent)
@@ -1839,6 +1871,16 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        for record in records.iter().filter(|record| record.had_in_flight_run) {
+            if let Some(controller) = self
+                .hierarchy_state
+                .parent_integrations
+                .get_mut(&record.issue.id)
+            {
+                controller.reconcile_restart(record.recovered_run.is_some(), observed_at)?;
+                self.hierarchy_state_dirty = true;
+            }
+        }
         // Recovery manifests intentionally do not persist a second hierarchy
         // identity. Hydrate the parent edge from the provider's full issue
         // detail before terminal cleanup can release an intermediate parent's
@@ -3742,6 +3784,69 @@ where
                 }
             };
 
+            if !normalized.sub_issues.is_empty() {
+                let targets = match self
+                    .workspace
+                    .parent_workspace_targets(&normalized, &workspace)
+                    .await
+                {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        let error = self
+                            .clear_parent_dispatch_intent_after_preparation_failure(
+                                &issue_id,
+                                SchedulerError::Workspace {
+                                    detail: error.to_string(),
+                                },
+                            )
+                            .await;
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
+                };
+                let input_version = parent_targets_input_version(
+                    self.hierarchy_state
+                        .hierarchy
+                        .get(&issue_id)
+                        .map_or(0, |snapshot| snapshot.generation),
+                    &targets,
+                );
+                let previous_state = self.hierarchy_state.clone();
+                let result = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&issue_id)
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: "parent workspace has no durable integration controller".to_owned(),
+                    })?
+                    .record_workspace_prepared(targets, &input_version, observed_at);
+                if let Err(error) = result {
+                    self.hierarchy_state = previous_state;
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            }
+
             if let Some(normal_retry_count) = self
                 .executions
                 .get(&issue_id)
@@ -3894,6 +3999,31 @@ where
                 Ok(launch) => {
                     self.recovered_memory_issue_ids.remove(&issue_id);
                     let started_at = launch.started_at.unwrap_or(observed_at);
+                    if !execution.issue().sub_issues.is_empty() {
+                        let conversation_id = launch.conversation.conversation_id.to_string();
+                        let input_version = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get(&issue_id)
+                            .map(parent_controller_input_version)
+                            .unwrap_or_default();
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&issue_id)
+                            .ok_or_else(|| SchedulerError::Workspace {
+                                detail: "parent launch has no durable integration controller"
+                                    .to_owned(),
+                            })?
+                            .start_attempt(
+                                "parent integration harness run",
+                                format!("parent-run:{}", claimed_run.worker_id),
+                                ParentAttemptRoot::ParentRoot,
+                                conversation_id,
+                                effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
+                                input_version,
+                                started_at,
+                            )?;
+                    }
                     execution = execution.start_running(
                         observed_at,
                         effective_stall_timeout(self.config.stall_timeout_ms),
@@ -4009,6 +4139,81 @@ where
         first_error.map_or(Ok(()), Err)
     }
 
+    async fn record_parent_worker_outcome(
+        &mut self,
+        issue_id: &IssueId,
+        execution: &IssueExecution,
+        outcome: &WorkerOutcomeRecord,
+    ) -> Result<(), SchedulerError> {
+        let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(issue_id) else {
+            return Ok(());
+        };
+        let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+            return Ok(());
+        };
+        let (status, cleanup_status) = match outcome.outcome {
+            WorkerOutcomeKind::Succeeded => {
+                (ParentAttemptStatus::Passed, ParentCleanupStatus::Succeeded)
+            }
+            WorkerOutcomeKind::Failed => {
+                (ParentAttemptStatus::Failed, ParentCleanupStatus::Succeeded)
+            }
+            WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => (
+                ParentAttemptStatus::TimedOut,
+                ParentCleanupStatus::Succeeded,
+            ),
+            WorkerOutcomeKind::Cancelled => (
+                ParentAttemptStatus::Canceled,
+                ParentCleanupStatus::Succeeded,
+            ),
+            WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => (
+                ParentAttemptStatus::Indeterminate,
+                ParentCleanupStatus::Pending,
+            ),
+        };
+        controller.finish_attempt(
+            &attempt_id,
+            status,
+            None,
+            ParentCleanupReceipt {
+                status: cleanup_status,
+                occurred_at: outcome.finished_at,
+                detail: outcome.error.clone().or_else(|| outcome.summary.clone()),
+            },
+            outcome.finished_at,
+        )?;
+        let input_version = parent_controller_input_version(controller);
+        if status == ParentAttemptStatus::Passed
+            && execution.issue().state.category == IssueStateCategory::Terminal
+        {
+            controller.complete(&attempt_id, &input_version, outcome.finished_at)?;
+        } else if matches!(
+            status,
+            ParentAttemptStatus::Canceled | ParentAttemptStatus::Indeterminate
+        ) {
+            controller.cancel(
+                outcome
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| "parent integration harness was canceled".to_owned()),
+                &input_version,
+                status == ParentAttemptStatus::Canceled,
+                outcome.finished_at,
+            )?;
+        } else {
+            controller.prepare_retry(
+                &attempt_id,
+                outcome
+                    .error
+                    .as_deref()
+                    .or(outcome.summary.as_deref())
+                    .unwrap_or("parent integration turn finished before terminal tracker state"),
+                outcome.finished_at,
+            )?;
+        }
+        self.persist_orchestrator_state().await
+    }
+
     async fn clear_parent_dispatch_intent_after_preparation_failure(
         &mut self,
         issue_id: &IssueId,
@@ -4058,6 +4263,23 @@ where
                     else {
                         continue;
                     };
+                    let parent_log = format!(
+                        "{}: {}{}",
+                        event_kind.as_deref().unwrap_or("runtime_event"),
+                        summary.as_deref().unwrap_or_default(),
+                        payload
+                            .as_ref()
+                            .map(|payload| format!(" {payload}"))
+                            .unwrap_or_default()
+                    );
+                    if let Some(controller) =
+                        self.hierarchy_state.parent_integrations.get_mut(&issue_id)
+                        && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
+                    {
+                        controller
+                            .append_log(&attempt_id, &redact_runtime_diagnostic(&parent_log))?;
+                        self.hierarchy_state_dirty = true;
+                    }
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
                         execution.observe_runtime_event(
                             observed_at,
@@ -4096,6 +4318,13 @@ where
                             continue;
                         }
                     };
+                    if let Err(error) = self
+                        .record_parent_worker_outcome(&issue_id, &execution, &finished_outcome)
+                        .await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
                     if let Err(error) = self
                         .rebind_finished_child_hierarchy_generation(&issue_id)
                         .await
@@ -5192,6 +5421,7 @@ where
             return Ok(false);
         }
         next_snapshot.mark_dispatch_intent();
+        let input_version = parent_input_version(next_snapshot);
         let mut required_leases = evidence.integration_leases(&normalized.id, observed_at.as_u64());
         required_leases.extend(evidence.children.iter().flat_map(|child| {
             child
@@ -5213,6 +5443,18 @@ where
             .map_err(|error| SchedulerError::Workspace {
                 detail: error.to_string(),
             })?;
+        let controller = next_state
+            .parent_integrations
+            .entry(normalized.id.clone())
+            .or_insert(ParentIntegrationController::new(
+                normalized.id.clone(),
+                snapshot.generation,
+            )?);
+        if controller.hierarchy_generation != snapshot.generation {
+            *controller =
+                ParentIntegrationController::new(normalized.id.clone(), snapshot.generation)?;
+        }
+        controller.admit(&input_version, observed_at)?;
         let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
         if let Err(error) = self.persist_orchestrator_state().await {
             self.hierarchy_state = previous_state;
@@ -6460,6 +6702,49 @@ fn current_epoch_millis() -> u64 {
 
 fn conversation_id_suffix(value: &str) -> &str {
     value.get(value.len().saturating_sub(8)..).unwrap_or(value)
+}
+
+fn parent_input_version(snapshot: &HierarchySnapshot) -> String {
+    let merges = snapshot
+        .dispatch_required_merge_commits
+        .iter()
+        .map(|commit| {
+            format!(
+                "{}@{}",
+                commit
+                    .repository_id
+                    .as_ref()
+                    .map_or("<legacy>", |repository| repository.as_str()),
+                commit.commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("hierarchy:{};merges:{merges}", snapshot.generation)
+}
+
+fn parent_targets_input_version(
+    hierarchy_generation: u64,
+    targets: &[ParentRepositoryTarget],
+) -> String {
+    let targets = targets
+        .iter()
+        .map(|target| {
+            format!(
+                "{}:{}@{}",
+                target.repository_id, target.checkout_handle, target.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("hierarchy:{hierarchy_generation};targets:{targets}")
+}
+
+fn parent_controller_input_version(controller: &ParentIntegrationController) -> String {
+    parent_targets_input_version(
+        controller.hierarchy_generation,
+        &controller.targets.values().cloned().collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]

@@ -860,6 +860,8 @@ pub struct IssueEvidence {
     #[serde(default)]
     pub repository_id: Option<String>,
     #[serde(default)]
+    pub verified_repository_commits: BTreeMap<String, String>,
+    #[serde(default)]
     pub execution_run_id: Option<String>,
     #[serde(default)]
     pub execution_attempt: Option<u32>,

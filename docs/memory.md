@@ -481,7 +481,13 @@ explicitly. Ordinary worker grants have no administrative capability. Persisted
 sibling memory and target-branch code use the registered canonical source;
 AST requests may name that source using the `repository` alias as well as the
 legacy `repo` field; live overlays resolve only the execution repository's
-verified checkout.
+verified checkout. A parent integration grant instead contains the exact
+repository set from its durable runtime envelope. Persisted memory may span
+that set and the parent plus recorded descendants; `all_accessible` cannot add
+another repository or work item. Live overlays resolve only the envelope's
+active integration checkouts, using their opaque handles, contained relative
+paths, run and attempt, and target commits. An unrelated managed checkout stays
+inaccessible even when its repository belongs to the same project.
 The overlay must match the worker's issue, run, attempt, checkout generation,
 and target commit. A worker may advance that checkout during its run; strict
 discovery verifies that the current `HEAD` descends from the target commit

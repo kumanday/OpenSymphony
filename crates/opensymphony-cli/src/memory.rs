@@ -519,6 +519,7 @@ pub(crate) struct TerminalCaptureBinding {
     pub(crate) target_commit: String,
     pub(crate) checkout_head: String,
     pub(crate) instruction_hash: String,
+    pub(crate) repository_commits: BTreeMap<String, String>,
 }
 
 /// Read durable run envelopes before terminal capture so repository ownership
@@ -574,6 +575,71 @@ fn load_terminal_capture_bindings_inner(
         };
         let key = run.identifier.to_ascii_lowercase();
         if requested.is_some_and(|requested| !requested.contains(&key)) {
+            continue;
+        }
+        if let Some(envelope) = run.parent_runtime_envelope.as_ref() {
+            if envelope.run_id.trim().is_empty() || envelope.attempt == 0 {
+                continue;
+            }
+            let workspace_path =
+                candidate
+                    .canonicalize()
+                    .map_err(|source| MemoryError::ResolvePath {
+                        path: candidate.clone(),
+                        source,
+                    })?;
+            let manifest_workspace_path =
+                run.workspace_path
+                    .canonicalize()
+                    .map_err(|source| MemoryError::ResolvePath {
+                        path: run.workspace_path.clone(),
+                        source,
+                    })?;
+            let envelope_workspace_path =
+                envelope.workspace_path.canonicalize().map_err(|source| {
+                    MemoryError::ResolvePath {
+                        path: envelope.workspace_path.clone(),
+                        source,
+                    }
+                })?;
+            if envelope.run_id != run.run_id
+                || envelope.attempt != run.attempt
+                || manifest_workspace_path != workspace_path
+                || envelope_workspace_path != workspace_path
+                || !workspace_path.starts_with(&root)
+            {
+                return Err(MemoryError::InvalidInput(format!(
+                    "parent runtime envelope for `{}` does not match its durable run manifest",
+                    run.identifier
+                )));
+            }
+            let binding = TerminalCaptureBinding {
+                repository_id: String::new(),
+                run_id: run.run_id.clone(),
+                attempt: run.attempt,
+                target_branch: String::new(),
+                target_commit: String::new(),
+                checkout_head: String::new(),
+                instruction_hash: envelope
+                    .integration_instruction_hash
+                    .clone()
+                    .unwrap_or_default(),
+                repository_commits: envelope
+                    .checkouts
+                    .iter()
+                    .map(|(repository_id, checkout)| {
+                        (repository_id.clone(), checkout.target_commit.clone())
+                    })
+                    .collect(),
+            };
+            if let Some(previous) = bindings.insert(key.clone(), binding.clone())
+                && previous != binding
+            {
+                return Err(MemoryError::InvalidInput(format!(
+                    "multiple immutable runtime envelopes were found for `{}`",
+                    run.identifier
+                )));
+            }
             continue;
         }
         let Some(envelope) = run.runtime_envelope.as_ref() else {
@@ -641,6 +707,7 @@ fn load_terminal_capture_bindings_inner(
             target_commit: envelope.target_commit.clone(),
             checkout_head,
             instruction_hash: envelope.instruction.content_hash.clone(),
+            repository_commits: BTreeMap::new(),
         };
         if let Some(previous) = bindings.insert(key.clone(), binding.clone())
             && previous != binding
@@ -662,13 +729,19 @@ fn apply_terminal_capture_bindings(
         let Some(binding) = bindings.get(&issue.identifier.to_ascii_lowercase()) else {
             continue;
         };
-        issue.repository_id = Some(binding.repository_id.clone());
+        issue.repository_id =
+            (!binding.repository_id.is_empty()).then(|| binding.repository_id.clone());
         issue.execution_run_id = Some(binding.run_id.clone());
         issue.execution_attempt = Some(binding.attempt);
-        issue.target_branch = Some(binding.target_branch.clone());
-        issue.target_commit = Some(binding.target_commit.clone());
-        issue.checkout_head = Some(binding.checkout_head.clone());
-        issue.instruction_hash = Some(binding.instruction_hash.clone());
+        issue.target_branch =
+            (!binding.target_branch.is_empty()).then(|| binding.target_branch.clone());
+        issue.target_commit =
+            (!binding.target_commit.is_empty()).then(|| binding.target_commit.clone());
+        issue.checkout_head =
+            (!binding.checkout_head.is_empty()).then(|| binding.checkout_head.clone());
+        issue.instruction_hash =
+            (!binding.instruction_hash.is_empty()).then(|| binding.instruction_hash.clone());
+        issue.verified_repository_commits = binding.repository_commits.clone();
     }
 }
 
@@ -960,7 +1033,14 @@ fn resolve_auto_capture_repository_config(
             .issues
             .iter()
             .any(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()));
-        if selected_issue_is_known && config.repository_sources.len() > 1 {
+        let selected_issue_is_parent_capture = source.issues.iter().any(|issue| {
+            issue_ids.contains(&issue.identifier.to_ascii_lowercase())
+                && !issue.verified_repository_commits.is_empty()
+        });
+        if selected_issue_is_known
+            && !selected_issue_is_parent_capture
+            && config.repository_sources.len() > 1
+        {
             return Err(MemoryError::InvalidInput(
                 "cannot auto-capture a terminal issue without a unique repository source"
                     .to_string(),
@@ -1006,6 +1086,9 @@ fn auto_capture_candidate_repositories(
     config: &MemoryConfig,
     issue: &IssueEvidence,
 ) -> BTreeSet<String> {
+    if !issue.verified_repository_commits.is_empty() {
+        return BTreeSet::new();
+    }
     if let Some(repository_id) = issue.repository_id.as_ref() {
         return BTreeSet::from([repository_id.clone()]);
     }
@@ -2136,11 +2219,21 @@ struct MemoryScopeGrantRegistryState {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MemoryLiveOverlayGrant {
+    pub(crate) parent_workspace_path: PathBuf,
+    pub(crate) checkout_handle: String,
+    pub(crate) relative_path: PathBuf,
+    pub(crate) target_commit: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MemoryScopeGrant {
     pub(crate) project: String,
     pub(crate) project_set: Option<String>,
     pub(crate) execution_repo: String,
     pub(crate) authorized_repositories: BTreeSet<String>,
+    pub(crate) authorized_work_items: BTreeSet<String>,
+    pub(crate) live_overlays: BTreeMap<String, MemoryLiveOverlayGrant>,
     pub(crate) issue: String,
     pub(crate) run_id: Option<String>,
     pub(crate) attempt: Option<u32>,
@@ -3885,6 +3978,12 @@ async fn call_memory_tool_with_workspace(
                     && (bool_arg(&arguments, "includeCodeIntel")
                         || bool_arg(&arguments, "include_code_intel"))))
         {
+            if grant.execution_repo.is_empty() {
+                return Err(MemoryError::InvalidInput(
+                    "repository-neutral parent code access requires an explicit repository"
+                        .to_owned(),
+                ));
+            }
             scope.repo = Some(grant.execution_repo.clone());
         }
         if workspace_root.is_none()
@@ -4162,10 +4261,9 @@ fn validate_worker_memory_scope(
                 .get("currentIssue")
                 .and_then(|current| optional_string_arg(current, "identifier"))
         });
-    if requested_work_item
-        .as_deref()
-        .is_some_and(|work_item| work_item != grant.issue)
-    {
+    if requested_work_item.as_deref().is_some_and(|work_item| {
+        work_item != grant.issue && !grant.authorized_work_items.contains(work_item)
+    }) {
         return Err(MemoryError::InvalidInput(format!(
             "worker memory grant is bound to work item `{}`; requested work item is not permitted",
             grant.issue
@@ -4226,15 +4324,15 @@ fn validate_worker_memory_scope(
     };
     if tool_name.starts_with("code.")
         && requested_repo != grant.execution_repo
+        && !grant.live_overlays.contains_key(&requested_repo)
         && tool_name == "code.graph.context"
         && optional_string_arg(arguments, "runId")
             .or_else(|| optional_string_arg(arguments, "run"))
             .is_some()
     {
-        return Err(MemoryError::InvalidInput(format!(
-            "worker live code access is limited to execution repository `{}`",
-            grant.execution_repo
-        )));
+        return Err(MemoryError::InvalidInput(
+            "worker live code access is outside the current execution checkouts".to_owned(),
+        ));
     }
     if !grant.authorized_repositories.contains(&requested_repo) {
         return Err(MemoryError::InvalidInput(
@@ -4260,10 +4358,9 @@ fn validate_worker_memory_scope(
                     "worker live code graph access is bound to the current run".to_owned(),
                 ));
             }
-        } else if requested_issue
-            .as_deref()
-            .is_some_and(|issue| issue != grant.issue)
-        {
+        } else if requested_issue.as_deref().is_some_and(|issue| {
+            issue != grant.issue && !grant.authorized_work_items.contains(issue)
+        }) {
             return Err(MemoryError::InvalidInput(format!(
                 "worker memory grant is bound to issue `{}`; requested code scope is not permitted",
                 grant.issue
@@ -4387,6 +4484,22 @@ fn resolve_code_graph_overlay_with_grant(
                 path: workspace_root.to_path_buf(),
                 source,
             })?;
+    if let Some((grant, overlay)) = worker_grant.and_then(|grant| {
+        grant
+            .live_overlays
+            .get(repo_id)
+            .map(|overlay| (grant, overlay))
+    }) {
+        return resolve_parent_code_graph_overlay(
+            config,
+            &workspace_root,
+            repo_id,
+            run_id,
+            context_query,
+            grant,
+            overlay,
+        );
+    }
     let workspace_candidate = if strict_checkout {
         find_verified_checkout_for_code_intel_with_claims(
             &workspace_root,
@@ -4527,6 +4640,102 @@ fn resolve_code_graph_overlay_with_grant(
         config,
         repo_id,
         &workspace_path,
+        run_id,
+        &base_revision,
+        context_query,
+    )
+    .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+}
+
+fn resolve_parent_code_graph_overlay(
+    config: &MemoryConfig,
+    workspace_root: &Path,
+    repo_id: &str,
+    run_id: &str,
+    context_query: &CodeGraphContextQuery,
+    grant: &MemoryScopeGrant,
+    overlay: &MemoryLiveOverlayGrant,
+) -> Result<CodeWorkspaceOverlay, MemoryError> {
+    let parent_path = overlay
+        .parent_workspace_path
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: overlay.parent_workspace_path.clone(),
+            source,
+        })?;
+    if !parent_path.starts_with(workspace_root) {
+        return Err(MemoryError::PathOutsideRepo {
+            path: parent_path,
+            repo_root: workspace_root.to_path_buf(),
+        });
+    }
+    let run_path = parent_path.join(".opensymphony/run.json");
+    let raw = fs::read_to_string(&run_path).map_err(|source| MemoryError::ReadFile {
+        path: run_path,
+        source,
+    })?;
+    let run: RunManifest = serde_json::from_str(&raw).map_err(|source| {
+        MemoryError::InvalidInput(format!("invalid parent run manifest: {source}"))
+    })?;
+    let envelope = run.parent_runtime_envelope.as_ref().ok_or_else(|| {
+        MemoryError::InvalidInput("durable run manifest has no parent runtime envelope".to_owned())
+    })?;
+    let checkout = envelope.checkouts.get(repo_id).ok_or_else(|| {
+        MemoryError::InvalidInput(
+            "requested repository is absent from the parent runtime envelope".to_owned(),
+        )
+    })?;
+    if grant.run_id.as_deref() != Some(run_id)
+        || run.run_id != run_id
+        || grant.attempt != Some(run.attempt)
+        || envelope.run_id != run.run_id
+        || envelope.attempt != run.attempt
+        || envelope.workspace_path != overlay.parent_workspace_path
+        || checkout.checkout_handle != overlay.checkout_handle
+        || checkout.relative_path != overlay.relative_path
+        || checkout.target_commit != overlay.target_commit
+    {
+        return Err(MemoryError::InvalidInput(
+            "parent runtime envelope does not match the worker overlay claim".to_owned(),
+        ));
+    }
+    let checkout_path = parent_path.join(&overlay.relative_path);
+    if fs::symlink_metadata(&checkout_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(MemoryError::InvalidInput(
+            "parent checkout must not be a symlink".to_owned(),
+        ));
+    }
+    let checkout_path =
+        checkout_path
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: checkout_path,
+                source,
+            })?;
+    if !checkout_path.starts_with(&parent_path) {
+        return Err(MemoryError::PathOutsideRepo {
+            path: checkout_path,
+            repo_root: parent_path,
+        });
+    }
+    let source = config.repository_sources.get(repo_id).ok_or_else(|| {
+        MemoryError::InvalidInput(format!("unknown parent repository source `{repo_id}`"))
+    })?;
+    if !workspace_matches_registered_repository(&checkout_path, &source.root) {
+        return Err(MemoryError::InvalidInput(
+            "parent checkout does not match the registered repository".to_owned(),
+        ));
+    }
+    let branch = code_index_branch_for_config(config)
+        .map_err(|error| MemoryError::InvalidInput(error.to_string()))?;
+    let base_revision = workspace_merge_base(&checkout_path, &branch)?;
+    code_graph_workspace_context_overlay(
+        config,
+        repo_id,
+        &checkout_path,
         run_id,
         &base_revision,
         context_query,
@@ -8581,17 +8790,21 @@ fn print_search_results(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, path::PathBuf};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::PathBuf,
+    };
 
     use super::{
-        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryScopeGrant,
-        MemoryScopeGrantRegistry, MemoryServerAccess, MemoryServerAuth, MemoryServerState,
-        RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock, authorize_memory_request,
-        brief_scope_filter, call_code_graph_context_tool, call_memory_ingest_code_intel_tool,
-        call_memory_tool, call_memory_tool_with_workspace, context_source_from_mcp,
-        find_verified_checkout_for_code_intel, find_verified_checkout_for_code_intel_with_claims,
-        load_memory_config, memory_server_health, memory_server_health_payload,
-        memory_tool_descriptors, origin_is_localhost, parse_remote_memory_response,
+        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryLiveOverlayGrant,
+        MemoryMcpRequest, MemoryScopeGrant, MemoryScopeGrantRegistry, MemoryServerAccess,
+        MemoryServerAuth, MemoryServerState, RUST_QUERY_PACK_VERSION, acquire_memory_writer_lock,
+        authorize_memory_request, brief_scope_filter, call_code_graph_context_tool,
+        call_memory_ingest_code_intel_tool, call_memory_tool, call_memory_tool_with_workspace,
+        context_source_from_mcp, find_verified_checkout_for_code_intel,
+        find_verified_checkout_for_code_intel_with_claims, load_memory_config,
+        memory_server_health, memory_server_health_payload, memory_tool_descriptors,
+        origin_is_localhost, parse_remote_memory_response,
         refresh_memory_index_from_okf_and_reimport_pending, remote_memory_tool_request,
         remote_memory_tool_token, replace_or_append_managed_section, required_access_for_request,
         resolve_code_graph_overlay, resolve_code_intel_config, resolve_code_intel_repo, run_init,
@@ -13581,6 +13794,57 @@ Public memory concept.
         .expect("code scope should remain bound to the worker issue");
         validate_worker_memory_scope("code.graph.context", &json!({"repo": "repo-alpha"}), &grant)
             .expect("baseline graph scope should not require a run overlay");
+
+        let parent_grant = MemoryScopeGrant {
+            project: "project-alpha".to_owned(),
+            execution_repo: "repo-alpha".to_owned(),
+            authorized_repositories: BTreeSet::from([
+                "repo-alpha".to_owned(),
+                "repo-beta".to_owned(),
+            ]),
+            authorized_work_items: BTreeSet::from(["COE-548".to_owned()]),
+            live_overlays: BTreeMap::from([(
+                "repo-beta".to_owned(),
+                MemoryLiveOverlayGrant {
+                    parent_workspace_path: PathBuf::from("/parent"),
+                    checkout_handle: "checkout-beta".to_owned(),
+                    relative_path: PathBuf::from("repositories/repo-beta"),
+                    target_commit: "beta-commit".to_owned(),
+                },
+            )]),
+            issue: "COE-547".to_owned(),
+            run_id: Some("parent-run".to_owned()),
+            attempt: Some(1),
+            ..MemoryScopeGrant::default()
+        };
+        validate_worker_memory_scope(
+            "code.graph.context",
+            &json!({"repo": "repo-beta", "runId": "parent-run"}),
+            &parent_grant,
+        )
+        .expect("parent live graph access should allow an envelope checkout");
+        validate_worker_memory_scope(
+            "memory.context",
+            &json!({"repo": "repo-beta", "issue": "COE-548"}),
+            &parent_grant,
+        )
+        .expect("parent memory should allow a recorded descendant");
+        assert!(
+            validate_worker_memory_scope(
+                "code.graph.context",
+                &json!({"repo": "repo-gamma", "runId": "parent-run"}),
+                &parent_grant,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_memory_scope(
+                "memory.context",
+                &json!({"repo": "repo-beta", "issue": "COE-999"}),
+                &parent_grant,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -14174,6 +14438,81 @@ Public memory concept.
         let all_bindings = super::load_all_terminal_capture_bindings(workspace_root.path())
             .expect("all durable capture bindings");
         assert_eq!(all_bindings, bindings);
+
+        let parent_workspace = workspace_root.path().join("COE-554-parent");
+        std::fs::create_dir_all(parent_workspace.join(".opensymphony"))
+            .expect("parent metadata directory");
+        let parent_envelope = serde_json::from_value(json!({
+            "parent_issue_id": "issue-554",
+            "parent_identifier": "COE-554",
+            "run_id": "run-554",
+            "attempt": 1,
+            "hierarchy_generation": 4,
+            "workspace_path": parent_workspace,
+            "checkouts": {
+                "repo-a": {
+                    "repository_id": "repo-a",
+                    "checkout_handle": "checkout-a",
+                    "relative_path": "repositories/repo-a",
+                    "target_branch": "develop",
+                    "target_commit": "commit-a",
+                    "instruction_path": "AGENTS.md",
+                    "instruction_hash": "sha256:a"
+                },
+                "repo-b": {
+                    "repository_id": "repo-b",
+                    "checkout_handle": "checkout-b",
+                    "relative_path": "repositories/repo-b",
+                    "target_branch": "develop",
+                    "target_commit": "commit-b",
+                    "instruction_path": "AGENTS.md",
+                    "instruction_hash": "sha256:b"
+                }
+            },
+            "integration_instruction_path": "AGENTS.md",
+            "integration_instruction_hash": "sha256:parent",
+            "harness": "codex_app_server",
+            "model_profile": "default",
+            "requested_execution_scope": "parent_integration",
+            "effective_containment": "trusted_host"
+        }))
+        .expect("parent runtime envelope");
+        let mut parent_run = run.clone();
+        parent_run.run_id = "run-554".to_owned();
+        parent_run.issue_id = "issue-554".to_owned();
+        parent_run.identifier = "COE-554".to_owned();
+        parent_run.workspace_path = parent_workspace.clone();
+        parent_run.runtime_envelope = None;
+        parent_run.parent_runtime_envelope = Some(parent_envelope);
+        parent_run.attempt = 1;
+        std::fs::write(
+            parent_workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&parent_run).expect("parent run manifest JSON"),
+        )
+        .expect("parent run manifest");
+        let parent_bindings =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
+                .expect("parent capture binding");
+        assert_eq!(
+            parent_bindings["coe-554"].repository_commits,
+            BTreeMap::from([
+                ("repo-a".to_owned(), "commit-a".to_owned()),
+                ("repo-b".to_owned(), "commit-b".to_owned())
+            ])
+        );
+        let mut source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-554".to_owned(),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        super::apply_terminal_capture_bindings(&mut source, &parent_bindings);
+        assert_eq!(
+            source.issues[0].execution_run_id.as_deref(),
+            Some("run-554")
+        );
+        assert_eq!(source.issues[0].verified_repository_commits.len(), 2);
 
         let outside = workspace_root.path().join("outside");
         std::fs::create_dir_all(&outside).expect("outside path");

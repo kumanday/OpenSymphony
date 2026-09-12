@@ -13,7 +13,7 @@ use std::{
 
 use crate::opensymphony_cli::{
     BlockedEnvironment,
-    memory::{MemoryScopeGrant, MemoryScopeGrantRegistry},
+    memory::{MemoryLiveOverlayGrant, MemoryScopeGrant, MemoryScopeGrantRegistry},
 };
 use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
@@ -41,8 +41,8 @@ use crate::opensymphony_openhands::{
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
-    ParentEligibilityEvidence, ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord,
-    RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    ParentEligibilityEvidence, ParentRepositoryTarget, ProviderEvidenceBoundary, RecoveredRun,
+    RecoveryRecord, RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
     WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
@@ -90,6 +90,8 @@ pub(super) enum CliWorkspaceError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Identifier(#[from] crate::opensymphony_domain::IdentifierError),
+    #[error(transparent)]
+    RepositoryIdentity(#[from] crate::opensymphony_domain::RepositoryIdentityError),
     #[error("Codex lifecycle recovery failed: {0}")]
     CodexLifecycle(String),
     #[error("OpenHands lifecycle recovery failed: {0}")]
@@ -3010,6 +3012,32 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(state.active_for(&resource))
     }
 
+    async fn parent_workspace_targets(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<Vec<ParentRepositoryTarget>, Self::Error> {
+        if issue.sub_issues.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent = self
+            .manager
+            .open_parent_execution_root_at_for_retry(&issue_descriptor(issue), &workspace.path)
+            .await?;
+        parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .map(|checkout| {
+                Ok(ParentRepositoryTarget {
+                    repository_id: CanonicalRepositoryId::new(checkout.repository_id.clone())?,
+                    checkout_handle: checkout.checkout_handle.clone(),
+                    target_commit: checkout.target_commit.clone(),
+                })
+            })
+            .collect()
+    }
+
     async fn recover_retry_exhaustion(
         &mut self,
     ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
@@ -4210,64 +4238,116 @@ impl RuntimeWorkerBackend {
                 None
             };
             let mut memory_grant_requires_fresh_conversation = false;
-            let worker_memory_env = memory_env
-                .as_ref()
-                .filter(|_| parent_execution.is_none())
-                .map(|memory| {
-                    let mut scoped = memory.clone();
-                    scoped.project = worker_memory_project(&issue, &memory.project);
-                    scoped.execution_repo = runtime_envelope
+            let worker_memory_env = memory_env.as_ref().map(|memory| {
+                let mut scoped = memory.clone();
+                scoped.project = worker_memory_project(&issue, &memory.project);
+                scoped.parent_scope = parent_runtime_envelope.is_some();
+                scoped.execution_repo = if scoped.parent_scope {
+                    String::new()
+                } else {
+                    runtime_envelope
                         .as_ref()
                         .map(|envelope| envelope.repository_binding.repository.id.to_string())
-                        .unwrap_or_else(|| memory.execution_repo.clone());
-                    scoped.run_id = runtime_envelope
+                        .unwrap_or_else(|| memory.execution_repo.clone())
+                };
+                scoped.run_id = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.run_id.clone())
+                    .or_else(|| {
+                        parent_runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.run_id.clone())
+                    });
+                scoped.attempt = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.attempt)
+                    .or_else(|| {
+                        parent_runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.attempt)
+                    });
+                scoped.target_commit = runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.target_commit.clone());
+                scoped.checkout_head = initially_verified_checkout
+                    .as_ref()
+                    .map(|checkout| checkout.head.clone());
+                let authorized_repositories = parent_runtime_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.checkouts.keys().cloned().collect())
+                    .unwrap_or_else(|| {
+                        scoped
+                            .authorized_repositories_by_project
+                            .get(&scoped.project)
+                            .cloned()
+                            .or_else(|| {
+                                scoped
+                                    .authorized_repositories_by_project
+                                    .iter()
+                                    .find(|(project, _)| {
+                                        project.eq_ignore_ascii_case(&scoped.project)
+                                    })
+                                    .map(|(_, repositories)| repositories.clone())
+                            })
+                            .filter(|repositories| !repositories.is_empty())
+                            .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]))
+                    });
+                scoped.authorized_repositories = authorized_repositories.clone();
+                if let Some(grants) = &scoped.scope_grants {
+                    let authorized_work_items = parent_execution
                         .as_ref()
-                        .map(|envelope| envelope.run_id.clone());
-                    scoped.attempt = runtime_envelope.as_ref().map(|envelope| envelope.attempt);
-                    scoped.target_commit = runtime_envelope
-                        .as_ref()
-                        .map(|envelope| envelope.target_commit.clone());
-                    scoped.checkout_head = initially_verified_checkout
-                        .as_ref()
-                        .map(|checkout| checkout.head.clone());
-                    let authorized_repositories = scoped
-                        .authorized_repositories_by_project
-                        .get(&scoped.project)
-                        .cloned()
-                        .or_else(|| {
-                            scoped
-                                .authorized_repositories_by_project
-                                .iter()
-                                .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
-                                .map(|(_, repositories)| repositories.clone())
+                        .into_iter()
+                        .flat_map(|parent| parent.child_checkout_map.repositories.values())
+                        .flat_map(|checkout| checkout.retained_checkouts.iter())
+                        .flat_map(|checkout| {
+                            [checkout.issue_id.clone(), checkout.identifier.clone()]
                         })
-                        .filter(|repositories| !repositories.is_empty())
-                        .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
-                    scoped.authorized_repositories = authorized_repositories.clone();
-                    if let Some(grants) = &scoped.scope_grants {
-                        let (token, requires_fresh_conversation) = grants
-                            .issue_or_refresh_with_claims(MemoryScopeGrant {
-                                project: scoped.project.clone(),
-                                project_set: scoped.project_set.clone(),
-                                execution_repo: scoped.execution_repo.clone(),
-                                authorized_repositories,
-                                issue: issue.identifier.to_string(),
-                                run_id: scoped.run_id.clone(),
-                                attempt: scoped.attempt,
-                                checkout_generation: runtime_envelope
-                                    .as_ref()
-                                    .map(|envelope| envelope.checkout_generation.clone()),
-                                target_commit: scoped.target_commit.clone(),
-                                checkout_head: scoped.checkout_head.clone(),
-                                visibility: scoped.visibility,
-                                capabilities: BTreeSet::new(),
-                            });
-                        memory_grant_requires_fresh_conversation = requires_fresh_conversation;
-                        scoped.token = Some(token.clone());
-                    }
-                    scoped.authorized_repositories_by_project.clear();
-                    scoped
-                });
+                        .collect();
+                    let live_overlays = parent_runtime_envelope
+                        .as_ref()
+                        .map(|envelope| {
+                            envelope
+                                .checkouts
+                                .iter()
+                                .map(|(repository_id, checkout)| {
+                                    (
+                                        repository_id.clone(),
+                                        MemoryLiveOverlayGrant {
+                                            parent_workspace_path: envelope.workspace_path.clone(),
+                                            checkout_handle: checkout.checkout_handle.clone(),
+                                            relative_path: checkout.relative_path.clone(),
+                                            target_commit: checkout.target_commit.clone(),
+                                        },
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let (token, requires_fresh_conversation) =
+                        grants.issue_or_refresh_with_claims(MemoryScopeGrant {
+                            project: scoped.project.clone(),
+                            project_set: scoped.project_set.clone(),
+                            execution_repo: scoped.execution_repo.clone(),
+                            authorized_repositories,
+                            authorized_work_items,
+                            live_overlays,
+                            issue: issue.identifier.to_string(),
+                            run_id: scoped.run_id.clone(),
+                            attempt: scoped.attempt,
+                            checkout_generation: runtime_envelope
+                                .as_ref()
+                                .map(|envelope| envelope.checkout_generation.clone()),
+                            target_commit: scoped.target_commit.clone(),
+                            checkout_head: scoped.checkout_head.clone(),
+                            visibility: scoped.visibility,
+                            capabilities: BTreeSet::new(),
+                        });
+                    memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                    scoped.token = Some(token.clone());
+                }
+                scoped.authorized_repositories_by_project.clear();
+                scoped
+            });
             let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
                 || (memory_grant_registry_recovered
                     && worker_memory_env
@@ -5002,10 +5082,14 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
             project_set.clone(),
         );
     }
-    env.insert(
-        "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
-        memory.execution_repo.clone(),
-    );
+    if memory.parent_scope {
+        env.remove("OPENSYMPHONY_MEMORY_EXECUTION_REPO");
+    } else {
+        env.insert(
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+            memory.execution_repo.clone(),
+        );
+    }
     if let Some(token) = &memory.token {
         env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
     }
@@ -5032,7 +5116,14 @@ fn inject_memory_env(env: &mut BTreeMap<String, String>, memory: &RuntimeMemoryE
 }
 
 fn memory_scope_prompt(memory: &RuntimeMemoryEnv) -> String {
-    let mut prompt = memory_scope_prompt_values(&memory.project, &memory.execution_repo);
+    let mut prompt = if memory.parent_scope {
+        format!(
+            "Memory scope is repository-neutral for project {} and requires an explicit repository for code access.",
+            memory.project
+        )
+    } else {
+        memory_scope_prompt_values(&memory.project, &memory.execution_repo)
+    };
     if let Some(project_set) = &memory.project_set {
         prompt.push_str(&format!(" Project set is {project_set}."));
     }
@@ -11157,6 +11248,7 @@ mod tests {
             token: Some("read-token".to_string()),
             project: "project-alpha".to_string(),
             execution_repo: "/tmp/project-alpha/services/api".to_string(),
+            parent_scope: false,
             authorized_repositories: BTreeSet::from(["repo-alpha".to_string()]),
             authorized_repositories_by_project: BTreeMap::new(),
             scope_grants: None,

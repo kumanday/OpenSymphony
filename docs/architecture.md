@@ -108,6 +108,18 @@ once with this root as `cwd`, a relative checkout-handle map, and a generic
 `parent_multi_checkout` envelope; neither the directory layout nor the prompt
 assigns repository roles.
 
+The scheduler persists one generation-bound parent integration controller with
+the hierarchy state. Its versioned transitions cover admission, lease
+acquisition, workspace preparation, repository refresh, harness integration,
+final verification, and finalization. Each harness turn is one bounded attempt
+on the shared parent conversation and records its input version, root or opaque
+checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
+a reconciled running attempt attached; an unreconciled attempt becomes
+indeterminate and must pass cleanup and repository refresh before rerun. Final
+evidence maps every canonical repository to the exact verified commit so a
+higher ancestor can consume the completed parent without assigning repository
+roles.
+
 ### 3.2 OpenHands is the execution adapter
 
 OpenHands provides:
