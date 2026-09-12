@@ -502,6 +502,31 @@ prove atomic staged publication, target-branch and non-shallow verification,
 clean-worktree enforcement, wrong-remote quarantine, collision-resistant
 checkout keys, instruction hashing, and repository-only prompt composition.
 
+The parent execution-root fixture uses three temporary remotes, multiple
+children in one repository, an actual squash merge, an actual rebase and
+fast-forward merge, and a recorded shallow generation. It proves one non-Git
+root, one shared-object worktree per canonical repository, exact target and
+provider merge-result reachability, unchanged child HEAD/status/manifest bytes,
+and rejection of stale generations, missing ancestor leases, ambiguous merge
+evidence, dirty children, wrong remotes, arbitrary handles, changed root
+requests, runtime-map target repinning, and symlink escapes. It also proves
+checkout-local HTTP transport configuration is rejected before credential
+exposure; checkout-controlled process filters, fsmonitor, custom hooks paths,
+and conditional includes are rejected before parent verification; retained
+`post-checkout` hooks do not run during worktree creation; colliding sanitized
+parent identifiers remain distinct; and `after_create` cannot turn a parent
+root into a Git repository. It also covers parent `after_create`
+receipt/reuse/failure behavior and proves a child-controlled direct or
+worktree-conditional fsmonitor executable is rejected without running before
+the incomplete parent root is rolled back. A lower-level regression proves the
+orchestrator Git command overrides checkout-controlled fsmonitor configuration
+and default repository hooks at execution time. Focused
+OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope
+while preserving truthful `trusted_host` containment and omitting a leaf runtime
+envelope.
+The parent launch tests re-read project-set integration instructions after the
+lifecycle hook boundary and reject changed bytes before harness attachment.
+
 ### Scenario B: conversation reuse
 
 - run the same issue a second time against the same workspace

@@ -122,6 +122,95 @@ scope and leases and requests a full tracker observation on the next tick.
 Generation-checked replans also fetch full reachability before reconciling
 changed edges, so rejecting a stale replan cannot discard reparented evidence.
 
+### Parent execution roots
+
+A frozen parent hierarchy uses a separate non-Git root:
+
+```text
+<workspace.root>/parents/parent-<sanitized-identifier>-<identity-digest>/<hierarchy-generation>/
+  parent-manifest.json
+  child-checkouts.json
+  integration-plan.md
+  evidence/
+  repositories/<opaque-checkout-handle>/
+
+<workspace.root>/.opensymphony-parent-pins/
+  parent-<sanitized-identifier>/<hierarchy-generation>.json
+```
+
+`child-checkouts.json` is the durable handle boundary. It groups every leased
+child generation by canonical repository, records the safe remote fingerprint,
+target and provider merge-result commits, instruction provenance, and the
+selected shared-storage generation. Reopening an existing root verifies that
+the incoming generation, lease owners, children, and merge results still match
+that map, then revalidates every retained child generation before use. A parent
+whose children are all canceled still gets a valid root with an empty checkout
+map. Arbitrary paths and handles that are absent from the map are rejected.
+The workspace manager publishes an exact orchestrator-owned copy outside the
+parent runtime root and requires the runtime-visible map to match it on every
+reopen. A parent turn therefore cannot authorize an older integration target by
+rewriting its local map. Reopen also repeats provider merge-result reachability
+checks against the pinned target.
+
+Parent roots follow the same `after_create` contract as leaf workspaces. A new
+empty root runs the configured hook before metadata bootstrap, writes the
+root-scoped completion receipt, and publishes repository artifacts only after
+the hook succeeds. The manager rechecks that the hook did not initialize a
+root-level Git repository before publication. Hook failure or invariant drift
+removes the incomplete generation. Reuse requires the matching receipt and does
+not rerun the hook. Parent workspace keys include an issue-identity digest so
+identifiers that sanitize to the same display value remain distinct.
+
+Parent preparation verifies retained child identity and cleanliness without
+moving a child branch or HEAD. It can accept a recorded shallow generation,
+then fetch and deepen the configured target through the repository credential
+provider before adding a detached integration worktree. A shallow-to-complete
+storage transition remains valid against the immutable child manifest on later
+parent generations and ordinary child retry/reuse. Preparation gives every
+retained child generation an independent verification deadline. It also applies
+one deadline to integration worktree creation, instruction loading, and every
+final Git verification probe. Timed-out Git process groups are terminated and
+incomplete roots are rolled back so the same hierarchy generation can retry.
+Credentialed fetches use the configured repository remote directly, reject
+checkout-local and worktree HTTP, credential, transport, SSH-command, protocol,
+and URL-rewrite settings before exposing the configured secret, disable
+repository-local credential helpers, and route Git hooks to a fresh empty
+directory. Git receives credentials only through the orchestrator-owned askpass
+process. Timed-out authenticated Git process trees are terminated and awaited
+before askpass state is removed on every supported platform. Integration
+worktree creation uses an empty hooks directory and isolated system/global Git
+configuration, and rejects retained-checkout process-filter, fsmonitor, custom
+hooks-path, and conditional-include configuration before any parent verification
+probe. Every workspace-manager Git probe also supplies a version-compatible
+empty `core.fsmonitor` value and a fresh empty `core.hooksPath` on the command
+itself so mutable included configuration and default repository hooks cannot
+activate an executable between validation and use. The new worktree must
+remain below `repositories/`, share the selected child's Git common directory,
+match both the provider identity and locator fingerprints for fetch and push
+remotes, be clean, and point at the recorded target commit. Several children in
+one repository share one handle;
+the target must contain every provider merge-result commit, while replaced
+feature commits from squash or rebase are not required.
+
+The initial launch requires the integration worktrees to match their prepared
+targets exactly. A continuation or failure retry may reattach when the recorded
+target remains an ancestor of the current integration HEAD, preserving
+parent-owned committed and uncommitted work. Repository instruction bytes share
+one aggregate size budget across the entire parent prompt. Every launch reloads
+the pinned repository instructions so any path that creates a fresh conversation
+has a complete prompt; reused conversations consume continuation guidance. The
+runtime revalidates the parent root, envelope, and instructions after the
+`before_run` hook and before harness attachment. `WORKFLOW.md` instruction hashes
+and prompt content both exclude its front matter. Project-set integration
+instructions are also re-read and hash-checked after `before_run`; the parent
+prompt is composed only from those final verified bytes.
+
+The parent runtime artifact records the complete relative checkout map,
+requested `parent_multi_checkout` scope, harness/model selection, and truthful
+`trusted_host` or `workspace_confined` containment. Parent memory grants remain
+owned by the later parent-controller lifecycle and are not synthesized from a
+leaf checkout grant.
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:

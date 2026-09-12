@@ -68,6 +68,9 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [workspace.package]
 edition = "2024"
 license = "MIT"

@@ -133,6 +133,13 @@ envelope, and refuse attach when binding or provenance is incompatible.
 home configuration. `memory init` refuses to treat a selected central config
 as a repository-local memory file; initialize the local memory config instead.
 
+When a project set supplies hash-pinned integration instructions, the resolved
+artifact is carried into parent worker construction. Parent launch rereads the
+artifact and verifies its configured hash before composing the prompt. The
+artifact may describe topology-specific commands, but repository instructions
+remain separate sections keyed by canonical repository ID and the runtime does
+not convert those instructions into repository roles.
+
 Every run records one `sha256:` config generation in startup diagnostics and
 the initial control-plane event. Resolved credential values are never part of
 the central model or its serialized diagnostics.

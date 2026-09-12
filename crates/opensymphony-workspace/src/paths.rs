@@ -62,6 +62,20 @@ pub fn checkout_workspace_key(
     Ok(format!("{display}-{}", &digest[..16]))
 }
 
+/// Derive a collision-resistant key for a repository-neutral parent workspace.
+pub fn parent_workspace_key(
+    issue_identifier: &str,
+    issue_id: &str,
+) -> Result<String, WorkspaceError> {
+    let display = sanitize_workspace_key(issue_identifier)?;
+    let mut hasher = Sha256::new();
+    hasher.update(issue_identifier.as_bytes());
+    hasher.update([0]);
+    hasher.update(issue_id.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(format!("parent-{display}-{}", &digest[..16]))
+}
+
 pub fn resolve_path_within_root(
     root: impl AsRef<Path>,
     candidate: impl AsRef<Path>,
@@ -111,7 +125,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::WorkspaceError;
-    use super::{checkout_workspace_key, resolve_path_within_root, sanitize_workspace_key};
+    use super::{
+        checkout_workspace_key, parent_workspace_key, resolve_path_within_root,
+        sanitize_workspace_key,
+    };
 
     #[test]
     fn sanitizes_documented_examples() {
@@ -176,5 +193,15 @@ mod tests {
         assert_ne!(slash, colon);
         assert_ne!(slash, unicode);
         assert_ne!(colon, unicode);
+    }
+
+    #[test]
+    fn parent_keys_keep_sanitized_collisions_distinct() {
+        let slash = parent_workspace_key("TEAM/A", "parent-one").expect("slash key");
+        let underscore = parent_workspace_key("TEAM_A", "parent-two").expect("underscore key");
+
+        assert!(slash.starts_with("parent-TEAM_A-"));
+        assert!(underscore.starts_with("parent-TEAM_A-"));
+        assert_ne!(slash, underscore);
     }
 }
