@@ -396,6 +396,15 @@ impl WorkspaceManager {
                         )
                     })?;
                 let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
+                checkout_operation_with_timeout(
+                    checkout_time_remaining(deadline),
+                    child_handle.workspace_path(),
+                    "validate retained child process configuration",
+                    self.reject_checkout_controlled_process_filters(
+                        child_handle.workspace_path(),
+                    ),
+                )
+                .await?;
                 let checkout = self
                     .verify_checkout_with_worker_changes_timeout(
                         &child_handle,
@@ -1094,14 +1103,17 @@ impl WorkspaceManager {
         checkout: &Path,
     ) -> Result<(), WorkspaceError> {
         let names = self.checkout_controlled_config_names(checkout).await?;
-        if let Some(name) = names
-            .iter()
-            .find(|name| name.trim().to_ascii_lowercase().starts_with("filter."))
-        {
+        if let Some(name) = names.iter().find(|name| {
+            let name = name.trim().to_ascii_lowercase();
+            name.starts_with("filter.")
+                || name == "core.fsmonitor"
+                || name == "core.hookspath"
+                || name.starts_with("includeif.")
+        }) {
             return Err(checkout_verification(
                 checkout,
                 &format!(
-                    "checkout-controlled Git process-filter configuration `{}` is not allowed for parent worktree creation",
+                    "checkout-controlled Git process configuration or conditional include `{}` is not allowed for parent worktree creation or verification",
                     name.trim()
                 ),
             ));
@@ -1144,21 +1156,32 @@ impl WorkspaceManager {
         };
         let mut names = local_names.lines().map(str::to_owned).collect::<Vec<_>>();
         if worktree_config_enabled {
-            names.extend(
-                self.git(
-                    checkout,
-                    &[
-                        "config",
-                        "--worktree",
-                        "--includes",
-                        "--name-only",
-                        "--list",
-                    ],
-                )
-                .await?
-                .lines()
-                .map(str::to_owned),
-            );
+            let worktree_config_path = self
+                .git(checkout, &["rev-parse", "--git-path", "config.worktree"])
+                .await?;
+            let worktree_config_path = PathBuf::from(worktree_config_path);
+            let worktree_config_path = if worktree_config_path.is_absolute() {
+                worktree_config_path
+            } else {
+                checkout.join(worktree_config_path)
+            };
+            if path_exists(&worktree_config_path).await? {
+                names.extend(
+                    self.git(
+                        checkout,
+                        &[
+                            "config",
+                            "--worktree",
+                            "--includes",
+                            "--name-only",
+                            "--list",
+                        ],
+                    )
+                    .await?
+                    .lines()
+                    .map(str::to_owned),
+                );
+            }
         }
         Ok(names)
     }
@@ -1236,6 +1259,8 @@ impl WorkspaceManager {
         command
             .arg("-c")
             .arg("credential.helper=")
+            .arg("-c")
+            .arg("core.fsmonitor=")
             .arg("-c")
             .arg(hooks_config)
             .arg("-C")
@@ -1404,6 +1429,8 @@ impl WorkspaceManager {
                 "integration checkout path does not match its opaque handle",
             ));
         }
+        self.reject_checkout_controlled_process_filters(&integration)
+            .await?;
         let worktree_root = self
             .git(&integration, &["rev-parse", "--show-toplevel"])
             .await?;
@@ -1585,6 +1612,13 @@ impl WorkspaceManager {
                     Some(&retained.issue_id),
                 )
                 .await?;
+            checkout_operation_with_timeout(
+                checkout_time_remaining(deadline),
+                child.workspace_path(),
+                "validate retained child process configuration",
+                self.reject_checkout_controlled_process_filters(child.workspace_path()),
+            )
+            .await?;
             self.verify_checkout_with_worker_changes_timeout(&child, true, true, deadline)
                 .await?;
             let status = checkout_operation_with_timeout(
@@ -3603,6 +3637,8 @@ impl WorkspaceManager {
         let mut command = Command::new("git");
         command
             .arg("-c")
+            .arg("core.fsmonitor=")
+            .arg("-c")
             .arg(hooks_config)
             .arg("-C")
             .arg(checkout)
@@ -3655,8 +3691,25 @@ impl WorkspaceManager {
     }
 
     async fn git(&self, checkout: &Path, args: &[&str]) -> Result<String, WorkspaceError> {
+        let hooks_directory = tempfile::Builder::new()
+            .prefix("opensymphony-empty-git-hooks-")
+            .tempdir()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "isolate Git verification hooks".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let mut hooks_config = OsString::from("core.hooksPath=");
+        hooks_config.push(hooks_directory.path());
         let mut command = Command::new("git");
-        command.arg("-C").arg(checkout).args(args);
+        command
+            .arg("-c")
+            .arg("core.fsmonitor=")
+            .arg("-c")
+            .arg(hooks_config)
+            .arg("-C")
+            .arg(checkout)
+            .args(args);
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
@@ -3699,8 +3752,22 @@ impl WorkspaceManager {
     }
 
     async fn git_fsck(&self, checkout: &Path) -> Result<(), WorkspaceError> {
+        let hooks_directory = tempfile::Builder::new()
+            .prefix("opensymphony-empty-git-hooks-")
+            .tempdir()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "isolate Git integrity-check hooks".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let mut hooks_config = OsString::from("core.hooksPath=");
+        hooks_config.push(hooks_directory.path());
         let mut command = Command::new("git");
         command
+            .arg("-c")
+            .arg("core.fsmonitor=")
+            .arg("-c")
+            .arg(hooks_config)
             .arg("-C")
             .arg(checkout)
             .args(["fsck", "--no-dangling"]);
@@ -3759,8 +3826,25 @@ impl WorkspaceManager {
         checkout: &Path,
         args: &[&str],
     ) -> Result<bool, WorkspaceError> {
+        let hooks_directory = tempfile::Builder::new()
+            .prefix("opensymphony-empty-git-hooks-")
+            .tempdir()
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "isolate Git ancestry-check hooks".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        let mut hooks_config = OsString::from("core.hooksPath=");
+        hooks_config.push(hooks_directory.path());
         let mut command = Command::new("git");
-        command.arg("-C").arg(checkout).args(args);
+        command
+            .arg("-c")
+            .arg("core.fsmonitor=")
+            .arg("-c")
+            .arg(hooks_config)
+            .arg("-C")
+            .arg(checkout)
+            .args(args);
         for variable in &self.checkout_credential_envs {
             command.env_remove(variable);
         }
@@ -6202,8 +6286,18 @@ async fn tracked_instruction_paths(
 ) -> Result<Vec<PathBuf>, WorkspaceError> {
     const MAX_TRACKED_INSTRUCTION_PATHS: usize = 10_000;
     const MAX_TRACKED_INSTRUCTION_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+    let hooks_directory = tempfile::Builder::new()
+        .prefix("opensymphony-empty-git-hooks-")
+        .tempdir()
+        .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
+    let mut hooks_config = OsString::from("core.hooksPath=");
+    hooks_config.push(hooks_directory.path());
     let mut command = Command::new("git");
     command
+        .arg("-c")
+        .arg("core.fsmonitor=")
+        .arg("-c")
+        .arg(hooks_config)
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--cached", "-z", "--", ":(glob)**/AGENTS.md"]);
@@ -7129,6 +7223,99 @@ mod tests {
                 )
             )
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orchestrator_git_probe_disables_checkout_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("checkout root should exist");
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir(&checkout).expect("checkout should exist");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Test User"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(args)
+                .status()
+                .expect("git setup should launch");
+            assert!(status.success(), "git setup should succeed");
+        }
+        std::fs::write(checkout.join("tracked.txt"), "tracked\n")
+            .expect("tracked file should exist");
+        for args in [vec!["add", "tracked.txt"], vec!["commit", "-m", "initial"]] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(args)
+                .status()
+                .expect("git setup should launch");
+            assert!(status.success(), "git setup should succeed");
+        }
+
+        let marker = root.path().join("fsmonitor-ran.txt");
+        let hook_marker = root.path().join("post-index-change-ran.txt");
+        let fsmonitor = root.path().join("fsmonitor.sh");
+        std::fs::write(
+            &fsmonitor,
+            format!(
+                "#!/bin/sh\nprintf invoked > {}\n",
+                shell_single_quote(&marker.to_string_lossy())
+            ),
+        )
+        .expect("fsmonitor should be written");
+        std::fs::set_permissions(&fsmonitor, std::fs::Permissions::from_mode(0o755))
+            .expect("fsmonitor should be executable");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["config", "core.fsmonitor"])
+            .arg(&fsmonitor)
+            .status()
+            .expect("git config should launch");
+        assert!(status.success(), "git config should succeed");
+        let hook = checkout.join(".git/hooks/post-index-change");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf invoked > {}\n",
+                shell_single_quote(&hook_marker.to_string_lossy())
+            ),
+        )
+        .expect("post-index-change hook should be written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("post-index-change hook should be executable");
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        std::fs::write(checkout.join("tracked.txt"), "tracked\n")
+            .expect("tracked file timestamp should change");
+
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: root.path().join("workspaces"),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        manager
+            .git(&checkout, &["status", "--porcelain"])
+            .await
+            .expect("orchestrator Git probe should succeed");
+        super::tracked_instruction_paths(&checkout, &std::collections::BTreeSet::new())
+            .await
+            .expect("tracked instruction probe should succeed");
+
+        assert!(
+            !marker.exists(),
+            "checkout-controlled fsmonitor must be disabled on the Git command itself"
+        );
+        assert!(
+            !hook_marker.exists(),
+            "default checkout hooks must be disabled on the Git command itself"
+        );
     }
 
     #[test]

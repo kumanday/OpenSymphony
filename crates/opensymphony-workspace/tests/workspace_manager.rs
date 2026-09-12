@@ -501,7 +501,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     assert!(matches!(
         manager.prepare_parent_execution_root(&parent, 7, requests.clone()).await,
         Err(WorkspaceError::CheckoutVerification { reason, .. })
-            if reason.contains("process-filter configuration")
+            if reason.contains("process configuration")
     ));
     assert!(!parent_generation_path(&manager, &parent, 7).exists());
     git(
@@ -678,6 +678,45 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             "remote.origin.pushurl",
         ],
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker = temp_dir.path().join("integration-fsmonitor-ran.txt");
+        let fsmonitor = temp_dir.path().join("integration-fsmonitor.sh");
+        std::fs::write(
+            &fsmonitor,
+            format!("#!/bin/sh\nprintf invoked > {}\n", shell_quote(&marker)),
+        )
+        .expect("integration fsmonitor should be written");
+        std::fs::set_permissions(&fsmonitor, std::fs::Permissions::from_mode(0o755))
+            .expect("integration fsmonitor should be executable");
+        git(
+            &integration,
+            &[
+                "config",
+                "--worktree",
+                "core.fsmonitor",
+                fsmonitor.to_str().expect("fsmonitor path"),
+            ],
+        );
+        let fsmonitor_error = manager
+            .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+            .await
+            .expect_err("worktree-specific fsmonitor must invalidate the parent root");
+        assert!(
+            fsmonitor_error.to_string().contains("core.fsmonitor"),
+            "unexpected integration fsmonitor error: {fsmonitor_error}"
+        );
+        assert!(
+            !marker.exists(),
+            "integration fsmonitor must not run during parent probes"
+        );
+        git(
+            &integration,
+            &["config", "--worktree", "--unset-all", "core.fsmonitor"],
+        );
+    }
     std::fs::write(
         integration.join("parent-change.txt"),
         "preserve across retry\n",
@@ -982,8 +1021,8 @@ async fn parent_execution_root_rolls_back_when_after_create_initializes_git() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
-async fn parent_preparation_times_out_stalled_integration_verification() {
+#[tokio::test]
+async fn parent_preparation_rejects_child_controlled_fsmonitor_before_execution() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = TempDir::new().expect("temp dir should exist");
@@ -1003,12 +1042,11 @@ async fn parent_preparation_times_out_stalled_integration_verification() {
     child.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
     let child = manager.ensure(&child).await.expect("child should exist");
 
-    let fsmonitor = temp_dir
-        .path()
-        .join("stall-parent-integration-fsmonitor.sh");
+    let fsmonitor = temp_dir.path().join("capture-parent-probe-env.sh");
+    let marker = temp_dir.path().join("parent-probe-fsmonitor-ran.txt");
     std::fs::write(
         &fsmonitor,
-        "#!/bin/sh\ncase \"$PWD\" in */parents/*/repositories/*) sleep 300 ;; esac\nexit 0\n",
+        format!("#!/bin/sh\nprintf invoked > {}\n", shell_quote(&marker)),
     )
     .expect("fsmonitor hook should be written");
     std::fs::set_permissions(&fsmonitor, std::fs::Permissions::from_mode(0o755))
@@ -1041,11 +1079,98 @@ async fn parent_preparation_times_out_stalled_integration_verification() {
             }],
         )
         .await
-        .expect_err("stalled integration verification must time out");
+        .expect_err("child-controlled fsmonitor must be rejected");
 
     assert!(
-        error.to_string().contains("timed out"),
-        "unexpected integration timeout error: {error}"
+        error.to_string().contains("core.fsmonitor"),
+        "unexpected process-configuration error: {error}"
+    );
+    assert!(
+        !marker.exists(),
+        "fsmonitor must not run during parent probes"
+    );
+    assert!(!parent_generation_path(&manager, &parent, 1).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_preparation_rejects_worktree_conditional_fsmonitor_before_execution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let (source, binding, repository) =
+        repository_fixture(temp_dir.path(), "conditional-fsmonitor-repository");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_repository_checkouts(BTreeMap::from([(
+        binding.repository_id().to_string(),
+        repository,
+    )]));
+    let mut child = sample_issue("COE-CONDITIONAL-FSMONITOR-CHILD");
+    child.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+    let child = manager.ensure(&child).await.expect("child should exist");
+
+    let fsmonitor = temp_dir.path().join("conditional-fsmonitor.sh");
+    let marker = temp_dir.path().join("conditional-fsmonitor-ran.txt");
+    std::fs::write(
+        &fsmonitor,
+        format!("#!/bin/sh\nprintf invoked > {}\n", shell_quote(&marker)),
+    )
+    .expect("fsmonitor hook should be written");
+    std::fs::set_permissions(&fsmonitor, std::fs::Permissions::from_mode(0o755))
+        .expect("fsmonitor hook should be executable");
+    let included_config = temp_dir.path().join("worktree-conditional.gitconfig");
+    std::fs::write(
+        &included_config,
+        format!(
+            "[core]\n\tfsmonitor = {}\n",
+            fsmonitor.to_str().expect("fsmonitor path")
+        ),
+    )
+    .expect("conditional config should be written");
+    git(
+        child.handle.workspace_path(),
+        &[
+            "config",
+            "--local",
+            "includeIf.gitdir:**/worktrees/*.path",
+            included_config.to_str().expect("conditional config path"),
+        ],
+    );
+
+    let mut parent = sample_issue("COE-CONDITIONAL-FSMONITOR-PARENT");
+    parent.issue_id = "conditional-fsmonitor-parent-id".to_owned();
+    let error = manager
+        .prepare_parent_execution_root(
+            &parent,
+            1,
+            vec![ParentCheckoutRequest {
+                issue_id: child.handle.issue_id().to_owned(),
+                repository_id: binding.repository_id().to_string(),
+                checkout_generation: child
+                    .handle
+                    .checkout_generation()
+                    .expect("generation")
+                    .to_owned(),
+                lease_owner: "ancestor-integration:conditional-fsmonitor-parent-id".to_owned(),
+                required_merge_commits: vec![git(&source, &["rev-parse", "HEAD"])],
+            }],
+        )
+        .await
+        .expect_err("worktree-conditional fsmonitor must be rejected");
+
+    assert!(
+        error.to_string().contains("includeif.gitdir"),
+        "unexpected conditional-configuration error: {error}"
+    );
+    assert!(
+        !marker.exists(),
+        "worktree-conditional fsmonitor must not run during parent preparation"
     );
     assert!(!parent_generation_path(&manager, &parent, 1).exists());
 }

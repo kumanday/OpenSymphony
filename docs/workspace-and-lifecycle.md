@@ -179,8 +179,12 @@ directory. Git receives credentials only through the orchestrator-owned askpass
 process. Timed-out authenticated Git process trees are terminated and awaited
 before askpass state is removed on every supported platform. Integration
 worktree creation uses an empty hooks directory and isolated system/global Git
-configuration, and rejects retained-checkout process-filter configuration. The
-new worktree must
+configuration, and rejects retained-checkout process-filter, fsmonitor, custom
+hooks-path, and conditional-include configuration before any parent verification
+probe. Every workspace-manager Git probe also supplies a version-compatible
+empty `core.fsmonitor` value and a fresh empty `core.hooksPath` on the command
+itself so mutable included configuration and default repository hooks cannot
+activate an executable between validation and use. The new worktree must
 remain below `repositories/`, share the selected child's Git common directory,
 match both the provider identity and locator fingerprints for fetch and push
 remotes, be clean, and point at the recorded target commit. Several children in
