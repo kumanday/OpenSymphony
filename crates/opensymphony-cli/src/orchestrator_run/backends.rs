@@ -250,19 +250,27 @@ async fn attach_parent_verification_receipt(
     workspace: &WorkspaceHandle,
     issue: &NormalizedIssue,
     envelope: Option<&ParentRuntimeEnvelope>,
+    allow_repair_changes: bool,
 ) {
     let Some(envelope) = envelope else {
         return;
     };
     let result = async {
-        let verified_parent = workspace_manager
-            .open_parent_execution_root_at(&issue_descriptor(issue), workspace.workspace_path())
-            .await
-            .map_err(|error| {
-                format!(
-                    "parent checkouts no longer match their exact verification targets: {error}"
+        let verified_parent = if allow_repair_changes {
+            workspace_manager
+                .open_parent_execution_root_at_for_retry(
+                    &issue_descriptor(issue),
+                    workspace.workspace_path(),
                 )
-            })?;
+                .await
+        } else {
+            workspace_manager
+                .open_parent_execution_root_at(&issue_descriptor(issue), workspace.workspace_path())
+                .await
+        }
+        .map_err(|error| {
+            format!("parent checkouts no longer match their exact verification targets: {error}")
+        })?;
         workspace_manager
             .verify_parent_runtime_envelope(&verified_parent, envelope)
             .map_err(|error| {
@@ -1628,20 +1636,8 @@ impl RuntimeTrackerBackend {
                 let statuses = self
                     .github_commit_statuses(&api_root, &owner, &repository_name, head, repository)
                     .await?;
-                let failed = check_runs.iter().any(|run| {
-                    run.status.eq_ignore_ascii_case("completed")
-                        && run.conclusion.as_deref().is_some_and(|conclusion| {
-                            !matches!(
-                                conclusion.to_ascii_lowercase().as_str(),
-                                "success" | "neutral" | "skipped"
-                            )
-                        })
-                }) || statuses.iter().any(|status| {
-                    matches!(
-                        status.state.to_ascii_lowercase().as_str(),
-                        "failure" | "error"
-                    )
-                });
+                let failed =
+                    required_check_evidence_failed(&check_runs, &statuses, required.as_ref());
                 (
                     !failed
                         && check_runs.len() >= total_count
@@ -1934,7 +1930,7 @@ impl RuntimeTrackerBackend {
             return Ok(Some(false));
         };
         match expected_method.to_ascii_lowercase().as_str() {
-            "merge" => {
+            "merge" | "squash" | "rebase" => {
                 let endpoint = format!(
                     "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}"
                 );
@@ -1959,9 +1955,6 @@ impl RuntimeTrackerBackend {
                     commit.parents.len(),
                 )))
             }
-            "squash" | "rebase" => Err(LinearError::InvalidResponse(format!(
-                "GitHub REST merge evidence cannot distinguish `{expected_method}` from the other single-parent merge method; configure merge_method: merge or omit merge_method"
-            ))),
             _ => Ok(Some(false)),
         }
     }
@@ -2689,6 +2682,7 @@ fn github_required_status_checks_endpoint(
 fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bool {
     match expected_method.trim().to_ascii_lowercase().as_str() {
         "merge" => parent_count > 1,
+        "squash" | "rebase" => parent_count == 1,
         _ => false,
     }
 }
@@ -2783,6 +2777,64 @@ fn required_check_evidence_satisfied(
                     .as_deref()
                     .is_some_and(is_passing_check_conclusion)
         }),
+    }
+}
+
+fn required_check_evidence_failed(
+    check_runs: &[GitHubCheckRun],
+    commit_statuses: &[GitHubCommitStatus],
+    required_checks: Option<&GitHubRequiredStatusChecks>,
+) -> bool {
+    let latest_statuses = latest_commit_statuses(commit_statuses);
+    let check_failed = |check: &GitHubCheckRun| {
+        check.status.eq_ignore_ascii_case("completed")
+            && check
+                .conclusion
+                .as_deref()
+                .is_some_and(|conclusion| !is_passing_check_conclusion(conclusion))
+    };
+    let status_failed = |status: &GitHubCommitStatus| {
+        matches!(
+            status.state.to_ascii_lowercase().as_str(),
+            "failure" | "error"
+        )
+    };
+    match required_checks {
+        Some(required_checks) => {
+            required_checks.contexts.iter().any(|context| {
+                let check = latest_check_run(check_runs, |check| {
+                    check.name.as_deref() == Some(context.as_str())
+                });
+                let status = latest_statuses.get(context);
+                let passing = check.is_some_and(|check| {
+                    check.status.eq_ignore_ascii_case("completed")
+                        && check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(is_passing_check_conclusion)
+                }) || status
+                    .is_some_and(|status| status.state.eq_ignore_ascii_case("success"));
+                !passing
+                    && (check.is_some_and(&check_failed)
+                        || status.is_some_and(|status| status_failed(status)))
+            }) || required_checks.checks.iter().any(|required| {
+                latest_check_run(check_runs, |check| {
+                    check.name.as_deref() == Some(required.context.as_str())
+                        && required_check_run_app_matches(check, required.app_id)
+                })
+                .is_some_and(&check_failed)
+            })
+        }
+        None => {
+            let contexts = check_runs
+                .iter()
+                .filter_map(|check| check.name.as_deref())
+                .collect::<BTreeSet<_>>();
+            contexts.into_iter().any(|context| {
+                latest_check_run(check_runs, |check| check.name.as_deref() == Some(context))
+                    .is_some_and(&check_failed)
+            }) || latest_statuses.values().any(|status| status_failed(status))
+        }
     }
 }
 
@@ -3022,7 +3074,7 @@ fn codex_review_state_for_head(
             .user
             .as_ref()
             .and_then(|user| user.login.as_deref())
-            .is_some_and(|login| login == "chatgpt-codex-connector")
+            .is_some_and(is_codex_connector_login)
             && comment
                 .body
                 .contains("<!-- codex-pull-request-review-summary -->")
@@ -3034,7 +3086,7 @@ fn codex_review_state_for_head(
             .user
             .as_ref()
             .and_then(|user| user.login.as_deref())
-            .is_some_and(|login| login == "chatgpt-codex-connector")
+            .is_some_and(is_codex_connector_login)
             && comment
                 .original_commit_id
                 .as_deref()
@@ -3047,6 +3099,10 @@ fn codex_review_state_for_head(
         false,
         findings,
     )
+}
+
+fn is_codex_connector_login(login: &str) -> bool {
+    login.trim_end_matches("[bot]") == "chatgpt-codex-connector"
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3942,7 +3998,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         _target: &ParentRepositoryTarget,
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
-    ) -> Result<Option<(String, Option<String>)>, Self::Error> {
+    ) -> Result<Option<(String, Option<String>, bool)>, Self::Error> {
         let local_commit = self
             .manager
             .reconcile_parent_repair_branch(
@@ -3969,7 +4025,16 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                 &repair.branch,
             )
             .await?;
-        Ok(Some((local_commit, remote_commit)))
+        let has_uncommitted_changes = self
+            .manager
+            .parent_repair_has_uncommitted_changes(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                &repair.branch,
+            )
+            .await?;
+        Ok(Some((local_commit, remote_commit, has_uncommitted_changes)))
     }
 
     async fn publish_parent_repair(
@@ -5935,6 +6000,7 @@ impl RuntimeWorkerBackend {
                     &ensured.handle,
                     &issue,
                     parent_runtime_envelope.as_ref(),
+                    parent_repair.is_some(),
                 )
                 .await;
                 if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -6023,6 +6089,7 @@ impl RuntimeWorkerBackend {
                 &ensured.handle,
                 &issue,
                 parent_runtime_envelope.as_ref(),
+                parent_repair.is_some(),
             )
             .await;
             if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -13995,7 +14062,7 @@ Run the scheduler.
     #[test]
     fn codex_review_requires_a_completed_clean_scan_for_the_current_head() {
         let connector = Some(GitHubReviewUser {
-            login: Some("chatgpt-codex-connector".to_owned()),
+            login: Some("chatgpt-codex-connector[bot]".to_owned()),
         });
         let comments = vec![GitHubIssueComment {
             body: "<!-- codex-pull-request-review-summary -->\n| ✅ **Completed** | `abcdef1` |"
@@ -14060,8 +14127,8 @@ Run the scheduler.
     fn github_merge_evidence_matches_configured_merge_method() {
         assert!(github_merge_method_matches("merge", 2));
         assert!(!github_merge_method_matches("merge", 1));
-        assert!(!github_merge_method_matches("squash", 1));
-        assert!(!github_merge_method_matches("rebase", 1));
+        assert!(github_merge_method_matches("squash", 1));
+        assert!(github_merge_method_matches("rebase", 1));
     }
 
     #[test]
@@ -14127,6 +14194,11 @@ Run the scheduler.
             &[],
             Some(&required)
         ));
+        assert!(!required_check_evidence_failed(
+            &checks,
+            &[],
+            Some(&required)
+        ));
         assert!(required_check_evidence_satisfied(&checks, &[], None));
 
         let missing = GitHubRequiredStatusChecks {
@@ -14187,6 +14259,26 @@ Run the scheduler.
 
         assert!(!required_check_evidence_satisfied(
             &checks,
+            &[],
+            Some(&required),
+        ));
+        assert!(required_check_evidence_failed(
+            &checks,
+            &[],
+            Some(&required),
+        ));
+
+        let mut rerun = checks;
+        rerun.push(GitHubCheckRun {
+            id: 12,
+            name: Some("required".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            created_at: Some("2026-08-13T07:02:00Z".to_owned()),
+            ..Default::default()
+        });
+        assert!(!required_check_evidence_failed(
+            &rerun,
             &[],
             Some(&required),
         ));

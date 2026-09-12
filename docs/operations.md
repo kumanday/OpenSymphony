@@ -736,13 +736,22 @@ result must be reconciled first; do not create another branch or PR manually.
 `provider_unavailable`, `failed_checks`, `review_rejected`,
 `externally_closed`, `force_pushed`, and `merge_conflict` preserve the attempt
 for retry or operator repair. Requested changes return the same attempt to its
-recorded branch and PR. For a Codex review profile, the PR-open scan is the
+recorded branch and PR. A stage-specific failure is stored as a bounded,
+redacted repair diagnostic and retried without stopping the rest of the
+scheduler tick. For a Codex review profile, the PR-open scan is the
 initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
 affect eligibility. The scheduler applies a fresh provider snapshot immediately
-before merge. After a provider merge, refresh fetches the configured target,
+before merge and returns to review if approval, checks, or mergeability are no
+longer current. A failed parent verification selects the repository but does not
+publish immediately: the scheduler creates the repair branch, resumes the same
+parent conversation for an observed implementation-and-check turn, and only
+then commits and pushes through the workspace owner. After a provider merge, refresh fetches the configured target,
 proves the recorded merge-result commit is reachable, and refreshes complete
-instruction provenance before final verification runs again.
+instruction provenance before final verification runs again. The configured
+merge call selects merge, squash, or rebase centrally; recovery corroborates a
+merge commit by its multi-parent topology and a squash or rebase result by its
+single-parent topology plus target reachability.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before

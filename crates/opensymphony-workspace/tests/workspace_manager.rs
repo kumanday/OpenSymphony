@@ -842,6 +842,17 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .expect("repair branch creation");
     std::fs::write(integration.join("parent-repair.txt"), "repair\n")
         .expect("repair file should be written");
+    assert!(
+        manager
+            .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+            .await
+            .is_err(),
+        "ordinary final verification must reject repair edits"
+    );
+    manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("authorized repair completion may verify dirty branch changes");
     let repair_commit = manager
         .publish_parent_repair(
             &parent,

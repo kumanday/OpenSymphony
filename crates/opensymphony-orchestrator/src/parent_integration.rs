@@ -16,6 +16,7 @@ const MAX_ATTEMPTS: usize = 64;
 const MAX_LOG_BYTES: usize = 16 * 1024;
 const MAX_COMMAND_BYTES: usize = 4 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 256;
+const MAX_REPAIR_FAILURE_BYTES: usize = 4 * 1024;
 const MAX_RESOURCE_RECEIPTS: usize = 64;
 const MAX_COMMAND_RECEIPTS: usize = MAX_RESOURCE_RECEIPTS / 2;
 
@@ -225,7 +226,9 @@ pub struct ParentRepositoryTarget {
     #[serde(default = "default_parent_target_branch")]
     pub target_branch: String,
     pub target_commit: String,
+    #[serde(default)]
     pub instruction_path: PathBuf,
+    #[serde(default)]
     pub instruction_hash: String,
     #[serde(default)]
     pub repair_policy: ParentRepairPolicy,
@@ -337,6 +340,10 @@ pub struct ParentRepairAttempt {
     pub branch: String,
     pub lease_id: String,
     pub policy: ParentRepairPolicy,
+    #[serde(default)]
+    pub implementation_completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_advancement_failure: Option<ParentRepairAdvancementFailure>,
     pub status: ParentRepairStatus,
     pub created_at: TimestampMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,6 +360,12 @@ pub struct ParentRepairAttempt {
     pub requested_change_count: u32,
     #[serde(default)]
     pub operations: Vec<ParentProviderOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRepairAdvancementFailure {
+    pub occurred_at: TimestampMs,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,8 +509,10 @@ impl ParentIntegrationController {
         if existing.checkout_handle != current.checkout_handle
             || existing.relative_path != current.relative_path
             || existing.target_commit != current.target_commit
-            || existing.instruction_path != current.instruction_path
-            || existing.instruction_hash != current.instruction_hash
+            || (!existing.instruction_path.as_os_str().is_empty()
+                && existing.instruction_path != current.instruction_path)
+            || (!existing.instruction_hash.is_empty()
+                && existing.instruction_hash != current.instruction_hash)
         {
             return Err(ParentIntegrationError::RepairTargetMismatch(
                 current.repository_id.to_string(),
@@ -1384,6 +1399,8 @@ impl ParentIntegrationController {
             branch,
             lease_id,
             policy,
+            implementation_completed: false,
+            last_advancement_failure: None,
             status: ParentRepairStatus::PreparingBranch,
             created_at: occurred_at,
             pushed_commit: None,
@@ -1402,6 +1419,24 @@ impl ParentIntegrationController {
             }],
         });
         Ok(id)
+    }
+
+    pub fn record_repair_advancement_failure(
+        &mut self,
+        repair_id: &str,
+        detail: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let mut boundary = detail.len().min(MAX_REPAIR_FAILURE_BYTES);
+        while boundary > 0 && !detail.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        self.repair_mut(repair_id)?.last_advancement_failure =
+            Some(ParentRepairAdvancementFailure {
+                occurred_at,
+                detail: detail[..boundary].to_owned(),
+            });
+        Ok(())
     }
 
     pub fn begin_provider_operation(
@@ -1491,6 +1526,24 @@ impl ParentIntegrationController {
         repair_id: &str,
     ) -> Result<(), ParentIntegrationError> {
         self.repair_mut(repair_id)?.status = ParentRepairStatus::Implementing;
+        Ok(())
+    }
+
+    pub fn record_repair_implementation_completed(
+        &mut self,
+        repair_id: &str,
+    ) -> Result<(), ParentIntegrationError> {
+        let repair = self.repair_mut(repair_id)?;
+        if !matches!(
+            repair.status,
+            ParentRepairStatus::Implementing | ParentRepairStatus::ChangesRequested
+        ) {
+            return Err(ParentIntegrationError::RepairTargetMismatch(
+                repair_id.to_owned(),
+            ));
+        }
+        repair.status = ParentRepairStatus::Implementing;
+        repair.implementation_completed = true;
         Ok(())
     }
 
@@ -1589,6 +1642,30 @@ impl ParentIntegrationController {
                 occurred_at,
             );
         }
+        if snapshot.pull_request_id.is_none()
+            && current.pull_request_id.is_none()
+            && current.pushed_commit.is_some()
+            && matches!(self.state, ParentIntegrationState::Blocked { .. })
+        {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::AwaitingPullRequest;
+            self.transition(
+                ParentIntegrationState::Fixing {
+                    repository_id: current.repository_id,
+                    repair_attempt: current.number,
+                },
+                "provider recovered before repair pull-request creation",
+                format!("{repair_id}:pull-request-recovered:{}", self.state_version),
+                input_version,
+                Some(intent(
+                    "reconcile_pull_request",
+                    format!("{repair_id}:pull-request-recovered:{}", self.state_version),
+                )),
+                Some(receipt("missing", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            return Ok(());
+        }
         if snapshot.merged {
             let merge_commit = snapshot
                 .merge_result_commit
@@ -1673,6 +1750,7 @@ impl ParentIntegrationController {
             let (repository_id, number, change_number) = {
                 let repair = self.repair_mut(repair_id)?;
                 repair.status = ParentRepairStatus::ChangesRequested;
+                repair.implementation_completed = false;
                 repair.requested_change_count = repair.requested_change_count.saturating_add(1);
                 (
                     repair.repository_id.clone(),
@@ -1726,7 +1804,12 @@ impl ParentIntegrationController {
                 ParentRetryClassification::Retryable,
                 occurred_at,
             )?;
-        } else if matches!(self.state, ParentIntegrationState::Blocked { .. }) && snapshot.open {
+        } else if matches!(
+            self.state,
+            ParentIntegrationState::Blocked { .. }
+                | ParentIntegrationState::AwaitingFixMerge { .. }
+        ) && snapshot.open
+        {
             let pull_request_id = current.pull_request_id.ok_or_else(|| {
                 ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
             })?;
@@ -1737,7 +1820,7 @@ impl ParentIntegrationController {
                     repair_attempt: current.number,
                     pull_request_id,
                 },
-                "provider reconciliation recovered the repair attempt",
+                "provider reconciliation requires a current eligible review snapshot",
                 format!("{repair_id}:provider-recovered:{}", self.state_version),
                 input_version,
                 Some(intent(
@@ -2096,6 +2179,10 @@ fn allowed_transition(from: &ParentIntegrationState, to: &ParentIntegrationState
             | (
                 State::AwaitingFixReview { .. },
                 State::AwaitingFixMerge { .. }
+            )
+            | (
+                State::AwaitingFixMerge { .. },
+                State::AwaitingFixReview { .. }
             )
             | (State::AwaitingFixMerge { .. }, State::Fixing { .. })
             | (State::AwaitingFixReview { .. }, State::RefreshingAfterFixes)
@@ -3066,6 +3153,7 @@ mod tests {
     #[test]
     fn schema_one_parent_targets_without_repair_policy_remain_readable() {
         let controller = controller();
+        let current = controller.targets.values().next().expect("target").clone();
         let mut value = serde_json::to_value(controller).expect("serialize controller");
         for target in value["targets"]
             .as_object_mut()
@@ -3080,13 +3168,33 @@ mod tests {
                 .as_object_mut()
                 .expect("target")
                 .remove("target_branch");
+            target
+                .as_object_mut()
+                .expect("target")
+                .remove("instruction_path");
+            target
+                .as_object_mut()
+                .expect("target")
+                .remove("instruction_hash");
         }
 
-        let recovered: ParentIntegrationController =
+        let mut recovered: ParentIntegrationController =
             serde_json::from_value(value).expect("schema-one controller remains readable");
         assert!(recovered.targets.values().all(|target| {
-            target.target_branch.is_empty() && target.repair_policy == ParentRepairPolicy::default()
+            target.target_branch.is_empty()
+                && target.instruction_path.as_os_str().is_empty()
+                && target.instruction_hash.is_empty()
+                && target.repair_policy == ParentRepairPolicy::default()
         }));
+        assert!(
+            recovered
+                .migrate_legacy_repair_target(current.clone())
+                .expect("verified provenance migrates")
+        );
+        assert_eq!(
+            recovered.targets.get(&current.repository_id),
+            Some(&current)
+        );
     }
 
     #[test]
@@ -3354,6 +3462,43 @@ mod tests {
                 ref pull_request_id,
                 ..
             } if pull_request_id == "42"
+        ));
+    }
+
+    #[test]
+    fn provider_outage_before_pull_request_recovers_to_publication() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("push");
+        let mut unavailable = review_snapshot();
+        unavailable.provider_available = false;
+        unavailable.pull_request_id = None;
+        unavailable.pull_request_url = None;
+        unavailable.open = false;
+        controller
+            .reconcile_repair_provider(&repair_id, unavailable, "targets:1", TimestampMs::new(12))
+            .expect("outage");
+        let mut recovered = review_snapshot();
+        recovered.pull_request_id = None;
+        recovered.pull_request_url = None;
+        recovered.open = false;
+        controller
+            .reconcile_repair_provider(&repair_id, recovered, "targets:1", TimestampMs::new(13))
+            .expect("provider recovery");
+        assert_eq!(
+            controller.repair(&repair_id).expect("repair").status,
+            ParentRepairStatus::AwaitingPullRequest
+        );
+        assert!(matches!(
+            controller.state,
+            ParentIntegrationState::Fixing { .. }
         ));
     }
 

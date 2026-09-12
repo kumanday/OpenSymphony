@@ -300,7 +300,12 @@ generation-bound map contain a reachable post-merge target and refreshed
 instruction path and hash. A failed harness-observed parent check may request
 one canonical repository repair; the scheduler verifies the repository and
 owns branch, pull-request, review, merge, and refresh receipts before it queues
-the next final-verification turn. Capture
+the next final-verification turn. The failed verification turn only selects the
+repository. The scheduler creates its repair branch and resumes the same parent
+conversation with that authorized checkout; publication waits for a successful,
+harness-observed repair turn. Ordinary final verification still requires exact
+clean targets, while the repair turn may verify descendant or dirty work on its
+recorded repair branch before the workspace owner commits and pushes it. Capture
 acknowledgement and ordered release of evidence-protecting roots and leases
 remain part of the later cleanup lifecycle.
 

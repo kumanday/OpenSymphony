@@ -1109,6 +1109,35 @@ impl WorkspaceManager {
             .map(str::to_owned))
     }
 
+    pub async fn parent_repair_has_uncommitted_changes(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        branch: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        let current_branch = self.git(&checkout, &["branch", "--show-current"]).await?;
+        if current_branch != branch {
+            return Err(checkout_verification(
+                &checkout,
+                "repair checkout is not on its recorded branch",
+            ));
+        }
+        Ok(!self
+            .git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .is_empty())
+    }
+
     pub async fn publish_parent_repair(
         &self,
         issue: &IssueDescriptor,
@@ -6382,7 +6411,7 @@ pub fn compose_parent_prompt(
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, make the smallest required edits in that verified checkout and replace `null` with its exact canonical repository ID. This field is only a repair request; OpenSymphony verifies the checkout and owns every Git and provider receipt. Use the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
+        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, replace `null` with its exact canonical repository ID without editing the checkout. OpenSymphony will create the verified repair branch and resume this conversation with repair instructions. This field is only a repair request; OpenSymphony owns every Git and provider receipt. Use the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
         envelope.workspace_path.display(),
         envelope.hierarchy_generation,
         checkout_map,
@@ -6415,7 +6444,7 @@ pub fn compose_parent_continuation_prompt(envelope: &ParentRuntimeEnvelope) -> S
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, make the smallest required edits in that verified checkout and replace `null` with its exact canonical repository ID. This field is only a repair request; OpenSymphony verifies the checkout and owns every Git and provider receipt. The file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
+        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, replace `null` with its exact canonical repository ID without editing the checkout. OpenSymphony will create the verified repair branch and resume this conversation with repair instructions. This field is only a repair request; OpenSymphony owns every Git and provider receipt. The file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
         envelope.run_id,
         envelope.attempt,
         envelope.hierarchy_generation,
