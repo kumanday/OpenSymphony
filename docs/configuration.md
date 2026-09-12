@@ -64,6 +64,11 @@ for SSH clone URLs, while `environment` credentials are rejected for SSH
 clones. Active GitHub review profiles must separately resolve to an
 `environment` credential with a variable name, because review API requests do
 not use the checkout transport credential or ambient authentication.
+Parent repairs snapshot the selected repository's target branch, instruction
+hash, review profile, review provider, review-policy generation, required-check
+and required-review flags, and merge method. Repository instructions guide the
+repair but cannot weaken that central policy. GitHub PR creation and merge use
+the review credential; branch fetch and push use the checkout credential.
 Queued retries do not advance the durable retry count until dispatch begins, so
 a restart during the backoff window cannot mistake a pending retry for an
 exhausted one. Recovery restores persisted non-exhausted retry counts before

@@ -155,6 +155,13 @@ pub struct ParentIntegrationCheckout {
     pub retained_checkouts: Vec<ParentRetainedCheckout>,
     pub required_merge_commits: Vec<String>,
     pub instruction: InstructionProvenance,
+    pub review_profile: String,
+    pub review_provider: String,
+    pub review_policy_generation: String,
+    pub required_checks: bool,
+    pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

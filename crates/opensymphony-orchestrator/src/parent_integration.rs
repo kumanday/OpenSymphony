@@ -25,12 +25,33 @@ pub enum ParentIntegrationState {
     PreparingIntegrationWorkspace,
     RefreshingRepositories,
     Integrating,
+    Fixing {
+        repository_id: CanonicalRepositoryId,
+        repair_attempt: u64,
+    },
+    AwaitingFixReview {
+        repository_id: CanonicalRepositoryId,
+        repair_attempt: u64,
+        pull_request_id: String,
+    },
+    AwaitingFixMerge {
+        repository_id: CanonicalRepositoryId,
+        repair_attempt: u64,
+        pull_request_id: String,
+    },
+    RefreshingAfterFixes,
     FinalVerification,
     Finalizing,
     Completed,
-    Blocked { reason: String },
-    Failed { reason: String },
-    Canceled { reason: String },
+    Blocked {
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
+    Canceled {
+        reason: String,
+    },
 }
 
 impl ParentIntegrationState {
@@ -199,6 +220,134 @@ pub struct ParentRepositoryTarget {
     #[serde(default)]
     pub relative_path: PathBuf,
     pub target_commit: String,
+    pub instruction_path: PathBuf,
+    pub instruction_hash: String,
+    pub repair_policy: ParentRepairPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRepairPolicy {
+    pub review_profile: String,
+    pub review_provider: String,
+    pub review_policy_generation: String,
+    pub required_checks: bool,
+    pub required_review: bool,
+    pub merge_method: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentRepairStatus {
+    PreparingBranch,
+    Implementing,
+    AwaitingPullRequest,
+    AwaitingReview,
+    ChangesRequested,
+    AwaitingMerge,
+    Refreshing,
+    Completed,
+    FailedChecks,
+    ReviewRejected,
+    ProviderUnavailable,
+    ExternallyClosed,
+    ForcePushed,
+    MergeConflict,
+}
+
+impl ParentRepairStatus {
+    pub fn resumable(self) -> bool {
+        !matches!(self, Self::Completed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentProviderOperationKind {
+    ReconcileBranch,
+    CreateBranch,
+    ReconcilePush,
+    Push,
+    ReconcilePullRequest,
+    CreatePullRequest,
+    ReconcileReview,
+    RequestReview,
+    ReconcileMerge,
+    Merge,
+    RefreshTarget,
+}
+
+impl ParentProviderOperationKind {
+    fn prerequisite(self) -> Option<Self> {
+        match self {
+            Self::CreateBranch => Some(Self::ReconcileBranch),
+            Self::Push => Some(Self::ReconcilePush),
+            Self::CreatePullRequest => Some(Self::ReconcilePullRequest),
+            Self::RequestReview => Some(Self::ReconcileReview),
+            Self::Merge => Some(Self::ReconcileMerge),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentProviderOperation {
+    pub kind: ParentProviderOperationKind,
+    pub idempotency_key: String,
+    pub input_version: String,
+    pub intended_at: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ParentSideEffectReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<TimestampMs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRepairAttempt {
+    pub id: String,
+    pub number: u64,
+    pub repository_id: CanonicalRepositoryId,
+    pub checkout_handle: String,
+    pub target_commit: String,
+    pub instruction_path: PathBuf,
+    pub instruction_hash: String,
+    pub branch: String,
+    pub lease_id: String,
+    pub policy: ParentRepairPolicy,
+    pub status: ParentRepairStatus,
+    pub created_at: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_result_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_target_commit: Option<String>,
+    #[serde(default)]
+    pub requested_change_count: u32,
+    #[serde(default)]
+    pub operations: Vec<ParentProviderOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRepairProviderSnapshot {
+    pub pull_request_id: Option<String>,
+    pub pull_request_url: Option<String>,
+    pub head_commit: Option<String>,
+    pub open: bool,
+    pub checks_passed: bool,
+    pub checks_failed: bool,
+    pub review_approved: bool,
+    pub review_rejected: bool,
+    pub changes_requested: bool,
+    pub mergeable: bool,
+    pub merge_conflict: bool,
+    pub merged: bool,
+    pub merge_result_commit: Option<String>,
+    pub target_contains_merge_result: bool,
+    pub provider_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +373,8 @@ pub struct ParentIntegrationController {
     #[serde(default)]
     pub next_attempt_sequence: u64,
     #[serde(default)]
+    pub next_repair_sequence: u64,
+    #[serde(default)]
     pub transitions: Vec<ParentTransition>,
     #[serde(default)]
     pub targets: BTreeMap<CanonicalRepositoryId, ParentRepositoryTarget>,
@@ -231,6 +382,8 @@ pub struct ParentIntegrationController {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub attempts: Vec<ParentVerificationAttempt>,
+    #[serde(default)]
+    pub repair_attempts: Vec<ParentRepairAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_evidence: Option<ParentFinalEvidence>,
 }
@@ -241,8 +394,8 @@ pub enum ParentIntegrationError {
     InvalidGeneration,
     #[error("invalid parent transition from {from:?} to {to:?}")]
     InvalidTransition {
-        from: ParentIntegrationState,
-        to: ParentIntegrationState,
+        from: Box<ParentIntegrationState>,
+        to: Box<ParentIntegrationState>,
     },
     #[error("idempotency key `{0}` was reused with different transition facts")]
     IdempotencyConflict(String),
@@ -252,6 +405,17 @@ pub enum ParentIntegrationError {
     UnknownCheckoutHandle(String),
     #[error("verification attempt `{0}` was not found")]
     UnknownAttempt(String),
+    #[error("repair attempt `{0}` was not found")]
+    UnknownRepairAttempt(String),
+    #[error("repository `{0}` is not present in the verified parent target map")]
+    UnknownRepairRepository(String),
+    #[error("repair attempt `{0}` does not match its verified checkout target")]
+    RepairTargetMismatch(String),
+    #[error("provider operation `{operation:?}` requires a completed `{prerequisite:?}` lookup")]
+    ProviderReconciliationRequired {
+        operation: ParentProviderOperationKind,
+        prerequisite: ParentProviderOperationKind,
+    },
     #[error("verification attempt `{0}` is already terminal")]
     AttemptAlreadyTerminal(String),
     #[error("verification attempt `{0}` cannot start before cleanup and baseline verification")]
@@ -279,10 +443,12 @@ impl ParentIntegrationController {
             state: ParentIntegrationState::WaitingForChildren,
             admission_input_version: None,
             next_attempt_sequence: 0,
+            next_repair_sequence: 0,
             transitions: Vec::new(),
             targets: BTreeMap::new(),
             conversation_id: None,
             attempts: Vec::new(),
+            repair_attempts: Vec::new(),
             final_evidence: None,
         })
     }
@@ -1067,6 +1233,543 @@ impl ParentIntegrationController {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_repair(
+        &mut self,
+        idempotency_key: &str,
+        repository_id: CanonicalRepositoryId,
+        checkout_handle: &str,
+        target_commit: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<String, ParentIntegrationError> {
+        if let Some(existing) = self.repair_attempts.iter().find(|attempt| {
+            attempt
+                .operations
+                .first()
+                .is_some_and(|operation| operation.idempotency_key == idempotency_key)
+        }) {
+            return if existing.repository_id == repository_id
+                && existing.checkout_handle == checkout_handle
+                && existing.target_commit == target_commit
+            {
+                Ok(existing.id.clone())
+            } else {
+                Err(ParentIntegrationError::IdempotencyConflict(
+                    idempotency_key.to_owned(),
+                ))
+            };
+        }
+        if self.state != ParentIntegrationState::Integrating {
+            return Err(ParentIntegrationError::InvalidTransition {
+                from: Box::new(self.state.clone()),
+                to: Box::new(ParentIntegrationState::Fixing {
+                    repository_id,
+                    repair_attempt: self.next_repair_sequence.saturating_add(1),
+                }),
+            });
+        }
+        let target = self.targets.get(&repository_id).ok_or_else(|| {
+            ParentIntegrationError::UnknownRepairRepository(repository_id.to_string())
+        })?;
+        if target.checkout_handle != checkout_handle || target.target_commit != target_commit {
+            return Err(ParentIntegrationError::RepairTargetMismatch(
+                repository_id.to_string(),
+            ));
+        }
+        let instruction_path = target.instruction_path.clone();
+        let instruction_hash = target.instruction_hash.clone();
+        let policy = target.repair_policy.clone();
+        self.next_repair_sequence = self.next_repair_sequence.saturating_add(1);
+        let number = self.next_repair_sequence;
+        let id = format!("parent-repair-{number}");
+        let branch_parent = self
+            .parent_id
+            .as_str()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_owned();
+        let branch = format!("fix/{branch_parent}-repair-{number}");
+        let lease_id = format!(
+            "repair:{}:{}:{}",
+            self.parent_id, self.hierarchy_generation, number
+        );
+        self.transition(
+            ParentIntegrationState::Fixing {
+                repository_id: repository_id.clone(),
+                repair_attempt: number,
+            },
+            "integration defect requires a repository repair",
+            idempotency_key,
+            input_version,
+            Some(intent("acquire_repair_lease", idempotency_key)),
+            None,
+            ParentRetryClassification::Retryable,
+            occurred_at,
+        )?;
+        self.repair_attempts.push(ParentRepairAttempt {
+            id: id.clone(),
+            number,
+            repository_id,
+            checkout_handle: checkout_handle.to_owned(),
+            target_commit: target_commit.to_owned(),
+            instruction_path,
+            instruction_hash,
+            branch,
+            lease_id,
+            policy,
+            status: ParentRepairStatus::PreparingBranch,
+            created_at: occurred_at,
+            pushed_commit: None,
+            pull_request_id: None,
+            pull_request_url: None,
+            merge_result_commit: None,
+            refreshed_target_commit: None,
+            requested_change_count: 0,
+            operations: vec![ParentProviderOperation {
+                kind: ParentProviderOperationKind::ReconcileBranch,
+                idempotency_key: idempotency_key.to_owned(),
+                input_version: input_version.to_owned(),
+                intended_at: occurred_at,
+                receipt: None,
+                completed_at: None,
+            }],
+        });
+        Ok(id)
+    }
+
+    pub fn begin_provider_operation(
+        &mut self,
+        repair_id: &str,
+        kind: ParentProviderOperationKind,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<String, ParentIntegrationError> {
+        let repair = self.repair_mut(repair_id)?;
+        if let Some(prerequisite) = kind.prerequisite()
+            && !repair
+                .operations
+                .iter()
+                .any(|operation| operation.kind == prerequisite && operation.receipt.is_some())
+        {
+            return Err(ParentIntegrationError::ProviderReconciliationRequired {
+                operation: kind,
+                prerequisite,
+            });
+        }
+        if let Some(existing) = repair
+            .operations
+            .iter()
+            .rev()
+            .find(|operation| operation.kind == kind && operation.receipt.is_none())
+        {
+            return if existing.input_version == input_version {
+                Ok(existing.idempotency_key.clone())
+            } else {
+                Err(ParentIntegrationError::IdempotencyConflict(
+                    existing.idempotency_key.clone(),
+                ))
+            };
+        }
+        let sequence = repair
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == kind)
+            .count()
+            .saturating_add(1);
+        let key = format!("{}:{kind:?}:{sequence}", repair.id).to_ascii_lowercase();
+        repair.operations.push(ParentProviderOperation {
+            kind,
+            idempotency_key: key.clone(),
+            input_version: input_version.to_owned(),
+            intended_at: occurred_at,
+            receipt: None,
+            completed_at: None,
+        });
+        Ok(key)
+    }
+
+    pub fn record_provider_operation(
+        &mut self,
+        repair_id: &str,
+        idempotency_key: &str,
+        status: &str,
+        detail: Option<String>,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let operation = self
+            .repair_mut(repair_id)?
+            .operations
+            .iter_mut()
+            .find(|operation| operation.idempotency_key == idempotency_key)
+            .ok_or_else(|| {
+                ParentIntegrationError::IdempotencyConflict(idempotency_key.to_owned())
+            })?;
+        let next = receipt(status, detail);
+        if let Some(existing) = &operation.receipt {
+            return if existing == &next {
+                Ok(())
+            } else {
+                Err(ParentIntegrationError::IdempotencyConflict(
+                    idempotency_key.to_owned(),
+                ))
+            };
+        }
+        operation.receipt = Some(next);
+        operation.completed_at = Some(occurred_at);
+        Ok(())
+    }
+
+    pub fn record_repair_branch_ready(
+        &mut self,
+        repair_id: &str,
+    ) -> Result<(), ParentIntegrationError> {
+        self.repair_mut(repair_id)?.status = ParentRepairStatus::Implementing;
+        Ok(())
+    }
+
+    pub fn record_repair_push(
+        &mut self,
+        repair_id: &str,
+        commit: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let was_fixing = matches!(self.state, ParentIntegrationState::Fixing { .. });
+        let review_state = {
+            let repair = self.repair_mut(repair_id)?;
+            let unchanged = repair.pushed_commit.as_deref() == Some(commit);
+            repair.pushed_commit = Some(commit.to_owned());
+            repair.status = if repair.pull_request_id.is_some() {
+                ParentRepairStatus::AwaitingReview
+            } else {
+                ParentRepairStatus::AwaitingPullRequest
+            };
+            (!unchanged || was_fixing)
+                .then(|| repair.pull_request_id.clone())
+                .flatten()
+                .map(
+                    |pull_request_id| ParentIntegrationState::AwaitingFixReview {
+                        repository_id: repair.repository_id.clone(),
+                        repair_attempt: repair.number,
+                        pull_request_id,
+                    },
+                )
+        };
+        if let Some(review_state) = review_state {
+            self.transition(
+                review_state,
+                "requested changes were pushed to the existing repair pull request",
+                format!("{repair_id}:push:{commit}"),
+                input_version,
+                Some(intent("push_repair", format!("{repair_id}:push:{commit}"))),
+                Some(receipt("pushed", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn record_repair_pull_request(
+        &mut self,
+        repair_id: &str,
+        pull_request_id: &str,
+        pull_request_url: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let (repository_id, number) = {
+            let repair = self.repair_mut(repair_id)?;
+            repair.pull_request_id = Some(pull_request_id.to_owned());
+            repair.pull_request_url = Some(pull_request_url.to_owned());
+            repair.status = ParentRepairStatus::AwaitingReview;
+            (repair.repository_id.clone(), repair.number)
+        };
+        self.transition(
+            ParentIntegrationState::AwaitingFixReview {
+                repository_id,
+                repair_attempt: number,
+                pull_request_id: pull_request_id.to_owned(),
+            },
+            "repair pull request is awaiting configured checks and review",
+            format!("{repair_id}:pull-request:{pull_request_id}"),
+            input_version,
+            Some(intent(
+                "reconcile_pull_request",
+                format!("{repair_id}:pull-request:{pull_request_id}"),
+            )),
+            Some(receipt("found_or_created", None)),
+            ParentRetryClassification::Retryable,
+            occurred_at,
+        )?;
+        Ok(())
+    }
+
+    pub fn reconcile_repair_provider(
+        &mut self,
+        repair_id: &str,
+        snapshot: ParentRepairProviderSnapshot,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let current = self.repair(repair_id)?.clone();
+        if !snapshot.provider_available {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::ProviderUnavailable;
+            return self.block_repair(
+                repair_id,
+                "provider unavailable",
+                input_version,
+                occurred_at,
+            );
+        }
+        if snapshot.merged {
+            let merge_commit = snapshot
+                .merge_result_commit
+                .filter(|commit| !commit.trim().is_empty())
+                .ok_or_else(|| {
+                    ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
+                })?;
+            if !snapshot.target_contains_merge_result {
+                self.repair_mut(repair_id)?.status = ParentRepairStatus::ForcePushed;
+                return self.block_repair(
+                    repair_id,
+                    "provider merge result is not reachable from target",
+                    input_version,
+                    occurred_at,
+                );
+            }
+            let repair = self.repair_mut(repair_id)?;
+            repair.status = ParentRepairStatus::Refreshing;
+            repair.merge_result_commit = Some(merge_commit);
+            self.transition(
+                ParentIntegrationState::RefreshingAfterFixes,
+                "provider reports a reachable repair merge result",
+                format!("{repair_id}:merged"),
+                input_version,
+                Some(intent(
+                    "refresh_after_repair",
+                    format!("{repair_id}:merged"),
+                )),
+                Some(receipt("merged", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            return Ok(());
+        }
+        if !snapshot.open && snapshot.pull_request_id.is_some() {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::ExternallyClosed;
+            return self.block_repair(
+                repair_id,
+                "repair pull request was closed externally",
+                input_version,
+                occurred_at,
+            );
+        }
+        if snapshot
+            .head_commit
+            .as_deref()
+            .zip(current.pushed_commit.as_deref())
+            .is_some_and(|(actual, expected)| actual != expected)
+        {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::ForcePushed;
+            return self.block_repair(
+                repair_id,
+                "repair branch was force-pushed outside the recorded attempt",
+                input_version,
+                occurred_at,
+            );
+        }
+        if snapshot.merge_conflict {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::MergeConflict;
+            return self.block_repair(
+                repair_id,
+                "repair merge conflict",
+                input_version,
+                occurred_at,
+            );
+        }
+        if snapshot.checks_failed {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::FailedChecks;
+            return self.block_repair(
+                repair_id,
+                "required checks failed",
+                input_version,
+                occurred_at,
+            );
+        }
+        if snapshot.changes_requested {
+            let (repository_id, number, change_number) = {
+                let repair = self.repair_mut(repair_id)?;
+                repair.status = ParentRepairStatus::ChangesRequested;
+                repair.requested_change_count = repair.requested_change_count.saturating_add(1);
+                (
+                    repair.repository_id.clone(),
+                    repair.number,
+                    repair.requested_change_count,
+                )
+            };
+            self.transition(
+                ParentIntegrationState::Fixing {
+                    repository_id,
+                    repair_attempt: number,
+                },
+                "provider review requested changes in the existing repair attempt",
+                format!("{repair_id}:changes-requested:{change_number}"),
+                input_version,
+                None,
+                Some(receipt("changes_requested", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            return Ok(());
+        }
+        if snapshot.review_rejected {
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::ReviewRejected;
+            return self.block_repair(
+                repair_id,
+                "repair review was rejected",
+                input_version,
+                occurred_at,
+            );
+        }
+        let checks_satisfied = !current.policy.required_checks || snapshot.checks_passed;
+        let review_satisfied = !current.policy.required_review || snapshot.review_approved;
+        if checks_satisfied && review_satisfied && snapshot.mergeable {
+            let pull_request_id = current.pull_request_id.ok_or_else(|| {
+                ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
+            })?;
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::AwaitingMerge;
+            self.transition(
+                ParentIntegrationState::AwaitingFixMerge {
+                    repository_id: current.repository_id,
+                    repair_attempt: current.number,
+                    pull_request_id,
+                },
+                "central repair review policy is satisfied",
+                format!("{repair_id}:merge-ready"),
+                input_version,
+                Some(intent("merge_repair", format!("{repair_id}:merge-ready"))),
+                Some(receipt("eligible", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+        } else if matches!(self.state, ParentIntegrationState::Blocked { .. }) && snapshot.open {
+            let pull_request_id = current.pull_request_id.ok_or_else(|| {
+                ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
+            })?;
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::AwaitingReview;
+            self.transition(
+                ParentIntegrationState::AwaitingFixReview {
+                    repository_id: current.repository_id,
+                    repair_attempt: current.number,
+                    pull_request_id,
+                },
+                "provider reconciliation recovered the repair attempt",
+                format!("{repair_id}:provider-recovered:{}", self.state_version),
+                input_version,
+                Some(intent(
+                    "reconcile_provider",
+                    format!("{repair_id}:provider-recovered:{}", self.state_version),
+                )),
+                Some(receipt("recovered", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn record_repair_refresh(
+        &mut self,
+        repair_id: &str,
+        refreshed_target_commit: &str,
+        refreshed_instruction_hash: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let repository_id = {
+            let repair = self.repair_mut(repair_id)?;
+            if repair.merge_result_commit.is_none() || refreshed_target_commit.trim().is_empty() {
+                return Err(ParentIntegrationError::RepairTargetMismatch(
+                    repair_id.to_owned(),
+                ));
+            }
+            repair.status = ParentRepairStatus::Completed;
+            repair.refreshed_target_commit = Some(refreshed_target_commit.to_owned());
+            repair.repository_id.clone()
+        };
+        let target = self.targets.get_mut(&repository_id).ok_or_else(|| {
+            ParentIntegrationError::UnknownRepairRepository(repository_id.to_string())
+        })?;
+        target.target_commit = refreshed_target_commit.to_owned();
+        target.instruction_hash = refreshed_instruction_hash.to_owned();
+        self.transition(
+            ParentIntegrationState::Integrating,
+            "affected integration checkout refreshed to the provider merge result",
+            format!("{repair_id}:refreshed:{refreshed_target_commit}"),
+            input_version,
+            Some(intent(
+                "verify_refreshed_target",
+                format!("{repair_id}:refreshed:{refreshed_target_commit}"),
+            )),
+            Some(receipt("reachable", None)),
+            ParentRetryClassification::Retryable,
+            occurred_at,
+        )?;
+        Ok(())
+    }
+
+    pub fn repair(&self, repair_id: &str) -> Result<&ParentRepairAttempt, ParentIntegrationError> {
+        self.repair_attempts
+            .iter()
+            .find(|repair| repair.id == repair_id)
+            .ok_or_else(|| ParentIntegrationError::UnknownRepairAttempt(repair_id.to_owned()))
+    }
+
+    fn repair_mut(
+        &mut self,
+        repair_id: &str,
+    ) -> Result<&mut ParentRepairAttempt, ParentIntegrationError> {
+        self.repair_attempts
+            .iter_mut()
+            .find(|repair| repair.id == repair_id)
+            .ok_or_else(|| ParentIntegrationError::UnknownRepairAttempt(repair_id.to_owned()))
+    }
+
+    fn block_repair(
+        &mut self,
+        repair_id: &str,
+        reason: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        self.transition(
+            ParentIntegrationState::Blocked {
+                reason: reason.to_owned(),
+            },
+            reason,
+            format!("{repair_id}:blocked:{reason}"),
+            input_version,
+            Some(intent(
+                "reconcile_provider",
+                format!("{repair_id}:blocked:{reason}"),
+            )),
+            Some(receipt("blocked", Some(reason.to_owned()))),
+            ParentRetryClassification::OperatorAction,
+            occurred_at,
+        )?;
+        Ok(())
+    }
+
     pub fn complete(
         &mut self,
         attempt_id: &str,
@@ -1258,8 +1961,8 @@ impl ParentIntegrationController {
         }
         if !allowed_transition(&self.state, &next) {
             return Err(ParentIntegrationError::InvalidTransition {
-                from: self.state.clone(),
-                to: next,
+                from: Box::new(self.state.clone()),
+                to: Box::new(next),
             });
         }
         self.state_version = self.state_version.saturating_add(1);
@@ -1321,11 +2024,25 @@ fn allowed_transition(from: &ParentIntegrationState, to: &ParentIntegrationState
             )
             | (State::RefreshingRepositories, State::Integrating)
             | (State::Integrating, State::RefreshingRepositories)
+            | (State::Integrating, State::Fixing { .. })
+            | (State::Fixing { .. }, State::AwaitingFixReview { .. })
+            | (State::AwaitingFixReview { .. }, State::Fixing { .. })
+            | (
+                State::AwaitingFixReview { .. },
+                State::AwaitingFixMerge { .. }
+            )
+            | (State::AwaitingFixReview { .. }, State::RefreshingAfterFixes)
+            | (State::AwaitingFixMerge { .. }, State::RefreshingAfterFixes)
+            | (State::RefreshingAfterFixes, State::Integrating)
             | (State::Integrating, State::FinalVerification)
             | (State::FinalVerification, State::Integrating)
             | (State::FinalVerification, State::Finalizing)
             | (State::Finalizing, State::Completed)
             | (State::Blocked { .. }, State::RefreshingRepositories)
+            | (State::Blocked { .. }, State::Fixing { .. })
+            | (State::Blocked { .. }, State::AwaitingFixReview { .. })
+            | (State::Blocked { .. }, State::AwaitingFixMerge { .. })
+            | (State::Blocked { .. }, State::RefreshingAfterFixes)
             | (_, State::Blocked { .. })
             | (_, State::Failed { .. })
             | (_, State::Canceled { .. })
@@ -1356,6 +2073,17 @@ pub fn parent_command_identity(command: &str) -> String {
 mod tests {
     use super::*;
 
+    fn repair_policy() -> ParentRepairPolicy {
+        ParentRepairPolicy {
+            review_profile: "required".to_owned(),
+            review_provider: "github".to_owned(),
+            review_policy_generation: "policy-1".to_owned(),
+            required_checks: true,
+            required_review: true,
+            merge_method: "squash".to_owned(),
+        }
+    }
+
     fn controller() -> ParentIntegrationController {
         let mut controller =
             ParentIntegrationController::new(IssueId::new("parent").expect("parent id"), 7)
@@ -1375,6 +2103,9 @@ mod tests {
                         checkout_handle: format!("checkout-{repo}"),
                         relative_path: PathBuf::from(format!("repositories/{repo}")),
                         target_commit: format!("commit-{repo}"),
+                        instruction_path: PathBuf::from("AGENTS.md"),
+                        instruction_hash: format!("instruction-{repo}"),
+                        repair_policy: repair_policy(),
                     }),
                 "targets:1",
                 TimestampMs::new(2),
@@ -2204,5 +2935,363 @@ mod tests {
             serde_json::from_value(encoded).expect("decode");
         assert_eq!(recovered.targets.len(), 3);
         assert_eq!(recovered.final_evidence, controller.final_evidence);
+    }
+
+    fn begin_repair(controller: &mut ParentIntegrationController) -> String {
+        controller
+            .begin_repair(
+                "repair:defect-a",
+                CanonicalRepositoryId::new("github:repository:a").expect("repository"),
+                "checkout-a",
+                "commit-a",
+                "targets:1",
+                TimestampMs::new(10),
+            )
+            .expect("begin repair")
+    }
+
+    fn review_snapshot() -> ParentRepairProviderSnapshot {
+        ParentRepairProviderSnapshot {
+            pull_request_id: Some("42".to_owned()),
+            pull_request_url: Some("https://github.com/example/a/pull/42".to_owned()),
+            head_commit: Some("repair-commit-1".to_owned()),
+            open: true,
+            checks_passed: false,
+            checks_failed: false,
+            review_approved: false,
+            review_rejected: false,
+            changes_requested: false,
+            mergeable: true,
+            merge_conflict: false,
+            merged: false,
+            merge_result_commit: None,
+            target_contains_merge_result: false,
+            provider_available: true,
+        }
+    }
+
+    #[test]
+    fn repair_attempts_use_verified_target_policy_and_survive_recovery() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        let replay = begin_repair(&mut controller);
+
+        assert_eq!(replay, repair_id);
+        let repair = controller.repair(&repair_id).expect("repair");
+        assert_eq!(repair.branch, "fix/parent-repair-1");
+        assert_eq!(repair.instruction_hash, "instruction-a");
+        assert_eq!(repair.policy, repair_policy());
+        assert_eq!(repair.target_commit, "commit-a");
+
+        let recovered: ParentIntegrationController = serde_json::from_value(
+            serde_json::to_value(controller).expect("serialize repair controller"),
+        )
+        .expect("recover repair controller");
+        assert_eq!(recovered.repair_attempts.len(), 1);
+        assert_eq!(recovered.next_repair_sequence, 1);
+    }
+
+    #[test]
+    fn mutating_provider_operations_require_search_before_create() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+
+        assert!(matches!(
+            controller.begin_provider_operation(
+                &repair_id,
+                ParentProviderOperationKind::CreateBranch,
+                "targets:1",
+                TimestampMs::new(11),
+            ),
+            Err(ParentIntegrationError::ProviderReconciliationRequired { .. })
+        ));
+        controller
+            .record_provider_operation(
+                &repair_id,
+                "repair:defect-a",
+                "missing",
+                None,
+                TimestampMs::new(11),
+            )
+            .expect("branch lookup receipt");
+        let create_key = controller
+            .begin_provider_operation(
+                &repair_id,
+                ParentProviderOperationKind::CreateBranch,
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("create intent");
+        assert_eq!(
+            controller
+                .begin_provider_operation(
+                    &repair_id,
+                    ParentProviderOperationKind::CreateBranch,
+                    "targets:1",
+                    TimestampMs::new(13),
+                )
+                .expect("replayed create intent"),
+            create_key
+        );
+        assert_eq!(
+            controller
+                .repair(&repair_id)
+                .expect("repair")
+                .operations
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn requested_changes_keep_one_attempt_and_reachable_merge_refreshes_target() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_branch_ready(&repair_id)
+            .expect("branch ready");
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("push");
+        controller
+            .record_repair_pull_request(
+                &repair_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pull request");
+
+        let mut changes = review_snapshot();
+        changes.changes_requested = true;
+        controller
+            .reconcile_repair_provider(&repair_id, changes, "targets:1", TimestampMs::new(13))
+            .expect("requested changes");
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-2",
+                "targets:1",
+                TimestampMs::new(14),
+            )
+            .expect("same PR repair push");
+
+        let mut approved = review_snapshot();
+        approved.head_commit = Some("repair-commit-2".to_owned());
+        approved.checks_passed = true;
+        approved.review_approved = true;
+        controller
+            .reconcile_repair_provider(&repair_id, approved, "targets:1", TimestampMs::new(15))
+            .expect("merge ready");
+        let mut merged = review_snapshot();
+        merged.head_commit = Some("repair-commit-2".to_owned());
+        merged.merged = true;
+        merged.open = false;
+        merged.merge_result_commit = Some("squash-result".to_owned());
+        merged.target_contains_merge_result = true;
+        controller
+            .reconcile_repair_provider(&repair_id, merged, "targets:1", TimestampMs::new(16))
+            .expect("merged");
+        controller
+            .record_repair_refresh(
+                &repair_id,
+                "target-after-squash-result",
+                "instruction-a-after",
+                "targets:2",
+                TimestampMs::new(17),
+            )
+            .expect("refresh");
+
+        let repair = controller.repair(&repair_id).expect("repair");
+        assert_eq!(controller.repair_attempts.len(), 1);
+        assert_eq!(repair.requested_change_count, 1);
+        assert_eq!(repair.pull_request_id.as_deref(), Some("42"));
+        assert_eq!(repair.status, ParentRepairStatus::Completed);
+        assert_eq!(
+            controller.targets[&repair.repository_id].target_commit,
+            "target-after-squash-result"
+        );
+        assert_eq!(controller.state, ParentIntegrationState::Integrating);
+    }
+
+    #[test]
+    fn provider_failures_are_typed_and_resumable() {
+        for (mut snapshot, expected) in [
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.provider_available = false;
+                (snapshot, ParentRepairStatus::ProviderUnavailable)
+            },
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.open = false;
+                (snapshot, ParentRepairStatus::ExternallyClosed)
+            },
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.head_commit = Some("foreign".to_owned());
+                (snapshot, ParentRepairStatus::ForcePushed)
+            },
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.merge_conflict = true;
+                (snapshot, ParentRepairStatus::MergeConflict)
+            },
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.checks_failed = true;
+                (snapshot, ParentRepairStatus::FailedChecks)
+            },
+            {
+                let mut snapshot = review_snapshot();
+                snapshot.review_rejected = true;
+                (snapshot, ParentRepairStatus::ReviewRejected)
+            },
+        ] {
+            let mut controller = controller();
+            let repair_id = begin_repair(&mut controller);
+            controller
+                .record_repair_push(
+                    &repair_id,
+                    "repair-commit-1",
+                    "targets:1",
+                    TimestampMs::new(11),
+                )
+                .expect("push");
+            controller
+                .record_repair_pull_request(
+                    &repair_id,
+                    "42",
+                    "https://github.com/example/a/pull/42",
+                    "targets:1",
+                    TimestampMs::new(12),
+                )
+                .expect("pull request");
+            snapshot.pull_request_id = Some("42".to_owned());
+            controller
+                .reconcile_repair_provider(&repair_id, snapshot, "targets:1", TimestampMs::new(13))
+                .expect("typed block");
+            let status = controller.repair(&repair_id).expect("repair").status;
+            assert_eq!(status, expected);
+            assert!(status.resumable());
+            assert!(matches!(
+                controller.state,
+                ParentIntegrationState::Blocked { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn provider_outage_recovers_to_the_same_pull_request() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("push");
+        controller
+            .record_repair_pull_request(
+                &repair_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pull request");
+        let mut unavailable = review_snapshot();
+        unavailable.provider_available = false;
+        controller
+            .reconcile_repair_provider(&repair_id, unavailable, "targets:1", TimestampMs::new(13))
+            .expect("outage");
+        controller
+            .reconcile_repair_provider(
+                &repair_id,
+                review_snapshot(),
+                "targets:1",
+                TimestampMs::new(14),
+            )
+            .expect("provider recovery");
+        assert_eq!(
+            controller.repair(&repair_id).expect("repair").status,
+            ParentRepairStatus::AwaitingReview
+        );
+        assert!(matches!(
+            controller.state,
+            ParentIntegrationState::AwaitingFixReview {
+                ref pull_request_id,
+                ..
+            } if pull_request_id == "42"
+        ));
+    }
+
+    #[test]
+    fn repairs_across_repositories_preserve_prior_attempt_evidence() {
+        let mut controller = controller();
+        let first_id = begin_repair(&mut controller);
+        controller
+            .record_repair_push(&first_id, "repair-a", "targets:1", TimestampMs::new(11))
+            .expect("push a");
+        controller
+            .record_repair_pull_request(
+                &first_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pr a");
+        let mut merged = review_snapshot();
+        merged.head_commit = Some("repair-a".to_owned());
+        merged.open = false;
+        merged.merged = true;
+        merged.merge_result_commit = Some("squash-a".to_owned());
+        merged.target_contains_merge_result = true;
+        controller
+            .reconcile_repair_provider(&first_id, merged, "targets:1", TimestampMs::new(13))
+            .expect("merge a");
+        controller
+            .record_repair_refresh(
+                &first_id,
+                "squash-a",
+                "instruction-a-2",
+                "targets:2",
+                TimestampMs::new(14),
+            )
+            .expect("refresh a");
+
+        let second_id = controller
+            .begin_repair(
+                "repair:defect-b",
+                CanonicalRepositoryId::new("github:repository:b").expect("repository b"),
+                "checkout-b",
+                "commit-b",
+                "targets:2",
+                TimestampMs::new(15),
+            )
+            .expect("begin b");
+        assert_ne!(first_id, second_id);
+        assert_eq!(controller.repair_attempts.len(), 2);
+        assert_eq!(
+            controller.repair_attempts[0].status,
+            ParentRepairStatus::Completed
+        );
+        assert_eq!(
+            controller.repair_attempts[0].pull_request_id.as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            controller.repair_attempts[1].repository_id.as_str(),
+            "github:repository:b"
+        );
     }
 }

@@ -730,6 +730,16 @@ incomplete root, a hook-created root-level Git repository also fails and rolls
 back, and reuse requires the hook completion receipt. Parent paths include a
 stable issue-identity digest after the sanitized identifier.
 
+For a blocked parent repair, inspect the repair attempt's provider-operation
+ledger before intervening. A pending operation is an intent whose provider
+result must be reconciled first; do not create another branch or PR manually.
+`provider_unavailable`, `failed_checks`, `review_rejected`,
+`externally_closed`, `force_pushed`, and `merge_conflict` preserve the attempt
+for retry or operator repair. Requested changes return the same attempt to its
+recorded branch and PR. After a provider merge, refresh fetches the configured
+target and proves the recorded merge-result commit is reachable before final
+verification runs again.
+
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
 creating a replacement conversation. If that envelope differs from the

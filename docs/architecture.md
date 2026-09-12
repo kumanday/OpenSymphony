@@ -125,6 +125,23 @@ completed parent reopens, the scheduler creates a new controller lifecycle even
 when its child-edge generation did not change. A bound parent conversation also
 fixes the harness choice for that lifecycle; a configured harness switch fails
 before the replacement session starts.
+An integration defect creates an immutable repair attempt for one canonical
+repository. The controller copies the verified target, instruction provenance,
+and central review policy into that attempt, then records a durable intent and
+receipt for each provider operation. Branch, push, pull-request, review, and
+merge writes are preceded by provider reconciliation, so restart recovery finds
+an existing result before repeating a side effect. Requested changes stay on
+the same attempt and pull request. Provider outages, failed checks, review
+rejection, external closure, force-push, and merge conflicts remain precise,
+resumable states. GitHub is the first provider adapter and remains authoritative
+for PR, review, check, and merge facts.
+After merge, the controller records the provider merge-result commit and the
+workspace manager fetches the configured target through the central credential
+path. The refreshed checkout is accepted only when that merge result is
+reachable from the new target. Squash and rebase results therefore do not
+depend on the replaced repair commit remaining an ancestor. Both copies of the
+generation-bound checkout map and its instruction hash are updated before final
+verification can resume.
 Final evidence is accepted only from the run-bound
 `evidence/final-verification.json` receipt. The runtime reopens every checkout
 at its exact prepared commit and uses the file only to select an actual command

@@ -284,6 +284,21 @@ admission. Parents with no recorded checkout targets still require an observed
 successful final command and successful cleanup; their final repository commit
 map is empty by definition.
 
+A parent repair uses the affected repository's existing contained integration
+worktree. The workspace manager resolves it through the opaque checkout handle,
+reloads the pinned instruction provenance, and creates a fresh
+`fix/<parent>-repair-<attempt>` branch at the recorded target. Managed Git
+operations isolate hooks and reject checkout-controlled transport settings.
+Pushes use the configured credential path and reconcile the exact remote branch
+before mutation. One repair does not open or modify another repository's
+checkout.
+
+The repair lease and completed parent root remain durable after refresh. Final
+verification resumes only after every affected checkout and both copies of its
+generation-bound map contain a reachable post-merge target. Capture
+acknowledgement and ordered release of evidence-protecting roots and leases
+remain part of the later cleanup lifecycle.
+
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful
 `trusted_host` or `workspace_confined` containment. Parent memory grants remain

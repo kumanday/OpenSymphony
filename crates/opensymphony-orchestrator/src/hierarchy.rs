@@ -700,20 +700,42 @@ impl DurableOrchestratorState {
         }) {
             return Err("durable hierarchy snapshot has invalid identity or generation".to_owned());
         }
-        if self
-            .parent_integrations
-            .iter()
-            .any(|(parent_id, controller)| {
-                parent_id != &controller.parent_id
-                    || controller.hierarchy_generation == 0
-                    || controller.state_version
-                        < controller
-                            .transitions
-                            .last()
-                            .map_or(0, |transition| transition.state_version)
-            })
-        {
-            return Err("durable parent integration controller is inconsistent".to_owned());
+        for (parent_id, controller) in &self.parent_integrations {
+            if parent_id != &controller.parent_id
+                || controller.hierarchy_generation == 0
+                || controller.state_version
+                    < controller
+                        .transitions
+                        .last()
+                        .map_or(0, |transition| transition.state_version)
+            {
+                return Err("durable parent integration controller is inconsistent".to_owned());
+            }
+            let mut repair_ids = BTreeSet::new();
+            let mut repair_numbers = BTreeSet::new();
+            for repair in &controller.repair_attempts {
+                let Some(target) = controller.targets.get(&repair.repository_id) else {
+                    return Err("durable parent repair references an unknown repository".to_owned());
+                };
+                if repair.id.trim().is_empty()
+                    || repair.number == 0
+                    || !repair_ids.insert(repair.id.as_str())
+                    || !repair_numbers.insert(repair.number)
+                    || repair.checkout_handle != target.checkout_handle
+                    || repair.instruction_path != target.instruction_path
+                    || repair.policy != target.repair_policy
+                {
+                    return Err("durable parent repair attempt is inconsistent".to_owned());
+                }
+                let mut operation_keys = BTreeSet::new();
+                if repair.operations.iter().any(|operation| {
+                    operation.idempotency_key.trim().is_empty()
+                        || !operation_keys.insert(operation.idempotency_key.as_str())
+                        || operation.receipt.is_some() != operation.completed_at.is_some()
+                }) {
+                    return Err("durable parent repair operation ledger is inconsistent".to_owned());
+                }
+            }
         }
         Ok(())
     }

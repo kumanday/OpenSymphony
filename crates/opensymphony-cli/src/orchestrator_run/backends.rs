@@ -42,10 +42,11 @@ use crate::opensymphony_openhands::{
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
-    ParentEligibilityEvidence, ParentRepositoryTarget, ProviderEvidenceBoundary, RecoveredRun,
-    RecoveryRecord, RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
-    WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, parent_command_identity,
+    ParentEligibilityEvidence, ParentRepairPolicy, ParentRepositoryTarget,
+    ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord, RequiredMergeCommit,
+    RetryExhaustionRecord, RetryPendingRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    WorkspaceBackend, parent_command_identity,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -1244,6 +1245,98 @@ impl TrackerBackend for RuntimeTrackerBackend {
         })
     }
 
+    async fn parent_repair_snapshot(
+        &mut self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        self.github_parent_repair_snapshot(repair).await.map(Some)
+    }
+
+    async fn ensure_parent_repair_pull_request(
+        &mut self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(String, String)>, Self::Error> {
+        let repository = self.repository_for_repair(repair)?;
+        let (api_root, owner, repository_name) = github_repository_api(repository)?;
+        if let Some(pull_request) = self
+            .find_github_parent_repair_pull_request(repair, repository)
+            .await?
+        {
+            return Ok(Some((
+                pull_request.number.to_string(),
+                pull_request.html_url,
+            )));
+        }
+        let endpoint = format!("{api_root}/repos/{owner}/{repository_name}/pulls");
+        let title = format!("Repair parent integration ({})", repair.id);
+        let marker = format!("<!-- opensymphony-parent-repair:{} -->", repair.id);
+        let body = serde_json::json!({
+            "title": title,
+            "head": repair.branch,
+            "base": repository.target_branch,
+            "body": format!("{marker}\n\nDurable OpenSymphony parent repair attempt."),
+        });
+        let pull_request = self
+            .github_send_json::<GitHubPullRequest>(
+                reqwest::Method::POST,
+                &endpoint,
+                repository,
+                Some(&body),
+            )
+            .await?;
+        Ok(Some((
+            pull_request.number.to_string(),
+            pull_request.html_url,
+        )))
+    }
+
+    async fn request_parent_repair_review(
+        &mut self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        // GitHub review automation is configured to start when the repair PR
+        // opens. Reconciliation is the idempotent acknowledgement boundary.
+        self.github_parent_repair_snapshot(repair).await.map(Some)
+    }
+
+    async fn merge_parent_repair(
+        &mut self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        let repository = self.repository_for_repair(repair)?;
+        let (api_root, owner, repository_name) = github_repository_api(repository)?;
+        let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
+            LinearError::InvalidResponse("repair pull request identity is missing".to_owned())
+        })?;
+        let pushed_commit = repair.pushed_commit.as_deref().ok_or_else(|| {
+            LinearError::InvalidResponse("repair pushed commit is missing".to_owned())
+        })?;
+        let endpoint =
+            format!("{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/merge");
+        let body = serde_json::json!({
+            "sha": pushed_commit,
+            "merge_method": repair.policy.merge_method,
+        });
+        let result = self
+            .github_send_json::<GitHubMergeResult>(
+                reqwest::Method::PUT,
+                &endpoint,
+                repository,
+                Some(&body),
+            )
+            .await?;
+        if !result.merged {
+            return Err(LinearError::InvalidResponse(format!(
+                "GitHub declined parent repair merge: {}",
+                result.message
+            )));
+        }
+        self.github_parent_repair_snapshot(repair).await.map(Some)
+    }
+
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
     }
@@ -1280,6 +1373,200 @@ impl TrackerBackend for RuntimeTrackerBackend {
 }
 
 impl RuntimeTrackerBackend {
+    fn repository_for_repair(
+        &self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<&CheckoutRepository, LinearError> {
+        self.repository_checkouts
+            .get(repair.repository_id.as_str())
+            .ok_or_else(|| {
+                LinearError::InvalidConfiguration(format!(
+                    "parent repair repository {} is not configured",
+                    repair.repository_id
+                ))
+            })
+    }
+
+    async fn find_github_parent_repair_pull_request(
+        &self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+        repository: &CheckoutRepository,
+    ) -> Result<Option<GitHubPullRequest>, LinearError> {
+        let (api_root, owner, repository_name) = github_repository_api(repository)?;
+        if let Some(pull_number) = repair.pull_request_id.as_deref() {
+            let endpoint =
+                format!("{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}");
+            return self
+                .github_get_json::<GitHubPullRequest>(&endpoint, repository)
+                .await
+                .map(Some);
+        }
+        let mut endpoint = Url::parse(&format!("{api_root}/repos/{owner}/{repository_name}/pulls"))
+            .map_err(|error| LinearError::InvalidResponse(error.to_string()))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("state", "all")
+            .append_pair("head", &format!("{owner}:{}", repair.branch))
+            .append_pair("base", &repository.target_branch)
+            .append_pair("per_page", "100");
+        let pulls = self
+            .github_get_json::<Vec<GitHubPullRequest>>(endpoint.as_ref(), repository)
+            .await?;
+        let mut matching = pulls
+            .into_iter()
+            .filter(|pull| {
+                pull.head.ref_name == repair.branch
+                    && pull.base.ref_name == repository.target_branch
+            })
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|pull| pull.number);
+        if matching.len() > 1 {
+            return Err(LinearError::InvalidResponse(format!(
+                "multiple pull requests match durable parent repair {}",
+                repair.id
+            )));
+        }
+        Ok(matching.pop())
+    }
+
+    async fn github_parent_repair_snapshot(
+        &self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot, LinearError> {
+        let repository = self.repository_for_repair(repair)?;
+        if !repository.provider.eq_ignore_ascii_case("github")
+            || !repair.policy.review_provider.eq_ignore_ascii_case("github")
+        {
+            return Err(LinearError::InvalidConfiguration(
+                "parent repair requires a GitHub repository and review provider".to_owned(),
+            ));
+        }
+        let (api_root, owner, repository_name) = github_repository_api(repository)?;
+        let Some(pull) = self
+            .find_github_parent_repair_pull_request(repair, repository)
+            .await?
+        else {
+            return Ok(
+                crate::opensymphony_orchestrator::ParentRepairProviderSnapshot {
+                    pull_request_id: None,
+                    pull_request_url: None,
+                    head_commit: None,
+                    open: false,
+                    checks_passed: false,
+                    checks_failed: false,
+                    review_approved: false,
+                    review_rejected: false,
+                    changes_requested: false,
+                    mergeable: false,
+                    merge_conflict: false,
+                    merged: false,
+                    merge_result_commit: None,
+                    target_contains_merge_result: false,
+                    provider_available: true,
+                },
+            );
+        };
+        let pull_number = pull.number.to_string();
+        let reviews = self
+            .github_reviews(
+                &api_root,
+                &owner,
+                &repository_name,
+                &pull_number,
+                repository,
+            )
+            .await?;
+        let latest_reviews = latest_github_review_states(reviews);
+        let review_approved = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
+        let changes_requested = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
+        let review_rejected = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
+        let head_commit = pull.head.sha.clone();
+        let (checks_passed, checks_failed) = if repository.required_checks {
+            if let Some(head) = head_commit.as_deref() {
+                let (total_count, check_runs) = self
+                    .github_check_runs(&api_root, &owner, &repository_name, head, repository)
+                    .await?;
+                let required = self
+                    .github_required_check_contexts(&api_root, &owner, &repository_name, repository)
+                    .await?;
+                let statuses = self
+                    .github_commit_statuses(&api_root, &owner, &repository_name, head, repository)
+                    .await?;
+                let failed = check_runs.iter().any(|run| {
+                    run.status.eq_ignore_ascii_case("completed")
+                        && run.conclusion.as_deref().is_some_and(|conclusion| {
+                            !matches!(
+                                conclusion.to_ascii_lowercase().as_str(),
+                                "success" | "neutral" | "skipped"
+                            )
+                        })
+                }) || statuses.iter().any(|status| {
+                    matches!(
+                        status.state.to_ascii_lowercase().as_str(),
+                        "failure" | "error"
+                    )
+                });
+                (
+                    !failed
+                        && check_runs.len() >= total_count
+                        && required_check_evidence_satisfied(
+                            &check_runs,
+                            &statuses,
+                            required.as_ref(),
+                        ),
+                    failed,
+                )
+            } else {
+                (false, false)
+            }
+        } else {
+            (true, false)
+        };
+        let merged = pull.merged_at.is_some();
+        let target_contains_merge_result = if merged {
+            self.github_merge_commit_reachable(
+                &api_root,
+                &owner,
+                &repository_name,
+                &repository.target_branch,
+                pull.merge_commit_sha.as_deref(),
+                repository,
+            )
+            .await?
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        Ok(
+            crate::opensymphony_orchestrator::ParentRepairProviderSnapshot {
+                pull_request_id: Some(pull.number.to_string()),
+                pull_request_url: Some(pull.html_url),
+                head_commit,
+                open: pull.state.eq_ignore_ascii_case("open"),
+                checks_passed,
+                checks_failed,
+                review_approved,
+                review_rejected,
+                changes_requested,
+                mergeable: pull.mergeable.unwrap_or(false),
+                merge_conflict: pull
+                    .mergeable_state
+                    .as_deref()
+                    .is_some_and(|state| state.eq_ignore_ascii_case("dirty")),
+                merged,
+                merge_result_commit: pull.merge_commit_sha,
+                target_contains_merge_result,
+                provider_available: true,
+            },
+        )
+    }
+
     fn checkout_policy_for_issue(&self, issue: &TrackerIssue) -> Option<&CheckoutRepository> {
         if !issue.sub_issues.is_empty() {
             return None;
@@ -1637,6 +1924,60 @@ impl RuntimeTrackerBackend {
             });
         }
         serde_json::from_str::<T>(&response_body).map_err(|error| {
+            LinearError::InvalidResponse(format!(
+                "GitHub API response decode failed for {endpoint}: {error}"
+            ))
+        })
+    }
+
+    async fn github_send_json<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        endpoint: &str,
+        repository: &CheckoutRepository,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T, LinearError> {
+        let mut request = self
+            .github_http
+            .request(method, endpoint)
+            .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        let configured_token = match repository.review_credential_env.as_deref() {
+            Some(name) => env::var(name).map_err(|_| {
+                LinearError::InvalidConfiguration(format!(
+                    "configured GitHub review credential variable `{name}` is not set"
+                ))
+            })?,
+            None => self.github_token.clone().unwrap_or_default(),
+        };
+        if configured_token.trim().is_empty() {
+            return Err(LinearError::InvalidConfiguration(
+                "GitHub repair writes require a configured review credential".to_owned(),
+            ));
+        }
+        request = request.bearer_auth(configured_token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        let status = response.status();
+        let retry_after = github_retry_after(response.headers());
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        if !status.is_success() {
+            return Err(LinearError::HttpStatus {
+                status,
+                body: format!("GitHub API write failed for {endpoint}: {response_body}"),
+                retry_after,
+            });
+        }
+        serde_json::from_str(&response_body).map_err(|error| {
             LinearError::InvalidResponse(format!(
                 "GitHub API response decode failed for {endpoint}: {error}"
             ))
@@ -2098,6 +2439,30 @@ fn github_remote_repository(locator: &str) -> Option<(String, String)> {
     Some((owner, repository))
 }
 
+fn github_repository_api(
+    repository: &CheckoutRepository,
+) -> Result<(String, String, String), LinearError> {
+    let authority = github_remote_authority(&repository.remote_locator).ok_or_else(|| {
+        LinearError::InvalidConfiguration(format!(
+            "configured GitHub remote has no authority: {}",
+            repository.remote_locator
+        ))
+    })?;
+    let (owner, repository_name) = github_remote_repository(&repository.remote_locator)
+        .ok_or_else(|| {
+            LinearError::InvalidConfiguration(format!(
+                "configured GitHub remote has no repository path: {}",
+                repository.remote_locator
+            ))
+        })?;
+    let api_root = if authority == "github.com" {
+        "https://api.github.com".to_owned()
+    } else {
+        format!("https://{authority}/api/v3")
+    };
+    Ok((api_root, owner, repository_name))
+}
+
 fn normalize_github_authority(authority: &str) -> String {
     let authority = authority.trim().to_ascii_lowercase();
     match authority.strip_prefix("www.") {
@@ -2316,11 +2681,29 @@ fn parent_pull_request_candidates(issue: &TrackerIssue) -> Vec<String> {
 
 #[derive(Debug, serde::Deserialize)]
 struct GitHubPullRequest {
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    state: String,
     created_at: String,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
     base: GitHubPullRequestBase,
     head: GitHubPullRequestHead,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default)]
+    mergeable_state: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubMergeResult {
+    #[serde(default)]
+    merged: bool,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2371,7 +2754,7 @@ fn latest_github_review_states(
         let submitted_at = review.submitted_at.unwrap_or_default();
         if !matches!(
             review.state.to_ascii_lowercase().as_str(),
-            "approved" | "changes_requested" | "dismissed"
+            "approved" | "changes_requested" | "dismissed" | "rejected"
         ) {
             continue;
         }
@@ -3216,9 +3599,126 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     checkout_handle: checkout.checkout_handle.clone(),
                     relative_path: checkout.relative_path.clone(),
                     target_commit: checkout.target_commit.clone(),
+                    instruction_path: checkout.instruction.path.clone(),
+                    instruction_hash: checkout.instruction.content_hash.clone(),
+                    repair_policy: ParentRepairPolicy {
+                        review_profile: checkout.review_profile.clone(),
+                        review_provider: checkout.review_provider.clone(),
+                        review_policy_generation: checkout.review_policy_generation.clone(),
+                        required_checks: checkout.required_checks,
+                        required_review: checkout.required_review,
+                        merge_method: checkout
+                            .merge_method
+                            .clone()
+                            .unwrap_or_else(|| "merge".to_owned()),
+                    },
                 })
             })
             .collect()
+    }
+
+    async fn reconcile_parent_repair_branch(
+        &mut self,
+        parent: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(Option<String>, String)>, Self::Error> {
+        self.manager
+            .reconcile_parent_repair_branch(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                &repair.branch,
+                &repair.target_commit,
+            )
+            .await
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    async fn prepare_parent_repair(
+        &mut self,
+        parent: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        self.manager
+            .create_parent_repair_branch(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                &repair.branch,
+                &repair.target_commit,
+            )
+            .await
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    async fn reconcile_parent_repair_push(
+        &mut self,
+        parent: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<Option<String>>, Self::Error> {
+        self.manager
+            .reconcile_parent_repair_push(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                repair.repository_id.as_str(),
+                &repair.branch,
+            )
+            .await
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    async fn publish_parent_repair(
+        &mut self,
+        parent: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        let commit = self
+            .manager
+            .publish_parent_repair(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                repair.repository_id.as_str(),
+                &repair.branch,
+            )
+            .await
+            .map_err(CliWorkspaceError::from)?;
+        Ok(Some(commit))
+    }
+
+    async fn refresh_parent_repair(
+        &mut self,
+        parent: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(String, String)>, Self::Error> {
+        let merge_result = repair.merge_result_commit.as_deref().ok_or_else(|| {
+            CliWorkspaceError::RetryState("repair merge result is missing".to_owned())
+        })?;
+        self.manager
+            .refresh_parent_repair_target(
+                &issue_descriptor(parent),
+                &workspace.path,
+                &repair.checkout_handle,
+                repair.repository_id.as_str(),
+                merge_result,
+            )
+            .await
+            .map(Some)
+            .map_err(Into::into)
     }
 
     async fn recover_retry_exhaustion(
