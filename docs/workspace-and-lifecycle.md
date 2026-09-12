@@ -204,6 +204,13 @@ intent is persisted before the worker starts, and the conversation identity is
 attached as a later launch receipt, so a crash cannot leave an unowned parent
 harness. Cleanup and workspace deletion policy remain owned by the workspace
 manager.
+Once that conversation is bound, a parent harness change is rejected before a
+replacement session starts. A runtime-terminal successful, failed, or canceled
+turn supplies stopped-turn evidence and releases its foreground-process receipt;
+timeout, stall, detach, and failed-cancel paths still require explicit stopped
+state reconciliation. An ordinary cancellation while the tracker parent remains
+active returns through cleanup and baseline refresh. Operator and tracker
+terminal cancellation remains terminal.
 
 The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
@@ -246,6 +253,12 @@ indeterminate and reruns after named-resource cleanup and baseline refresh. Term
 tracker state cannot publish orchestrator success, release descendant leases,
 or remove the parent workspace until the durable controller reaches
 `completed` through accepted final verification.
+A reopened completed parent starts a new controller lifecycle even when the
+child-edge generation is unchanged. Admission idempotency is retained outside
+the compact transition history, so retry history pruning cannot replay initial
+admission. Parents with no recorded checkout targets still require an observed
+successful final command and successful cleanup; their final repository commit
+map is empty by definition.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

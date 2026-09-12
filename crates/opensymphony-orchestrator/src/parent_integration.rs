@@ -212,6 +212,9 @@ pub struct ParentIntegrationController {
     pub hierarchy_generation: u64,
     pub state_version: u64,
     pub state: ParentIntegrationState,
+    // Transition history is bounded, so admission identity must survive pruning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_input_version: Option<String>,
     #[serde(default)]
     pub next_attempt_sequence: u64,
     #[serde(default)]
@@ -249,7 +252,7 @@ pub enum ParentIntegrationError {
     AttemptNotReady(String),
     #[error("resource `{kind}:{identifier}` is already allocated")]
     ResourceCollision { kind: String, identifier: String },
-    #[error("final verification requires a passed attempt and at least one repository target")]
+    #[error("final verification requires a passed attempt for the current repository targets")]
     FinalVerificationIncomplete,
     #[error("parent verification evidence is invalid: {0}")]
     InvalidVerificationEvidence(String),
@@ -268,6 +271,7 @@ impl ParentIntegrationController {
             hierarchy_generation,
             state_version: 0,
             state: ParentIntegrationState::WaitingForChildren,
+            admission_input_version: None,
             next_attempt_sequence: 0,
             transitions: Vec::new(),
             targets: BTreeMap::new(),
@@ -282,51 +286,70 @@ impl ParentIntegrationController {
         input_version: &str,
         occurred_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
-        self.transition(
-            ParentIntegrationState::WaitingForChildMerges,
-            "required children reached terminal orchestrator outcomes",
-            format!(
-                "parent:{}:{}:children",
-                self.parent_id, self.hierarchy_generation
-            ),
-            input_version,
-            None,
-            Some(receipt("verified", None)),
-            ParentRetryClassification::Retryable,
-            occurred_at,
-        )?;
-        self.transition(
-            ParentIntegrationState::AcquiringChildLeases,
-            "provider merge evidence is complete",
-            format!(
-                "parent:{}:{}:merges",
-                self.parent_id, self.hierarchy_generation
-            ),
-            input_version,
-            None,
-            Some(receipt("verified", None)),
-            ParentRetryClassification::Retryable,
-            occurred_at,
-        )?;
-        self.transition(
-            ParentIntegrationState::PreparingIntegrationWorkspace,
-            "generation-bound descendant leases were acquired",
-            format!(
-                "parent:{}:{}:leases",
-                self.parent_id, self.hierarchy_generation
-            ),
-            input_version,
-            Some(intent(
-                "acquire_descendant_leases",
+        if let Some(admitted_input) = self.admission_input_version.as_deref() {
+            return if admitted_input == input_version {
+                Ok(())
+            } else {
+                Err(ParentIntegrationError::IdempotencyConflict(format!(
+                    "parent:{}:{}:admission",
+                    self.parent_id, self.hierarchy_generation
+                )))
+            };
+        }
+        let previous = self.clone();
+        let result = (|| {
+            self.transition(
+                ParentIntegrationState::WaitingForChildMerges,
+                "required children reached terminal orchestrator outcomes",
+                format!(
+                    "parent:{}:{}:children",
+                    self.parent_id, self.hierarchy_generation
+                ),
+                input_version,
+                None,
+                Some(receipt("verified", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            self.transition(
+                ParentIntegrationState::AcquiringChildLeases,
+                "provider merge evidence is complete",
+                format!(
+                    "parent:{}:{}:merges",
+                    self.parent_id, self.hierarchy_generation
+                ),
+                input_version,
+                None,
+                Some(receipt("verified", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            self.transition(
+                ParentIntegrationState::PreparingIntegrationWorkspace,
+                "generation-bound descendant leases were acquired",
                 format!(
                     "parent:{}:{}:leases",
                     self.parent_id, self.hierarchy_generation
                 ),
-            )),
-            Some(receipt("succeeded", None)),
-            ParentRetryClassification::Retryable,
-            occurred_at,
-        )?;
+                input_version,
+                Some(intent(
+                    "acquire_descendant_leases",
+                    format!(
+                        "parent:{}:{}:leases",
+                        self.parent_id, self.hierarchy_generation
+                    ),
+                )),
+                Some(receipt("succeeded", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            *self = previous;
+            return Err(error);
+        }
+        self.admission_input_version = Some(input_version.to_owned());
         Ok(())
     }
 
@@ -1036,19 +1059,17 @@ impl ParentIntegrationController {
             .iter()
             .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
             .collect::<BTreeMap<_, _>>();
-        if expected_commits.is_empty()
-            || !self.attempts.iter().any(|attempt| {
-                attempt.id == attempt_id
-                    && attempt.status.passed()
-                    && attempt.input_version == input_version
-                    && attempt.exit_code == Some(0)
-                    && attempt
-                        .cleanup
-                        .as_ref()
-                        .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
-                    && attempt.verified_repository_commits == expected_commits
-            })
-        {
+        if !self.attempts.iter().any(|attempt| {
+            attempt.id == attempt_id
+                && attempt.status.passed()
+                && attempt.input_version == input_version
+                && attempt.exit_code == Some(0)
+                && attempt
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
+                && attempt.verified_repository_commits == expected_commits
+        }) {
             return Err(ParentIntegrationError::FinalVerificationIncomplete);
         }
         self.transition(
@@ -1878,6 +1899,102 @@ mod tests {
             .expect("attempt");
         assert_eq!(attempt, "parent-attempt-65");
         assert_eq!(controller.next_attempt_sequence, 65);
+    }
+
+    #[test]
+    fn admission_idempotency_survives_transition_history_compaction() {
+        let mut controller = controller();
+        for sequence in 1..=(MAX_TRANSITIONS / 2 + 8) {
+            let attempt = controller
+                .start_attempt(
+                    format!("integration {sequence}"),
+                    format!("attempt:{sequence}"),
+                    ParentAttemptRoot::ParentRoot,
+                    "conversation-1",
+                    1_000,
+                    "targets:1",
+                    TimestampMs::new(sequence as u64 * 3),
+                )
+                .expect("attempt");
+            controller
+                .finish_attempt(
+                    &attempt,
+                    ParentAttemptStatus::Failed,
+                    Some(1),
+                    ParentCleanupReceipt {
+                        status: ParentCleanupStatus::Succeeded,
+                        occurred_at: TimestampMs::new(sequence as u64 * 3 + 1),
+                        detail: None,
+                    },
+                    TimestampMs::new(sequence as u64 * 3 + 1),
+                )
+                .expect("finish attempt");
+            controller
+                .prepare_retry(&attempt, "retry", TimestampMs::new(sequence as u64 * 3 + 1))
+                .expect("prepare retry");
+            controller
+                .record_baseline_verified("targets:1", TimestampMs::new(sequence as u64 * 3 + 2))
+                .expect("baseline");
+        }
+        assert_eq!(controller.transitions.len(), MAX_TRANSITIONS);
+        assert!(
+            !controller
+                .transitions
+                .iter()
+                .any(|transition| { transition.idempotency_key.ends_with(":children") })
+        );
+
+        let mut restored: ParentIntegrationController = serde_json::from_value(
+            serde_json::to_value(&controller).expect("serialize controller"),
+        )
+        .expect("restore controller");
+        let state_version = restored.state_version;
+        restored
+            .admit("hierarchy:7", TimestampMs::new(10_000))
+            .expect("persisted admission remains idempotent");
+        assert_eq!(restored.state_version, state_version);
+        assert_eq!(
+            restored.admission_input_version.as_deref(),
+            Some("hierarchy:7")
+        );
+    }
+
+    #[test]
+    fn repository_neutral_parent_can_complete_with_no_checkout_targets() {
+        let mut controller =
+            ParentIntegrationController::new(IssueId::new("parent-empty").expect("parent id"), 1)
+                .expect("controller");
+        controller
+            .admit("hierarchy:1", TimestampMs::new(1))
+            .expect("admit");
+        controller
+            .record_workspace_prepared([], "targets:empty", TimestampMs::new(2))
+            .expect("empty parent workspace");
+        let attempt = controller
+            .start_attempt(
+                "repository-neutral verification",
+                "attempt:empty",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-empty",
+                100,
+                "targets:empty",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+        finish_passed(&mut controller, &attempt);
+        controller
+            .complete(&attempt, "targets:empty", TimestampMs::new(5))
+            .expect("empty target set is verified by the runtime command");
+
+        assert_eq!(controller.state, ParentIntegrationState::Completed);
+        assert!(
+            controller
+                .final_evidence
+                .as_ref()
+                .expect("final evidence")
+                .repository_commits
+                .is_empty()
+        );
     }
 
     #[test]

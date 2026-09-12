@@ -116,7 +116,13 @@ on the shared parent conversation and records its input version, root or opaque
 checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
 a reconciled running attempt attached; an unreconciled attempt becomes
 indeterminate and must pass cleanup and repository refresh before rerun. Final
-evidence is accepted only from the run-bound
+admission identity is stored separately from the compact transition tail so an
+unbounded retry history cannot replay the initial admission transitions. If a
+completed parent reopens, the scheduler creates a new controller lifecycle even
+when its child-edge generation did not change. A bound parent conversation also
+fixes the harness choice for that lifecycle; a configured harness switch fails
+before the replacement session starts.
+Final evidence is accepted only from the run-bound
 `evidence/final-verification.json` receipt. The runtime reopens every checkout
 at its exact prepared commit and uses the file only to select an actual command
 observed through the Codex or OpenHands event stream. The controller maps the
@@ -130,6 +136,9 @@ releases the foreground-process receipt; any other named resource remains an
 explicit cleanup fence. The durable final record maps every canonical repository to the
 exact verified commit so a higher ancestor can consume the completed parent
 without assigning repository roles.
+When admission produces no repository targets, the same observed final command
+can complete with an empty commit map. This represents a repository-neutral
+parent and does not weaken command, deadline, cleanup, or controller gates.
 Recovery treats a persisted launch intent with no attached conversation,
 command, or resource as a metadata-only crash and safely returns through
 cleanup and baseline refresh. A terminal harness manifest whose controller

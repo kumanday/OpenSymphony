@@ -1801,6 +1801,26 @@ where
             }
             return Ok(true);
         }
+        if reactivated_parent {
+            let generation = self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .map(|snapshot| snapshot.generation);
+            if let Some(generation) = generation
+                && self
+                    .hierarchy_state
+                    .hierarchy
+                    .get(&normalized.id)
+                    .is_some_and(|snapshot| snapshot.blocked_reason.is_none())
+            {
+                self.parent_eligibility_checked_at.remove(&normalized.id);
+                self.hierarchy_state.parent_integrations.insert(
+                    normalized.id.clone(),
+                    ParentIntegrationController::new(normalized.id.clone(), generation)?,
+                );
+            }
+        }
         Ok(released_terminal_parent_evidence || reactivated_parent)
     }
 
@@ -4304,6 +4324,16 @@ where
             }
         };
         enforce_parent_outcome_trust(outcome, deadline_reached, verification_passed);
+        if matches!(
+            outcome.outcome,
+            WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed | WorkerOutcomeKind::Cancelled
+        ) {
+            controller.observe_harness_stopped(
+                &attempt_id,
+                "terminal worker outcome reconciled the harness turn as stopped",
+                outcome.finished_at,
+            )?;
+        }
         let observed_cleanup = controller
             .attempts
             .iter()
@@ -4350,10 +4380,11 @@ where
                 "tracker merging superseded human-review polling; refresh before continuing",
                 outcome.finished_at,
             )?;
-        } else if matches!(
-            status,
-            ParentAttemptStatus::Canceled | ParentAttemptStatus::Indeterminate
-        ) {
+        } else if status == ParentAttemptStatus::Indeterminate
+            || (status == ParentAttemptStatus::Canceled
+                && (execution.issue().state.category != IssueStateCategory::Active
+                    || acknowledged_operator_cancel_terminal(execution, outcome)))
+        {
             controller.cancel(
                 outcome
                     .summary

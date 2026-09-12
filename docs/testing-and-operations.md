@@ -69,8 +69,12 @@ Why fakes matter:
   observed parent-root and checkout working directories, orchestrator-owned
   deadlines, bounded command logs/resources, rejection of prompt-authored
   execution claims, uncertain cleanup fences, metadata-only prelaunch crash
-  recovery, authenticated same-conversation parent grants after restart, terminal-success
-  finalization gates, and retry after a failed durable outcome write
+  recovery, authenticated same-conversation parent grants after restart,
+  prelaunch rejection of parent harness switches, terminal-turn cleanup before
+  retry, retryable active cancellation, completed-parent reopen with unchanged
+  child edges, compacted admission idempotency, empty-target verification,
+  terminal-success finalization gates, and retry after a failed durable outcome
+  write
 
 ## 2.4 Live local tests
 
@@ -98,7 +102,7 @@ Current implementation:
 - `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, lightweight dispatch-summary reads, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, long rate-limit reset return-without-sleep behavior with the 30s inline cap, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh with bounded unscoped fallback for moved issues, and tracker error mapping against a local stub server
 - `cargo test --test linear_client live_linear_client_reads_opensymphony_project -- --ignored --nocapture` is a read-only live evidence probe for PRs that need to show the actual Linear HTTP/GraphQL client path against the OpenSymphony project
 - `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, child-edge generation reconciliation and freeze fencing, owner-identified lease acquisition, provider-evidence parent eligibility, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, Linear cooldown behavior, separated Linear polling cadences, manifest-backed workspace recovery against fake tracker/workspace/worker backends, external retry-marker proof, metadata-only workspace recovery, binding-drift workspace rematerialization, legacy parent neutrality, same-ID generation retention, independent running/discovery cadences, and adoption of every launched worker after persistence errors
-- `cargo test --lib parent_integration` exercises the restart-safe parent state machine, exact multi-repository target evidence, topology-neutral checkout handles, idempotent transitions, bounded diagnostics, timeout and indeterminate cleanup gates, resource collisions, and higher-ancestor serialization
+- `cargo test --lib parent_integration` exercises the restart-safe parent state machine, exact multi-repository and empty-target evidence, topology-neutral checkout handles, idempotent admission after transition compaction, bounded diagnostics, timeout and indeterminate cleanup gates, resource collisions, and higher-ancestor serialization
 - the memory scope and terminal capture tests cover parent grants across exact descendants, denial of unrelated repositories and work items, parent runtime-envelope capture, and preservation of every verified repository commit
 - `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
 - `cargo test --test workspace_manager` covers durable checkout/staging ownership-marker sweeps, preservation of foreign generation-shaped directories and staging content, receipt-owned recovery, and the retry verification mode that permits legitimate worker changes while retaining checkout provenance checks

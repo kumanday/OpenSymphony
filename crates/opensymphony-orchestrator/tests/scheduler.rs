@@ -788,6 +788,91 @@ async fn parent_provider_cooldown_stops_later_lookups_in_the_same_dispatch_pass(
     assert_eq!(scheduler.tracker().parent_evidence_requests, 1);
 }
 
+async fn launched_parent_scheduler(
+    suffix: &str,
+) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
+    let parent_id = IssueId::new(format!("parent-{suffix}")).expect("parent id");
+    let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
+    let parent_identifier = format!("COE-PARENT-{suffix}");
+    let child_identifier = format!("COE-CHILD-{suffix}");
+    let mut parent = tracker_issue(parent_id.as_str(), &parent_identifier, "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: child_identifier,
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let snapshot = HierarchySnapshot::new(&parent);
+    let repository_id =
+        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id");
+    let resource = LeaseResource {
+        issue_id: child_id.clone(),
+        repository_id: repository_id.clone(),
+        checkout_generation: format!("checkout-{suffix}"),
+    };
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot.clone())]),
+        leases: vec![LeaseRecord {
+            kind: LeaseKind::LeafWorker,
+            resource: resource.clone(),
+            owner: LeaseOwner::leaf_worker(&child_id),
+            hierarchy_generation: snapshot.generation,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        }],
+        terminal_orchestrator_issues: [child_id.clone()].into_iter().collect(),
+        ..Default::default()
+    };
+    let evidence = ParentEligibilityEvidence {
+        hierarchy_generation: snapshot.generation,
+        children: vec![ChildEligibilityEvidence {
+            child_id,
+            hierarchy_generation: snapshot.generation,
+            orchestrator_terminal: true,
+            provider_merge_confirmed: true,
+            merge_required: true,
+            merge_result_commit: Some(format!("commit-{suffix}")),
+            merge_result_commits: Vec::new(),
+            merge_result_commits_by_repository: vec![RequiredMergeCommit {
+                repository_id: Some(repository_id.clone()),
+                commit: format!("commit-{suffix}"),
+            }],
+            merge_repository_id: Some(repository_id.clone()),
+            merge_repository_ids: vec![repository_id.clone()],
+            provider_evidence_at: None,
+            provider_evidence_by_issue: Vec::new(),
+            resource: Some(resource),
+            resources: Vec::new(),
+            unresolved_failure: None,
+        }],
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![parent],
+            parent_evidence: Some(evidence),
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&durable_state).expect("durable state")),
+            parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
+                repository_id,
+                checkout_handle: format!("checkout-{suffix}"),
+                relative_path: PathBuf::from(format!("repositories/{suffix}")),
+                target_commit: format!("commit-{suffix}"),
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    scheduler.tick(ts(100)).await.expect("launch parent");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    (scheduler, parent_id)
+}
+
 #[tokio::test]
 async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
     let child_id = IssueId::new("child-1").expect("child id should be valid");
@@ -1143,6 +1228,181 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         .await
         .expect("restart should respect the durable dispatch claim");
     assert!(restarted.worker().launches.is_empty());
+}
+
+#[tokio::test]
+async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("FAILED-NO-COMMAND").await;
+    let first_run = scheduler.worker().launches[0].run.clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Failed,
+                ts(150),
+                Some("runner failed before the first command".to_owned()),
+                None,
+            ),
+        });
+    scheduler.tick(ts(150)).await.expect("record failed turn");
+
+    let retry_due_at = scheduler.executions()[&parent_id]
+        .retry()
+        .expect("retry")
+        .due_at;
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.attempts[0]
+            .cleanup
+            .as_ref()
+            .map(|cleanup| cleanup.status),
+        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded)
+    );
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+    );
+
+    let retry_dispatch_at = retry_due_at.max(ts(3_600_100));
+    scheduler
+        .worker_mut()
+        .launch_results
+        .push_back(Ok(WorkerLaunch {
+            conversation,
+            started_at: Some(retry_dispatch_at),
+        }));
+    scheduler
+        .tick(retry_dispatch_at)
+        .await
+        .expect("retry after stopped failed turn");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-2")
+    );
+}
+
+#[tokio::test]
+async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
+    let (mut scheduler, parent_id) = launched_parent_scheduler("CANCELLED").await;
+    let first_run = scheduler.worker().launches[0].run.clone();
+    let conversation = scheduler
+        .execution(&parent_id)
+        .and_then(|execution| execution.conversation())
+        .cloned()
+        .expect("parent conversation");
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Cancelled,
+                ts(150),
+                Some("runtime cancelled the active turn".to_owned()),
+                None,
+            ),
+        });
+    scheduler.tick(ts(150)).await.expect("record cancellation");
+
+    let retry = scheduler.executions()[&parent_id]
+        .retry()
+        .cloned()
+        .expect("cancelled turn retry");
+    assert_eq!(retry.reason, RetryReason::Cancelled);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+    );
+
+    let retry_dispatch_at = retry.due_at.max(ts(3_600_100));
+    scheduler
+        .worker_mut()
+        .launch_results
+        .push_back(Ok(WorkerLaunch {
+            conversation,
+            started_at: Some(retry_dispatch_at),
+        }));
+    scheduler
+        .tick(retry_dispatch_at)
+        .await
+        .expect("retry cancelled parent turn");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+}
+
+#[tokio::test]
+async fn reopened_completed_parent_resets_controller_without_scope_change() {
+    let parent_id = IssueId::new("reopened-parent").expect("parent id");
+    let child_id = IssueId::new("reopened-child").expect("child id");
+    let mut parent = tracker_issue("reopened-parent", "COE-REOPENED", "In Progress", 0);
+    parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: "COE-REOPENED-CHILD".to_owned(),
+        title: None,
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut snapshot = HierarchySnapshot::new(&parent);
+    snapshot.freeze().expect("freeze hierarchy");
+    snapshot.mark_dispatched();
+    let mut completed = crate::opensymphony_orchestrator::ParentIntegrationController::new(
+        parent_id.clone(),
+        snapshot.generation,
+    )
+    .expect("controller");
+    completed.state = crate::opensymphony_orchestrator::ParentIntegrationState::Completed;
+    completed.conversation_id = Some("old-parent-conversation".to_owned());
+    let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+        hierarchy: BTreeMap::from([(parent_id.clone(), snapshot)]),
+        parent_integrations: BTreeMap::from([(parent_id.clone(), completed)]),
+        ..Default::default()
+    };
+    let mut scheduler = Scheduler::new(
+        FakeTracker {
+            active: vec![parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&durable_state).expect("state")),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("reconcile reopened parent");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::WaitingForChildren
+    );
+    assert!(controller.conversation_id.is_none());
+    assert_eq!(controller.hierarchy_generation, 1);
 }
 
 #[tokio::test]

@@ -4260,6 +4260,12 @@ impl RuntimeWorkerBackend {
             let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
                 conversation_manifest_is_codex(manifest) != target_is_codex
             });
+            if let Some(error) =
+                parent_harness_switch_error(parent_execution.is_some(), switching_harness)
+            {
+                report_launch_failure(&mut launch_tx, error);
+                return;
+            }
             let superseded_harness_manifest = switching_harness.then(|| {
                 recovered_conversation
                     .as_ref()
@@ -7920,6 +7926,13 @@ fn report_launch_failure(
     }
 }
 
+fn parent_harness_switch_error(is_parent: bool, switching_harness: bool) -> Option<String> {
+    (is_parent && switching_harness).then(|| {
+        "parent integration cannot switch harnesses while its authoritative conversation is bound"
+            .to_owned()
+    })
+}
+
 async fn read_verified_integration_instructions(
     instructions: Option<&ResolvedIntegrationInstructions>,
 ) -> Result<Option<String>, String> {
@@ -8424,6 +8437,13 @@ mod tests {
                 .expect_err("credential-like command must be rejected")
                 .contains("credential-like")
         );
+    }
+
+    #[test]
+    fn parent_harness_switch_is_rejected_before_session_launch() {
+        assert!(parent_harness_switch_error(true, true).is_some());
+        assert!(parent_harness_switch_error(true, false).is_none());
+        assert!(parent_harness_switch_error(false, true).is_none());
     }
 
     #[test]
