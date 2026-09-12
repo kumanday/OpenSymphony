@@ -94,6 +94,17 @@ after terminal orchestrator outcomes and retained checkout-generation lease
 resources are present; scope changes after freeze are recorded as
 `HierarchyChanged` and cannot silently widen the parent run.
 
+An eligible parent is materialized as a repository-neutral execution root for
+the frozen hierarchy generation. The workspace backend resolves only active
+ancestor leases, groups their retained generations by canonical repository ID,
+and asks the workspace manager for one contained integration worktree per
+repository. Those worktrees share a selected child's Git object store, refresh
+the configured target through that repository's credential provider, and pin
+the provider merge-result commits used for admission. The parent worker starts
+once with this root as `cwd`, a relative checkout-handle map, and a generic
+`parent_multi_checkout` envelope; neither the directory layout nor the prompt
+assigns repository roles.
+
 ### 3.2 OpenHands is the execution adapter
 
 OpenHands provides:

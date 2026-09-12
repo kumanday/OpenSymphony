@@ -707,6 +707,17 @@ manually reset a quarantined checkout into service. The runtime envelope also
 records that current local containment is process `cwd` containment on a
 trusted host, not a sandbox boundary.
 
+Parent runs publish a separate generation-scoped root below
+`workspace.root/parents/`. Inspect `parent-manifest.json`,
+`child-checkouts.json`, and `.opensymphony/parent-runtime.json` together when a
+parent cannot launch. Preparation blocks before a repository operation when a
+required child subtree lacks an active ancestor lease, a retained generation is
+stale or dirty, merge evidence is ambiguous across repositories, a remote no
+longer matches policy, or a contained worktree fails its shared-storage and
+path checks. Do not repair those files or substitute a filesystem path for the
+recorded opaque handle; reconcile the hierarchy/lease evidence or retained
+checkout and retry the same generation.
+
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
 creating a replacement conversation. If that envelope differs from the

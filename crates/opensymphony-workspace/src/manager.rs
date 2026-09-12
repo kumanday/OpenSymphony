@@ -31,9 +31,11 @@ use super::{
     CheckoutManifest, CheckoutRepository, CleanupDecision, CleanupOutcome, ConversationManifest,
     EnsureWorkspaceResult, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, IssueManifest,
-    PromptCaptureDescriptor, PromptCaptureManifest, RunDescriptor, RunManifest, RunStatus,
-    SessionContextArtifact, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
+    ParentCheckoutRequest, ParentChildCheckoutMap, ParentExecutionManifest, ParentExecutionRoot,
+    ParentIntegrationCheckout, ParentRetainedCheckout, ParentRuntimeCheckout,
+    ParentRuntimeDescriptor, ParentRuntimeEnvelope, PromptCaptureDescriptor, PromptCaptureManifest,
+    RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, TerminalRuntimeEnvelope,
+    WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
     models::{
         AfterCreateBootstrapReceipt, InstructionProvenance, SSH_AUTH_SOCK_ENV,
         redact_runtime_diagnostic,
@@ -269,6 +271,895 @@ impl WorkspaceManager {
 
     pub fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf, WorkspaceError> {
         super::workspace_path_for_root(&self.config.root, issue_identifier)
+    }
+
+    pub async fn prepare_parent_execution_root(
+        &self,
+        issue: &IssueDescriptor,
+        hierarchy_generation: u64,
+        requests: Vec<ParentCheckoutRequest>,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        if hierarchy_generation == 0 || requests.is_empty() || issue.repository_binding.is_some() {
+            return Err(checkout_verification(
+                &self.config.root,
+                "parent preparation requires a repository-neutral issue, a hierarchy generation, and retained checkout requests",
+            ));
+        }
+        let workspace_key = format!("parent-{}", sanitize_workspace_key(&issue.identifier)?);
+        let parent_relative = PathBuf::from("parents").join(&workspace_key);
+        self.reject_symlinked_path_components(&self.config.root, &parent_relative)
+            .await?;
+        let parent_base = resolve_path_within_root(&self.config.root, &parent_relative)?;
+        self.create_directory(&parent_base).await?;
+        let root = parent_base.join(hierarchy_generation.to_string());
+        self.reject_symlinked_workspace_root(&root).await?;
+        if path_exists(&root).await? {
+            let parent = self
+                .open_parent_execution_root(issue, hierarchy_generation, &root)
+                .await?;
+            self.verify_parent_requests(&parent, &requests)?;
+            return Ok(parent);
+        }
+        self.create_directory(&root).await?;
+        let root = self.canonicalize_path(&root).await?;
+        ensure_descendant(&self.canonicalize_path(&self.config.root).await?, &root)?;
+        let handle = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            workspace_key,
+            root,
+        );
+        self.bootstrap_workspace_layout(&handle).await?;
+        self.create_managed_directory(&handle, &handle.workspace_path().join("evidence"))
+            .await?;
+        self.create_managed_directory(&handle, &handle.workspace_path().join("repositories"))
+            .await?;
+
+        let retained = self.list_all_workspaces().await?;
+        let mut grouped = BTreeMap::<String, Vec<ParentCheckoutRequest>>::new();
+        let mut request_keys = BTreeSet::new();
+        for request in requests {
+            if request.issue_id.trim().is_empty()
+                || request.repository_id.trim().is_empty()
+                || request.checkout_generation.trim().is_empty()
+                || request.lease_owner.trim().is_empty()
+            {
+                return Err(checkout_verification(
+                    handle.workspace_path(),
+                    "parent checkout request is missing a generation-bound identity or lease owner",
+                ));
+            }
+            if !request_keys.insert((
+                request.repository_id.clone(),
+                request.issue_id.clone(),
+                request.checkout_generation.clone(),
+            )) {
+                return Err(checkout_verification(
+                    handle.workspace_path(),
+                    "parent checkout requests contain a duplicate generation-bound handle",
+                ));
+            }
+            grouped
+                .entry(request.repository_id.clone())
+                .or_default()
+                .push(request);
+        }
+
+        let mut repositories = BTreeMap::new();
+        for (repository_id, mut repository_requests) in grouped {
+            repository_requests.sort_by(|left, right| {
+                left.issue_id
+                    .cmp(&right.issue_id)
+                    .then_with(|| left.checkout_generation.cmp(&right.checkout_generation))
+            });
+            let repository = self
+                .checkout_repositories
+                .get(&repository_id)
+                .ok_or_else(|| {
+                    checkout_verification(
+                        handle.workspace_path(),
+                        "parent checkout repository policy is unavailable",
+                    )
+                })?;
+            let mut retained_checkouts = Vec::with_capacity(repository_requests.len());
+            let mut source = None;
+            let mut required_merge_commits = BTreeSet::new();
+            for request in repository_requests {
+                let (child_handle, child_issue) = retained
+                    .iter()
+                    .find(|(candidate, manifest)| {
+                        manifest.issue_id == request.issue_id
+                            && candidate.checkout_generation()
+                                == Some(request.checkout_generation.as_str())
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        checkout_verification(
+                            handle.workspace_path(),
+                            "retained child checkout generation is unavailable",
+                        )
+                    })?;
+                let checkout = self.verify_checkout_for_parent(&child_handle).await?;
+                if checkout.repository_binding.repository_id().as_str() != repository_id {
+                    return Err(checkout_verification(
+                        child_handle.workspace_path(),
+                        "retained child checkout has the wrong canonical repository",
+                    ));
+                }
+                let status = self
+                    .git(
+                        child_handle.workspace_path(),
+                        &["status", "--porcelain", "--untracked-files=all"],
+                    )
+                    .await?;
+                if !status.is_empty() {
+                    return Err(checkout_verification(
+                        child_handle.workspace_path(),
+                        "retained child checkout is dirty",
+                    ));
+                }
+                let child_branch = self
+                    .git(child_handle.workspace_path(), &["branch", "--show-current"])
+                    .await?;
+                let child_head = self
+                    .git(child_handle.workspace_path(), &["rev-parse", "HEAD"])
+                    .await?;
+                source.get_or_insert((child_handle.clone(), checkout.clone()));
+                required_merge_commits.extend(
+                    request
+                        .required_merge_commits
+                        .into_iter()
+                        .filter(|commit| !commit.trim().is_empty()),
+                );
+                retained_checkouts.push(ParentRetainedCheckout {
+                    issue_id: request.issue_id,
+                    identifier: child_issue.identifier,
+                    checkout_generation: request.checkout_generation,
+                    lease_owner: request.lease_owner,
+                    child_branch,
+                    child_head,
+                });
+            }
+            let (source_handle, source_manifest) = source.expect("non-empty repository group");
+            self.fetch_parent_target(&source_handle, repository).await?;
+            let target_ref = format!("refs/remotes/origin/{}", repository.target_branch);
+            let target_commit = self
+                .git(source_handle.workspace_path(), &["rev-parse", &target_ref])
+                .await?;
+            for required in &required_merge_commits {
+                if !self
+                    .git_is_ancestor(
+                        source_handle.workspace_path(),
+                        &["merge-base", "--is-ancestor", required, &target_commit],
+                    )
+                    .await?
+                {
+                    return Err(checkout_verification(
+                        source_handle.workspace_path(),
+                        &format!(
+                            "provider merge result {required} is not reachable from target commit {target_commit}"
+                        ),
+                    ));
+                }
+            }
+
+            let checkout_handle = parent_checkout_handle(&repository_id, hierarchy_generation);
+            let relative_path = PathBuf::from("repositories").join(&checkout_handle);
+            let integration_path = handle.workspace_path().join(&relative_path);
+            let integration_path_text = integration_path.to_str().ok_or_else(|| {
+                checkout_verification(&integration_path, "integration checkout path is not UTF-8")
+            })?;
+            self.git(
+                source_handle.workspace_path(),
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    integration_path_text,
+                    &target_commit,
+                ],
+            )
+            .await?;
+            let instruction = self
+                .load_instruction_provenance(&integration_path, repository, &target_commit)
+                .await?;
+            let record = ParentIntegrationCheckout {
+                checkout_handle: checkout_handle.clone(),
+                repository_id: repository_id.clone(),
+                safe_remote_fingerprint: source_manifest.remote_fingerprint.clone(),
+                relative_path,
+                target_branch: repository.target_branch.clone(),
+                target_commit,
+                storage_source_generation: source_manifest.generation,
+                retained_checkouts,
+                required_merge_commits: required_merge_commits.into_iter().collect(),
+                instruction,
+            };
+            self.verify_parent_integration_checkout(&handle, &record, &source_handle)
+                .await?;
+            repositories.insert(repository_id, record);
+        }
+
+        let now = Utc::now();
+        let child_checkout_map = ParentChildCheckoutMap {
+            schema_version: 1,
+            hierarchy_generation,
+            repositories,
+        };
+        let manifest = ParentExecutionManifest {
+            schema_version: 1,
+            parent_issue_id: issue.issue_id.clone(),
+            parent_identifier: issue.identifier.clone(),
+            hierarchy_generation,
+            workspace_path: handle.workspace_path().to_path_buf(),
+            child_checkout_map: PathBuf::from("child-checkouts.json"),
+            integration_plan: PathBuf::from("integration-plan.md"),
+            evidence_directory: PathBuf::from("evidence"),
+            repositories_directory: PathBuf::from("repositories"),
+            created_at: now,
+            updated_at: now,
+        };
+        self.write_manifest_atomically(
+            &handle,
+            &handle.child_checkouts_path(),
+            &child_checkout_map,
+        )
+        .await?;
+        self.write_bytes_artifact_atomically(
+            &handle,
+            &handle.workspace_path().join("integration-plan.md"),
+            render_parent_integration_plan(&child_checkout_map).as_bytes(),
+        )
+        .await?;
+        self.write_manifest_atomically(&handle, &handle.parent_manifest_path(), &manifest)
+            .await?;
+        let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+        debug_assert_eq!(issue_manifest.workspace_path, handle.workspace_path());
+        Ok(ParentExecutionRoot {
+            handle,
+            manifest,
+            child_checkout_map,
+            created: true,
+        })
+    }
+
+    pub async fn open_parent_execution_root(
+        &self,
+        issue: &IssueDescriptor,
+        hierarchy_generation: u64,
+        root: &Path,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        self.reject_symlinked_path_components(
+            &self.config.root,
+            &PathBuf::from("parents")
+                .join(format!(
+                    "parent-{}",
+                    sanitize_workspace_key(&issue.identifier)?
+                ))
+                .join(hierarchy_generation.to_string()),
+        )
+        .await?;
+        let canonical_root = self.canonicalize_path(root).await?;
+        ensure_descendant(
+            &self.canonicalize_path(&self.config.root).await?,
+            &canonical_root,
+        )?;
+        let handle = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            canonical_root,
+        );
+        let expected_root = self
+            .config
+            .root
+            .join("parents")
+            .join(handle.workspace_key())
+            .join(hierarchy_generation.to_string());
+        if self.canonicalize_path(&expected_root).await? != handle.workspace_path() {
+            return Err(checkout_verification(
+                handle.workspace_path(),
+                "parent execution root is not the generation-bound managed path",
+            ));
+        }
+        let manifest = self
+            .load_manifest::<ParentExecutionManifest>(&handle, &handle.parent_manifest_path())
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(handle.workspace_path(), "parent manifest is missing")
+            })?;
+        let child_checkout_map = self
+            .load_manifest::<ParentChildCheckoutMap>(&handle, &handle.child_checkouts_path())
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(handle.workspace_path(), "child checkout map is missing")
+            })?;
+        if manifest.schema_version != 1
+            || manifest.parent_issue_id != issue.issue_id
+            || manifest.parent_identifier != issue.identifier
+            || manifest.hierarchy_generation != hierarchy_generation
+            || manifest.workspace_path != handle.workspace_path()
+            || manifest.child_checkout_map != Path::new("child-checkouts.json")
+            || manifest.integration_plan != Path::new("integration-plan.md")
+            || manifest.evidence_directory != Path::new("evidence")
+            || manifest.repositories_directory != Path::new("repositories")
+            || child_checkout_map.schema_version != 1
+            || child_checkout_map.hierarchy_generation != hierarchy_generation
+            || path_exists(&handle.workspace_path().join(".git")).await?
+        {
+            return Err(checkout_verification(
+                handle.workspace_path(),
+                "parent execution root identity is inconsistent",
+            ));
+        }
+        for record in child_checkout_map.repositories.values() {
+            let source = self
+                .find_retained_checkout(
+                    &record.repository_id,
+                    &record.storage_source_generation,
+                    None,
+                )
+                .await?;
+            self.verify_parent_integration_checkout(&handle, record, &source)
+                .await?;
+        }
+        Ok(ParentExecutionRoot {
+            handle,
+            manifest,
+            child_checkout_map,
+            created: false,
+        })
+    }
+
+    pub async fn open_parent_execution_root_at(
+        &self,
+        issue: &IssueDescriptor,
+        root: &Path,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(root).await?;
+        let handle = WorkspaceHandle::new(
+            issue.issue_id.clone(),
+            issue.identifier.clone(),
+            format!("parent-{}", sanitize_workspace_key(&issue.identifier)?),
+            canonical_root,
+        );
+        let manifest = self
+            .load_manifest::<ParentExecutionManifest>(&handle, &handle.parent_manifest_path())
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(handle.workspace_path(), "parent manifest is missing")
+            })?;
+        self.open_parent_execution_root(issue, manifest.hierarchy_generation, root)
+            .await
+    }
+
+    pub async fn resolve_parent_checkout(
+        &self,
+        parent: &ParentExecutionRoot,
+        checkout_handle: &str,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let record = parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .find(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| {
+                checkout_verification(
+                    parent.handle.workspace_path(),
+                    "checkout handle is not present in the pinned parent map",
+                )
+            })?;
+        let source = self
+            .find_retained_checkout(
+                &record.repository_id,
+                &record.storage_source_generation,
+                None,
+            )
+            .await?;
+        self.verify_parent_integration_checkout(&parent.handle, record, &source)
+            .await?;
+        Ok(parent.handle.workspace_path().join(&record.relative_path))
+    }
+
+    fn verify_parent_requests(
+        &self,
+        parent: &ParentExecutionRoot,
+        requests: &[ParentCheckoutRequest],
+    ) -> Result<(), WorkspaceError> {
+        let expected = requests
+            .iter()
+            .map(|request| {
+                (
+                    request.repository_id.as_str(),
+                    request.issue_id.as_str(),
+                    request.checkout_generation.as_str(),
+                    request.lease_owner.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let observed = parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .flat_map(|repository| {
+                repository.retained_checkouts.iter().map(|checkout| {
+                    (
+                        repository.repository_id.as_str(),
+                        checkout.issue_id.as_str(),
+                        checkout.checkout_generation.as_str(),
+                        checkout.lease_owner.as_str(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_merges = requests
+            .iter()
+            .flat_map(|request| {
+                request
+                    .required_merge_commits
+                    .iter()
+                    .map(|commit| (request.repository_id.as_str(), commit.as_str()))
+            })
+            .filter(|(_, commit)| !commit.trim().is_empty())
+            .collect::<BTreeSet<_>>();
+        let observed_merges = parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .flat_map(|repository| {
+                repository
+                    .required_merge_commits
+                    .iter()
+                    .map(|commit| (repository.repository_id.as_str(), commit.as_str()))
+            })
+            .collect::<BTreeSet<_>>();
+        if expected.len() != requests.len()
+            || expected != observed
+            || expected_merges != observed_merges
+        {
+            return Err(checkout_verification(
+                parent.handle.workspace_path(),
+                "existing parent checkout map does not match the generation-bound preparation request",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn parent_repository_instructions(
+        &self,
+        parent: &ParentExecutionRoot,
+    ) -> Result<BTreeMap<String, String>, WorkspaceError> {
+        let mut instructions = BTreeMap::new();
+        for record in parent.child_checkout_map.repositories.values() {
+            let checkout = self
+                .resolve_parent_checkout(parent, &record.checkout_handle)
+                .await?;
+            if record.instruction.path.as_os_str().is_empty() {
+                continue;
+            }
+            let path = resolve_path_within_root(&checkout, &record.instruction.path)?;
+            let relative = path
+                .strip_prefix(parent.handle.workspace_path())
+                .map_err(|_| {
+                    checkout_verification(&path, "repository instruction path escapes parent root")
+                })?;
+            self.reject_symlinked_path_components(parent.handle.workspace_path(), relative)
+                .await?;
+            let mut total_bytes = 0;
+            let (hash, bytes) =
+                read_bounded_instruction_file(&path, &mut total_bytes, true).await?;
+            if hash != record.instruction.content_hash {
+                return Err(checkout_verification(
+                    &path,
+                    "repository instruction hash does not match the parent checkout map",
+                ));
+            }
+            let bytes = if is_workflow_instruction_path(&record.instruction.path) {
+                workflow_body(&bytes)
+            } else {
+                bytes
+            };
+            instructions.insert(
+                record.repository_id.clone(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            );
+        }
+        Ok(instructions)
+    }
+
+    pub async fn write_parent_runtime_envelope(
+        &self,
+        parent: &ParentExecutionRoot,
+        envelope: &ParentRuntimeEnvelope,
+    ) -> Result<(), WorkspaceError> {
+        if envelope.parent_issue_id != parent.manifest.parent_issue_id
+            || envelope.parent_identifier != parent.manifest.parent_identifier
+            || envelope.hierarchy_generation != parent.manifest.hierarchy_generation
+            || envelope.workspace_path != parent.handle.workspace_path()
+            || envelope.checkouts.len() != parent.child_checkout_map.repositories.len()
+            || envelope.requested_execution_scope != "parent_multi_checkout"
+            || !matches!(
+                envelope.effective_containment.as_str(),
+                "trusted_host" | "workspace_confined"
+            )
+            || parent
+                .child_checkout_map
+                .repositories
+                .values()
+                .any(|record| {
+                    envelope
+                        .checkouts
+                        .get(&record.checkout_handle)
+                        .is_none_or(|checkout| {
+                            checkout.repository_id != record.repository_id
+                                || checkout.relative_path != record.relative_path
+                                || checkout.target_branch != record.target_branch
+                                || checkout.target_commit != record.target_commit
+                                || checkout.instruction_path != record.instruction.path
+                                || checkout.instruction_hash != record.instruction.content_hash
+                        })
+                })
+        {
+            return Err(checkout_verification(
+                parent.handle.workspace_path(),
+                "parent runtime envelope does not match the prepared execution root",
+            ));
+        }
+        self.write_manifest_atomically(
+            &parent.handle,
+            &parent.handle.parent_runtime_envelope_path(),
+            envelope,
+        )
+        .await
+    }
+
+    pub fn parent_runtime_envelope(
+        &self,
+        parent: &ParentExecutionRoot,
+        descriptor: ParentRuntimeDescriptor,
+    ) -> ParentRuntimeEnvelope {
+        let checkouts = parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .map(|record| {
+                (
+                    record.checkout_handle.clone(),
+                    ParentRuntimeCheckout {
+                        repository_id: record.repository_id.clone(),
+                        checkout_handle: record.checkout_handle.clone(),
+                        relative_path: record.relative_path.clone(),
+                        target_branch: record.target_branch.clone(),
+                        target_commit: record.target_commit.clone(),
+                        instruction_path: record.instruction.path.clone(),
+                        instruction_hash: record.instruction.content_hash.clone(),
+                    },
+                )
+            })
+            .collect();
+        let (integration_instruction_path, integration_instruction_hash) = descriptor
+            .integration_instruction
+            .map_or((None, None), |(path, hash)| (Some(path), Some(hash)));
+        ParentRuntimeEnvelope {
+            parent_issue_id: parent.manifest.parent_issue_id.clone(),
+            parent_identifier: parent.manifest.parent_identifier.clone(),
+            run_id: descriptor.run_id,
+            attempt: descriptor.attempt,
+            hierarchy_generation: parent.manifest.hierarchy_generation,
+            workspace_path: parent.handle.workspace_path().to_path_buf(),
+            checkouts,
+            integration_instruction_path,
+            integration_instruction_hash,
+            harness: descriptor.harness,
+            model_profile: descriptor.model_profile,
+            model: descriptor.model,
+            requested_execution_scope: "parent_multi_checkout".to_owned(),
+            effective_containment: descriptor.effective_containment,
+            conversation_binding: None,
+        }
+    }
+
+    async fn find_retained_checkout(
+        &self,
+        repository_id: &str,
+        generation: &str,
+        issue_id: Option<&str>,
+    ) -> Result<WorkspaceHandle, WorkspaceError> {
+        self.list_all_workspaces()
+            .await?
+            .into_iter()
+            .find_map(|(handle, manifest)| {
+                (handle.checkout_generation() == Some(generation)
+                    && issue_id.is_none_or(|issue_id| manifest.issue_id == issue_id)
+                    && manifest
+                        .repository_binding
+                        .as_ref()
+                        .and_then(
+                            crate::opensymphony_domain::RepositoryBindingOutcome::repository_id,
+                        )
+                        .is_some_and(|candidate| candidate.as_str() == repository_id))
+                .then_some(handle)
+            })
+            .ok_or_else(|| {
+                checkout_verification(
+                    &self.config.root,
+                    "generation-bound retained checkout handle is stale",
+                )
+            })
+    }
+
+    async fn fetch_parent_target(
+        &self,
+        source: &WorkspaceHandle,
+        repository: &CheckoutRepository,
+    ) -> Result<(), WorkspaceError> {
+        let shallow = self
+            .git(
+                source.workspace_path(),
+                &["rev-parse", "--is-shallow-repository"],
+            )
+            .await?
+            == "true";
+        let mut args = vec!["fetch", "--prune"];
+        if shallow {
+            args.push("--unshallow");
+        }
+        let refspec = format!(
+            "+refs/heads/{0}:refs/remotes/origin/{0}",
+            repository.target_branch
+        );
+        args.extend(["origin", refspec.as_str()]);
+        self.run_authenticated_git(source.workspace_path(), repository, &args)
+            .await
+    }
+
+    async fn run_authenticated_git(
+        &self,
+        checkout: &Path,
+        repository: &CheckoutRepository,
+        args: &[&str],
+    ) -> Result<(), WorkspaceError> {
+        let environment_credential = repository.credential_kind == "environment";
+        let ssh_agent_credential = repository.credential_kind == "ssh-agent";
+        let environment_credential_value = environment_credential
+            .then_some(repository.credential_env.as_deref())
+            .flatten()
+            .and_then(std::env::var_os)
+            .map(|value| value.to_string_lossy().into_owned());
+        if (environment_credential && environment_credential_value.is_none())
+            || (ssh_agent_credential && !ssh_agent_socket_is_usable())
+            || (!environment_credential && !ssh_agent_credential)
+        {
+            return Err(WorkspaceError::CheckoutOperation {
+                operation: "resolve repository credential provider".to_owned(),
+                path: checkout.to_path_buf(),
+                detail: if ssh_agent_credential {
+                    "SSH_AUTH_SOCK is unset or does not point to a usable SSH agent socket"
+                        .to_owned()
+                } else {
+                    "repository credential provider is unavailable".to_owned()
+                },
+            });
+        }
+
+        let askpass_path = if environment_credential {
+            let path = checkout
+                .join(".opensymphony")
+                .join(format!("askpass-{}", Uuid::new_v4().simple()));
+            fs::write(
+                &path,
+                b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_USERNAME\" ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
+            )
+            .await
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: "prepare Git credential helper".to_owned(),
+                path: path.clone(),
+                detail: source.to_string(),
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                    .await
+                    .map_err(|source| WorkspaceError::CheckoutOperation {
+                        operation: "prepare Git credential helper".to_owned(),
+                        path: path.clone(),
+                        detail: source.to_string(),
+                    })?;
+            }
+            Some(path)
+        } else {
+            None
+        };
+
+        let mut command = Command::new("git");
+        command.arg("-C").arg(checkout).args(args);
+        for variable in &self.checkout_credential_envs {
+            command.env_remove(variable);
+        }
+        sanitize_git_environment(&mut command);
+        command
+            .env_remove("OPENSYMPHONY_CHECKOUT_CREDENTIAL")
+            .env_remove("GIT_SSH_COMMAND")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env("GIT_NO_REPLACE_OBJECTS", "1");
+        if ssh_agent_credential {
+            let value = std::env::var_os(SSH_AUTH_SOCK_ENV)
+                .expect("usable SSH agent socket was validated above");
+            command.env(SSH_AUTH_SOCK_ENV, &value).env(
+                "GIT_SSH_COMMAND",
+                format!(
+                    "ssh -o IdentityAgent={}",
+                    shell_single_quote(&value.to_string_lossy())
+                ),
+            );
+        }
+        if let Some(value) = environment_credential_value.as_deref() {
+            command.env("OPENSYMPHONY_CHECKOUT_CREDENTIAL", value);
+        }
+        command.env(
+            "OPENSYMPHONY_CHECKOUT_USERNAME",
+            git_askpass_username(&repository.provider),
+        );
+        if let Some(path) = askpass_path.as_ref() {
+            command
+                .env("GIT_ASKPASS", path)
+                .env("GIT_TERMINAL_PROMPT", "0");
+        }
+        configure_process_group(&mut command);
+        command.kill_on_drop(true);
+        let output = timeout(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT, command.output()).await;
+        if let Some(path) = askpass_path.as_ref() {
+            let _ = fs::remove_file(path).await;
+        }
+        let output = output
+            .map_err(|_| WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: format!(
+                    "operation timed out after {:?}",
+                    RETAINED_CHECKOUT_VERIFICATION_TIMEOUT
+                ),
+            })?
+            .map_err(|source| WorkspaceError::CheckoutOperation {
+                operation: args.first().copied().unwrap_or("git").to_owned(),
+                path: checkout.to_path_buf(),
+                detail: source.to_string(),
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let mut detail = redact_runtime_diagnostic(&String::from_utf8_lossy(&output.stderr));
+        if let Some(value) = environment_credential_value.as_deref() {
+            detail = detail.replace(value, "<redacted>");
+        }
+        Err(WorkspaceError::CheckoutOperation {
+            operation: args.first().copied().unwrap_or("git").to_owned(),
+            path: checkout.to_path_buf(),
+            detail,
+        })
+    }
+
+    async fn verify_parent_integration_checkout(
+        &self,
+        parent: &WorkspaceHandle,
+        record: &ParentIntegrationCheckout,
+        source: &WorkspaceHandle,
+    ) -> Result<(), WorkspaceError> {
+        let integration = resolve_path_within_root(parent.workspace_path(), &record.relative_path)?;
+        let repositories = parent.workspace_path().join("repositories");
+        let canonical_repositories = self.canonicalize_path(&repositories).await?;
+        let canonical_integration = self.canonicalize_path(&integration).await?;
+        ensure_descendant(&canonical_repositories, &canonical_integration)?;
+        if integration.file_name().and_then(|name| name.to_str())
+            != Some(record.checkout_handle.as_str())
+        {
+            return Err(checkout_verification(
+                &integration,
+                "integration checkout path does not match its opaque handle",
+            ));
+        }
+        let worktree_root = self
+            .git(&integration, &["rev-parse", "--show-toplevel"])
+            .await?;
+        if self.canonicalize_path(Path::new(&worktree_root)).await? != canonical_integration {
+            return Err(checkout_verification(
+                &integration,
+                "integration checkout Git root is inconsistent",
+            ));
+        }
+        let common = self
+            .git(&integration, &["rev-parse", "--git-common-dir"])
+            .await?;
+        let common = PathBuf::from(common);
+        let common = if common.is_absolute() {
+            common
+        } else {
+            integration.join(common)
+        };
+        let source_common = self
+            .git(source.workspace_path(), &["rev-parse", "--git-common-dir"])
+            .await?;
+        let source_common = PathBuf::from(source_common);
+        let source_common = if source_common.is_absolute() {
+            source_common
+        } else {
+            source.workspace_path().join(source_common)
+        };
+        if self.canonicalize_path(&common).await? != self.canonicalize_path(&source_common).await? {
+            return Err(checkout_verification(
+                &integration,
+                "integration checkout does not share retained child Git storage",
+            ));
+        }
+        if self.git(&integration, &["rev-parse", "HEAD"]).await? != record.target_commit {
+            return Err(checkout_verification(
+                &integration,
+                "integration checkout is not at its recorded target commit",
+            ));
+        }
+        if !self
+            .git(
+                &integration,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .is_empty()
+        {
+            return Err(checkout_verification(
+                &integration,
+                "integration checkout is dirty",
+            ));
+        }
+        let repository = self
+            .checkout_repositories
+            .get(&record.repository_id)
+            .ok_or_else(|| {
+                checkout_verification(&integration, "repository policy is unavailable")
+            })?;
+        let expected = SafeRemoteFingerprint::from_remote(
+            &repository.provider,
+            repository.provider_id.as_deref(),
+            &repository.remote,
+        )
+        .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
+        for args in [
+            ["remote", "get-url", "--all", "origin"].as_slice(),
+            ["remote", "get-url", "--all", "--push", "origin"].as_slice(),
+        ] {
+            let remotes = self.git(&integration, args).await?;
+            if remotes.lines().all(|remote| remote.trim().is_empty()) {
+                return Err(checkout_verification(
+                    &integration,
+                    "origin remote is unavailable",
+                ));
+            }
+            for remote in remotes.lines() {
+                let actual = SafeRemoteFingerprint::from_remote(
+                    &repository.provider,
+                    repository.provider_id.as_deref(),
+                    remote,
+                )
+                .map_err(|error| checkout_verification(&integration, &error.to_string()))?;
+                if actual != expected || actual.as_str() != record.safe_remote_fingerprint {
+                    return Err(checkout_verification(
+                        &integration,
+                        "origin remote fingerprint mismatch",
+                    ));
+                }
+            }
+        }
+        let instruction = self
+            .load_instruction_provenance(&integration, repository, &record.target_commit)
+            .await?;
+        if instruction != record.instruction {
+            return Err(checkout_verification(
+                &integration,
+                "repository instruction provenance does not match the parent checkout map",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn ensure(
@@ -539,7 +1430,7 @@ impl WorkspaceManager {
             checkout_time_remaining(checkout_deadline),
             &staging_path,
             "verify acquired checkout",
-            self.verify_git_checkout(&staging_path, binding, repository, true, true),
+            self.verify_git_checkout(&staging_path, binding, repository, true, true, false),
         )
         .await
         {
@@ -632,7 +1523,14 @@ impl WorkspaceManager {
             checkout_time_remaining(checkout_deadline),
             workspace.workspace_path(),
             "verify checkout after creation hook",
-            self.verify_git_checkout(workspace.workspace_path(), binding, repository, true, true),
+            self.verify_git_checkout(
+                workspace.workspace_path(),
+                binding,
+                repository,
+                true,
+                true,
+                false,
+            ),
         )
         .await
         {
@@ -743,7 +1641,7 @@ impl WorkspaceManager {
     ) -> Result<CheckoutManifest, WorkspaceError> {
         let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
         let manifest = self
-            .verify_checkout_with_worker_changes_timeout(workspace, true, deadline)
+            .verify_checkout_with_worker_changes_timeout(workspace, true, false, deadline)
             .await?;
         if manifest.repository_binding != expected.repository_binding
             || manifest.policy_generation != expected.policy_generation
@@ -799,14 +1697,20 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         allow_worker_changes: bool,
     ) -> Result<CheckoutManifest, WorkspaceError> {
-        self.verify_checkout_with_worker_changes_timeout(workspace, allow_worker_changes, None)
-            .await
+        self.verify_checkout_with_worker_changes_timeout(
+            workspace,
+            allow_worker_changes,
+            false,
+            None,
+        )
+        .await
     }
 
     async fn verify_checkout_with_worker_changes_timeout(
         &self,
         workspace: &WorkspaceHandle,
         allow_worker_changes: bool,
+        allow_shallow: bool,
         checkout_deadline: Option<Instant>,
     ) -> Result<CheckoutManifest, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
@@ -856,6 +1760,7 @@ impl WorkspaceManager {
                 repository,
                 !allow_worker_changes,
                 false,
+                allow_shallow,
             ),
         )
         .await?;
@@ -950,7 +1855,16 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
     ) -> Result<CheckoutManifest, WorkspaceError> {
         let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
-        self.verify_checkout_with_worker_changes_timeout(workspace, true, deadline)
+        self.verify_checkout_with_worker_changes_timeout(workspace, true, false, deadline)
+            .await
+    }
+
+    async fn verify_checkout_for_parent(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<CheckoutManifest, WorkspaceError> {
+        let deadline = checkout_deadline(Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT));
+        self.verify_checkout_with_worker_changes_timeout(workspace, true, true, deadline)
             .await
     }
 
@@ -1178,6 +2092,7 @@ impl WorkspaceManager {
                             repository,
                             true,
                             true,
+                            false,
                         )
                         .await
                     {
@@ -1296,6 +2211,7 @@ impl WorkspaceManager {
                 .verify_checkout_with_worker_changes_timeout(
                     &handle,
                     allow_worker_changes,
+                    false,
                     checkout_deadline,
                 )
                 .await
@@ -1925,6 +2841,7 @@ impl WorkspaceManager {
         repository: &CheckoutRepository,
         enforce_worktree_state: bool,
         require_remote_head: bool,
+        allow_shallow: bool,
     ) -> Result<GitFacts, WorkspaceError> {
         let inside = self
             .git(checkout, &["rev-parse", "--is-inside-work-tree"])
@@ -2073,7 +2990,7 @@ impl WorkspaceManager {
             .git(checkout, &["rev-parse", "--is-shallow-repository"])
             .await?
             == "true";
-        if shallow {
+        if shallow && !allow_shallow {
             return Err(checkout_verification(checkout, "history is shallow"));
         }
         let status = self
@@ -4192,6 +5109,83 @@ pub fn compose_terminal_prompt(
         .unwrap_or("No repository-specific instructions were selected.");
     format!(
         "## Central Execution Procedure\n\n{central_procedure}\n\n## Task Facts\n\n{task_facts}\n\n## Verified Checkout\n\n{checkout_facts}\n\n## Repository Instructions\n\n{repository_section}\n\n## Runtime Capabilities\n\n{capabilities}\n"
+    )
+}
+
+pub fn compose_parent_prompt(
+    central_procedure: &str,
+    task_facts: &str,
+    envelope: &ParentRuntimeEnvelope,
+    integration_instructions: Option<&str>,
+    repository_instructions: &BTreeMap<String, String>,
+) -> String {
+    let checkout_map = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            format!(
+                "- handle={} repository={} path={} branch={} commit={}",
+                checkout.checkout_handle,
+                checkout.repository_id,
+                checkout.relative_path.display(),
+                checkout.target_branch,
+                checkout.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let integration = integration_instructions
+        .filter(|instructions| !instructions.trim().is_empty())
+        .unwrap_or("No project-set integration instructions were configured.");
+    let repositories = repository_instructions
+        .iter()
+        .map(|(repository_id, instructions)| {
+            format!("### Repository `{repository_id}`\n\n{instructions}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let repositories = if repositories.is_empty() {
+        "No repository-specific instructions were selected.".to_owned()
+    } else {
+        repositories
+    };
+    format!(
+        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
+        envelope.workspace_path.display(),
+        envelope.hierarchy_generation,
+        checkout_map,
+        integration,
+        repositories,
+        envelope.harness,
+        envelope.workspace_path.display(),
+        envelope.requested_execution_scope,
+        envelope.effective_containment,
+    )
+}
+
+fn parent_checkout_handle(repository_id: &str, hierarchy_generation: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(repository_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(hierarchy_generation.to_le_bytes());
+    format!("checkout-{}", &format!("{:x}", hasher.finalize())[..16])
+}
+
+fn render_parent_integration_plan(map: &ParentChildCheckoutMap) -> String {
+    let repositories = map
+        .repositories
+        .values()
+        .map(|checkout| {
+            format!(
+                "- `{}` via `{}` at `{}`",
+                checkout.repository_id, checkout.checkout_handle, checkout.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "# Parent Integration Plan\n\nHierarchy generation: {}\n\n{}\n",
+        map.hierarchy_generation, repositories
     )
 }
 

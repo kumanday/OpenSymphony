@@ -124,6 +124,115 @@ pub struct TerminalRuntimeEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentCheckoutRequest {
+    pub issue_id: String,
+    pub repository_id: String,
+    pub checkout_generation: String,
+    pub lease_owner: String,
+    #[serde(default)]
+    pub required_merge_commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRetainedCheckout {
+    pub issue_id: String,
+    pub identifier: String,
+    pub checkout_generation: String,
+    pub lease_owner: String,
+    pub child_branch: String,
+    pub child_head: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentIntegrationCheckout {
+    pub checkout_handle: String,
+    pub repository_id: String,
+    pub safe_remote_fingerprint: String,
+    pub relative_path: PathBuf,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub storage_source_generation: String,
+    pub retained_checkouts: Vec<ParentRetainedCheckout>,
+    pub required_merge_commits: Vec<String>,
+    pub instruction: InstructionProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentChildCheckoutMap {
+    pub schema_version: u32,
+    pub hierarchy_generation: u64,
+    pub repositories: BTreeMap<String, ParentIntegrationCheckout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentExecutionManifest {
+    pub schema_version: u32,
+    pub parent_issue_id: String,
+    pub parent_identifier: String,
+    pub hierarchy_generation: u64,
+    pub workspace_path: PathBuf,
+    pub child_checkout_map: PathBuf,
+    pub integration_plan: PathBuf,
+    pub evidence_directory: PathBuf,
+    pub repositories_directory: PathBuf,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRuntimeCheckout {
+    pub repository_id: String,
+    pub checkout_handle: String,
+    pub relative_path: PathBuf,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub instruction_path: PathBuf,
+    pub instruction_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRuntimeEnvelope {
+    pub parent_issue_id: String,
+    pub parent_identifier: String,
+    pub run_id: String,
+    pub attempt: u32,
+    pub hierarchy_generation: u64,
+    pub workspace_path: PathBuf,
+    pub checkouts: BTreeMap<String, ParentRuntimeCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_instruction_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_instruction_hash: Option<String>,
+    pub harness: String,
+    pub model_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub requested_execution_scope: String,
+    pub effective_containment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_binding: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRuntimeDescriptor {
+    pub run_id: String,
+    pub attempt: u32,
+    pub integration_instruction: Option<(PathBuf, String)>,
+    pub harness: String,
+    pub model_profile: String,
+    pub model: Option<String>,
+    pub effective_containment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentExecutionRoot {
+    pub handle: WorkspaceHandle,
+    pub manifest: ParentExecutionManifest,
+    pub child_checkout_map: ParentChildCheckoutMap,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutManifest {
     pub schema_version: u32,
     pub generation: String,
@@ -528,6 +637,7 @@ pub struct RunDescriptor {
     pub normal_retry_count: u32,
     pub repository_binding: Option<RepositoryBinding>,
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
 }
 
 impl RunDescriptor {
@@ -538,6 +648,7 @@ impl RunDescriptor {
             normal_retry_count: 0,
             repository_binding: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
         }
     }
 
@@ -559,6 +670,14 @@ impl RunDescriptor {
         runtime_envelope: Option<TerminalRuntimeEnvelope>,
     ) -> Self {
         self.runtime_envelope = runtime_envelope;
+        self
+    }
+
+    pub fn with_parent_runtime_envelope(
+        mut self,
+        parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    ) -> Self {
+        self.parent_runtime_envelope = parent_runtime_envelope;
         self
     }
 }
@@ -688,6 +807,18 @@ impl WorkspaceHandle {
 
     pub fn checkout_manifest_path(&self) -> PathBuf {
         self.metadata_dir().join("checkout.json")
+    }
+
+    pub fn parent_manifest_path(&self) -> PathBuf {
+        self.workspace_path.join("parent-manifest.json")
+    }
+
+    pub fn child_checkouts_path(&self) -> PathBuf {
+        self.workspace_path.join("child-checkouts.json")
+    }
+
+    pub fn parent_runtime_envelope_path(&self) -> PathBuf {
+        self.metadata_dir().join("parent-runtime.json")
     }
 
     pub fn logs_dir(&self) -> PathBuf {
@@ -913,6 +1044,8 @@ pub struct RunManifest {
     pub repository_binding: Option<RepositoryBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
@@ -951,6 +1084,7 @@ impl RunManifest {
             workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: run.repository_binding.clone(),
             runtime_envelope: run.runtime_envelope.clone(),
+            parent_runtime_envelope: run.parent_runtime_envelope.clone(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,

@@ -483,6 +483,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) memory_sources: BTreeMap<String, ResolvedMemorySource>,
     pub(super) project_set_id: Option<String>,
+    pub(super) integration_instructions: Option<ResolvedIntegrationInstructions>,
     pub(super) retain_failed: bool,
     pub(super) preserve_terminal_workspaces: bool,
     pub(super) memory: RunMemoryConfig,
@@ -503,6 +504,7 @@ pub(super) async fn resolve_runtime_config(
         central_memory_catalog_root,
         central_memory_sources,
         central_project_set_id,
+        central_integration_instructions,
         central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -530,6 +532,7 @@ pub(super) async fn resolve_runtime_config(
                     central.memory_catalog_root,
                     central.memory_sources,
                     central.project_set_id,
+                    central.integration_instructions,
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -552,6 +555,7 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
         }
@@ -564,6 +568,7 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             BTreeMap::new(),
+            None,
             None,
             None,
             None,
@@ -711,6 +716,7 @@ pub(super) async fn resolve_runtime_config(
         memory_catalog_root: central_memory_catalog_root,
         memory_sources: central_memory_sources,
         project_set_id: central_project_set_id,
+        integration_instructions: central_integration_instructions,
         retain_failed: central_retain_failed.unwrap_or(true),
         preserve_terminal_workspaces: central_preserve_terminal_workspaces.unwrap_or(true),
         memory,

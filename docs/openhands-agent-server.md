@@ -96,6 +96,15 @@ truthful trusted-host process-`cwd` containment receipt. A compatible persisted
 conversation may be reused only when its envelope matches; a mismatch is
 rejected before attach.
 
+For an eligible parent, `workspace.working_dir` is the non-Git parent execution
+root. The conversation manifest binds the parent envelope to the OpenHands
+conversation ID and records the complete relative checkout map with requested
+`parent_multi_checkout` scope. Trusted local OpenHands runs report
+`trusted_host`; the prompt and `cwd` do not claim filesystem sandboxing. The
+full first prompt combines the generic parent lifecycle, optional verified
+project-set integration instructions, parent task facts, the checkout map, and
+repository instructions keyed by canonical repository ID.
+
 When the local memory server issues a process-scoped worker grant, the grant
 is also part of conversation compatibility. The agent-server create contract
 does not provide a conversation MCP-config update operation, so a persisted

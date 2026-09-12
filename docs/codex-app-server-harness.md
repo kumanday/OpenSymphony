@@ -92,6 +92,13 @@ input plus the maximum-permission turn profile:
 }
 ```
 
+Parent threads use the repository-neutral parent root as that working
+directory. Their conversation manifest binds the same relative checkout map and
+`parent_multi_checkout` scope used by OpenHands, while recording effective
+`trusted_host` containment for the local danger-full-access profile. Codex does
+not receive a synthetic leaf checkout envelope or a parent memory grant owned
+by the later parent-controller lifecycle.
+
 `approvalPolicy: "never"` means OpenSymphony does not wait for human approval
 callbacks from Codex. Execution failures are streamed back through Codex and
 handled by the model loop. `dangerFullAccess` intentionally carries no

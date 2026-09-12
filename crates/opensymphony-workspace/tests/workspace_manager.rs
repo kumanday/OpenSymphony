@@ -7,9 +7,10 @@ use crate::opensymphony_domain::{
 use crate::opensymphony_workspace::{
     CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest,
     HookConfig, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
-    IssueContextArtifact, IssueDescriptor, IssueLifecycleState, PromptCaptureDescriptor,
-    PromptKind, RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError,
-    WorkspaceManager, WorkspaceManagerConfig, compose_terminal_prompt,
+    IssueContextArtifact, IssueDescriptor, IssueLifecycleState, ParentCheckoutRequest,
+    ParentRuntimeDescriptor, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunManifest,
+    RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    compose_parent_prompt, compose_terminal_prompt,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -70,6 +71,491 @@ fn terminal_prompt_keeps_repository_instructions_in_one_section() {
     assert!(prompt.contains("Description:\nacceptance criteria"));
     assert!(prompt.contains("## Repository Instructions\n\nrepository-only instruction"));
     assert!(!prompt.contains("other repository"));
+}
+
+fn repository_fixture(
+    root: &std::path::Path,
+    name: &str,
+) -> (std::path::PathBuf, RepositoryBinding, CheckoutRepository) {
+    let source = root.join(format!("{name}-source"));
+    let origin = root.join(format!("{name}.git"));
+    std::fs::create_dir_all(&source).expect("source should exist");
+    std::fs::create_dir_all(&origin).expect("origin should exist");
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    git(&source, &["config", "user.name", "OpenSymphony Test"]);
+    std::fs::write(
+        source.join("AGENTS.md"),
+        format!("instructions for {name}\n"),
+    )
+    .expect("instructions should be written");
+    std::fs::write(source.join("README.md"), format!("{name}\n"))
+        .expect("readme should be written");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(&origin, &["init", "--bare"]);
+    git(
+        &source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    git(&source, &["push", "-u", "origin", "main"]);
+    let id =
+        CanonicalRepositoryId::from_remote("local", None, origin.to_str().expect("origin path"))
+            .expect("repository id should be valid");
+    let fingerprint =
+        SafeRemoteFingerprint::from_remote("local", None, origin.to_str().expect("origin path"))
+            .expect("fingerprint should be valid");
+    (
+        source,
+        RepositoryBinding {
+            alias: name.to_owned(),
+            repository: RepositoryIdentity {
+                id,
+                safe_remote_fingerprint: fingerprint,
+            },
+            config_generation: "config-1".to_owned(),
+            inventory_generation: "inventory-1".to_owned(),
+        },
+        CheckoutRepository {
+            provider: "local".to_owned(),
+            provider_id: None,
+            remote_locator: origin.to_str().expect("origin path").to_owned(),
+            remote: origin.to_str().expect("origin path").to_owned(),
+            target_branch: "main".to_owned(),
+            credential_kind: "environment".to_owned(),
+            credential_reference: None,
+            credential_env: Some("HOME".to_owned()),
+            review_credential_env: None,
+            instructions_path: "AGENTS.md".into(),
+            policy_generation: "policy-1".to_owned(),
+            review_profile: "local".to_owned(),
+            review_provider: "local".to_owned(),
+            review_policy_generation: "review-1".to_owned(),
+            required_checks: false,
+            required_review: false,
+            merge_method: None,
+        },
+    )
+}
+
+fn commit_file(source: &std::path::Path, name: &str, contents: &str, message: &str) -> String {
+    std::fs::write(source.join(name), contents).expect("fixture file should be written");
+    git(source, &["add", name]);
+    git(source, &["commit", "-m", message]);
+    git(source, &["push", "origin", "main"]);
+    git(source, &["rev-parse", "HEAD"])
+}
+
+fn squash_merge_fixture(source: &std::path::Path) -> String {
+    git(source, &["checkout", "-b", "feature-squash"]);
+    std::fs::write(
+        source.join("a1-feature.txt"),
+        "feature commit replaced by squash\n",
+    )
+    .expect("squash feature should be written");
+    git(source, &["add", "a1-feature.txt"]);
+    git(source, &["commit", "-m", "feature commit for squash"]);
+    git(source, &["checkout", "main"]);
+    git(source, &["merge", "--squash", "feature-squash"]);
+    git(source, &["commit", "-m", "squash merge result"]);
+    git(source, &["push", "origin", "main"]);
+    git(source, &["rev-parse", "HEAD"])
+}
+
+fn rebase_merge_fixture(source: &std::path::Path) -> String {
+    git(source, &["checkout", "-b", "feature-rebase"]);
+    std::fs::write(
+        source.join("a2-feature.txt"),
+        "feature commit rebased before merge\n",
+    )
+    .expect("rebase feature should be written");
+    git(source, &["add", "a2-feature.txt"]);
+    git(source, &["commit", "-m", "feature commit before rebase"]);
+    git(source, &["checkout", "main"]);
+    commit_file(
+        source,
+        "base-advance.txt",
+        "target advanced before rebase\n",
+        "advance target before rebase",
+    );
+    git(source, &["rebase", "main", "feature-rebase"]);
+    git(source, &["checkout", "main"]);
+    git(source, &["merge", "--ff-only", "feature-rebase"]);
+    git(source, &["push", "origin", "main"]);
+    git(source, &["rev-parse", "HEAD"])
+}
+
+#[tokio::test]
+async fn parent_execution_root_reuses_three_repositories_and_preserves_children() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let (source_a, binding_a, repository_a) = repository_fixture(temp_dir.path(), "repository-a");
+    let (source_b, binding_b, repository_b) = repository_fixture(temp_dir.path(), "repository-b");
+    let (source_c, binding_c, repository_c) = repository_fixture(temp_dir.path(), "repository-c");
+    let merge_a1 = squash_merge_fixture(&source_a);
+    let manager = WorkspaceManager::new(manager_config(
+        &temp_dir.path().join("workspaces"),
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build")
+    .with_repository_checkouts(BTreeMap::from([
+        (binding_a.repository_id().to_string(), repository_a),
+        (binding_b.repository_id().to_string(), repository_b),
+        (binding_c.repository_id().to_string(), repository_c),
+    ]));
+
+    let mut child_a1 = sample_issue("COE-A1");
+    child_a1.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding_a.clone()));
+    let child_a1 = manager
+        .ensure(&child_a1)
+        .await
+        .expect("first repository-a child should exist");
+    let child_a1_head = git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]);
+    let merge_a2 = rebase_merge_fixture(&source_a);
+
+    let mut child_a2 = sample_issue("COE-A2");
+    child_a2.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding_a.clone()));
+    let child_a2 = manager
+        .ensure(&child_a2)
+        .await
+        .expect("second repository-a child should exist");
+    let mut child_b = sample_issue("COE-B");
+    child_b.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding_b.clone()));
+    let child_b = manager
+        .ensure(&child_b)
+        .await
+        .expect("repository-b child should exist");
+    let mut child_c = sample_issue("COE-C");
+    child_c.repository_binding = Some(RepositoryBindingOutcome::Resolved(binding_c.clone()));
+    let child_c = manager
+        .ensure(&child_c)
+        .await
+        .expect("repository-c child should exist");
+    let child_c_git_dir = child_c.handle.workspace_path().join(".git");
+    std::fs::write(
+        child_c_git_dir.join("shallow"),
+        format!(
+            "{}\n",
+            git(child_c.handle.workspace_path(), &["rev-parse", "HEAD"])
+        ),
+    )
+    .expect("shallow boundary should be written");
+    let child_c_manifest_path = child_c.handle.checkout_manifest_path();
+    let mut child_c_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&child_c_manifest_path).expect("child manifest should be readable"),
+    )
+    .expect("child manifest should decode");
+    child_c_manifest["shallow"] = serde_json::Value::Bool(true);
+    std::fs::write(
+        &child_c_manifest_path,
+        serde_json::to_vec_pretty(&child_c_manifest).expect("child manifest should encode"),
+    )
+    .expect("child manifest should be updated for the shallow fixture");
+    assert_eq!(
+        git(
+            child_c.handle.workspace_path(),
+            &["rev-parse", "--is-shallow-repository"]
+        ),
+        "true"
+    );
+
+    let child_snapshot = [
+        child_a1.handle.clone(),
+        child_a2.handle.clone(),
+        child_b.handle.clone(),
+        child_c.handle.clone(),
+    ]
+    .map(|handle| {
+        (
+            handle.clone(),
+            git(handle.workspace_path(), &["rev-parse", "HEAD"]),
+            git(
+                handle.workspace_path(),
+                &["status", "--porcelain", "--untracked-files=all"],
+            ),
+            std::fs::read(handle.checkout_manifest_path())
+                .expect("child manifest should be readable"),
+        )
+    });
+    let mut parent = sample_issue("COE-PARENT");
+    parent.issue_id = "parent-id".to_owned();
+    let requests = vec![
+        ParentCheckoutRequest {
+            issue_id: child_a1.handle.issue_id().to_owned(),
+            repository_id: binding_a.repository_id().to_string(),
+            checkout_generation: child_a1
+                .handle
+                .checkout_generation()
+                .expect("generation")
+                .to_owned(),
+            lease_owner: "ancestor-integration:parent-id".to_owned(),
+            required_merge_commits: vec![merge_a1],
+        },
+        ParentCheckoutRequest {
+            issue_id: child_a2.handle.issue_id().to_owned(),
+            repository_id: binding_a.repository_id().to_string(),
+            checkout_generation: child_a2
+                .handle
+                .checkout_generation()
+                .expect("generation")
+                .to_owned(),
+            lease_owner: "ancestor-integration:parent-id".to_owned(),
+            required_merge_commits: vec![merge_a2.clone()],
+        },
+        ParentCheckoutRequest {
+            issue_id: child_b.handle.issue_id().to_owned(),
+            repository_id: binding_b.repository_id().to_string(),
+            checkout_generation: child_b
+                .handle
+                .checkout_generation()
+                .expect("generation")
+                .to_owned(),
+            lease_owner: "ancestor-integration:parent-id".to_owned(),
+            required_merge_commits: vec![git(&source_b, &["rev-parse", "HEAD"])],
+        },
+        ParentCheckoutRequest {
+            issue_id: child_c.handle.issue_id().to_owned(),
+            repository_id: binding_c.repository_id().to_string(),
+            checkout_generation: child_c
+                .handle
+                .checkout_generation()
+                .expect("generation")
+                .to_owned(),
+            lease_owner: "ancestor-integration:parent-id".to_owned(),
+            required_merge_commits: vec![git(&source_c, &["rev-parse", "HEAD"])],
+        },
+    ];
+    let mut stale_requests = requests.clone();
+    stale_requests[0].checkout_generation = "stale-generation".to_owned();
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 4, stale_requests).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("generation is unavailable")
+    ));
+
+    std::fs::write(child_b.handle.workspace_path().join("dirty.txt"), "dirty\n")
+        .expect("dirty marker should be written");
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 5, requests.clone()).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("dirty")
+    ));
+    std::fs::remove_file(child_b.handle.workspace_path().join("dirty.txt"))
+        .expect("dirty marker should be removed");
+
+    let expected_remote = git(
+        child_c.handle.workspace_path(),
+        &["remote", "get-url", "origin"],
+    );
+    git(
+        child_c.handle.workspace_path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            source_b.to_str().expect("wrong remote path"),
+        ],
+    );
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 6, requests.clone()).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("remote fingerprint")
+    ));
+    git(
+        child_c.handle.workspace_path(),
+        &["remote", "set-url", "origin", &expected_remote],
+    );
+
+    let prepared = manager
+        .prepare_parent_execution_root(&parent, 7, requests)
+        .await
+        .expect("parent root should be prepared from retained storage");
+
+    assert!(!prepared.handle.workspace_path().join(".git").exists());
+    assert_eq!(prepared.child_checkout_map.repositories.len(), 3);
+    let repository_a = prepared
+        .child_checkout_map
+        .repositories
+        .get(binding_a.repository_id().as_str())
+        .expect("repository-a checkout should exist");
+    assert_eq!(repository_a.retained_checkouts.len(), 2);
+    assert_eq!(repository_a.target_commit, merge_a2);
+    for (handle, head, status, manifest) in child_snapshot {
+        assert_eq!(git(handle.workspace_path(), &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(
+                handle.workspace_path(),
+                &["status", "--porcelain", "--untracked-files=all"],
+            ),
+            status
+        );
+        assert_eq!(
+            std::fs::read(handle.checkout_manifest_path())
+                .expect("child manifest should remain readable"),
+            manifest
+        );
+    }
+    for checkout in prepared.child_checkout_map.repositories.values() {
+        let path = manager
+            .resolve_parent_checkout(&prepared, &checkout.checkout_handle)
+            .await
+            .expect("opaque checkout handle should resolve");
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]), checkout.target_commit);
+        assert!(
+            path.join(".git").is_file(),
+            "a linked worktree uses a .git file"
+        );
+    }
+    assert_eq!(
+        git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]),
+        child_a1_head
+    );
+    assert!(matches!(
+        manager.resolve_parent_checkout(&prepared, "../arbitrary").await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("not present")
+    ));
+
+    let mut changed_requests = prepared
+        .child_checkout_map
+        .repositories
+        .values()
+        .flat_map(|repository| {
+            repository
+                .retained_checkouts
+                .iter()
+                .map(|checkout| ParentCheckoutRequest {
+                    issue_id: checkout.issue_id.clone(),
+                    repository_id: repository.repository_id.clone(),
+                    checkout_generation: checkout.checkout_generation.clone(),
+                    lease_owner: checkout.lease_owner.clone(),
+                    required_merge_commits: repository.required_merge_commits.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    changed_requests[0].lease_owner = "ancestor-integration:other-parent".to_owned();
+    assert!(matches!(
+        manager.prepare_parent_execution_root(&parent, 7, changed_requests).await,
+        Err(WorkspaceError::CheckoutVerification { reason, .. })
+            if reason.contains("does not match")
+    ));
+
+    let repository_instructions = manager
+        .parent_repository_instructions(&prepared)
+        .await
+        .expect("repository instructions should load");
+    let openhands = manager.parent_runtime_envelope(
+        &prepared,
+        ParentRuntimeDescriptor {
+            run_id: "run-parent".to_owned(),
+            attempt: 1,
+            integration_instruction: None,
+            harness: "openhands_agent_server".to_owned(),
+            model_profile: "default".to_owned(),
+            model: None,
+            effective_containment: "trusted_host".to_owned(),
+        },
+    );
+    let codex = manager.parent_runtime_envelope(
+        &prepared,
+        ParentRuntimeDescriptor {
+            run_id: "run-parent".to_owned(),
+            attempt: 1,
+            integration_instruction: None,
+            harness: "codex_app_server".to_owned(),
+            model_profile: "default".to_owned(),
+            model: None,
+            effective_containment: "trusted_host".to_owned(),
+        },
+    );
+    assert_eq!(openhands.workspace_path, codex.workspace_path);
+    assert_eq!(openhands.checkouts, codex.checkouts);
+    assert_eq!(openhands.requested_execution_scope, "parent_multi_checkout");
+    assert_eq!(codex.effective_containment, "trusted_host");
+    let prompt = compose_parent_prompt(
+        "generic lifecycle policy",
+        "acceptance criteria",
+        &codex,
+        Some("project-set instructions"),
+        &repository_instructions,
+    );
+    assert!(prompt.contains(binding_a.repository_id().as_str()));
+    assert!(prompt.contains("project-set instructions"));
+    assert!(!prompt.contains("frontend repository"));
+
+    #[cfg(unix)]
+    {
+        let integration = prepared
+            .handle
+            .workspace_path()
+            .join(&repository_a.relative_path);
+        git(
+            child_a1.handle.workspace_path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                integration.to_str().expect("integration path"),
+            ],
+        );
+        let outside = temp_dir.path().join("outside-parent-root");
+        std::fs::create_dir_all(&outside).expect("outside directory should exist");
+        symlink(&outside, &integration).expect("integration symlink should be created");
+        assert!(matches!(
+            manager
+                .resolve_parent_checkout(&prepared, &repository_a.checkout_handle)
+                .await,
+            Err(WorkspaceError::PathEscape { .. })
+                | Err(WorkspaceError::ManagedPathSymlink { .. })
+                | Err(WorkspaceError::CheckoutVerification { .. })
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_execution_root_rejects_a_symlinked_parent_directory_before_git() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let outside = temp_dir.path().join("outside");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root should exist");
+    std::fs::create_dir_all(&outside).expect("outside should exist");
+    symlink(&outside, workspace_root.join("parents"))
+        .expect("parent directory symlink should be created");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+
+    assert!(matches!(
+        manager
+            .prepare_parent_execution_root(
+                &sample_issue("COE-PARENT-SYMLINK"),
+                1,
+                vec![ParentCheckoutRequest {
+                    issue_id: "child-id".to_owned(),
+                    repository_id: "local:repository:child".to_owned(),
+                    checkout_generation: "generation-1".to_owned(),
+                    lease_owner: "ancestor-integration:parent-id".to_owned(),
+                    required_merge_commits: Vec::new(),
+                }],
+            )
+            .await,
+        Err(WorkspaceError::InstructionPathEscape { .. })
+    ));
+    assert!(
+        std::fs::read_dir(&outside)
+            .expect("outside should remain readable")
+            .next()
+            .is_none()
+    );
 }
 
 #[cfg(unix)]

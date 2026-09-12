@@ -122,6 +122,42 @@ scope and leases and requests a full tracker observation on the next tick.
 Generation-checked replans also fetch full reachability before reconciling
 changed edges, so rejecting a stale replan cannot discard reparented evidence.
 
+### Parent execution roots
+
+A frozen parent hierarchy uses a separate non-Git root:
+
+```text
+<workspace.root>/parents/parent-<sanitized-identifier>/<hierarchy-generation>/
+  parent-manifest.json
+  child-checkouts.json
+  integration-plan.md
+  evidence/
+  repositories/<opaque-checkout-handle>/
+```
+
+`child-checkouts.json` is the durable handle boundary. It groups every leased
+child generation by canonical repository, records the safe remote fingerprint,
+target and provider merge-result commits, instruction provenance, and the
+selected shared-storage generation. Reopening an existing root verifies that
+the incoming generation, lease owners, children, and merge results still match
+that map. Arbitrary paths and handles that are absent from the map are rejected.
+
+Parent preparation verifies retained child identity and cleanliness without
+moving a child branch or HEAD. It can accept a recorded shallow generation,
+then fetch and deepen the configured target through the repository credential
+provider before adding a detached integration worktree. The new worktree must
+remain below `repositories/`, share the selected child's Git common directory,
+match both fetch and push remote fingerprints, be clean, and point at the
+recorded target commit. Several children in one repository share one handle;
+the target must contain every provider merge-result commit, while replaced
+feature commits from squash or rebase are not required.
+
+The parent runtime artifact records the complete relative checkout map,
+requested `parent_multi_checkout` scope, harness/model selection, and truthful
+`trusted_host` or `workspace_confined` containment. Parent memory grants remain
+owned by the later parent-controller lifecycle and are not synthesized from a
+leaf checkout grant.
+
 ## 4. Workspace directory layout
 
 Recommended layout inside each issue workspace:

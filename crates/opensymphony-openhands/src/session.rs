@@ -23,8 +23,8 @@ use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
 use crate::opensymphony_workspace::{
-    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, compose_terminal_prompt,
+    ParentRuntimeEnvelope, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
+    WorkspaceHandle, WorkspaceManager, compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -802,6 +802,8 @@ pub struct IssueConversationManifest {
     pub runtime_contract_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
@@ -885,6 +887,7 @@ impl IssueConversationManifest {
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -1009,6 +1012,22 @@ impl IssueConversationManifest {
             next_activity_sequence: 0,
         }
     }
+}
+
+fn bind_runtime_envelopes(
+    manifest: &mut IssueConversationManifest,
+    run_manifest: &mut RunManifest,
+) {
+    manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+    if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+    manifest.parent_runtime_envelope = run_manifest.parent_runtime_envelope.clone();
+    if let Some(envelope) = manifest.parent_runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    run_manifest.parent_runtime_envelope = manifest.parent_runtime_envelope.clone();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2951,11 +2970,7 @@ impl IssueSessionRunner {
         );
         manifest.llm_config_fingerprint =
             Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
-        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
-        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
-            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
-        }
-        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        bind_runtime_envelopes(&mut manifest, run_manifest);
         let pending_manifest_path = pending_conversation_manifest_path(workspace);
         if let Err(error) = workspace_manager
             .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
@@ -3131,6 +3146,10 @@ impl IssueSessionRunner {
         );
         failed_manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
         if let Some(envelope) = failed_manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
+        }
+        failed_manifest.parent_runtime_envelope = run_manifest.parent_runtime_envelope.clone();
+        if let Some(envelope) = failed_manifest.parent_runtime_envelope.as_mut() {
             envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
         }
         failed_manifest.apply_transport_diagnostics(
@@ -4726,7 +4745,7 @@ mod tests {
 
     use crate::opensymphony_domain::{
         BlockerRef, ConversationId, HarnessInterruptExpectedNextState, HarnessInterruptReason,
-        IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
+        IssueIdentifier, IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
     };
     use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
     use axum::{Json, Router, extract::State, routing::post};
@@ -4740,6 +4759,77 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[test]
+    fn openhands_binds_parent_scope_without_creating_a_leaf_envelope() {
+        let root = tempfile::tempdir().expect("temporary workspace root");
+        let path = root.path().join("parent-root");
+        std::fs::create_dir_all(&path).expect("parent root should exist");
+        let workspace =
+            WorkspaceHandle::new("parent-id", "COE-PARENT", "parent-COE-PARENT", path.clone());
+        let parent_envelope: ParentRuntimeEnvelope = serde_json::from_value(json!({
+            "parent_issue_id": "parent-id",
+            "parent_identifier": "COE-PARENT",
+            "run_id": "run-parent",
+            "attempt": 1,
+            "hierarchy_generation": 7,
+            "workspace_path": path,
+            "checkouts": {},
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "parent_multi_checkout",
+            "effective_containment": "trusted_host"
+        }))
+        .expect("parent envelope should decode");
+        let mut run_manifest = RunManifest::new(
+            &workspace,
+            &crate::opensymphony_workspace::RunDescriptor::new("run-parent", 1)
+                .with_parent_runtime_envelope(Some(parent_envelope)),
+        );
+        let profile = ConversationLaunchProfile {
+            workspace_kind: "LocalWorkspace".to_owned(),
+            confirmation_policy_kind: "NeverConfirm".to_owned(),
+            agent_kind: "Agent".to_owned(),
+            llm_model: "test-model".to_owned(),
+            llm_credential_mode: "api_key".to_owned(),
+            llm_api_key_env: None,
+            llm_base_url_env: None,
+            llm_subscription: None,
+            condenser: None,
+            agent_tools: None,
+            agent_include_default_tools: None,
+            max_iterations: 10,
+            stuck_detection: true,
+            llm_api_key_fingerprint: None,
+        };
+        let conversation_id = must(ConversationId::new("conversation-parent"));
+        let mut manifest = IssueConversationManifest::new(
+            must(IssueId::new("parent-id")),
+            must(IssueIdentifier::new("COE-PARENT")),
+            conversation_id.clone(),
+            "per_issue",
+            workspace.openhands_dir(),
+            Utc::now(),
+            None,
+            profile,
+            &BTreeMap::new(),
+        );
+
+        bind_runtime_envelopes(&mut manifest, &mut run_manifest);
+
+        assert!(manifest.runtime_envelope.is_none());
+        assert_eq!(
+            manifest
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref()),
+            Some(conversation_id.as_str())
+        );
+        assert_eq!(
+            manifest.parent_runtime_envelope,
+            run_manifest.parent_runtime_envelope
+        );
     }
 
     #[test]
@@ -5343,6 +5433,7 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,

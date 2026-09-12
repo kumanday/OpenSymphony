@@ -2,6 +2,7 @@
 
 use futures_util::{StreamExt, stream};
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, io,
@@ -48,9 +49,10 @@ use crate::opensymphony_orchestrator::{
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
     CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
-    IssueLifecycleState, RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope,
-    WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
-    checkout_credential_environment_variables, compose_terminal_prompt,
+    IssueLifecycleState, ParentCheckoutRequest, ParentRuntimeDescriptor, ParentRuntimeEnvelope,
+    RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
+    WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
+    checkout_credential_environment_variables, compose_parent_prompt, compose_terminal_prompt,
     environment_variable_names_equal,
 };
 use async_trait::async_trait;
@@ -66,8 +68,9 @@ use tokio::{
 use url::Url;
 
 use super::{
-    RunCommandError, RuntimeMemoryEnv, config::RunRuntimeConfig, datetime_to_timestamp_ms,
-    now_timestamp, timestamp_to_datetime,
+    RunCommandError, RuntimeMemoryEnv,
+    config::{ResolvedIntegrationInstructions, RunRuntimeConfig},
+    datetime_to_timestamp_ms, now_timestamp, timestamp_to_datetime,
 };
 
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -187,6 +190,7 @@ pub(super) struct RuntimeWorkerBackend {
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     worker_env: BTreeMap<String, String>,
     checkout_credential_envs: BTreeSet<String>,
+    integration_instructions: Option<ResolvedIntegrationInstructions>,
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     codex_interrupts: CodexInterruptRegistry,
@@ -2353,6 +2357,99 @@ impl GitHubRepository {
     }
 }
 
+fn parent_checkout_requests(
+    state: &DurableOrchestratorState,
+    parent_id: &IssueId,
+    snapshot: &HierarchySnapshot,
+) -> Result<Vec<ParentCheckoutRequest>, CliWorkspaceError> {
+    let resources = state.descendant_resources_for(parent_id);
+    for edge in snapshot
+        .required_child_edges
+        .iter()
+        .filter(|edge| edge.required)
+    {
+        let mut subtree = BTreeSet::from([edge.child_id.clone()]);
+        let mut pending = vec![edge.child_id.clone()];
+        while let Some(issue_id) = pending.pop() {
+            if let Some(child_snapshot) = state.hierarchy.get(&issue_id) {
+                for child in child_snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|child| child.required)
+                {
+                    if subtree.insert(child.child_id.clone()) {
+                        pending.push(child.child_id.clone());
+                    }
+                }
+            }
+        }
+        if !resources
+            .iter()
+            .any(|resource| subtree.contains(&resource.issue_id))
+        {
+            return Err(CliWorkspaceError::RetryState(format!(
+                "required child {} has no active generation-bound ancestor lease",
+                edge.child_identifier
+            )));
+        }
+    }
+    let repository_ids = resources
+        .iter()
+        .map(|resource| resource.repository_id.clone())
+        .collect::<BTreeSet<_>>();
+    if snapshot
+        .dispatch_required_merge_commits
+        .iter()
+        .any(|commit| commit.repository_id.is_none())
+        && repository_ids.len() != 1
+    {
+        return Err(CliWorkspaceError::RetryState(
+            "repository-neutral merge evidence is ambiguous for a multi-repository parent"
+                .to_owned(),
+        ));
+    }
+    let owner = crate::opensymphony_orchestrator::LeaseOwner::ancestor(parent_id);
+    resources
+        .into_iter()
+        .map(|resource| {
+            let lease = state
+                .leases
+                .iter()
+                .find(|lease| {
+                    lease.active()
+                        && lease.owner == owner
+                        && lease.hierarchy_generation == snapshot.generation
+                        && lease.resource == resource
+                })
+                .ok_or_else(|| {
+                    CliWorkspaceError::RetryState(format!(
+                        "parent checkout {} has no active ancestor lease",
+                        resource.checkout_generation
+                    ))
+                })?;
+            let required_merge_commits = snapshot
+                .dispatch_required_merge_commits
+                .iter()
+                .filter(|commit| {
+                    commit
+                        .repository_id
+                        .as_ref()
+                        .is_some_and(|repository_id| repository_id == &resource.repository_id)
+                        || (commit.repository_id.is_none() && repository_ids.len() == 1)
+                })
+                .map(|commit| commit.commit.clone())
+                .collect();
+            Ok(ParentCheckoutRequest {
+                issue_id: resource.issue_id.to_string(),
+                repository_id: resource.repository_id.to_string(),
+                checkout_generation: resource.checkout_generation,
+                lease_owner: lease.owner.id.clone(),
+                required_merge_commits,
+            })
+        })
+        .collect()
+}
+
 impl RuntimeWorkspaceBackend {
     #[cfg(test)]
     pub(super) fn new(manager: Arc<WorkspaceManager>, workflow: &ResolvedWorkflow) -> Self {
@@ -2652,6 +2749,52 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         issue: &NormalizedIssue,
         _observed_at: TimestampMs,
     ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
+        if !issue.sub_issues.is_empty() {
+            let raw = self
+                .manager
+                .load_orchestrator_state::<serde_json::Value>()
+                .await?
+                .ok_or_else(|| {
+                    CliWorkspaceError::RetryState(
+                        "parent preparation requires durable hierarchy state".to_owned(),
+                    )
+                })?;
+            let state: DurableOrchestratorState = serde_json::from_value(raw).map_err(|error| {
+                CliWorkspaceError::RetryState(format!(
+                    "invalid durable hierarchy state during parent preparation: {error}"
+                ))
+            })?;
+            state.validate().map_err(CliWorkspaceError::RetryState)?;
+            let snapshot = state.hierarchy.get(&issue.id).ok_or_else(|| {
+                CliWorkspaceError::RetryState(
+                    "parent preparation requires a pinned hierarchy snapshot".to_owned(),
+                )
+            })?;
+            if !snapshot.dispatch_intended() {
+                return Err(CliWorkspaceError::RetryState(
+                    "parent preparation requires a persisted dispatch intent".to_owned(),
+                ));
+            }
+            let requests = parent_checkout_requests(&state, &issue.id, snapshot)?;
+            let parent = self
+                .manager
+                .prepare_parent_execution_root(
+                    &issue_descriptor(issue),
+                    snapshot.generation,
+                    requests,
+                )
+                .await?;
+            self.terminal_cleanup_paths
+                .remove(parent.handle.workspace_path());
+            return Ok(crate::opensymphony_domain::WorkspaceRecord {
+                path: parent.handle.workspace_path().to_path_buf(),
+                workspace_key: WorkspaceKey::new(parent.handle.workspace_key().to_owned())?,
+                created_now: parent.created,
+                created_at: Some(datetime_to_timestamp_ms(parent.manifest.created_at)),
+                updated_at: Some(datetime_to_timestamp_ms(parent.manifest.updated_at)),
+                last_seen_tracker_refresh_at: issue.updated_at,
+            });
+        }
         let ensured = self
             .manager
             .ensure_with_checkout_timeout(&issue_descriptor(issue), DEFAULT_WORKER_LAUNCH_TIMEOUT)
@@ -3634,6 +3777,7 @@ impl RuntimeWorkerBackend {
             workpad_comment_source,
             worker_env,
             checkout_credential_envs: BTreeSet::new(),
+            integration_instructions: None,
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
@@ -3647,6 +3791,14 @@ impl RuntimeWorkerBackend {
 
     pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
         self.checkout_credential_envs = variables;
+        self
+    }
+
+    pub(super) fn with_integration_instructions(
+        mut self,
+        instructions: Option<ResolvedIntegrationInstructions>,
+    ) -> Self {
+        self.integration_instructions = instructions;
         self
     }
 
@@ -3719,6 +3871,7 @@ impl RuntimeWorkerBackend {
         let memory_env = self.memory_env.clone();
         let workpad_comment_source = self.workpad_comment_source.clone();
         let workspace_manager = self.workspace_manager.clone();
+        let integration_instructions = self.integration_instructions.clone();
         let openhands_conversation_store = self.openhands_conversation_store.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
@@ -3751,17 +3904,62 @@ impl RuntimeWorkerBackend {
                 workspace_issue.repository_binding =
                     Some(RepositoryBindingOutcome::Resolved(binding));
             }
-            let ensured = match workspace_manager
-                .ensure_with_run_id(&workspace_issue, Some(&run_id))
-                .await
-            {
-                Ok(ensured) => ensured,
-                Err(error) => {
-                    report_launch_failure(
-                        &mut launch_tx,
-                        format!("failed to ensure workspace: {error}"),
-                    );
-                    return;
+            let (ensured, parent_execution) = if issue.sub_issues.is_empty() {
+                match workspace_manager
+                    .ensure_with_run_id(&workspace_issue, Some(&run_id))
+                    .await
+                {
+                    Ok(ensured) => (ensured, None),
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to ensure workspace: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                match workspace_manager
+                    .open_parent_execution_root_at(&workspace_issue, &run.workspace_path)
+                    .await
+                {
+                    Ok(parent) => {
+                        let issue_manifest =
+                            match workspace_manager.load_issue_manifest(&parent.handle).await {
+                                Ok(Some(manifest)) => manifest,
+                                Ok(None) => {
+                                    report_launch_failure(
+                                        &mut launch_tx,
+                                        "parent execution root is missing its issue manifest"
+                                            .to_owned(),
+                                    );
+                                    return;
+                                }
+                                Err(error) => {
+                                    report_launch_failure(
+                                        &mut launch_tx,
+                                        format!("failed to load parent issue manifest: {error}"),
+                                    );
+                                    return;
+                                }
+                            };
+                        (
+                            crate::opensymphony_workspace::EnsureWorkspaceResult {
+                                handle: parent.handle.clone(),
+                                issue_manifest,
+                                created: false,
+                                after_create: None,
+                            },
+                            Some(parent),
+                        )
+                    }
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to open parent execution root: {error}"),
+                        );
+                        return;
+                    }
                 }
             };
             let scheduler_workspace_path = match fs::canonicalize(&run.workspace_path).await {
@@ -3850,16 +4048,34 @@ impl RuntimeWorkerBackend {
             let persisted_conversation_binding = recovered_conversation
                 .as_ref()
                 .filter(|_| !switching_harness)
-                .and_then(|manifest| manifest.runtime_envelope.as_ref())
-                .and_then(|envelope| envelope.conversation_binding.clone())
+                .and_then(|manifest| {
+                    manifest
+                        .runtime_envelope
+                        .as_ref()
+                        .and_then(|envelope| envelope.conversation_binding.clone())
+                        .or_else(|| {
+                            manifest
+                                .parent_runtime_envelope
+                                .as_ref()
+                                .and_then(|envelope| envelope.conversation_binding.clone())
+                        })
+                })
                 .or_else(|| {
                     if switching_harness {
                         None
                     } else {
-                        prior_run_manifest
-                            .as_ref()
-                            .and_then(|manifest| manifest.runtime_envelope.as_ref())
-                            .and_then(|envelope| envelope.conversation_binding.clone())
+                        prior_run_manifest.as_ref().and_then(|manifest| {
+                            manifest
+                                .runtime_envelope
+                                .as_ref()
+                                .and_then(|envelope| envelope.conversation_binding.clone())
+                                .or_else(|| {
+                                    manifest
+                                        .parent_runtime_envelope
+                                        .as_ref()
+                                        .and_then(|envelope| envelope.conversation_binding.clone())
+                                })
+                        })
                     }
                 });
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
@@ -3918,7 +4134,7 @@ impl RuntimeWorkerBackend {
                             }),
                             requested_execution_scope: "single_checkout".to_owned(),
                             effective_containment: "trusted_host_process_cwd".to_owned(),
-                            conversation_binding: persisted_conversation_binding,
+                            conversation_binding: persisted_conversation_binding.clone(),
                             cleanup_intent: "workspace_manager_owned".to_owned(),
                         })
                     }
@@ -3933,62 +4149,143 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let mut memory_grant_requires_fresh_conversation = false;
-            let worker_memory_env = memory_env.as_ref().map(|memory| {
-                let mut scoped = memory.clone();
-                scoped.project = worker_memory_project(&issue, &memory.project);
-                scoped.execution_repo = runtime_envelope
-                    .as_ref()
-                    .map(|envelope| envelope.repository_binding.repository.id.to_string())
-                    .unwrap_or_else(|| memory.execution_repo.clone());
-                scoped.run_id = runtime_envelope
-                    .as_ref()
-                    .map(|envelope| envelope.run_id.clone());
-                scoped.attempt = runtime_envelope.as_ref().map(|envelope| envelope.attempt);
-                scoped.target_commit = runtime_envelope
-                    .as_ref()
-                    .map(|envelope| envelope.target_commit.clone());
-                scoped.checkout_head = initially_verified_checkout
-                    .as_ref()
-                    .map(|checkout| checkout.head.clone());
-                let authorized_repositories = scoped
-                    .authorized_repositories_by_project
-                    .get(&scoped.project)
-                    .cloned()
-                    .or_else(|| {
-                        scoped
-                            .authorized_repositories_by_project
-                            .iter()
-                            .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
-                            .map(|(_, repositories)| repositories.clone())
-                    })
-                    .filter(|repositories| !repositories.is_empty())
-                    .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
-                scoped.authorized_repositories = authorized_repositories.clone();
-                if let Some(grants) = &scoped.scope_grants {
-                    let (token, requires_fresh_conversation) =
-                        grants.issue_or_refresh_with_claims(MemoryScopeGrant {
-                            project: scoped.project.clone(),
-                            project_set: scoped.project_set.clone(),
-                            execution_repo: scoped.execution_repo.clone(),
-                            authorized_repositories,
-                            issue: issue.identifier.to_string(),
-                            run_id: scoped.run_id.clone(),
-                            attempt: scoped.attempt,
-                            checkout_generation: runtime_envelope
-                                .as_ref()
-                                .map(|envelope| envelope.checkout_generation.clone()),
-                            target_commit: scoped.target_commit.clone(),
-                            checkout_head: scoped.checkout_head.clone(),
-                            visibility: scoped.visibility,
-                            capabilities: BTreeSet::new(),
-                        });
-                    memory_grant_requires_fresh_conversation = requires_fresh_conversation;
-                    scoped.token = Some(token.clone());
+            let (parent_runtime_envelope, parent_integration_instructions) = if let Some(parent) =
+                parent_execution.as_ref()
+            {
+                let integration_content = match integration_instructions.as_ref() {
+                    Some(instructions) => match fs::read(&instructions.path).await {
+                        Ok(content) => {
+                            let mut hasher = Sha256::new();
+                            hasher.update(&content);
+                            let actual = format!("sha256:{:x}", hasher.finalize());
+                            if actual != instructions.content_hash {
+                                report_launch_failure(
+                                        &mut launch_tx,
+                                        "project-set integration instructions changed after configuration was resolved"
+                                            .to_owned(),
+                                    );
+                                return;
+                            }
+                            Some(String::from_utf8_lossy(&content).into_owned())
+                        }
+                        Err(error) => {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!(
+                                    "failed to read project-set integration instructions: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    },
+                    None => None,
+                };
+                let mut envelope = workspace_manager.parent_runtime_envelope(
+                    parent,
+                    ParentRuntimeDescriptor {
+                        run_id: run_id.clone(),
+                        attempt,
+                        integration_instruction: integration_instructions.as_ref().map(
+                            |instructions| {
+                                (instructions.path.clone(), instructions.content_hash.clone())
+                            },
+                        ),
+                        harness: route.harness_kind.clone(),
+                        model_profile: route
+                            .model_profile
+                            .clone()
+                            .unwrap_or_else(|| "default".to_owned()),
+                        model: route.model.clone().or_else(|| {
+                            if route.harness_kind == OPENHANDS_AGENT_SERVER_KIND {
+                                workflow
+                                    .extensions
+                                    .openhands
+                                    .conversation
+                                    .agent
+                                    .llm
+                                    .as_ref()
+                                    .and_then(|llm| llm.model.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                        effective_containment: "trusted_host".to_owned(),
+                    },
+                );
+                envelope.conversation_binding = persisted_conversation_binding.clone();
+                if let Err(error) = workspace_manager
+                    .write_parent_runtime_envelope(parent, &envelope)
+                    .await
+                {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to persist parent runtime envelope: {error}"),
+                    );
+                    return;
                 }
-                scoped.authorized_repositories_by_project.clear();
-                scoped
-            });
+                (Some(envelope), integration_content)
+            } else {
+                (None, None)
+            };
+            let mut memory_grant_requires_fresh_conversation = false;
+            let worker_memory_env = memory_env
+                .as_ref()
+                .filter(|_| parent_execution.is_none())
+                .map(|memory| {
+                    let mut scoped = memory.clone();
+                    scoped.project = worker_memory_project(&issue, &memory.project);
+                    scoped.execution_repo = runtime_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.repository_binding.repository.id.to_string())
+                        .unwrap_or_else(|| memory.execution_repo.clone());
+                    scoped.run_id = runtime_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.run_id.clone());
+                    scoped.attempt = runtime_envelope.as_ref().map(|envelope| envelope.attempt);
+                    scoped.target_commit = runtime_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.target_commit.clone());
+                    scoped.checkout_head = initially_verified_checkout
+                        .as_ref()
+                        .map(|checkout| checkout.head.clone());
+                    let authorized_repositories = scoped
+                        .authorized_repositories_by_project
+                        .get(&scoped.project)
+                        .cloned()
+                        .or_else(|| {
+                            scoped
+                                .authorized_repositories_by_project
+                                .iter()
+                                .find(|(project, _)| project.eq_ignore_ascii_case(&scoped.project))
+                                .map(|(_, repositories)| repositories.clone())
+                        })
+                        .filter(|repositories| !repositories.is_empty())
+                        .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]));
+                    scoped.authorized_repositories = authorized_repositories.clone();
+                    if let Some(grants) = &scoped.scope_grants {
+                        let (token, requires_fresh_conversation) = grants
+                            .issue_or_refresh_with_claims(MemoryScopeGrant {
+                                project: scoped.project.clone(),
+                                project_set: scoped.project_set.clone(),
+                                execution_repo: scoped.execution_repo.clone(),
+                                authorized_repositories,
+                                issue: issue.identifier.to_string(),
+                                run_id: scoped.run_id.clone(),
+                                attempt: scoped.attempt,
+                                checkout_generation: runtime_envelope
+                                    .as_ref()
+                                    .map(|envelope| envelope.checkout_generation.clone()),
+                                target_commit: scoped.target_commit.clone(),
+                                checkout_head: scoped.checkout_head.clone(),
+                                visibility: scoped.visibility,
+                                capabilities: BTreeSet::new(),
+                            });
+                        memory_grant_requires_fresh_conversation = requires_fresh_conversation;
+                        scoped.token = Some(token.clone());
+                    }
+                    scoped.authorized_repositories_by_project.clear();
+                    scoped
+                });
             let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
                 || (memory_grant_registry_recovered
                     && worker_memory_env
@@ -4049,10 +4346,27 @@ impl RuntimeWorkerBackend {
             } else {
                 None
             };
-            let terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
-                let central_procedure = match workflow
-                    .render_prompt(&issue, run.attempt.map(|attempt| attempt.get()))
+            let parent_repository_instructions = if let Some(parent) = parent_execution.as_ref() {
+                match workspace_manager
+                    .parent_repository_instructions(parent)
+                    .await
                 {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to load parent repository instructions: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                BTreeMap::new()
+            };
+            let central_procedure =
+                || workflow.render_prompt(&issue, run.attempt.map(|attempt| attempt.get()));
+            let terminal_prompt = if let Some(checkout) = runtime_envelope.as_ref() {
+                let central_procedure = match central_procedure() {
                     Ok(prompt) => prompt,
                     Err(error) => {
                         report_launch_failure(
@@ -4094,6 +4408,34 @@ impl RuntimeWorkerBackend {
                         checkout.effective_containment
                     ),
                 ))
+            } else if let Some(parent_envelope) = parent_runtime_envelope.as_ref() {
+                let central_procedure = match central_procedure() {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        report_launch_failure(
+                            &mut launch_tx,
+                            format!("failed to render workflow prompt: {error}"),
+                        );
+                        return;
+                    }
+                };
+                Some(compose_parent_prompt(
+                    &central_procedure,
+                    &format!(
+                        "Issue: {}\nTitle: {}\nAttempt: {}\nAcceptance and task description:\n{}",
+                        issue.identifier,
+                        issue.title,
+                        attempt,
+                        issue
+                            .description
+                            .as_deref()
+                            .filter(|description| !description.trim().is_empty())
+                            .unwrap_or("No tracker description provided."),
+                    ),
+                    parent_envelope,
+                    parent_integration_instructions.as_deref(),
+                    &parent_repository_instructions,
+                ))
             } else {
                 None
             };
@@ -4101,7 +4443,8 @@ impl RuntimeWorkerBackend {
             let run_descriptor = RunDescriptor::new(run_id, attempt)
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
-                .with_runtime_envelope(runtime_envelope.clone());
+                .with_runtime_envelope(runtime_envelope.clone())
+                .with_parent_runtime_envelope(parent_runtime_envelope.clone());
             let mut initialize_fresh_conversation = false;
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
@@ -5226,6 +5569,7 @@ async fn try_run_codex_stdio_issue(
                 &conversation_id,
                 route,
                 run_manifest.runtime_envelope.clone(),
+                run_manifest.parent_runtime_envelope.clone(),
             )
             .await
             {
@@ -5277,8 +5621,9 @@ async fn try_run_codex_stdio_issue(
                     ));
                 }
             };
-            if manifest.runtime_envelope.is_some() {
+            if manifest.runtime_envelope.is_some() || manifest.parent_runtime_envelope.is_some() {
                 run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+                run_manifest.parent_runtime_envelope = manifest.parent_runtime_envelope.clone();
                 workspace_manager
                     .write_run_manifest(workspace, run_manifest)
                     .await
@@ -6744,6 +7089,7 @@ async fn write_codex_conversation_manifest(
     thread_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
     runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
 ) -> Result<IssueConversationManifest, String> {
     let now = chrono::Utc::now();
     let conversation_id = ConversationId::new(thread_id.to_string())
@@ -6769,6 +7115,7 @@ async fn write_codex_conversation_manifest(
         reset_reason: None,
         runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
         runtime_envelope,
+        parent_runtime_envelope,
         codex_archive_state: Some("active".to_string()),
         last_turn_id: None,
         active_run_id: None,
@@ -6788,6 +7135,9 @@ async fn write_codex_conversation_manifest(
         last_token_accumulation_at: None,
     };
     if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    if let Some(envelope) = manifest.parent_runtime_envelope.as_mut() {
         envelope.conversation_binding = Some(manifest.conversation_id.to_string());
     }
     workspace_manager
@@ -7442,9 +7792,13 @@ mod tests {
     };
 
     use crate::opensymphony_domain::{
-        ConversationId, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
-        HarnessInterruptReason, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-        RetryAttempt, RunAttempt, TrackerIssueStateKind, WorkerId, WorkspaceKey,
+        CanonicalRepositoryId, ConversationId, HarnessInterruptCommand,
+        HarnessInterruptExpectedNextState, HarnessInterruptReason, IssueId, IssueIdentifier,
+        IssueState, IssueStateCategory, RetryAttempt, RunAttempt, TrackerIssueStateKind, WorkerId,
+        WorkspaceKey,
+    };
+    use crate::opensymphony_orchestrator::{
+        HierarchyChildEdge, LeaseKind, LeaseOwner, LeaseRecord,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
@@ -7460,6 +7814,106 @@ mod tests {
             None
         );
         assert!(parse_superseded_harness_manifests("{not-json").is_err());
+    }
+
+    #[test]
+    fn parent_checkout_requests_require_generation_bound_leases_and_scoped_merges() {
+        let parent_id = IssueId::new("parent-id").expect("parent id");
+        let child_a = IssueId::new("child-a").expect("child id");
+        let child_b = IssueId::new("child-b").expect("child id");
+        let repository_a = CanonicalRepositoryId::new("github:repository:a").expect("repo id");
+        let repository_b = CanonicalRepositoryId::new("github:repository:b").expect("repo id");
+        let mut snapshot = HierarchySnapshot {
+            parent_id: parent_id.clone(),
+            generation: 7,
+            required_child_edges: vec![
+                HierarchyChildEdge {
+                    child_id: child_a.clone(),
+                    child_identifier: IssueIdentifier::new("COE-A").expect("identifier"),
+                    required: true,
+                },
+                HierarchyChildEdge {
+                    child_id: child_b.clone(),
+                    child_identifier: IssueIdentifier::new("COE-B").expect("identifier"),
+                    required: true,
+                },
+            ],
+            frozen: true,
+            blocked_reason: None,
+            eligibility_blocked_reason: None,
+            dispatched_generation: None,
+            dispatch_intent_generation: Some(7),
+            in_flight_generation: None,
+            dispatch_required_merge_commits: vec![
+                RequiredMergeCommit {
+                    repository_id: Some(repository_a.clone()),
+                    commit: "merge-a".to_owned(),
+                },
+                RequiredMergeCommit {
+                    repository_id: Some(repository_b.clone()),
+                    commit: "merge-b".to_owned(),
+                },
+            ],
+        };
+        let owner = LeaseOwner::ancestor(&parent_id);
+        let resources = [
+            LeaseResource {
+                issue_id: child_a,
+                repository_id: repository_a,
+                checkout_generation: "generation-a".to_owned(),
+            },
+            LeaseResource {
+                issue_id: child_b,
+                repository_id: repository_b,
+                checkout_generation: "generation-b".to_owned(),
+            },
+        ];
+        let mut state = DurableOrchestratorState::default();
+        state.hierarchy.insert(parent_id.clone(), snapshot.clone());
+        state.leases = resources
+            .iter()
+            .cloned()
+            .map(|resource| LeaseRecord {
+                kind: LeaseKind::AncestorIntegration,
+                resource,
+                owner: owner.clone(),
+                hierarchy_generation: 7,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            })
+            .collect();
+
+        let requests = parent_checkout_requests(&state, &parent_id, &snapshot)
+            .expect("leased requests should resolve");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().any(|request| {
+            request.checkout_generation == "generation-a"
+                && request.required_merge_commits == ["merge-a"]
+        }));
+        state.leases.pop();
+        assert!(matches!(
+            parent_checkout_requests(&state, &parent_id, &snapshot),
+            Err(CliWorkspaceError::RetryState(reason)) if reason.contains("no active generation-bound ancestor lease")
+        ));
+
+        state.leases.push(LeaseRecord {
+            kind: LeaseKind::AncestorIntegration,
+            resource: resources[1].clone(),
+            owner,
+            hierarchy_generation: 7,
+            acquired_at: 1,
+            expires_at: None,
+            released_at: None,
+        });
+        snapshot.dispatch_required_merge_commits = vec![RequiredMergeCommit {
+            repository_id: None,
+            commit: "ambiguous-merge".to_owned(),
+        }];
+        assert!(matches!(
+            parent_checkout_requests(&state, &parent_id, &snapshot),
+            Err(CliWorkspaceError::RetryState(reason)) if reason.contains("ambiguous")
+        ));
     }
 
     fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
@@ -7543,6 +7997,7 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -7787,6 +8242,7 @@ mod tests {
             workspace_path: PathBuf::from("/workspace/COE-479"),
             repository_binding: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -7861,6 +8317,7 @@ mod tests {
             workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope.clone()),
+            parent_runtime_envelope: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -7943,6 +8400,7 @@ mod tests {
             workspace_path: PathBuf::from("/workspace/COE-479--generation-1"),
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope.clone()),
+            parent_runtime_envelope: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -11387,6 +11845,7 @@ Run the scheduler.
             state_root: None,
             memory_catalog_root: None,
             memory_sources: std::collections::BTreeMap::new(),
+            integration_instructions: None,
             project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
@@ -12132,6 +12591,64 @@ Run the scheduler.
         }
     }
 
+    #[tokio::test]
+    async fn codex_manifest_binds_the_same_parent_execution_scope() {
+        let root = TempDir::new().expect("temporary root should exist");
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: root.path().join("workspaces"),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should build");
+        let issue = sample_issue();
+        let workspace = manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should exist");
+        let envelope: ParentRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+            "parent_issue_id": issue.id.as_str(),
+            "parent_identifier": issue.identifier.as_str(),
+            "run_id": "run-parent-codex",
+            "attempt": 1,
+            "hierarchy_generation": 7,
+            "workspace_path": workspace.handle.workspace_path(),
+            "checkouts": {},
+            "harness": "codex_app_server",
+            "model_profile": "codex-chatgpt-local-keychain",
+            "requested_execution_scope": "parent_multi_checkout",
+            "effective_containment": "trusted_host"
+        }))
+        .expect("parent envelope should decode");
+
+        let manifest = write_codex_conversation_manifest(
+            &manager,
+            &workspace.handle,
+            &issue,
+            "thread-parent-codex",
+            &codex_test_route(false),
+            None,
+            Some(envelope),
+        )
+        .await
+        .expect("Codex manifest should persist");
+
+        assert!(manifest.runtime_envelope.is_none());
+        assert_eq!(
+            manifest
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref()),
+            Some("thread-parent-codex")
+        );
+        assert_eq!(
+            manifest
+                .parent_runtime_envelope
+                .as_ref()
+                .map(|envelope| envelope.requested_execution_scope.as_str()),
+            Some("parent_multi_checkout")
+        );
+    }
+
     const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize","thread/start","thread/resume","thread/list","thread/archive","thread/unarchive","turn/start","turn/interrupt"]},"params":{"type":"object"}}}}}"#;
 
     #[cfg(unix)]
@@ -12627,6 +13144,7 @@ exit 64
             reset_reason: None,
             runtime_contract_version: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,

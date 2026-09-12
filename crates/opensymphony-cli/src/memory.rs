@@ -14117,6 +14117,7 @@ Public memory concept.
             workspace_path: workspace.clone(),
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope),
+            parent_runtime_envelope: None,
             attempt: 2,
             normal_retry_count: 0,
             pending_retry: false,

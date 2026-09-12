@@ -509,6 +509,7 @@ async fn seed_recovered_human_review_workspace(
         reset_reason: None,
         runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_string()),
         runtime_envelope: None,
+        parent_runtime_envelope: None,
         codex_archive_state: None,
         last_turn_id: None,
         active_run_id: None,

@@ -1127,6 +1127,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         linear_worker_env,
     )
     .with_openhands_conversation_store(runtime.openhands_conversation_store.clone())
+    .with_integration_instructions(runtime.integration_instructions.clone())
     .with_checkout_credential_envs(
         runtime
             .repository_checkouts
@@ -2043,6 +2044,7 @@ mod tests {
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
             memory_sources: BTreeMap::new(),
+            integration_instructions: None,
             project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
