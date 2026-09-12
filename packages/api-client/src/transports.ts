@@ -365,43 +365,58 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     return response as ActionReceipt;
   }
 
-  async cancelRun(runId: string): Promise<ActionReceipt> {
+  async cancelRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `cancel-${runId}-${crypto.randomUUID()}`,
       action_kind: "cancel",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `cancel-${runId}`,
+      idempotency_key: `cancel-${runId}-${operationId}`,
     });
   }
 
-  async retryRun(runId: string): Promise<ActionReceipt> {
+  async replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId = crypto.randomUUID(),
+  ): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `replan-${parentId}-${crypto.randomUUID()}`,
+      action_kind: "replan",
+      target_entity: { entity_kind: "issue", entity_id: parentId },
+      payload: { hierarchy_generation: hierarchyGeneration },
+      idempotency_key: `replan-${parentId}-${operationId}`,
+    });
+  }
+
+  async retryRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `retry-${runId}-${crypto.randomUUID()}`,
       action_kind: "retry",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `retry-${runId}`,
+      idempotency_key: `retry-${runId}-${operationId}`,
     });
   }
 
-  async resumeRun(runId: string): Promise<ActionReceipt> {
+  async resumeRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `resume-${runId}-${crypto.randomUUID()}`,
       action_kind: "resume",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `resume-${runId}`,
+      idempotency_key: `resume-${runId}-${operationId}`,
     });
   }
 
-  async rehydrateRun(runId: string): Promise<ActionReceipt> {
+  async rehydrateRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `rehydrate-${runId}-${crypto.randomUUID()}`,
       action_kind: "rehydrate",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `rehydrate-${runId}`,
+      idempotency_key: `rehydrate-${runId}-${operationId}`,
     });
   }
 

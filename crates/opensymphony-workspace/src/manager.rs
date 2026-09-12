@@ -3033,6 +3033,54 @@ impl WorkspaceManager {
             .await
     }
 
+    /// Read the scheduler-owned state kept beside managed workspaces. The
+    /// synthetic handle keeps the same containment and symlink checks as a
+    /// normal workspace artifact.
+    pub async fn load_orchestrator_state<T>(&self) -> Result<Option<T>, WorkspaceError>
+    where
+        T: DeserializeOwned,
+    {
+        if !path_exists(&self.config.root).await? {
+            return Ok(None);
+        }
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root.clone());
+        self.validate_workspace_handle(&handle).await?;
+        self.load_manifest(&handle, &self.orchestrator_state_path(&canonical_root))
+            .await
+    }
+
+    pub async fn write_orchestrator_state_atomically<T>(
+        &self,
+        state: &T,
+    ) -> Result<(), WorkspaceError>
+    where
+        T: Serialize,
+    {
+        self.create_directory(&self.config.root).await?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root.clone());
+        self.write_json_artifact_atomically(
+            &handle,
+            &self.orchestrator_state_path(&canonical_root),
+            state,
+        )
+        .await
+    }
+
+    fn orchestrator_state_handle(&self, canonical_root: PathBuf) -> WorkspaceHandle {
+        WorkspaceHandle::new(
+            "__opensymphony_orchestrator_state__",
+            "__opensymphony_orchestrator_state__",
+            "__opensymphony_orchestrator_state__",
+            canonical_root,
+        )
+    }
+
+    fn orchestrator_state_path(&self, canonical_root: &Path) -> PathBuf {
+        canonical_root.join(".opensymphony-orchestrator-state.json")
+    }
+
     pub async fn load_conversation_manifest(
         &self,
         workspace: &WorkspaceHandle,
@@ -4982,6 +5030,8 @@ fn build_shell_command(command: &str) -> Command {
 mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use super::{
@@ -5032,6 +5082,77 @@ mod tests {
         assert_eq!(hash, super::hash_bytes(b"abc"));
         assert!(contents.is_empty());
         assert_eq!(total_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_state_round_trips_through_atomic_workspace_artifact() {
+        let root = tempfile::tempdir().expect("workspace root should exist");
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: root.path().join("workspaces"),
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        let state = serde_json::json!({
+            "schema_version": 1,
+            "hierarchy": {},
+            "leases": []
+        });
+
+        manager
+            .write_orchestrator_state_atomically(&state)
+            .await
+            .expect("scheduler state should write atomically");
+        let loaded: Option<serde_json::Value> = manager
+            .load_orchestrator_state()
+            .await
+            .expect("scheduler state should load");
+
+        assert_eq!(loaded, Some(state));
+        assert!(
+            root.path()
+                .join("workspaces/.opensymphony-orchestrator-state.json")
+                .is_file()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orchestrator_state_uses_canonical_root_for_symlinked_workspace_root() {
+        let root = tempfile::tempdir().expect("workspace root should exist");
+        let canonical_root = root.path().join("canonical-workspaces");
+        let configured_root = root.path().join("configured-workspaces");
+        tokio::fs::create_dir_all(&canonical_root)
+            .await
+            .expect("canonical workspace root should exist");
+        symlink(&canonical_root, &configured_root).expect("workspace root symlink should exist");
+        let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+            root: configured_root,
+            hooks: HookConfig::default(),
+            cleanup: CleanupConfig::default(),
+        })
+        .expect("workspace manager should be constructed");
+        let state = serde_json::json!({
+            "schema_version": 1,
+            "hierarchy": {},
+            "leases": []
+        });
+
+        manager
+            .write_orchestrator_state_atomically(&state)
+            .await
+            .expect("scheduler state should write through a symlinked root");
+        let loaded: Option<serde_json::Value> = manager
+            .load_orchestrator_state()
+            .await
+            .expect("scheduler state should load through a symlinked root");
+
+        assert_eq!(loaded, Some(state));
+        assert!(
+            canonical_root
+                .join(".opensymphony-orchestrator-state.json")
+                .is_file()
+        );
     }
 
     #[tokio::test]
@@ -5159,11 +5280,15 @@ mod tests {
             credential_kind: "ssh-agent".to_owned(),
             credential_reference: None,
             credential_env: None,
+            review_credential_env: None,
             instructions_path: PathBuf::from(".git/hooks/local-instructions.md"),
             policy_generation: String::new(),
             review_profile: String::new(),
             review_provider: String::new(),
             review_policy_generation: String::new(),
+            required_checks: false,
+            required_review: false,
+            merge_method: None,
         };
 
         let error = manager

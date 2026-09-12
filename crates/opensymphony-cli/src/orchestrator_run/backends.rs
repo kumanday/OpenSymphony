@@ -1,11 +1,13 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
+use futures_util::{StreamExt, stream};
+use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::opensymphony_cli::{
@@ -20,10 +22,11 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId, IssueIdentifier,
-    IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome, RetryEntry,
-    RetryReason, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
-    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+    CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
+    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome,
+    RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
+    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -36,16 +39,19 @@ use crate::opensymphony_openhands::{
     pending_conversation_manifest_path, superseded_conversation_manifests_path,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
+    ChildEligibilityEvidence, DurableOrchestratorState, HierarchySnapshot, LeaseResource,
+    ParentEligibilityEvidence, ProviderEvidenceBoundary, RecoveredRun, RecoveryRecord,
+    RequiredMergeCommit, RetryExhaustionRecord, RetryPendingRecord, TrackerBackend,
     WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, IssueLifecycleState, RunDescriptor,
-    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, WorkspaceManagerConfig, checkout_credential_environment_variables,
-    compose_terminal_prompt, environment_variable_names_equal,
+    CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
+    IssueLifecycleState, RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope,
+    WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
+    checkout_credential_environment_variables, compose_terminal_prompt,
+    environment_variable_names_equal,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -67,6 +73,8 @@ use super::{
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
+const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
+const MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES: usize = 32;
 const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
@@ -87,6 +95,8 @@ pub(super) enum CliWorkspaceError {
     ConversationLifecycle(String),
     #[error("retry state persistence failed: {0}")]
     RetryState(String),
+    #[error("workspace cleanup deferred while a durable lease is active")]
+    CleanupDeferred,
 }
 
 #[derive(Debug, Error)]
@@ -107,13 +117,24 @@ pub(super) enum CliWorkerError {
 
 #[derive(Debug)]
 enum LaunchReport {
-    Conversation(Box<ConversationMetadata>),
+    Conversation {
+        conversation: Box<ConversationMetadata>,
+        started_at: Option<TimestampMs>,
+    },
     Failed(String),
 }
 
 pub(super) struct RuntimeTrackerBackend {
     client: LinearClient,
+    github_http: reqwest::Client,
+    github_token: Option<String>,
+    repository_checkouts: BTreeMap<String, CheckoutRepository>,
+    repository_routing: Option<RepositoryRouting>,
+    active_states: HashSet<String>,
+    terminal_states: HashSet<String>,
 }
+
+const GITHUB_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ActiveConversationStorePreparation {
@@ -150,6 +171,7 @@ pub(super) struct RuntimeWorkspaceBackend {
     active_states: HashSet<String>,
     terminal_states: HashSet<String>,
     terminal_cleanup_paths: HashSet<PathBuf>,
+    recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
     codex_bin: String,
     retain_failed: bool,
     retry_state_root: PathBuf,
@@ -253,8 +275,19 @@ impl WorkpadCommentSource for LinearWorkpadCommentSource {
 
 impl IssueSessionObserver for SchedulerObserver {
     fn on_launch(&mut self, conversation: &ConversationMetadata) {
+        self.on_launch_with_started_at(conversation, None);
+    }
+
+    fn on_launch_with_started_at(
+        &mut self,
+        conversation: &ConversationMetadata,
+        started_at: Option<TimestampMs>,
+    ) {
         if let Some(sender) = self.launch_tx.take() {
-            let _ = sender.send(LaunchReport::Conversation(Box::new(conversation.clone())));
+            let _ = sender.send(LaunchReport::Conversation {
+                conversation: Box::new(conversation.clone()),
+                started_at,
+            });
         }
     }
 
@@ -315,9 +348,35 @@ fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment
 
 pub(super) fn build_tracker_backend(
     workflow: &ResolvedWorkflow,
+    repository_checkouts: BTreeMap<String, CheckoutRepository>,
+    repository_routing: Option<RepositoryRouting>,
 ) -> Result<RuntimeTrackerBackend, LinearError> {
+    let github_http = reqwest::Client::builder()
+        .timeout(GITHUB_ELIGIBILITY_TIMEOUT)
+        .build()
+        .map_err(|error| LinearError::InvalidConfiguration(format!("GitHub client: {error}")))?;
     Ok(RuntimeTrackerBackend {
         client: build_linear_client(workflow)?,
+        github_http,
+        github_token: env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty()),
+        repository_checkouts,
+        repository_routing,
+        active_states: workflow
+            .config
+            .tracker
+            .active_states
+            .iter()
+            .map(|state| normalized_state_name(state))
+            .collect(),
+        terminal_states: workflow
+            .config
+            .tracker
+            .terminal_states
+            .iter()
+            .map(|state| normalized_state_name(state))
+            .collect(),
     })
 }
 
@@ -860,12 +919,16 @@ fn runtime_checkout_env_remove(
 }
 
 fn checkout_env_remove_variables(
-    variables: BTreeSet<String>,
+    mut variables: BTreeSet<String>,
     _local_server_env: &BTreeMap<String, String>,
 ) -> BTreeSet<String> {
     // A local-server override must never reintroduce a checkout credential,
     // including when its value was resolved from that same environment
     // variable (for example `${GITHUB_TOKEN}`).
+    // The tracker backend may use this ambient fallback for provider reads;
+    // it must never cross the worker boundary when it was not explicitly
+    // configured as a worker credential.
+    variables.insert("GITHUB_TOKEN".to_owned());
     variables
 }
 
@@ -879,6 +942,119 @@ fn strict_openhands_cleanup_requires_conversation_store(
 
 impl TrackerBackend for RuntimeTrackerBackend {
     type Error = LinearError;
+
+    async fn parent_eligibility(
+        &mut self,
+        _parent: &TrackerIssue,
+        hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        let identifiers = hierarchy
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+            .map(|edge| edge.child_identifier.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let children = self.client.issues_by_identifiers(&identifiers).await?;
+        let mut evidence = Vec::with_capacity(hierarchy.required_child_edges.len());
+        for edge in hierarchy
+            .required_child_edges
+            .iter()
+            .filter(|edge| edge.required)
+        {
+            let child = children
+                .iter()
+                .find(|child| child.id == edge.child_id.as_str())
+                .ok_or_else(|| LinearError::MissingIssueIds {
+                    issue_ids: vec![edge.child_identifier.as_str().to_owned()],
+                })?;
+            let (
+                provider_merge_confirmed,
+                merge_result_commit,
+                merge_repository_id,
+                merge_repository_ids,
+                merge_result_commits,
+                provider_evidence_at,
+                merge_required,
+                provider_evidence_by_issue,
+            ) = if let Some(repository) = self.checkout_policy_for_issue(child) {
+                if !repository.provider.eq_ignore_ascii_case("github") {
+                    // Legacy single-repository profiles may use a generic Git
+                    // checkout without a provider API for merge evidence. They
+                    // retain the legacy leaf-completion path instead of being
+                    // routed through incompatible GitHub evidence.
+                    (
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        false,
+                        Vec::new(),
+                    )
+                } else {
+                    let (
+                        provider_merge_confirmed,
+                        merge_result_commit,
+                        merge_repository_id,
+                        merge_repository_ids,
+                        merge_result_commits,
+                        provider_evidence_at,
+                        provider_evidence_by_issue,
+                    ) = self.direct_merge_evidence(child, repository).await?;
+                    (
+                        provider_merge_confirmed,
+                        merge_result_commit,
+                        merge_repository_id,
+                        merge_repository_ids,
+                        merge_result_commits,
+                        provider_evidence_at,
+                        true,
+                        provider_evidence_by_issue,
+                    )
+                }
+            } else if child.sub_issues.is_empty() {
+                (
+                    false,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    true,
+                    Vec::new(),
+                )
+            } else {
+                self.descendant_merge_evidence(child).await?
+            };
+            evidence.push(ChildEligibilityEvidence {
+                child_id: edge.child_id.clone(),
+                hierarchy_generation: hierarchy.generation,
+                // The scheduler overlays this provider evidence with its
+                // own durable terminal outcome for the child execution.
+                orchestrator_terminal: false,
+                provider_merge_confirmed,
+                merge_required,
+                merge_result_commit,
+                merge_result_commits: merge_result_commits
+                    .iter()
+                    .map(|commit| commit.commit.clone())
+                    .collect(),
+                merge_result_commits_by_repository: merge_result_commits,
+                merge_repository_id,
+                merge_repository_ids,
+                provider_evidence_at,
+                provider_evidence_by_issue,
+                resource: None,
+                resources: Vec::new(),
+                unresolved_failure: None,
+            });
+        }
+        Ok(ParentEligibilityEvidence {
+            hierarchy_generation: hierarchy.generation,
+            children: evidence,
+        })
+    }
 
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
@@ -912,6 +1088,1268 @@ impl TrackerBackend for RuntimeTrackerBackend {
 
     fn retry_after(error: &Self::Error) -> Option<Duration> {
         error.retry_after()
+    }
+}
+
+impl RuntimeTrackerBackend {
+    fn checkout_policy_for_issue(&self, issue: &TrackerIssue) -> Option<&CheckoutRepository> {
+        if !issue.sub_issues.is_empty() {
+            return None;
+        }
+        if let Some(routing) = self.repository_routing.as_ref() {
+            let binding = routing.resolve(
+                &issue.labels,
+                issue.project_id.as_deref(),
+                issue.project_slug.as_deref(),
+                false,
+            );
+            return binding
+                .repository_id()
+                .and_then(|repository_id| self.repository_checkouts.get(repository_id.as_str()));
+        }
+        (self.repository_checkouts.len() == 1)
+            .then(|| self.repository_checkouts.values().next())
+            .flatten()
+    }
+
+    async fn github_merge_evidence(
+        &self,
+        pr_url: &str,
+        repository: &CheckoutRepository,
+        expected_head_branch: Option<&str>,
+    ) -> Result<Option<GithubMergeEvidence>, LinearError> {
+        let url = Url::parse(pr_url).map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
+        })?;
+        let review_provider = if repository.review_provider.trim().is_empty() {
+            repository.provider.as_str()
+        } else {
+            repository.review_provider.as_str()
+        };
+        if !review_provider.eq_ignore_ascii_case("github")
+            || !repository.provider.eq_ignore_ascii_case("github")
+        {
+            return Ok(Some(GithubMergeEvidence::incompatible()));
+        }
+        if url.scheme() != "https" {
+            return Err(LinearError::InvalidResponse(format!(
+                "GitHub pull request URL must use https: {pr_url}"
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(LinearError::InvalidResponse(format!(
+                "GitHub pull request URL must not contain credentials: {pr_url}"
+            )));
+        }
+        let segments = url
+            .path_segments()
+            .map(|segments| segments.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if segments.len() != 4 || segments[2] != "pull" {
+            return Err(LinearError::InvalidResponse(format!(
+                "invalid GitHub pull request path: {pr_url}"
+            )));
+        }
+        let pull_number = segments[3].parse::<u64>().map_err(|error| {
+            LinearError::InvalidResponse(format!(
+                "invalid GitHub pull request number `{}`: {error}",
+                segments[3]
+            ))
+        })?;
+        let authority = github_url_authority(&url).ok_or_else(|| {
+            LinearError::InvalidResponse(format!(
+                "GitHub pull request URL has no supported authority: {pr_url}"
+            ))
+        })?;
+        let configured_authority =
+            github_remote_authority(&repository.remote_locator).ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "configured GitHub remote has no authority: {}",
+                    repository.remote_locator
+                ))
+            })?;
+        if authority != configured_authority {
+            return Ok(Some(GithubMergeEvidence::incompatible()));
+        }
+        if let Some((configured_owner, configured_repository)) =
+            github_remote_repository(&repository.remote_locator)
+            && (!configured_owner.eq_ignore_ascii_case(segments[0])
+                || !configured_repository.eq_ignore_ascii_case(segments[1]))
+        {
+            return Ok(Some(GithubMergeEvidence::incompatible()));
+        }
+        let public_github = authority == "github.com";
+        let api_root = if public_github {
+            "https://api.github.com".to_owned()
+        } else {
+            format!("{}/api/v3", url.origin().ascii_serialization())
+        };
+        let endpoint = format!(
+            "{api_root}/repos/{}/{}/pulls/{}",
+            segments[0], segments[1], segments[3]
+        );
+        let merge_repository_id = CanonicalRepositoryId::from_remote(
+            "github",
+            repository.provider_id.as_deref(),
+            format!("https://{authority}/{}/{}", segments[0], segments[1]),
+        )
+        .map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub repository identity: {error}"))
+        })?;
+        let pull_request = match self
+            .github_get_json::<GitHubPullRequest>(&endpoint, repository)
+            .await
+        {
+            Ok(pull_request) => pull_request,
+            Err(LinearError::HttpStatus { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                // A PR lookup 404 is only historical-deletion evidence after
+                // the repository itself is confirmed readable. Otherwise the
+                // same response can mean a private repository or insufficient
+                // token scope, which must remain an operational failure.
+                let repository_endpoint =
+                    format!("{api_root}/repos/{}/{}", segments[0], segments[1]);
+                self.github_get_json::<GitHubRepository>(&repository_endpoint, repository)
+                    .await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        // `updated_at` changes when an old PR is edited after a child is
+        // reactivated. Bind eligibility to the immutable merge event instead
+        // so unrelated metadata edits cannot make stale evidence look fresh.
+        let provider_evidence_at = pull_request
+            .merged_at
+            .as_deref()
+            .or(Some(pull_request.created_at.as_str()))
+            .and_then(github_provider_evidence_timestamp_ms);
+        let compatible = pull_request.base.ref_name == repository.target_branch
+            && pull_request
+                .base
+                .repo
+                .full_name
+                .eq_ignore_ascii_case(&format!("{}/{}", segments[0], segments[1]))
+            && repository.provider_id.as_deref().is_none_or(|provider_id| {
+                pull_request
+                    .base
+                    .repo
+                    .native_ids()
+                    .iter()
+                    .any(|candidate| candidate == provider_id)
+            })
+            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
+        let merge_method_satisfied = if compatible && pull_request.merged_at.is_some() {
+            let Some(satisfied) = self
+                .github_merge_method_satisfied(
+                    &api_root,
+                    segments[0],
+                    segments[1],
+                    pull_request.merge_commit_sha.as_deref(),
+                    repository,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            satisfied
+        } else {
+            false
+        };
+        let merge_commit_reachable = if compatible && pull_request.merged_at.is_some() {
+            let Some(reachable) = self
+                .github_merge_commit_reachable(
+                    &api_root,
+                    segments[0],
+                    segments[1],
+                    &repository.target_branch,
+                    pull_request.merge_commit_sha.as_deref(),
+                    repository,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            reachable
+        } else {
+            false
+        };
+        let policy_satisfied = if compatible && pull_request.merged_at.is_some() {
+            merge_method_satisfied
+                && self
+                    .github_merge_policy_satisfied(
+                        &api_root,
+                        segments[0],
+                        segments[1],
+                        segments[3],
+                        repository,
+                        pull_request.head.sha.as_deref(),
+                    )
+                    .await?
+        } else {
+            false
+        };
+        Ok(Some(GithubMergeEvidence {
+            compatible,
+            merged: compatible
+                && merge_method_satisfied
+                && merge_commit_reachable
+                && policy_satisfied
+                && pull_request.merged_at.is_some()
+                && pull_request
+                    .merge_commit_sha
+                    .as_deref()
+                    .is_some_and(|commit| !commit.trim().is_empty()),
+            merge_commit_sha: pull_request.merge_commit_sha,
+            merge_repository_id: Some(merge_repository_id),
+            created_at: pull_request.created_at,
+            pull_number,
+            provider_evidence_at,
+        }))
+    }
+
+    async fn github_merge_method_satisfied(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        merge_commit_sha: Option<&str>,
+        repository: &CheckoutRepository,
+    ) -> Result<Option<bool>, LinearError> {
+        let Some(expected_method) = repository
+            .merge_method
+            .as_deref()
+            .map(str::trim)
+            .filter(|method| !method.is_empty())
+        else {
+            return Ok(Some(true));
+        };
+        let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
+            return Ok(Some(false));
+        };
+        match expected_method.to_ascii_lowercase().as_str() {
+            "merge" => {
+                let endpoint = format!(
+                    "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}"
+                );
+                let commit = match self
+                    .github_get_json::<GitHubCommit>(&endpoint, repository)
+                    .await
+                {
+                    Ok(commit) => commit,
+                    Err(LinearError::HttpStatus { status, .. })
+                        if status == reqwest::StatusCode::NOT_FOUND =>
+                    {
+                        let repository_endpoint =
+                            format!("{api_root}/repos/{owner}/{repository_name}");
+                        self.github_get_json::<GitHubRepository>(&repository_endpoint, repository)
+                            .await?;
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+                Ok(Some(github_merge_method_matches(
+                    expected_method,
+                    commit.parents.len(),
+                )))
+            }
+            "squash" | "rebase" => Err(LinearError::InvalidResponse(format!(
+                "GitHub REST merge evidence cannot distinguish `{expected_method}` from the other single-parent merge method; configure merge_method: merge or omit merge_method"
+            ))),
+            _ => Ok(Some(false)),
+        }
+    }
+
+    async fn github_merge_commit_reachable(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        target_branch: &str,
+        merge_commit_sha: Option<&str>,
+        repository: &CheckoutRepository,
+    ) -> Result<Option<bool>, LinearError> {
+        let Some(merge_commit_sha) = merge_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
+            return Ok(Some(false));
+        };
+        let mut endpoint = Url::parse(api_root).map_err(|error| {
+            LinearError::InvalidResponse(format!("invalid GitHub API root: {error}"))
+        })?;
+        {
+            let mut segments = endpoint.path_segments_mut().map_err(|_| {
+                LinearError::InvalidResponse("GitHub API root cannot be a base URL".to_owned())
+            })?;
+            segments
+                .push("repos")
+                .push(owner)
+                .push(repository_name)
+                .push("compare")
+                .push(&format!("{target_branch}...{merge_commit_sha}"));
+        }
+        let comparison = self
+            .github_get_json::<GitHubCompare>(endpoint.as_ref(), repository)
+            .await?;
+        Ok(Some(github_compare_contains_commit(&comparison)))
+    }
+
+    async fn github_get_json<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<T, LinearError> {
+        let mut request = self
+            .github_http
+            .get(endpoint)
+            .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+        let configured_token = match repository.review_credential_env.as_deref() {
+            Some(name) => {
+                let token = env::var(name).map_err(|_| {
+                    LinearError::InvalidConfiguration(format!(
+                        "configured GitHub review credential variable `{name}` is not set"
+                    ))
+                })?;
+                (!token.trim().is_empty()).then_some(token).ok_or_else(|| {
+                    LinearError::InvalidConfiguration(format!(
+                        "configured GitHub review credential variable `{name}` is empty"
+                    ))
+                })?
+            }
+            None => self.github_token.clone().unwrap_or_default(),
+        };
+        if !configured_token.is_empty() {
+            request = request.bearer_auth(configured_token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        let status = response.status();
+        let retry_after = github_retry_after(response.headers());
+        let headers_indicate_rate_limit = github_headers_indicate_rate_limit(response.headers());
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| LinearError::Request(Box::new(error)))?;
+        if !status.is_success() {
+            let rate_limited = headers_indicate_rate_limit
+                || response_body.to_ascii_lowercase().contains("rate limit")
+                || response_body
+                    .to_ascii_lowercase()
+                    .contains("secondary rate limit");
+            let body = if rate_limited {
+                format!("GitHub API rate limit response for {endpoint}: {response_body}")
+            } else {
+                format!("GitHub API lookup failed for {endpoint}: {response_body}")
+            };
+            return Err(LinearError::HttpStatus {
+                status,
+                body,
+                retry_after,
+            });
+        }
+        serde_json::from_str::<T>(&response_body).map_err(|error| {
+            LinearError::InvalidResponse(format!(
+                "GitHub API response decode failed for {endpoint}: {error}"
+            ))
+        })
+    }
+
+    async fn github_merge_policy_satisfied(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        pull_number: &str,
+        repository: &CheckoutRepository,
+        check_commit_sha: Option<&str>,
+    ) -> Result<bool, LinearError> {
+        if repository.required_review {
+            let reviews = self
+                .github_reviews(api_root, owner, repository_name, pull_number, repository)
+                .await?;
+            let latest_by_reviewer = latest_github_review_states(reviews);
+            if !latest_by_reviewer
+                .values()
+                .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"))
+                || latest_by_reviewer
+                    .values()
+                    .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"))
+            {
+                return Ok(false);
+            }
+        }
+        if repository.required_checks {
+            let Some(check_commit_sha) = check_commit_sha.filter(|sha| !sha.trim().is_empty())
+            else {
+                return Ok(false);
+            };
+            let (total_count, check_runs) = self
+                .github_check_runs(
+                    api_root,
+                    owner,
+                    repository_name,
+                    check_commit_sha,
+                    repository,
+                )
+                .await?;
+            let required_checks = self
+                .github_required_check_contexts(api_root, owner, repository_name, repository)
+                .await?;
+            let commit_statuses = if required_checks.is_some() {
+                self.github_commit_statuses(
+                    api_root,
+                    owner,
+                    repository_name,
+                    check_commit_sha,
+                    repository,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            if check_runs.len() < total_count
+                || (total_count == 0 && required_checks.is_none())
+                || !required_check_evidence_satisfied(
+                    &check_runs,
+                    &commit_statuses,
+                    required_checks.as_ref(),
+                )
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn github_reviews(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        pull_number: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubPullRequestReview>, LinearError> {
+        let mut page = 1;
+        let mut reviews = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/pulls/{pull_number}/reviews?per_page=100&page={page}"
+            );
+            let page_reviews = self
+                .github_get_json::<Vec<GitHubPullRequestReview>>(&endpoint, repository)
+                .await?;
+            let page_count = page_reviews.len();
+            reviews.extend(page_reviews);
+            if page_count == 0 || page_count < 100 || page >= 1000 {
+                return Ok(reviews);
+            }
+            page += 1;
+        }
+    }
+
+    async fn github_check_runs(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        merge_commit_sha: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<(usize, Vec<GitHubCheckRun>), LinearError> {
+        let mut page = 1;
+        let mut total_count = None;
+        let mut check_runs = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/commits/{merge_commit_sha}/check-runs?per_page=100&page={page}"
+            );
+            let response = self
+                .github_get_json::<GitHubCheckRuns>(&endpoint, repository)
+                .await?;
+            total_count.get_or_insert(response.total_count);
+            let page_count = response.check_runs.len();
+            check_runs.extend(response.check_runs);
+            let expected = total_count.unwrap_or_default();
+            if check_runs.len() >= expected {
+                return Ok((expected, check_runs));
+            }
+            if page_count == 0 || page >= 1000 {
+                return Ok((expected, check_runs));
+            }
+            page += 1;
+        }
+    }
+
+    async fn github_commit_statuses(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        commit_sha: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Vec<GitHubCommitStatus>, LinearError> {
+        let mut page = 1;
+        let mut total_count = None;
+        let mut statuses = Vec::new();
+        loop {
+            let endpoint = format!(
+                "{api_root}/repos/{owner}/{repository_name}/commits/{commit_sha}/status?per_page=100&page={page}"
+            );
+            let response = self
+                .github_get_json::<GitHubCommitStatuses>(&endpoint, repository)
+                .await?;
+            total_count.get_or_insert(response.total_count);
+            let page_count = response.statuses.len();
+            statuses.extend(response.statuses);
+            let expected = total_count.unwrap_or_default();
+            if statuses.len() >= expected || page_count == 0 || page >= 1000 {
+                return Ok(statuses);
+            }
+            page += 1;
+        }
+    }
+
+    async fn github_required_check_contexts(
+        &self,
+        api_root: &str,
+        owner: &str,
+        repository_name: &str,
+        repository: &CheckoutRepository,
+    ) -> Result<Option<GitHubRequiredStatusChecks>, LinearError> {
+        let endpoint = github_required_status_checks_endpoint(
+            api_root,
+            owner,
+            repository_name,
+            &repository.target_branch,
+        )?;
+        match self
+            .github_get_json::<GitHubRequiredStatusChecks>(&endpoint, repository)
+            .await
+        {
+            Ok(policy) => {
+                Ok((!policy.contexts.is_empty() || !policy.checks.is_empty()).then_some(policy))
+            }
+            // A 404 is ambiguous: GitHub returns it for an unprotected branch
+            // and for credentials that cannot read protection settings.
+            // Required-check eligibility therefore fails closed.
+            Err(LinearError::HttpStatus { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Err(LinearError::HttpStatus {
+                    status,
+                    body: "GitHub branch protection lookup was not authorized or unavailable: /protection/required_status_checks".to_owned(),
+                    retry_after: None,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn direct_merge_evidence(
+        &self,
+        issue: &TrackerIssue,
+        repository: &CheckoutRepository,
+    ) -> Result<
+        (
+            bool,
+            Option<String>,
+            Option<CanonicalRepositoryId>,
+            Vec<CanonicalRepositoryId>,
+            Vec<RequiredMergeCommit>,
+            Option<TimestampMs>,
+            Vec<ProviderEvidenceBoundary>,
+        ),
+        LinearError,
+    > {
+        let pull_requests = parent_pull_request_candidates(issue);
+        let evidence = stream::iter(pull_requests)
+            .map(|pr_url| async move {
+                self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
+                    .await
+            })
+            .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let (confirmed, commit, repository_id, provider_evidence_at) =
+            select_current_github_merge_evidence(evidence);
+        let commits = commit
+            .iter()
+            .zip(repository_id.iter())
+            .map(|(commit, repository_id)| RequiredMergeCommit {
+                repository_id: Some(repository_id.clone()),
+                commit: commit.clone(),
+            })
+            .collect();
+        let repository_ids = repository_id.iter().cloned().collect();
+        let provider_evidence_by_issue = provider_evidence_at
+            .map(|evidence_at| {
+                vec![ProviderEvidenceBoundary {
+                    issue_id: IssueId::new(issue.id.clone()).expect("tracker ids are validated"),
+                    evidence_at,
+                }]
+            })
+            .unwrap_or_default();
+        Ok((
+            confirmed,
+            commit,
+            repository_id,
+            repository_ids,
+            commits,
+            provider_evidence_at,
+            provider_evidence_by_issue,
+        ))
+    }
+
+    async fn descendant_merge_evidence(
+        &self,
+        parent: &TrackerIssue,
+    ) -> Result<
+        (
+            bool,
+            Option<String>,
+            Option<CanonicalRepositoryId>,
+            Vec<CanonicalRepositoryId>,
+            Vec<RequiredMergeCommit>,
+            Option<TimestampMs>,
+            bool,
+            Vec<ProviderEvidenceBoundary>,
+        ),
+        LinearError,
+    > {
+        let mut pending = parent.sub_issues.clone();
+        let mut commits = Vec::new();
+        let mut repository_ids = BTreeSet::new();
+        let mut provider_evidence_at: Option<TimestampMs> = None;
+        let mut provider_evidence_by_issue = Vec::new();
+        let mut saw_leaf = false;
+        while !pending.is_empty() {
+            let identifiers = pending
+                .drain(..)
+                .map(|child| child.identifier)
+                .collect::<Vec<_>>();
+            let children = self.client.issues_by_identifiers(&identifiers).await?;
+            let mut leaf_children = Vec::new();
+            for child in children {
+                let child_state = normalized_state_name(&child.state);
+                if self.active_states.contains(&child_state)
+                    || !self.terminal_states.contains(&child_state)
+                {
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
+                }
+                if matches!(
+                    child.state_kind,
+                    crate::opensymphony_domain::TrackerIssueStateKind::Canceled
+                ) || (self.terminal_states.contains(&child_state)
+                    && child_state.contains("cancel"))
+                {
+                    continue;
+                }
+                if let Some(repository) = self.checkout_policy_for_issue(&child) {
+                    saw_leaf = true;
+                    leaf_children.push((child, repository.clone()));
+                } else if child.sub_issues.is_empty() {
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
+                } else {
+                    pending.extend(child.sub_issues);
+                }
+            }
+            let merge_results = stream::iter(leaf_children)
+                .map(|(child, repository)| async move {
+                    self.direct_merge_evidence(&child, &repository).await
+                })
+                .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for result in merge_results {
+                let (
+                    confirmed,
+                    commit,
+                    child_repository_id,
+                    _child_repository_ids,
+                    child_commits,
+                    child_evidence_at,
+                    child_evidence_by_issue,
+                ) = result?;
+                if !confirmed {
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
+                }
+                if let Some(repository_id) = child_repository_id {
+                    repository_ids.insert(repository_id);
+                }
+                commits.extend(child_commits);
+                provider_evidence_by_issue.extend(child_evidence_by_issue);
+                provider_evidence_at = match (provider_evidence_at, child_evidence_at) {
+                    (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                    (None, candidate) => candidate,
+                    (current, None) => current,
+                };
+                if commit.is_none() {
+                    return Ok((
+                        false,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+        let commit = commits.first().map(|commit| commit.commit.clone());
+        let repository_id = (repository_ids.len() == 1)
+            .then(|| repository_ids.iter().next().cloned())
+            .flatten();
+        Ok((
+            !saw_leaf || !commits.is_empty(),
+            commit,
+            repository_id,
+            repository_ids.into_iter().collect(),
+            commits,
+            provider_evidence_at,
+            saw_leaf,
+            provider_evidence_by_issue,
+        ))
+    }
+}
+
+fn github_url_authority(url: &Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let authority = url
+        .port()
+        .map_or(host.clone(), |port| format!("{host}:{port}"));
+    Some(normalize_github_authority(&authority))
+}
+
+fn github_remote_authority(locator: &str) -> Option<String> {
+    let locator = locator.trim();
+    if let Ok(url) = Url::parse(locator) {
+        let authority = github_url_authority(&url)?;
+        if matches!(url.scheme(), "ssh" | "git+ssh") && url.port() == Some(22) {
+            return Some(normalize_github_authority(url.host_str()?));
+        }
+        return Some(authority);
+    }
+    let scp_authority = locator
+        .strip_prefix("git@")
+        .or_else(|| locator.strip_prefix("ssh@"))
+        .and_then(|locator| locator.split_once(':').map(|(authority, _)| authority));
+    if let Some(authority) = scp_authority {
+        return Some(normalize_github_authority(&authority.to_ascii_lowercase()));
+    }
+    if locator.split('/').count() == 2 {
+        return Some("github.com".to_owned());
+    }
+    if let [authority, _owner, _repository] = locator.split('/').collect::<Vec<_>>().as_slice() {
+        return Some(normalize_github_authority(authority));
+    }
+    None
+}
+
+fn github_remote_repository(locator: &str) -> Option<(String, String)> {
+    let locator = locator.trim();
+    let path = if let Ok(url) = Url::parse(locator) {
+        url.path().to_owned()
+    } else if let Some((_, path)) = locator
+        .strip_prefix("git@")
+        .and_then(|value| value.split_once(':'))
+    {
+        path.to_owned()
+    } else if let Some((_, path)) = locator
+        .strip_prefix("ssh@")
+        .and_then(|value| value.split_once(':'))
+    {
+        path.to_owned()
+    } else {
+        locator.to_owned()
+    };
+    let mut segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_end_matches(".git"))
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return None;
+    }
+    let repository = segments.pop()?.to_owned();
+    let owner = segments.pop()?.to_owned();
+    Some((owner, repository))
+}
+
+fn normalize_github_authority(authority: &str) -> String {
+    let authority = authority.trim().to_ascii_lowercase();
+    match authority.strip_prefix("www.") {
+        Some("github.com") => "github.com".to_owned(),
+        Some(_) | None => authority,
+    }
+}
+
+fn github_required_status_checks_endpoint(
+    api_root: &str,
+    owner: &str,
+    repository_name: &str,
+    target_branch: &str,
+) -> Result<String, LinearError> {
+    let mut endpoint = Url::parse(api_root).map_err(|error| {
+        LinearError::InvalidResponse(format!("invalid GitHub API root: {error}"))
+    })?;
+    {
+        let mut segments = endpoint.path_segments_mut().map_err(|_| {
+            LinearError::InvalidResponse("GitHub API root cannot be a base URL".to_owned())
+        })?;
+        segments
+            .push("repos")
+            .push(owner)
+            .push(repository_name)
+            .push("branches")
+            .push(target_branch)
+            .push("protection")
+            .push("required_status_checks");
+    }
+    Ok(endpoint.to_string())
+}
+
+fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bool {
+    match expected_method.trim().to_ascii_lowercase().as_str() {
+        "merge" => parent_count > 1,
+        _ => false,
+    }
+}
+
+fn github_timestamp_ms(value: &str) -> Option<TimestampMs> {
+    let millis = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .timestamp_millis();
+    (millis >= 0).then_some(TimestampMs::new(millis as u64))
+}
+
+fn github_provider_evidence_timestamp_ms(value: &str) -> Option<TimestampMs> {
+    // GitHub's merge and creation timestamps are normally second-precision.
+    // Keep that evidence at the beginning of its precision window: a run
+    // starting later in the same second is ambiguous and must remain fenced
+    // instead of being allowed to reuse a prior merge.
+    github_timestamp_ms(value)
+}
+
+fn github_headers_indicate_rate_limit(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some_and(|remaining| remaining == 0)
+}
+
+fn github_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    retry_after.or_else(|| {
+        let reset_at = headers
+            .get("x-ratelimit-reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some(Duration::from_secs(reset_at.saturating_sub(now)))
+    })
+}
+
+fn github_compare_contains_commit(comparison: &GitHubCompare) -> bool {
+    comparison.ahead_by == 0
+        && matches!(
+            comparison.status.to_ascii_lowercase().as_str(),
+            "behind" | "identical"
+        )
+}
+
+fn required_check_evidence_satisfied(
+    check_runs: &[GitHubCheckRun],
+    commit_statuses: &[GitHubCommitStatus],
+    required_checks: Option<&GitHubRequiredStatusChecks>,
+) -> bool {
+    match required_checks {
+        Some(required_checks) => {
+            let latest_statuses = latest_commit_statuses(commit_statuses);
+            let legacy_contexts_satisfied = required_checks.contexts.iter().all(|context| {
+                latest_check_run(check_runs, |check| check.name.as_deref() == Some(context))
+                    .is_some_and(|check| {
+                        check.status.eq_ignore_ascii_case("completed")
+                            && check
+                                .conclusion
+                                .as_deref()
+                                .is_some_and(is_passing_check_conclusion)
+                    })
+                    || latest_statuses
+                        .get(context)
+                        .is_some_and(|status| status.state.eq_ignore_ascii_case("success"))
+            });
+            let app_bound_checks_satisfied = required_checks.checks.iter().all(|required| {
+                latest_check_run(check_runs, |check| {
+                    check.name.as_deref() == Some(required.context.as_str())
+                        && required_check_run_app_matches(check, required.app_id)
+                })
+                .is_some_and(|check| {
+                    check.status.eq_ignore_ascii_case("completed")
+                        && check
+                            .conclusion
+                            .as_deref()
+                            .is_some_and(is_passing_check_conclusion)
+                })
+            });
+            legacy_contexts_satisfied && app_bound_checks_satisfied
+        }
+        None => check_runs.iter().any(|check| {
+            check.status.eq_ignore_ascii_case("completed")
+                && check
+                    .conclusion
+                    .as_deref()
+                    .is_some_and(is_passing_check_conclusion)
+        }),
+    }
+}
+
+fn required_check_run_app_matches(check: &GitHubCheckRun, app_id: Option<i64>) -> bool {
+    match app_id {
+        Some(app_id) if app_id >= 0 => check.app.as_ref().is_some_and(|app| {
+            i64::try_from(app.id).is_ok_and(|check_app_id| check_app_id == app_id)
+        }),
+        // GitHub represents an any-App required check with the signed sentinel
+        // -1. Do not constrain the check run's App identity in that case.
+        Some(-1) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn is_passing_check_conclusion(conclusion: &str) -> bool {
+    matches!(
+        conclusion.to_ascii_lowercase().as_str(),
+        "success" | "neutral" | "skipped"
+    )
+}
+
+fn latest_check_run<F>(check_runs: &[GitHubCheckRun], mut matches: F) -> Option<&GitHubCheckRun>
+where
+    F: FnMut(&GitHubCheckRun) -> bool,
+{
+    check_runs
+        .iter()
+        .filter(|check| matches(check))
+        .max_by_key(|check| {
+            (
+                check
+                    .created_at
+                    .as_deref()
+                    .or(check.started_at.as_deref())
+                    .or(check.completed_at.as_deref())
+                    .and_then(github_timestamp_ms)
+                    .map(TimestampMs::as_u64),
+                check.id,
+            )
+        })
+}
+
+fn latest_commit_statuses<'a>(
+    commit_statuses: &'a [GitHubCommitStatus],
+) -> BTreeMap<String, &'a GitHubCommitStatus> {
+    let mut latest: BTreeMap<String, &'a GitHubCommitStatus> = BTreeMap::new();
+    for status in commit_statuses {
+        let timestamp = status
+            .updated_at
+            .as_deref()
+            .or(status.created_at.as_deref())
+            .unwrap_or_default();
+        let replace = latest.get(status.context.as_str()).is_none_or(|current| {
+            let current_timestamp = current
+                .updated_at
+                .as_deref()
+                .or(current.created_at.as_deref())
+                .unwrap_or_default();
+            (timestamp, status.id) >= (current_timestamp, current.id)
+        });
+        if replace {
+            latest.insert(status.context.clone(), status);
+        }
+    }
+    latest
+}
+
+/// Keep historical attachment evidence bounded while prioritizing the
+/// provider's current/singular PR projection. Linear can retain every PR ever
+/// attached to an issue; allowing that list to fan out without a total bound
+/// turns one parent eligibility check into unbounded provider work.
+fn parent_pull_request_candidates(issue: &TrackerIssue) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(issue.pr_urls.len() + 1);
+    if let Some(pr_url) = issue.pr_url.as_ref() {
+        candidates.push(pr_url.clone());
+    }
+    candidates.extend(issue.pr_urls.iter().cloned());
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|url| seen.insert(url.clone()))
+        .take(MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES)
+        .collect()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequest {
+    created_at: String,
+    merged_at: Option<String>,
+    merge_commit_sha: Option<String>,
+    base: GitHubPullRequestBase,
+    head: GitHubPullRequestHead,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommit {
+    #[serde(default)]
+    parents: Vec<GitHubCommitParent>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCompare {
+    status: String,
+    #[serde(default)]
+    ahead_by: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitParent {
+    #[allow(dead_code)]
+    sha: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestReview {
+    #[serde(default)]
+    id: u64,
+    state: String,
+    #[serde(default)]
+    submitted_at: Option<String>,
+    #[serde(default)]
+    user: Option<GitHubReviewUser>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GitHubReviewUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+fn latest_github_review_states(
+    reviews: impl IntoIterator<Item = GitHubPullRequestReview>,
+) -> BTreeMap<String, (String, String, u64)> {
+    let mut latest_by_reviewer: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
+    for review in reviews {
+        let reviewer = review
+            .user
+            .and_then(|user| user.login)
+            .unwrap_or_else(|| format!("review-{}", latest_by_reviewer.len()));
+        let submitted_at = review.submitted_at.unwrap_or_default();
+        if !matches!(
+            review.state.to_ascii_lowercase().as_str(),
+            "approved" | "changes_requested" | "dismissed"
+        ) {
+            continue;
+        }
+        if latest_by_reviewer
+            .get(&reviewer)
+            .is_none_or(|(_, timestamp, review_id)| {
+                timestamp.as_str() < submitted_at.as_str()
+                    || (timestamp == &submitted_at && *review_id <= review.id)
+            })
+        {
+            latest_by_reviewer.insert(reviewer, (review.state, submitted_at, review.id));
+        }
+    }
+    latest_by_reviewer
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCheckRuns {
+    #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
+    check_runs: Vec<GitHubCheckRun>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct GitHubCheckRun {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    app: Option<GitHubCheckRunApp>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCheckRunApp {
+    id: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRequiredStatusChecks {
+    #[serde(default)]
+    contexts: Vec<String>,
+    #[serde(default)]
+    checks: Vec<GitHubRequiredStatusCheck>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRequiredStatusCheck {
+    context: String,
+    #[serde(default)]
+    app_id: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitStatuses {
+    #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
+    statuses: Vec<GitHubCommitStatus>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubCommitStatus {
+    #[serde(default)]
+    id: u64,
+    context: String,
+    state: String,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestBase {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    repo: GitHubRepository,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubPullRequestHead {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    sha: Option<String>,
+}
+
+#[derive(Debug)]
+struct GithubMergeEvidence {
+    compatible: bool,
+    merged: bool,
+    merge_commit_sha: Option<String>,
+    merge_repository_id: Option<CanonicalRepositoryId>,
+    created_at: String,
+    pull_number: u64,
+    provider_evidence_at: Option<TimestampMs>,
+}
+
+impl GithubMergeEvidence {
+    fn incompatible() -> Self {
+        Self {
+            compatible: false,
+            merged: false,
+            merge_commit_sha: None,
+            merge_repository_id: None,
+            created_at: String::new(),
+            pull_number: 0,
+            provider_evidence_at: None,
+        }
+    }
+}
+
+fn select_current_github_merge_evidence(
+    candidates: Vec<GithubMergeEvidence>,
+) -> (
+    bool,
+    Option<String>,
+    Option<CanonicalRepositoryId>,
+    Option<TimestampMs>,
+) {
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.compatible)
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.pull_number.cmp(&right.pull_number))
+        })
+        .map_or((false, None, None, None), |candidate| {
+            (
+                candidate.merged,
+                candidate.merge_commit_sha,
+                candidate.merge_repository_id,
+                candidate.provider_evidence_at,
+            )
+        })
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubRepository {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    full_name: String,
+}
+
+impl GitHubRepository {
+    fn native_ids(&self) -> Vec<String> {
+        self.node_id
+            .iter()
+            .cloned()
+            .chain(self.id.iter().map(ToString::to_string))
+            .collect()
     }
 }
 
@@ -962,6 +2400,7 @@ impl RuntimeWorkspaceBackend {
                 .map(|state| normalized_state_name(state))
                 .collect(),
             terminal_cleanup_paths: HashSet::new(),
+            recovered_run_started_at: BTreeMap::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             retain_failed,
             retry_state_root,
@@ -993,6 +2432,13 @@ impl RuntimeWorkspaceBackend {
         force_remove: bool,
     ) -> Result<(), CliWorkspaceError> {
         if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
+            if self.workspace_has_active_lease(workspace).await? {
+                tracing::debug!(
+                    issue = %workspace.workspace_key,
+                    "retaining terminal workspace while a durable lease is active"
+                );
+                return Err(CliWorkspaceError::CleanupDeferred);
+            }
             let Some(handle) = self
                 .manager
                 .list_all_workspaces()
@@ -1227,8 +2673,15 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         let mut recoveries = Vec::new();
+        self.recovered_run_started_at.clear();
         for (handle, manifest) in self.manager.list_all_workspaces().await? {
             let mut run_manifest = self.manager.load_run_manifest(&handle).await?;
+            if let Some(run) = run_manifest.as_ref() {
+                self.recovered_run_started_at.insert(
+                    IssueId::new(run.issue_id.clone())?,
+                    datetime_to_timestamp_ms(run.started_at.unwrap_or(run.created_at)),
+                );
+            }
             let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
                 matches!(
                     run.status,
@@ -1313,6 +2766,105 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             });
         }
         Ok(recoveries)
+    }
+
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(self.recovered_run_started_at.clone())
+    }
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        self.manager
+            .load_orchestrator_state()
+            .await
+            .map_err(CliWorkspaceError::Workspace)
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        self.manager
+            .write_orchestrator_state_atomically(state)
+            .await
+            .map_err(CliWorkspaceError::Workspace)
+    }
+
+    async fn workspace_lease_resource(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<Option<LeaseResource>, Self::Error> {
+        let Some((handle, manifest)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Ok(None);
+        };
+        let Some(repository_id) = manifest
+            .repository_binding
+            .as_ref()
+            .and_then(RepositoryBindingOutcome::repository_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let Some(checkout_generation) = handle.checkout_generation() else {
+            return Ok(None);
+        };
+        Ok(Some(LeaseResource {
+            issue_id: issue.id.clone(),
+            repository_id,
+            checkout_generation: checkout_generation.to_owned(),
+        }))
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
+    ) -> Result<bool, Self::Error> {
+        let Some(raw) = self
+            .manager
+            .load_orchestrator_state::<serde_json::Value>()
+            .await?
+        else {
+            return Ok(false);
+        };
+        let state: DurableOrchestratorState = serde_json::from_value(raw).map_err(|error| {
+            CliWorkspaceError::RetryState(format!("invalid durable hierarchy state: {error}"))
+        })?;
+        state.validate().map_err(CliWorkspaceError::RetryState)?;
+        let Some((handle, manifest)) = self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find(|(handle, _)| handle.workspace_path() == workspace.path)
+        else {
+            return Ok(false);
+        };
+        let Some(generation) = handle.checkout_generation() else {
+            return Ok(false);
+        };
+        let resource = LeaseResource {
+            issue_id: IssueId::new(manifest.issue_id.clone())?,
+            repository_id: manifest
+                .repository_binding
+                .as_ref()
+                .and_then(RepositoryBindingOutcome::repository_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CliWorkspaceError::RetryState(
+                        "managed checkout is missing its canonical repository identity".to_owned(),
+                    )
+                })?,
+            checkout_generation: generation.to_owned(),
+        };
+        Ok(state.active_for(&resource))
     }
 
     async fn recover_retry_exhaustion(
@@ -2716,9 +4268,10 @@ impl RuntimeWorkerBackend {
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
-                    let _ = sender.send(LaunchReport::Conversation(Box::new(
-                        dry_run_conversation_metadata(&run, &route),
-                    )));
+                    let _ = sender.send(LaunchReport::Conversation {
+                        conversation: Box::new(dry_run_conversation_metadata(&run, &route)),
+                        started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+                    });
                 }
                 let finish_error = finish_route_dry_run_workspace_run(
                     &workspace_manager,
@@ -2918,9 +4471,15 @@ impl RuntimeWorkerBackend {
         >,
     ) -> Result<WorkerLaunch, CliWorkerError> {
         match result {
-            Ok(Ok(LaunchReport::Conversation(conversation))) => {
+            Ok(Ok(LaunchReport::Conversation {
+                conversation,
+                started_at,
+            })) => {
                 let conversation = annotate_route_decision(*conversation, worker_id, route);
-                Ok(WorkerLaunch { conversation })
+                Ok(WorkerLaunch {
+                    conversation,
+                    started_at,
+                })
             }
             Ok(Ok(LaunchReport::Failed(detail))) => {
                 if let Some(task) = self.take_tracked_task(worker_id) {
@@ -3491,6 +5050,7 @@ async fn try_run_codex_stdio_issue(
         })
     {
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         run_manifest.status_detail = Some("reattaching to an active Codex turn".to_owned());
         run_manifest.updated_at = chrono::Utc::now();
         workspace_manager
@@ -3851,9 +5411,10 @@ async fn try_run_codex_stdio_issue(
             },
         )?;
         if let Some(sender) = launch_tx.take() {
-            let _ = sender.send(LaunchReport::Conversation(Box::new(
-                codex_conversation_metadata(conversation_id.clone(), route),
-            )));
+            let _ = sender.send(LaunchReport::Conversation {
+                conversation: Box::new(codex_conversation_metadata(conversation_id.clone(), route)),
+                started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+            });
             if let Some(grants) = fresh_conversation_grants.as_ref() {
                 grants.acknowledge_fresh_conversation(fresh_conversation_issue);
             }
@@ -4016,9 +5577,10 @@ async fn try_run_codex_stdio_issue(
         },
     )?;
     if let Some(sender) = launch_tx.take() {
-        let _ = sender.send(LaunchReport::Conversation(Box::new(
-            codex_conversation_metadata(conversation_id.clone(), route),
-        )));
+        let _ = sender.send(LaunchReport::Conversation {
+            conversation: Box::new(codex_conversation_metadata(conversation_id.clone(), route)),
+            started_at: run_manifest.started_at.map(datetime_to_timestamp_ms),
+        });
         if let Some(grants) = fresh_conversation_grants.as_ref() {
             grants.acknowledge_fresh_conversation(fresh_conversation_issue);
         }
@@ -5449,6 +7011,7 @@ async fn persist_codex_run_started(
     prompt_kind: IssueSessionPromptKind,
 ) -> Result<(), String> {
     run_manifest.status = RunStatus::Running;
+    run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
     run_manifest.status_detail = Some(format!(
         "{} prompt sent to Codex conversation {conversation_id}",
         prompt_kind.as_str()
@@ -5843,6 +7406,7 @@ fn normalized_issue_from_manifest(
         },
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: None,
         labels: Vec::new(),
         project_id: None,
@@ -6233,6 +7797,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -6306,6 +7871,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -6387,6 +7953,7 @@ mod tests {
             interrupt_reason: None,
             status: RunStatus::Prepared,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
@@ -6861,7 +8428,7 @@ mod tests {
             .await
             .expect("launch report should be sent before terminal completion");
         match launch {
-            LaunchReport::Conversation(conversation) => {
+            LaunchReport::Conversation { conversation, .. } => {
                 assert_eq!(conversation.conversation_id.as_str(), "fake-thread");
                 assert_eq!(conversation.stream_state, RuntimeStreamState::Closed);
             }
@@ -7774,7 +9341,7 @@ mod tests {
         assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(_)
+            LaunchReport::Conversation { .. }
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
         assert!(
@@ -7871,7 +9438,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -7967,7 +9534,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Succeeded);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -7996,6 +9563,7 @@ mod tests {
             .await
             .expect("run should start");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -8067,7 +9635,7 @@ mod tests {
         assert_eq!(run_manifest.status, RunStatus::Cancelled);
         assert!(matches!(
             launch_rx.await.expect("launch report should be sent"),
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         let log = fs::read_to_string(&log_path).expect("fake child log should exist");
@@ -8145,7 +9713,7 @@ mod tests {
             .expect("launch sender should stay alive");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
 
@@ -8267,7 +9835,7 @@ mod tests {
             .expect("launch sender should stay alive");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
 
@@ -8364,7 +9932,7 @@ mod tests {
             .expect("launch report should be sent before terminal completion");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         assert!(
@@ -8446,7 +10014,7 @@ mod tests {
         let launch = launch_rx.await.expect("launch report should still be sent");
         assert!(matches!(
             launch,
-            LaunchReport::Conversation(conversation)
+            LaunchReport::Conversation { conversation, .. }
                 if conversation.conversation_id.as_str() == "fake-thread"
         ));
         assert!(
@@ -8846,6 +10414,7 @@ mod tests {
             .await
             .expect("initial run should be persisted");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -8971,7 +10540,27 @@ mod tests {
 
         assert_eq!(
             env_remove,
-            BTreeSet::from(["NODE_ENV".to_owned(), "CHECKOUT_TOKEN".to_owned()])
+            BTreeSet::from([
+                "GITHUB_TOKEN".to_owned(),
+                "NODE_ENV".to_owned(),
+                "CHECKOUT_TOKEN".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn github_remote_repository_matches_supported_locator_shapes() {
+        assert_eq!(
+            github_remote_repository("https://github.com/owner/repo.git"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_remote_repository("git@github.enterprise.example:owner/repo"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_remote_repository("github.enterprise.example/owner/repo"),
+            Some(("owner".to_owned(), "repo".to_owned()))
         );
     }
 
@@ -9163,6 +10752,7 @@ mod tests {
             .expect("run manifest should load")
             .expect("run manifest should exist");
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(chrono::Utc::now);
         workspace_manager
             .write_run_manifest(&ensured.handle, &run_manifest)
             .await
@@ -10011,6 +11601,460 @@ Run the scheduler.
         );
     }
 
+    #[test]
+    fn current_merge_evidence_rejects_stale_merged_pr_when_replacement_is_newer() {
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("old-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+                pull_number: 12,
+                provider_evidence_at: None,
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: false,
+                merge_commit_sha: None,
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
+                provider_evidence_at: None,
+            },
+        ]);
+        assert_eq!(selected, (false, None, None, None));
+
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("old-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+                pull_number: 12,
+                provider_evidence_at: None,
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("current-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
+                provider_evidence_at: None,
+            },
+        ]);
+        assert_eq!(
+            selected,
+            (true, Some("current-merge".to_owned()), None, None)
+        );
+
+        let selected = select_current_github_merge_evidence(vec![
+            GithubMergeEvidence {
+                compatible: true,
+                merged: true,
+                merge_commit_sha: Some("lower-number-merge".to_owned()),
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 12,
+                provider_evidence_at: None,
+            },
+            GithubMergeEvidence {
+                compatible: true,
+                merged: false,
+                merge_commit_sha: None,
+                merge_repository_id: None,
+                created_at: "2026-08-13T00:00:00Z".to_owned(),
+                pull_number: 34,
+                provider_evidence_at: None,
+            },
+        ]);
+        assert_eq!(selected, (false, None, None, None));
+    }
+
+    #[test]
+    fn parent_pull_request_candidates_prioritize_current_and_bound_history() {
+        let mut issue = sample_tracker_issue(&sample_issue());
+        issue.state = "Done".to_owned();
+        issue.pr_url = Some("https://github.com/kumanday/OpenSymphony/pull/999".to_owned());
+        issue.pr_urls = (1..=MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES + 10)
+            .map(|number| format!("https://github.com/kumanday/OpenSymphony/pull/{number}"))
+            .collect();
+
+        let candidates = parent_pull_request_candidates(&issue);
+        assert_eq!(
+            candidates.len(),
+            MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES
+        );
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            issue.pr_url.as_deref()
+        );
+        let current_pr = issue.pr_url.clone().expect("current PR should be present");
+        assert_eq!(
+            candidates.iter().filter(|url| *url == &current_pr).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn latest_reviews_break_equal_timestamp_ties_with_review_id() {
+        let reviewer = Some(GitHubReviewUser {
+            login: Some("reviewer".to_owned()),
+        });
+        let latest = latest_github_review_states(vec![
+            GitHubPullRequestReview {
+                id: 22,
+                state: "changes_requested".to_owned(),
+                submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                user: reviewer.clone(),
+            },
+            GitHubPullRequestReview {
+                id: 21,
+                state: "approved".to_owned(),
+                submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+                user: reviewer,
+            },
+        ]);
+
+        assert_eq!(
+            latest.get("reviewer"),
+            Some(&(
+                "changes_requested".to_owned(),
+                "2026-08-14T15:00:00Z".to_owned(),
+                22,
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_evidence_timestamp_respects_github_precision() {
+        let second_precision = github_timestamp_ms("1970-01-01T00:00:01Z").expect("timestamp");
+        assert_eq!(
+            github_provider_evidence_timestamp_ms("1970-01-01T00:00:01Z")
+                .expect("timestamp")
+                .as_u64(),
+            second_precision.as_u64()
+        );
+        assert_eq!(
+            github_provider_evidence_timestamp_ms("1970-01-01T00:00:01.123Z")
+                .expect("timestamp")
+                .as_u64(),
+            1123
+        );
+    }
+
+    #[test]
+    fn github_rate_limit_headers_preserve_retry_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-remaining",
+            reqwest::header::HeaderValue::from_static("0"),
+        );
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("7"),
+        );
+
+        assert!(github_headers_indicate_rate_limit(&headers));
+        assert_eq!(github_retry_after(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn github_merge_evidence_matches_configured_merge_method() {
+        assert!(github_merge_method_matches("merge", 2));
+        assert!(!github_merge_method_matches("merge", 1));
+        assert!(!github_merge_method_matches("squash", 1));
+        assert!(!github_merge_method_matches("rebase", 1));
+    }
+
+    #[test]
+    fn github_compare_rejects_force_pushed_or_diverged_target() {
+        assert!(github_compare_contains_commit(&GitHubCompare {
+            status: "behind".to_owned(),
+            ahead_by: 0,
+        }));
+        assert!(github_compare_contains_commit(&GitHubCompare {
+            status: "identical".to_owned(),
+            ahead_by: 0,
+        }));
+        assert!(!github_compare_contains_commit(&GitHubCompare {
+            status: "ahead".to_owned(),
+            ahead_by: 1,
+        }));
+        assert!(!github_compare_contains_commit(&GitHubCompare {
+            status: "diverged".to_owned(),
+            ahead_by: 0,
+        }));
+    }
+
+    #[test]
+    fn github_required_status_checks_endpoint_encodes_branch_segments() {
+        let endpoint = github_required_status_checks_endpoint(
+            "https://api.github.com",
+            "owner",
+            "repository",
+            "release/next",
+        )
+        .expect("GitHub endpoint should build");
+
+        assert_eq!(
+            endpoint,
+            "https://api.github.com/repos/owner/repository/branches/release%2Fnext/protection/required_status_checks"
+        );
+    }
+
+    #[test]
+    fn required_check_evidence_ignores_optional_failed_runs() {
+        let checks = vec![
+            GitHubCheckRun {
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+                app: None,
+                ..Default::default()
+            },
+            GitHubCheckRun {
+                name: Some("optional".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("failure".to_owned()),
+                app: None,
+                ..Default::default()
+            },
+        ];
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned()],
+            checks: Vec::new(),
+        };
+        assert!(required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&required)
+        ));
+        assert!(required_check_evidence_satisfied(&checks, &[], None));
+
+        let missing = GitHubRequiredStatusChecks {
+            contexts: vec!["missing".to_owned()],
+            checks: Vec::new(),
+        };
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&missing)
+        ));
+        let all_required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned(), "lint".to_owned()],
+            checks: Vec::new(),
+        };
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&all_required)
+        ));
+        assert!(required_check_evidence_satisfied(
+            &checks,
+            &[GitHubCommitStatus {
+                id: 1,
+                context: "lint".to_owned(),
+                state: "success".to_owned(),
+                created_at: None,
+                updated_at: None,
+            }],
+            Some(&all_required),
+        ));
+    }
+
+    #[test]
+    fn required_check_evidence_uses_the_latest_matching_check_run() {
+        let checks = vec![
+            GitHubCheckRun {
+                id: 10,
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                ..Default::default()
+            },
+            GitHubCheckRun {
+                id: 11,
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some("failure".to_owned()),
+                created_at: Some("2026-08-13T07:01:00Z".to_owned()),
+                ..Default::default()
+            },
+        ];
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["required".to_owned()],
+            checks: Vec::new(),
+        };
+
+        assert!(!required_check_evidence_satisfied(
+            &checks,
+            &[],
+            Some(&required),
+        ));
+    }
+
+    #[test]
+    fn required_check_evidence_accepts_neutral_and_skipped_runs() {
+        for conclusion in ["neutral", "skipped"] {
+            let checks = vec![GitHubCheckRun {
+                name: Some("required".to_owned()),
+                status: "completed".to_owned(),
+                conclusion: Some(conclusion.to_owned()),
+                app: None,
+                ..Default::default()
+            }];
+            let required = GitHubRequiredStatusChecks {
+                contexts: vec!["required".to_owned()],
+                checks: Vec::new(),
+            };
+
+            assert!(
+                required_check_evidence_satisfied(&checks, &[], Some(&required)),
+                "{conclusion} should satisfy a completed required check"
+            );
+        }
+    }
+
+    #[test]
+    fn app_bound_required_checks_reject_other_apps_and_classic_statuses() {
+        let required = GitHubRequiredStatusChecks {
+            contexts: Vec::new(),
+            checks: vec![GitHubRequiredStatusCheck {
+                context: "protected".to_owned(),
+                app_id: Some(42),
+            }],
+        };
+        let successful_other_app = vec![GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 7 }),
+            ..Default::default()
+        }];
+        assert!(!required_check_evidence_satisfied(
+            &successful_other_app,
+            &[],
+            Some(&required),
+        ));
+        assert!(!required_check_evidence_satisfied(
+            &[],
+            &[GitHubCommitStatus {
+                id: 1,
+                context: "protected".to_owned(),
+                state: "success".to_owned(),
+                created_at: None,
+                updated_at: None,
+            }],
+            Some(&required),
+        ));
+
+        let successful_required_app = vec![GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 42 }),
+            ..Default::default()
+        }];
+        assert!(required_check_evidence_satisfied(
+            &successful_required_app,
+            &[],
+            Some(&required),
+        ));
+
+        let older_required_app = GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 42 }),
+            created_at: Some("2026-08-13T06:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let newer_other_app = GitHubCheckRun {
+            name: Some("protected".to_owned()),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            app: Some(GitHubCheckRunApp { id: 7 }),
+            created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        assert!(required_check_evidence_satisfied(
+            &[older_required_app, newer_other_app],
+            &[],
+            Some(&required),
+        ));
+
+        let any_app = GitHubRequiredStatusChecks {
+            contexts: Vec::new(),
+            checks: vec![GitHubRequiredStatusCheck {
+                context: "protected".to_owned(),
+                app_id: Some(-1),
+            }],
+        };
+        assert!(required_check_evidence_satisfied(
+            &successful_other_app,
+            &[],
+            Some(&any_app),
+        ));
+    }
+
+    #[test]
+    fn required_status_context_uses_the_newest_commit_status() {
+        let required = GitHubRequiredStatusChecks {
+            contexts: vec!["lint".to_owned()],
+            checks: Vec::new(),
+        };
+        let statuses = vec![
+            GitHubCommitStatus {
+                id: 1,
+                context: "lint".to_owned(),
+                state: "success".to_owned(),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                updated_at: Some("2026-08-13T07:00:00Z".to_owned()),
+            },
+            GitHubCommitStatus {
+                id: 2,
+                context: "lint".to_owned(),
+                state: "failure".to_owned(),
+                created_at: Some("2026-08-13T07:00:00Z".to_owned()),
+                updated_at: Some("2026-08-13T07:00:00Z".to_owned()),
+            },
+        ];
+
+        assert!(!required_check_evidence_satisfied(
+            &[],
+            &statuses,
+            Some(&required),
+        ));
+    }
+
+    #[test]
+    fn github_remote_authority_accepts_schemeless_enterprise_locator() {
+        assert_eq!(
+            github_remote_authority("github.enterprise.example/owner/repo"),
+            Some("github.enterprise.example".to_owned())
+        );
+        assert_eq!(
+            github_remote_authority("owner/repo"),
+            Some("github.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn github_remote_authority_normalizes_ssh_default_port() {
+        assert_eq!(
+            github_remote_authority("ssh://git@ghe.example:22/owner/repo.git"),
+            Some("ghe.example".to_owned())
+        );
+        assert_eq!(
+            github_remote_authority("ssh://git@ghe.example:2222/owner/repo.git"),
+            Some("ghe.example:2222".to_owned())
+        );
+    }
+
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
         sample_workflow_with_prompt(
             base_dir,
@@ -10048,6 +12092,7 @@ Run the scheduler.
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: Vec::new(),
             project_id: None,
@@ -10617,6 +12662,7 @@ exit 64
             state_kind: tracker_issue_state_kind_from_category(&issue.state.category),
             branch_name: issue.branch_name.clone(),
             pr_url: issue.pr_url.clone(),
+            pr_urls: issue.pr_urls.clone(),
             labels: issue.labels.clone(),
             project_id: issue.project_id.clone(),
             project_slug: issue.project_slug.clone(),

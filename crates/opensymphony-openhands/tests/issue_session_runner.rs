@@ -51,6 +51,7 @@ fn sample_issue(identifier: &str) -> NormalizedIssue {
         },
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: None,
         labels: vec!["runtime".to_string()],
         project_id: None,

@@ -65,6 +65,14 @@ Rust owns:
 
 OpenHands conversation state is informative, not authoritative.
 
+Parent admission derives child terminal status from scheduler-owned durable
+outcomes or released executions. Provider-supplied terminal flags cannot
+approve dispatch. A current execution supersedes any older success receipt;
+unclaimed, claimed, running, and retry-queued children remain ineligible,
+including when a subtree no longer requires merge evidence. Reopening or
+recovering nonterminal work invalidates its durable success receipt before
+batched launch preparation.
+
 Repository routing is also orchestrator-owned: terminal child metadata carries
 one alias, the central inventory resolves it to a canonical provider identity,
 and the scheduler persists that identity plus its config and inventory
@@ -77,6 +85,14 @@ generation and then performs the same supersession against fresh tracker state.
 Repository binding outcomes are carried into the control-plane issue snapshot;
 invalid outcomes mark the issue blocked while preserving the typed diagnostic
 for operator clients.
+
+Hierarchy reconciliation is scheduler-owned as a separate generation axis from
+checkout, run, and attempt generations. The scheduler persists required child
+edges and owner-identified leases through the workspace manager's atomic JSON
+artifact path. Parent dispatch consumes provider-backed merge evidence only
+after terminal orchestrator outcomes and retained checkout-generation lease
+resources are present; scope changes after freeze are recorded as
+`HierarchyChanged` and cannot silently widen the parent run.
 
 ### 3.2 OpenHands is the execution adapter
 

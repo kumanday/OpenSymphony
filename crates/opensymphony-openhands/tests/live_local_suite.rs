@@ -752,6 +752,7 @@ fn sample_issue() -> NormalizedIssue {
         },
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: None,
         labels: vec!["live-suite".to_string()],
         project_id: None,

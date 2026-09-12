@@ -20,13 +20,14 @@ use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
-    ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY,
-    ISSUE_SUMMARIES_BY_STATE_QUERY, ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData,
-    IssueArchiveVariables, IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData,
-    IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
-    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
-    IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
+    ISSUE_CHILDREN_QUERY, ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION,
+    ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY, ISSUE_RELATION_CREATE_MUTATION,
+    ISSUE_STATES_BY_IDS_QUERY, ISSUE_STATES_BY_IDS_UNSCOPED_QUERY, ISSUE_SUMMARIES_BY_STATE_QUERY,
+    ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
+    IssueByIdentifierData, IssueByIdentifierVariables, IssueChildrenData, IssueChildrenVariables,
+    IssueCommentsData, IssueCommentsVariables, IssueCreateData, IssueCreateInput,
+    IssueCreateVariables, IssueInverseRelationsData, IssueInverseRelationsVariables,
+    IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
     IssueRelationCreateVariables, IssueRelationMutationNode, IssueStatesByIdsData,
     IssueStatesByIdsUnscopedVariables, IssueStatesByIdsVariables, IssueSummariesByStateData,
     IssueSummariesByStateVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
@@ -405,7 +406,7 @@ impl LinearClient {
                 continue;
             };
             let issue = normalize_issue(self.expand_issue(issue).await?)?;
-            if issue.identifier.eq_ignore_ascii_case(identifier) {
+            if issue.identifier.eq_ignore_ascii_case(identifier) || issue.id == *identifier {
                 issues.push(issue);
             } else {
                 return Err(LinearError::InvalidResponse(format!(
@@ -1238,11 +1239,55 @@ impl LinearClient {
         &self,
         mut issue: LinearIssueNode,
     ) -> Result<LinearIssueNode, LinearError> {
+        // ponytail: history is capped at 32 recent PR links; use lazy lookup if older evidence is needed.
+        if issue.attachments.page_info.has_next_page {
+            debug!(issue_id = %issue.id, "historical PR attachments truncated to the latest 32 candidates");
+        }
+        issue.children = self.load_all_children(&issue.id, issue.children).await?;
         issue.labels = self.load_all_labels(&issue.id, issue.labels).await?;
         issue.inverse_relations = self
             .load_all_inverse_relations(&issue.id, issue.inverse_relations)
             .await?;
         Ok(issue)
+    }
+
+    async fn load_all_children(
+        &self,
+        issue_id: &str,
+        mut connection: super::graphql::LinearChildConnection,
+    ) -> Result<super::graphql::LinearChildConnection, LinearError> {
+        let mut after = connection.page_info.end_cursor.clone();
+
+        while connection.page_info.has_next_page {
+            let cursor = after.clone().ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "Linear children page for issue {issue_id} indicated a next page without an end cursor"
+                ))
+            })?;
+            let variables = IssueChildrenVariables {
+                issue_id: issue_id.to_string(),
+                first: self.config.page_size,
+                after: Some(cursor),
+            };
+            let response: IssueChildrenData = self
+                .execute_graphql(ISSUE_CHILDREN_QUERY, json!(variables))
+                .await?;
+            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
+                issue_ids: vec![issue_id.to_string()],
+            })?;
+            if issue.id != issue_id {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear children page returned mismatched issue ID {} for {}",
+                    issue.id, issue_id
+                )));
+            }
+
+            connection.nodes.extend(issue.children.nodes);
+            connection.page_info = issue.children.page_info;
+            after = connection.page_info.end_cursor.clone();
+        }
+
+        Ok(connection)
     }
 
     async fn load_all_labels(
@@ -1475,7 +1520,7 @@ impl LinearClient {
             LinearError::Request(_) => true,
             LinearError::ResponseBody { .. } => true,
             LinearError::HttpStatus { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                error.is_rate_limited() || status.is_server_error()
             }
             LinearError::Graphql { .. } => error.is_rate_limited(),
             LinearError::MissingIssueIds { .. }

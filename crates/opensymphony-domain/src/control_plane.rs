@@ -132,6 +132,10 @@ pub struct ControlPlaneIssueSnapshot {
     pub runtime_seconds: u64,
     pub blocked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_binding: Option<RepositoryBindingOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,

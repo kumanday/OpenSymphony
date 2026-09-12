@@ -42,6 +42,7 @@ use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environm
 use chrono::{DateTime, Utc};
 use clap::Args;
 use serde::Deserialize;
+use serde_json::json;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -976,7 +977,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         "starting OpenSymphony orchestrator"
     );
 
-    let mut tracker = build_tracker_backend(&runtime.workflow)?;
+    let mut tracker = build_tracker_backend(
+        &runtime.workflow,
+        runtime.repository_checkouts.clone().unwrap_or_default(),
+        runtime.repository_routing.clone(),
+    )?;
     let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
         routing
             .legacy_repository
@@ -1435,13 +1440,31 @@ where
             continue;
         }
         let sequence = event.sequence;
-        let Some(target) = gateway_cancel_target(&event) else {
-            *cursor = sequence;
-            continue;
-        };
-        scheduler
-            .interrupt_operator_cancel(target, observed_at)
-            .await?;
+        if let Some(target) = gateway_cancel_target(&event) {
+            scheduler
+                .interrupt_operator_cancel(target, observed_at)
+                .await?;
+        } else if let Some((target, accepted_generation)) = gateway_replan_request(&event) {
+            let outcome = match scheduler
+                .replan_parent_target(target, accepted_generation, observed_at)
+                .await
+            {
+                Ok(changed) => Ok(changed),
+                Err(SchedulerError::Workspace { detail })
+                    if detail.starts_with("cannot replan hierarchy parent ") =>
+                {
+                    Err(detail)
+                }
+                Err(error) => return Err(error),
+            };
+            let outcome = gateway_replan_outcome_event(&event, outcome);
+            journal
+                .append(outcome)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: format!("failed to record replan outcome: {error:?}"),
+                })?;
+        }
         *cursor = sequence;
     }
     Ok(())
@@ -1457,6 +1480,65 @@ fn gateway_cancel_target(event: &EventRecord) -> Option<&str> {
         return None;
     }
     payload["target_entity"]["id"].as_str()
+}
+
+fn gateway_replan_request(event: &EventRecord) -> Option<(&str, u64)> {
+    match &event.kind {
+        EventKind::GatewayActionDispatched { action } if action == "replan" => {}
+        _ => return None,
+    }
+    let payload = event.payload.as_ref()?;
+    if payload["status"] != "accepted" {
+        return None;
+    }
+    let target = payload["target_entity"]["id"].as_str()?;
+    let accepted_generation = payload["payload"]["hierarchy_generation"].as_u64()?;
+    Some((target, accepted_generation))
+}
+
+fn gateway_replan_outcome_event(
+    dispatch: &EventRecord,
+    outcome: Result<bool, String>,
+) -> EventRecord {
+    let (completed, reason) = match outcome {
+        Ok(true) => (true, None),
+        Ok(false) => (
+            false,
+            Some("target is not blocked by HierarchyChanged".to_owned()),
+        ),
+        Err(reason) => (false, Some(reason)),
+    };
+    let status = if completed { "completed" } else { "rejected" };
+    EventRecord::builder()
+        .actor(EventActor::system("orchestrator"))
+        .correlation_id_opt(dispatch.correlation_id.clone())
+        .entity_refs(dispatch.entity_refs.clone())
+        .kind(if completed {
+            EventKind::GatewayActionCompleted {
+                action: "replan".to_owned(),
+            }
+        } else {
+            EventKind::GatewayActionFailed {
+                action: "replan".to_owned(),
+                reason: reason
+                    .clone()
+                    .expect("a rejected replan must carry a reason"),
+            }
+        })
+        .summary(if completed {
+            "Hierarchy replan completed"
+        } else {
+            "Hierarchy replan rejected"
+        })
+        .payload(json!({
+            "action_id": dispatch.payload.as_ref().and_then(|payload| payload.get("action_id")),
+            "action_kind": "replan",
+            "correlation_id": dispatch.correlation_id,
+            "status": status,
+            "target_entity": dispatch.payload.as_ref().and_then(|payload| payload.get("target_entity")),
+            "reason": reason,
+        }))
+        .build()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1823,6 +1905,88 @@ mod tests {
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn gateway_replan_outcome_records_completed_or_rejected_result() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "action_id": "replan-action",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+
+        let completed = gateway_replan_outcome_event(&dispatch, Ok(true));
+        assert!(matches!(
+            completed.kind,
+            EventKind::GatewayActionCompleted { ref action } if action == "replan"
+        ));
+        assert_eq!(
+            completed.payload.as_ref().expect("completion payload")["status"],
+            "completed"
+        );
+
+        let rejected = gateway_replan_outcome_event(&dispatch, Ok(false));
+        assert!(matches!(
+            rejected.kind,
+            EventKind::GatewayActionFailed { ref action, .. } if action == "replan"
+        ));
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["status"],
+            "rejected"
+        );
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["reason"],
+            "target is not blocked by HierarchyChanged"
+        );
+
+        let fenced = gateway_replan_outcome_event(
+            &dispatch,
+            Err("cannot replan hierarchy parent COE-552 while execution is running".to_owned()),
+        );
+        assert!(matches!(
+            fenced.kind,
+            EventKind::GatewayActionFailed { ref action, ref reason }
+                if action == "replan"
+                    && reason == "cannot replan hierarchy parent COE-552 while execution is running"
+        ));
+        assert_eq!(
+            fenced.payload.as_ref().expect("fenced payload")["reason"],
+            "cannot replan hierarchy parent COE-552 while execution is running"
+        );
+    }
+
+    #[test]
+    fn gateway_replan_request_requires_the_displayed_hierarchy_generation() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+                "payload": { "hierarchy_generation": 7 },
+            }))
+            .build();
+
+        assert_eq!(gateway_replan_request(&dispatch), Some(("COE-552", 7)));
+
+        let missing_generation = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+        assert_eq!(gateway_replan_request(&missing_generation), None);
     }
 
     #[test]

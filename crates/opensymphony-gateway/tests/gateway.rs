@@ -199,6 +199,7 @@ fn tracker_issue_from_snapshot(
         state_kind: tracker_state_kind_from_name(&issue.tracker_state),
         branch_name: issue.branch_name.clone(),
         pr_url: issue.pr_url.clone(),
+        pr_urls: Vec::new(),
         labels: Vec::new(),
         project_id: issue.project_id.clone(),
         project_slug: issue.project_slug.clone(),
@@ -233,6 +234,7 @@ fn tracker_issue_ref_from_tracker(issue: &TrackerIssue) -> TrackerIssueRef {
         title: Some(issue.title.clone()),
         url: Some(issue.url.clone()),
         state: issue.state.clone(),
+        state_kind: issue.state_kind.clone(),
     }
 }
 
@@ -243,6 +245,7 @@ fn tracker_issue_ref_from_identifier(identifier: &str) -> TrackerIssueRef {
         title: Some(format!("External {identifier}")),
         url: None,
         state: "Todo".to_owned(),
+        state_kind: TrackerIssueStateKind::Unstarted,
     }
 }
 
@@ -736,6 +739,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             max_turns: 8,
             runtime_seconds: 75,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -829,6 +834,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 max_turns: 0,
                 runtime_seconds: 0,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: None,
@@ -875,6 +882,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 max_turns: 0,
                 runtime_seconds: 70,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3001".to_owned()),
@@ -972,6 +981,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 max_turns: 0,
                 runtime_seconds: 20,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3002".to_owned()),
@@ -1018,6 +1029,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 max_turns: 0,
                 runtime_seconds: 0,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3003".to_owned()),
@@ -1064,6 +1077,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 max_turns: 0,
                 runtime_seconds: 0,
                 blocked: true,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: vec!["COE-300".to_owned()],
                 server_base_url: None,
@@ -3926,6 +3941,7 @@ async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
         state_kind: TrackerIssueStateKind::Backlog,
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         labels: Vec::new(),
         project_id: Some("proj-open".to_owned()),
         project_slug: Some("opensymphony-bootstrap".to_owned()),
@@ -3961,6 +3977,7 @@ async fn gateway_task_graph_includes_backlog_issues_with_cross_edges() {
         state_kind: TrackerIssueStateKind::Unstarted,
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         labels: Vec::new(),
         project_id: Some("proj-open".to_owned()),
         project_slug: Some("opensymphony-bootstrap".to_owned()),
@@ -5966,24 +5983,83 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         "action_id should be non-empty: {:?}",
         body.action_id
     );
+    let first_action_id = body.action_id.clone();
 
-    // Duplicate idempotency key → rejected receipt
+    let generationless_replan = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr_replan_missing_generation".to_string(),
+        action_kind: ActionKind::Replan,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Issue,
+            entity_id: "COE-255".to_string(),
+        },
+        payload: None,
+        idempotency_key: None,
+    };
+    let response = client
+        .post(&url)
+        .json(&generationless_replan)
+        .send()
+        .await
+        .expect("generation-less replan should respond");
+    assert_eq!(response.status(), 400);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    assert!(
+        body.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("hierarchy_generation"))
+    );
+
+    // Retried idempotency key → replay of the original accepted receipt
     let response = client
         .post(&url)
         .json(&dispatch)
         .send()
         .await
         .expect("POST /api/v1/actions/dispatch should respond");
+    assert_eq!(response.status(), 200);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Accepted);
+    assert_eq!(body.action_id, first_action_id);
+    assert_eq!(body.correlation_id, "corr_001");
+
+    // Retried idempotency key with a fresh correlation ID → same receipt
+    let correlation_retry = ActionDispatch {
+        correlation_id: "corr_retry".to_owned(),
+        ..dispatch.clone()
+    };
+    let response = client
+        .post(&url)
+        .json(&correlation_retry)
+        .send()
+        .await
+        .expect("correlation-only retry should respond");
+    assert_eq!(response.status(), 200);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Accepted);
+    assert_eq!(body.action_id, first_action_id);
+    assert_eq!(body.correlation_id, "corr_001");
+
+    // Reusing a key for a different action must not replay the original receipt.
+    let mismatched_dispatch = ActionDispatch {
+        action_kind: ActionKind::Comment,
+        correlation_id: "corr_mismatched_key".to_owned(),
+        ..dispatch.clone()
+    };
+    let response = client
+        .post(&url)
+        .json(&mismatched_dispatch)
+        .send()
+        .await
+        .expect("mismatched idempotency key should respond");
     assert_eq!(response.status(), 409);
     let body: ActionReceipt = response.json().await.expect("should not be None");
     assert_eq!(body.status, ActionStatus::Rejected);
     assert!(
         body.reason
-            .as_ref()
-            .expect("should not be None")
-            .contains("duplicate idempotency key"),
-        "rejected reason should mention duplicate idempotency key: {:?}",
-        body.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("different action"))
     );
 
     // Invalid retry action (already active) → rejected receipt

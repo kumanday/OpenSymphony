@@ -253,6 +253,14 @@ impl IssueExecution {
         &self.recent_worker_outcomes
     }
 
+    /// Retain a worker outcome while the scheduler retries a fallible
+    /// terminal transition. This does not change the scheduler state; it
+    /// preserves the completed evidence so a persistence failure cannot make
+    /// a finished worker look as though it never reported an outcome.
+    pub fn retain_worker_outcome(&mut self, outcome: WorkerOutcomeRecord) {
+        self.record_outcome(outcome);
+    }
+
     pub fn retry_count_override(&self) -> Option<u32> {
         self.retry_count_override
     }

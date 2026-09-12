@@ -76,6 +76,9 @@ pub enum ExpectedFollowup {
 pub enum ActionKind {
     Retry,
     Cancel,
+    /// Accept the current hierarchy snapshot and clear a parent
+    /// `HierarchyChanged` block for re-planning.
+    Replan,
     Pause,
     Resume,
     Rehydrate,
@@ -106,6 +109,7 @@ impl std::fmt::Display for ActionKind {
         let s = match self {
             ActionKind::Retry => "retry",
             ActionKind::Cancel => "cancel",
+            ActionKind::Replan => "replan",
             ActionKind::Pause => "pause",
             ActionKind::Resume => "resume",
             ActionKind::Rehydrate => "rehydrate",
@@ -138,6 +142,10 @@ impl ActionKind {
             ActionKind::Cancel => vec![
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::RunLifecycle,
+            ],
+            ActionKind::Replan => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::StateTransition,
             ],
             ActionKind::Pause => vec![
                 ExpectedFollowup::ActionCompletion,

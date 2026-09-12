@@ -23,6 +23,8 @@ pub struct CheckoutRepository {
     pub credential_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_credential_env: Option<String>,
     pub instructions_path: PathBuf,
     #[serde(default)]
     pub policy_generation: String,
@@ -31,6 +33,12 @@ pub struct CheckoutRepository {
     pub review_provider: String,
     #[serde(default)]
     pub review_policy_generation: String,
+    #[serde(default)]
+    pub required_checks: bool,
+    #[serde(default)]
+    pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";
@@ -49,6 +57,9 @@ pub fn checkout_credential_environment_variables(
     let mut variables = std::collections::BTreeSet::new();
     for repository in repositories.values() {
         if let Some(variable) = repository.credential_env.as_ref() {
+            variables.insert(variable.clone());
+        }
+        if let Some(variable) = repository.review_credential_env.as_ref() {
             variables.insert(variable.clone());
         }
         if repository.credential_kind == "ssh-agent" {
@@ -919,6 +930,9 @@ pub struct RunManifest {
     pub interrupt_reason: Option<String>,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
+    /// Durable boundary for fencing provider evidence after a run restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
@@ -947,6 +961,7 @@ impl RunManifest {
             interrupt_reason: None,
             status: RunStatus::Preparing,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),

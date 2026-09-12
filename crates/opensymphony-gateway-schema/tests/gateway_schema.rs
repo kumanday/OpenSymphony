@@ -566,6 +566,7 @@ fn run_detail_roundtrips() {
         codex_thread_id: None,
         summary: Some("Processing run".into()),
         blocker: None,
+        hierarchy_generation: Some(3),
         error: None,
         allowed_actions: vec![],
         liveness: None,
@@ -1650,6 +1651,7 @@ fn safe_actions_roundtrips() {
         cancel: false,
         rehydrate: true,
         detach: false,
+        replan: true,
     };
     let json = must_serialize(&actions);
     let back: SafeActions = must_deserialize(&json);
@@ -1663,6 +1665,7 @@ fn safe_actions_defaults_to_all_false() {
     assert!(!actions.cancel);
     assert!(!actions.rehydrate);
     assert!(!actions.detach);
+    assert!(!actions.replan);
 }
 
 #[test]

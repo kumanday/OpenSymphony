@@ -112,10 +112,23 @@ export interface GatewayTransport {
 /** Extended transport with action dispatch support. */
 export interface ActionCapableTransport extends GatewayTransport {
   dispatchAction(action: ActionDispatch): Promise<ActionReceipt>;
-  cancelRun(runId: string): Promise<ActionReceipt>;
-  retryRun(runId: string): Promise<ActionReceipt>;
-  resumeRun(runId: string): Promise<ActionReceipt>;
-  rehydrateRun(runId: string): Promise<ActionReceipt>;
+  /** Run lifecycle actions use a fresh operation ID by default; reuse it for request retries. */
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt>;
+  /**
+   * Replan one blocked hierarchy generation. The displayed generation is
+   * required so the orchestrator can reject stale control-plane actions.
+   * Callers that retry the same request should reuse operationId; a new
+   * operation gets a new key so a later hierarchy generation is not rejected
+   * as a duplicate.
+   */
+  replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId?: string,
+  ): Promise<ActionReceipt>;
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt>;
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt>;
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt>;
   commentRun(runId: string, text: string): Promise<ActionReceipt>;
   createFollowup(runId: string, payload: unknown): Promise<ActionReceipt>;
   approvalDecision(approvalId: string, decision: "approved" | "rejected", explanation?: string): Promise<ActionReceipt>;

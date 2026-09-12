@@ -42,8 +42,9 @@ pub use runtime::{
     StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
-    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
-    RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals, WorkerAttemptSnapshot,
+    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, HierarchyStateSnapshot, IssueSnapshot,
+    OrchestratorSnapshot, RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals,
+    WorkerAttemptSnapshot,
 };
 pub use state_machine::{
     IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,
@@ -139,6 +140,7 @@ mod tests {
                 "leonardogonzalez/coe-260-domain-model-and-orchestrator-state-machine".to_owned(),
             ),
             pr_url: None,
+            pr_urls: Vec::new(),
             url: Some(
                 "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
                     .to_owned(),

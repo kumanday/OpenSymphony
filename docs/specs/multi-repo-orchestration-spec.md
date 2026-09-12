@@ -297,7 +297,7 @@ review_profiles:
     credential: github-app
     required_checks: true
     required_review: true
-    merge_method: squash
+    merge_method: merge
 
 credentials:
   linear-main:

@@ -149,8 +149,83 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("attachments {")
+            .contains("attachments(first: 32, orderBy: updatedAt, filter: { url: { contains: \"/pull/\" } }) {")
     );
+}
+
+#[tokio::test]
+async fn issue_lookup_bounds_attachments_but_paginates_nested_children() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(
+            r#"{
+              "data": {"issue": {
+                "id": "parent-id",
+                "identifier": "COE-1",
+                "url": "https://linear.app/example/issue/COE-1",
+                "title": "Parent",
+                "description": null,
+                "priority": 1,
+                "branchName": null,
+                "createdAt": "2026-08-12T00:00:00Z",
+                "updatedAt": "2026-08-12T00:00:00Z",
+                "state": {"id": "state-active", "name": "In Progress", "type": "started"},
+                "project": null,
+                "parent": null,
+                "attachments": {
+                  "nodes": [{"url":"https://github.com/example/repo/pull/1","sourceType":"github"}],
+                  "pageInfo": {"hasNextPage": true, "endCursor": "attachment-cursor"}
+                },
+                "children": {
+                  "nodes": [{"id":"child-1","identifier":"COE-2","state":{"name":"Done"}}],
+                  "pageInfo": {"hasNextPage": true, "endCursor": "child-cursor"}
+                },
+                "labels": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}},
+                "inverseRelations": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+              }}
+            }"#,
+        ),
+        QueuedResponse::json(
+            r#"{
+              "data": {"issue": {
+                "id": "parent-id",
+                "children": {
+                  "nodes": [{"id":"child-2","identifier":"COE-3","state":{"name":"Done"}}],
+                  "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }
+              }}
+            }"#,
+        ),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .issues_by_identifiers(&["COE-1"])
+        .await
+        .expect("issue lookup should fetch all child pages");
+
+    assert_eq!(issues[0].sub_issues.len(), 2);
+    assert_eq!(issues[0].pr_urls.len(), 1);
+    let requests = server.recorded_requests().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "attachment pagination must not issue requests"
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("issue query should be a string")
+            .contains("attachments(first: 32, orderBy: updatedAt, filter: { url: { contains: \"/pull/\" } }) {")
+    );
+    assert!(
+        requests[1].body["query"]
+            .as_str()
+            .expect("child page query should be a string")
+            .contains("query IssueChildren")
+    );
+    assert_eq!(requests[1].body["variables"]["after"], "child-cursor");
 }
 
 #[tokio::test]

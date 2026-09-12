@@ -334,20 +334,28 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.actionInner.dispatchAction(action);
   }
 
-  cancelRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.cancelRun(runId);
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.cancelRun(runId, operationId);
   }
 
-  retryRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.retryRun(runId);
+  replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId?: string,
+  ): Promise<ActionReceipt> {
+    return this.actionInner.replanParent(parentId, hierarchyGeneration, operationId);
   }
 
-  resumeRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.resumeRun(runId);
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.retryRun(runId, operationId);
   }
 
-  rehydrateRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.rehydrateRun(runId);
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.resumeRun(runId, operationId);
+  }
+
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.rehydrateRun(runId, operationId);
   }
 
   commentRun(runId: string, text: string): Promise<ActionReceipt> {

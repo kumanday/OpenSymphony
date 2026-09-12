@@ -4,6 +4,7 @@ import type { SchemaVersion } from "./version.js";
 export type ActionKind =
   | "retry"
   | "cancel"
+  | "replan"
   | "pause"
   | "resume"
   | "rehydrate"
