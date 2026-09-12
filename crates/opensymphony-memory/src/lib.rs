@@ -3452,7 +3452,7 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
-        assert!(indexed_issue_matches_scope(
+        assert!(!indexed_issue_matches_scope(
             &config,
             &issue,
             &MemoryScopeFilter {
@@ -3460,11 +3460,22 @@ Reviews are triggered when you open a pull request for review.
                 ..MemoryScopeFilter::default()
             }
         ));
-        assert!(indexed_issue_matches_scope(
+        assert!(!indexed_issue_matches_scope(
             &config,
             &issue,
             &MemoryScopeFilter {
                 authorized_work_items: Some(BTreeSet::from(["coe-child".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from([
+                    "coe-123".to_string(),
+                    "coe-child".to_string(),
+                ])),
                 ..MemoryScopeFilter::default()
             }
         ));

@@ -2585,7 +2585,9 @@ where
                     && !record.cancelled_run
                     && self.retry_limit_reached(record.normal_retry_count)
                     && self.workspace.retain_failed_workspaces();
-                let cleanup_result = if retain_failed {
+                let parent_workspace =
+                    self.is_parent_integration_workspace(&issue_id, issue_has_children);
+                let cleanup_result = if parent_workspace || retain_failed {
                     Ok(())
                 } else if !record.successful_run
                     && !record.cancelled_run
@@ -5091,47 +5093,9 @@ where
             self.insert_execution(issue_id, execution);
             return Err(error);
         }
-        let parent_workspace = !execution.issue().sub_issues.is_empty();
+        let parent_workspace = self
+            .is_parent_integration_workspace(&issue_id, !execution.issue().sub_issues.is_empty());
         let mut retry_cleanup_succeeded = retain_failed;
-        if parent_workspace
-            && cleanup_terminal
-            && parent_finalized
-            && remote_stopped
-            && !retain_failed
-            && let Some(workspace) = execution.workspace().cloned()
-        {
-            let leased = match self.workspace_has_active_lease(&workspace).await {
-                Ok(leased) => leased,
-                Err(error) => {
-                    self.insert_execution(issue_id, execution);
-                    return Err(error);
-                }
-            };
-            if leased {
-                self.insert_execution(issue_id, execution);
-                return Ok(());
-            }
-            let cleanup = if cleanup_reason == ReleaseReason::RetryExhausted {
-                self.workspace.cleanup_failed_workspace(&workspace).await
-            } else {
-                self.workspace.cleanup_workspace(&workspace, true).await
-            };
-            match cleanup {
-                Ok(()) => {
-                    retry_cleanup_succeeded = true;
-                    execution.clear_workspace();
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        issue = %issue_id,
-                        %error,
-                        "retaining finalized parent and its child leases while workspace cleanup retries"
-                    );
-                    self.insert_execution(issue_id, execution);
-                    return Ok(());
-                }
-            }
-        }
         if matches!(
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::Completed
@@ -5328,6 +5292,19 @@ where
             }
         }
 
+        self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+            .await?;
+        if self.parent_waiting_for_tracker_confirmation(&issue_id) {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
+
         let retry_count = execution
             .current_run()
             .map(|run| run.normal_retry_count)
@@ -5342,25 +5319,11 @@ where
             // the refresh failed), park the exhausted run rather than making
             // a successful worker turn look like a completed Linear task.
             let reason = ReleaseReason::RetryExhausted;
-            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
-                .await?;
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
         }
 
-        self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
-            .await?;
-        if self.parent_waiting_for_tracker_confirmation(&issue_id) {
-            return self
-                .release_finished_execution(
-                    execution,
-                    observed_at,
-                    ReleaseReason::Completed,
-                    Some(outcome),
-                )
-                .await;
-        }
         self.queue_retry_for_outcome(execution, outcome, observed_at)
             .await
     }
@@ -5407,8 +5370,11 @@ where
             &execution.issue().id,
             !execution.issue().sub_issues.is_empty(),
         );
-        let defer_parent_retirement =
-            parent_finalized && !execution.issue().sub_issues.is_empty() && outcome.is_some();
+        let parent_workspace = self.is_parent_integration_workspace(
+            &execution.issue().id,
+            !execution.issue().sub_issues.is_empty(),
+        );
+        let defer_parent_lease_release = parent_finalized && parent_workspace && outcome.is_some();
         if cleanup_terminal && parent_finalized {
             self.retain_terminal_child_lease(&execution).await?;
         }
@@ -5421,7 +5387,7 @@ where
             self.record_terminal_orchestrator_success(&execution.issue().id)
                 .await?;
         }
-        if !defer_parent_retirement
+        if !defer_parent_lease_release
             && matches!(
                 reason,
                 ReleaseReason::TrackerTerminal | ReleaseReason::Completed
@@ -5450,9 +5416,9 @@ where
             let mut execution = execution.release(observed_at, reason, outcome)?;
             execution.set_retry_count_override(normal_retry_count);
             let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
-            if !defer_parent_retirement
-                && cleanup_terminal
+            if cleanup_terminal
                 && parent_finalized
+                && !parent_workspace
                 && !retain_failed
                 && let Some(workspace) = execution.workspace().cloned()
                 && !self.workspace_has_active_lease(&workspace).await?
@@ -5474,9 +5440,9 @@ where
         let mut execution = execution.release(observed_at, reason, outcome)?;
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
-        if !defer_parent_retirement
-            && cleanup_terminal
+        if cleanup_terminal
             && parent_finalized
+            && !parent_workspace
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
             && !self.workspace_has_active_lease(&workspace).await?
@@ -5532,6 +5498,20 @@ where
             }
             None => !issue_has_children,
         }
+    }
+
+    // Parent capture retries after daemon restart from the durable runtime
+    // envelope, so cleanup remains deferred to the capture-aware lifecycle.
+    fn is_parent_integration_workspace(
+        &self,
+        issue_id: &IssueId,
+        issue_has_children: bool,
+    ) -> bool {
+        issue_has_children
+            || self
+                .hierarchy_state
+                .parent_integrations
+                .contains_key(issue_id)
     }
 
     fn parent_waiting_for_tracker_confirmation(&self, issue_id: &IssueId) -> bool {

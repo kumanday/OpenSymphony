@@ -540,7 +540,7 @@ pub(crate) fn load_terminal_capture_bindings(
     load_terminal_capture_bindings_inner(workspace_root, Some(&requested))
 }
 
-/// Read every durable run envelope before terminal cleanup can remove its workspace.
+/// Read every durable run envelope from retained leaf and parent workspaces.
 pub(crate) fn load_all_terminal_capture_bindings(
     workspace_root: &Path,
 ) -> Result<BTreeMap<String, TerminalCaptureBinding>, MemoryError> {
@@ -558,18 +558,7 @@ fn load_terminal_capture_bindings_inner(
             source,
         })?;
     let mut bindings = BTreeMap::new();
-    for entry in fs::read_dir(&root).map_err(|source| MemoryError::ReadFile {
-        path: root.clone(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| MemoryError::ReadFile {
-            path: root.clone(),
-            source,
-        })?;
-        let candidate = entry.path();
-        if !candidate.is_dir() {
-            continue;
-        }
+    for candidate in terminal_capture_workspace_candidates(&root)? {
         let run_path = candidate.join(".opensymphony/run.json");
         let Ok(raw) = fs::read_to_string(&run_path) else {
             continue;
@@ -723,6 +712,58 @@ fn load_terminal_capture_bindings_inner(
         }
     }
     Ok(bindings)
+}
+
+fn terminal_capture_workspace_candidates(root: &Path) -> Result<Vec<PathBuf>, MemoryError> {
+    let parents_root = root.join("parents");
+    let mut candidates = child_directories(root)?;
+    candidates.retain(|candidate| candidate != &parents_root);
+    for parent_key in child_directories_if_present(&parents_root)? {
+        candidates.extend(child_directories(&parent_key)?);
+    }
+    Ok(candidates)
+}
+
+fn child_directories_if_present(path: &Path) -> Result<Vec<PathBuf>, MemoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_dir() => Ok(Vec::new()),
+        Ok(_) => child_directories(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(source) => Err(MemoryError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn child_directories(path: &Path) -> Result<Vec<PathBuf>, MemoryError> {
+    let entries = fs::read_dir(path).map_err(|source| MemoryError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    child_directories_from_entries(path, entries)
+}
+
+fn child_directories_from_entries(
+    path: &Path,
+    entries: fs::ReadDir,
+) -> Result<Vec<PathBuf>, MemoryError> {
+    let mut children = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| MemoryError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| MemoryError::ReadFile {
+            path: entry.path(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            children.push(entry.path());
+        }
+    }
+    children.sort();
+    Ok(children)
 }
 
 fn completed_parent_capture_commits(
@@ -14915,7 +14956,11 @@ Public memory concept.
             .expect("all durable capture bindings");
         assert_eq!(all_bindings, bindings);
 
-        let parent_workspace = workspace_root.path().join("COE-554-parent");
+        let parent_workspace = workspace_root
+            .path()
+            .join("parents")
+            .join("COE-554-parent")
+            .join("4");
         std::fs::create_dir_all(parent_workspace.join(".opensymphony"))
             .expect("parent metadata directory");
         let parent_envelope = serde_json::from_value(json!({

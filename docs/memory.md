@@ -527,16 +527,19 @@ endpoint and workspace before reattachment. A missing or different parent
 conversation manifest is rejected before a replacement session can launch.
 Terminal, inactive, and binding-superseded lifecycles issue the stop/cancel
 fence before revoking the issue grant. Raw bearer tokens are never persisted in
-manifests or diagnostics.
+manifests or diagnostics. With automatic capture enabled, terminal issues seen
+at daemon startup remain capture candidates instead of being assumed captured.
 This grant applies to direct `memory.show` capsule reads as well as search,
 context, brief, related, docs, status, and code-intelligence tools. If the
 central service stops, the control-plane status is explicitly degraded and
 scoped worker reads remain blocked; they do not silently fall back to an
 unrelated repository-local store. Leaf capture reads the immutable runtime
 envelope for repository ownership and commits, and documentation sync uses
-that explicit owner. Terminal capture snapshots those durable envelopes before
-the scheduler performs terminal workspace cleanup, so removal or retention
-policy cannot erase the repository/run provenance needed for capture.
+that explicit owner. Terminal capture reads those durable envelopes from leaf
+roots and from the generation-bound `parents/<parent-key>/<generation>` layout.
+Completed parent roots remain retained across reconciliation and restart so a
+transient capture failure cannot erase the repository/run provenance needed for
+the next attempt.
 For a parent, the capture path also reads validated durable controller state
 and requires the matching lifecycle to be `completed`, its final attempt to be
 passed for the same run and input version, its final evidence to be bound to the

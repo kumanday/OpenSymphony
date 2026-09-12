@@ -1104,7 +1104,7 @@ fn indexed_issue_matches_authorized_work_items(
                 .filter(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
                 .map(|scope| scope.id.as_str()),
         )
-        .any(|work_item| {
+        .all(|work_item| {
             authorized_work_items
                 .iter()
                 .any(|authorized| authorized.eq_ignore_ascii_case(work_item))

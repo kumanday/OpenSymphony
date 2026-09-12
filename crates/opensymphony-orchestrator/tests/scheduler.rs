@@ -1050,7 +1050,7 @@ async fn dry_run_parent_preview_does_not_bind_its_conversation() {
 }
 
 #[tokio::test]
-async fn completed_parent_stays_materialized_for_post_tick_capture_before_retirement() {
+async fn completed_parent_stays_materialized_across_later_capture_retries() {
     let suffix = "CAPTURE-WINDOW";
     let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
     let mut terminal = tracker_state_snapshot(
@@ -1101,25 +1101,73 @@ async fn completed_parent_stays_materialized_for_post_tick_capture_before_retire
         state: "Done".to_owned(),
         state_kind: TrackerIssueStateKind::Completed,
     }];
-    scheduler.tracker_mut().terminal = vec![terminal_parent];
+    scheduler.tracker_mut().terminal = vec![terminal_parent.clone()];
     scheduler
         .tick(ts(3_600_200))
         .await
-        .expect("later reconciliation should retire the captured parent");
-    assert_eq!(
-        scheduler.workspace().cleaned,
-        vec![(format!("COE-PARENT-{suffix}"), true)]
+        .expect("later reconciliation should retain the capturable parent");
+    assert!(
+        scheduler.workspace().cleaned.is_empty(),
+        "COE-556 owns durable parent cleanup after capture acknowledgement"
     );
     let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("durable state");
     assert!(state.leases.iter().all(|lease| !lease.active()));
+
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&state).expect("persisted state")),
+            recoveries: vec![RecoveryRecord {
+                issue: normalized_issue(
+                    parent_id.as_str(),
+                    &format!("COE-PARENT-{suffix}"),
+                    "Done",
+                ),
+                workspace: workspace_record(
+                    &format!("COE-PARENT-{suffix}"),
+                    &format!("/tmp/recovered/COE-PARENT-{suffix}"),
+                ),
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: false,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: None,
+                interrupt_reason: None,
+                recovered_run: None,
+            }],
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    restarted
+        .bootstrap(ts(3_600_300))
+        .await
+        .expect("restart should preserve completed parent evidence");
+    assert!(
+        restarted.workspace().cleaned.is_empty(),
+        "restart recovery must retain the parent root for another capture attempt"
+    );
 }
 
 #[tokio::test]
 async fn passed_parent_survives_tracker_refresh_failure_until_terminal_reconciliation() {
     let suffix = "PASSED-REFRESH";
-    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let (mut scheduler, parent_id) =
+        launched_parent_scheduler_with_config(suffix, config.clone()).await;
     scheduler.tracker_mut().state_errors.push_back(FakeError {
         message: "temporary tracker refresh failure".to_owned(),
         category: None,
@@ -1213,7 +1261,7 @@ async fn passed_parent_survives_tracker_refresh_failure_until_terminal_reconcili
             ..Default::default()
         },
         FakeWorker::default(),
-        scheduler_config(),
+        config,
     );
     scheduler
         .tick(ts(1_300))

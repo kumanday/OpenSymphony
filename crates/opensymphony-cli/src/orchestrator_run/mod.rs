@@ -1253,7 +1253,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             }
         },
     };
-    let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let mut auto_capture_completed_issues = initial_auto_capture_completed_issues(
+        &startup_terminal_issues,
+        runtime.memory.auto_capture,
+    );
     push_recent_event(
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
@@ -1994,6 +1998,17 @@ fn auto_capture_candidates(
         .collect()
 }
 
+fn initial_auto_capture_completed_issues(
+    startup_terminal_issues: &BTreeSet<String>,
+    auto_capture_enabled: bool,
+) -> BTreeSet<String> {
+    if auto_capture_enabled {
+        BTreeSet::new()
+    } else {
+        startup_terminal_issues.clone()
+    }
+}
+
 fn mark_auto_capture_completed(
     completed_issues: &mut BTreeSet<String>,
     candidates: &[String],
@@ -2500,6 +2515,16 @@ mod tests {
 
         let retry_candidates = auto_capture_candidates(&current, &mut completed, true);
         assert_eq!(retry_candidates, vec!["COE-2".to_string()]);
+    }
+
+    #[test]
+    fn startup_terminal_issues_retry_capture_after_daemon_restart() {
+        let terminal = issue_set(&["COE-1", "COE-2"]);
+        assert!(initial_auto_capture_completed_issues(&terminal, true).is_empty());
+        assert_eq!(
+            initial_auto_capture_completed_issues(&terminal, false),
+            terminal
+        );
     }
 
     #[test]
