@@ -295,7 +295,7 @@ impl WorkspaceManager {
         self.reject_symlinked_workspace_root(&root).await?;
         if path_exists(&root).await? {
             let parent = self
-                .open_parent_execution_root(issue, hierarchy_generation, &root)
+                .open_parent_execution_root_with_changes(issue, hierarchy_generation, &root, true)
                 .await?;
             self.verify_parent_requests(&parent, &requests)?;
             return Ok(parent);
@@ -1258,7 +1258,7 @@ impl WorkspaceManager {
                     Some(&retained.issue_id),
                 )
                 .await?;
-            let child_manifest = self.verify_checkout_for_parent(&child).await?;
+            self.verify_checkout_for_parent(&child).await?;
             let status = self
                 .git(
                     child.workspace_path(),
@@ -1271,9 +1271,13 @@ impl WorkspaceManager {
                     "retained child checkout is dirty",
                 ));
             }
-            if child_manifest.head != retained.child_head
-                || child_manifest.current_branch != retained.child_branch
-            {
+            let child_head = self
+                .git(child.workspace_path(), &["rev-parse", "HEAD"])
+                .await?;
+            let child_branch = self
+                .git(child.workspace_path(), &["branch", "--show-current"])
+                .await?;
+            if child_head != retained.child_head || child_branch != retained.child_branch {
                 return Err(checkout_verification(
                     child.workspace_path(),
                     "retained child evidence no longer matches the pinned parent map",

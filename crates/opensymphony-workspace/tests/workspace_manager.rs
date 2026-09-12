@@ -215,6 +215,19 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .ensure(&child_a1)
         .await
         .expect("first repository-a child should exist");
+    std::fs::write(
+        child_a1.handle.workspace_path().join("child-a1-work.txt"),
+        "retained child feature commit\n",
+    )
+    .expect("retained child feature should be written");
+    git(
+        child_a1.handle.workspace_path(),
+        &["add", "child-a1-work.txt"],
+    );
+    git(
+        child_a1.handle.workspace_path(),
+        &["commit", "-m", "retain child feature commit"],
+    );
     let child_a1_head = git(child_a1.handle.workspace_path(), &["rev-parse", "HEAD"]);
     let merge_a2 = rebase_merge_fixture(&source_a);
 
@@ -431,7 +444,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         "false"
     );
     manager
-        .prepare_parent_execution_root(&parent, 8, repeat_requests)
+        .prepare_parent_execution_root(&parent, 8, repeat_requests.clone())
         .await
         .expect("a deepened retained child should support a later parent generation");
     assert!(matches!(
@@ -464,6 +477,38 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     )
     .expect("late child drift marker should be removed");
 
+    let child_a2_head = git(child_a2.handle.workspace_path(), &["rev-parse", "HEAD"]);
+    std::fs::write(
+        child_a2
+            .handle
+            .workspace_path()
+            .join("late-child-commit.txt"),
+        "committed drift must be detected\n",
+    )
+    .expect("late child commit should be written");
+    git(
+        child_a2.handle.workspace_path(),
+        &["add", "late-child-commit.txt"],
+    );
+    git(
+        child_a2.handle.workspace_path(),
+        &["commit", "-m", "late child drift"],
+    );
+    let child_commit_drift_error = manager
+        .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+        .await
+        .expect_err("committed non-source child drift must invalidate the parent root");
+    assert!(
+        child_commit_drift_error
+            .to_string()
+            .contains("pinned parent map"),
+        "unexpected child-commit-drift error: {child_commit_drift_error}"
+    );
+    git(
+        child_a2.handle.workspace_path(),
+        &["reset", "--hard", &child_a2_head],
+    );
+
     let integration = prepared
         .handle
         .workspace_path()
@@ -485,6 +530,12 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
         .await
         .expect("retry attachment should preserve parent integration changes");
+    let retried_preparation = manager
+        .prepare_parent_execution_root(&parent, 5, repeat_requests.clone())
+        .await
+        .expect("scheduler preparation should preserve parent integration changes on retry");
+    assert!(!retried_preparation.created);
+    assert!(integration.join("parent-change.txt").exists());
     assert_eq!(
         manager
             .resolve_parent_checkout(&prepared, &repository_a.checkout_handle)
