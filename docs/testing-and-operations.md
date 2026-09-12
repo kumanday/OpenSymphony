@@ -70,11 +70,14 @@ Why fakes matter:
   deadlines, bounded command logs/resources, rejection of prompt-authored
   execution claims, uncertain cleanup fences, metadata-only prelaunch crash
   recovery, authenticated same-conversation parent grants after restart,
-  prelaunch rejection of parent harness switches, terminal-turn cleanup before
-  retry, retryable active cancellation, completed-parent reopen with unchanged
-  child edges, compacted admission idempotency, empty-target verification,
-  terminal-success finalization gates, and retry after a failed durable outcome
-  write
+  prelaunch rejection of missing or changed bound conversation manifests and
+  parent harness switches, attempt-specific continuation prompts for Codex and
+  OpenHands, terminal-turn cleanup before retry, retryable active cancellation,
+  completed-parent reopen with unchanged child edges, compacted admission
+  idempotency, empty-target verification, recursive intermediate-descendant
+  memory grants, durable-controller-gated parent capture, stable default memory
+  endpoint recovery, terminal-success finalization gates, and retry after a
+  failed durable outcome write
 
 ## 2.4 Live local tests
 
@@ -532,7 +535,9 @@ parent identifiers remain distinct; and `after_create` cannot turn a parent
 root into a Git repository. It also covers parent `after_create`
 receipt/reuse/failure behavior and proves a child-controlled direct or
 worktree-conditional fsmonitor executable is rejected without running before
-the incomplete parent root is rolled back. A lower-level regression proves the
+the incomplete parent root is rolled back. Terminal cleanup also unregisters
+the real integration worktrees and proves the same generation can be prepared
+again without a stale Git registration. A lower-level regression proves the
 orchestrator Git command overrides checkout-controlled fsmonitor configuration
 and default repository hooks at execution time. Focused
 OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope

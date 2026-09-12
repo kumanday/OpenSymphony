@@ -253,6 +253,15 @@ indeterminate and reruns after named-resource cleanup and baseline refresh. Term
 tracker state cannot publish orchestrator success, release descendant leases,
 or remove the parent workspace until the durable controller reaches
 `completed` through accepted final verification.
+A recovered parent worker must find the exact conversation manifest recorded by
+the controller. Its expected identity crosses the scheduler-to-worker request,
+and a missing or different manifest fails before any harness session is
+created. The reused conversation receives current run-bound receipt guidance
+without replaying the full workflow prompt. When terminal cleanup removes a
+parent root, the manager first unregisters each contained integration worktree
+from its retained source repository with isolated Git configuration. Cleanup is
+idempotent after partial progress, and the same hierarchy generation can be
+materialized again without stale Git worktree registrations.
 A reopened completed parent starts a new controller lifecycle even when the
 child-edge generation is unchanged. Admission idempotency is retained outside
 the compact transition history, so retry history pruning cannot replay initial

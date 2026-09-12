@@ -4,7 +4,10 @@ mod models;
 mod paths;
 
 pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
-pub use manager::{WorkspaceManager, compose_parent_prompt, compose_terminal_prompt};
+pub use manager::{
+    WorkspaceManager, compose_parent_continuation_prompt, compose_parent_prompt,
+    compose_terminal_prompt,
+};
 pub use models::{
     CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, CleanupOutcome,
     ConversationManifest, EnsureWorkspaceResult, HookConfig, HookDefinition, HookExecutionRecord,

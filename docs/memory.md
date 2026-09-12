@@ -227,8 +227,13 @@ memory:
 `auto_capture` defaults to `true`. `auto_archive` defaults to `false`; when it
 is enabled, OpenSymphony archives only after fresh capture succeeds with no
 blocking warnings. `serve` starts the local memory server during
-`opensymphony run` when memory is initialized. The default bind address uses an
-ephemeral loopback port, and workers receive the resulting MCP endpoint through
+`opensymphony run` when memory is initialized. The default bind address selects
+an available loopback port once, records it in
+`<workspace-root>/.opensymphony-memory-bind.json`, and reuses that exact port on
+later starts. This keeps the endpoint stable for an authenticated parent
+conversation recovered after daemon restart; startup fails if the recorded
+port cannot be rebound rather than rotating the conversation's endpoint.
+Workers receive the resulting MCP endpoint through
 `OPENSYMPHONY_MEMORY_ENDPOINT`. Workers receive only the normal read token;
 admin tools require a separate `OPENSYMPHONY_MEMORY_ADMIN_TOKEN`.
 
@@ -510,14 +515,19 @@ providers to import memory internals.
 Worker-scoped memory access uses a server-local, non-persisted bearer grant
 bound to the worker's project-set, project, work item, execution repository,
 authorized repository set, visibility, run/attempt, and checkout generation.
-An unchanged claim set may reuse the conversation bearer; a changed run,
-attempt, binding, target commit, or generation rotates the bearer and requires a
-fresh conversation. The startup checkout `HEAD` is retained as capture
-provenance, not as a live-overlay equality requirement. Durable daemon recovery reconstructs
-the claims from the terminal runtime envelope and forces a fresh conversation
-when the in-memory registry was replaced. Terminal, inactive, and
-binding-superseded lifecycles issue the stop/cancel fence before revoking the
-issue grant. Raw bearer tokens are never persisted in manifests or diagnostics.
+An unchanged leaf claim set may reuse the conversation bearer; a changed leaf
+run, attempt, binding, target commit, or generation rotates the bearer and
+requires a fresh leaf conversation. The startup checkout `HEAD` is retained as
+capture provenance, not as a live-overlay equality requirement. Durable daemon
+recovery reconstructs leaf claims from the runtime envelope and forces a fresh
+leaf conversation when the in-memory registry was replaced. A parent controller
+instead restores the bearer already held by its persisted OpenHands
+conversation into the reconstructed registry and verifies the same memory
+endpoint and workspace before reattachment. A missing or different parent
+conversation manifest is rejected before a replacement session can launch.
+Terminal, inactive, and binding-superseded lifecycles issue the stop/cancel
+fence before revoking the issue grant. Raw bearer tokens are never persisted in
+manifests or diagnostics.
 This grant applies to direct `memory.show` capsule reads as well as search,
 context, brief, related, docs, status, and code-intelligence tools. If the
 central service stops, the control-plane status is explicitly degraded and
@@ -527,6 +537,12 @@ envelope for repository ownership and commits, and documentation sync uses
 that explicit owner. Terminal capture snapshots those durable envelopes before
 the scheduler performs terminal workspace cleanup, so removal or retention
 policy cannot erase the repository/run provenance needed for capture.
+For a parent, the capture path also reads validated durable controller state
+and requires the matching lifecycle to be `completed`, its final attempt to be
+passed for the same run and input version, its final evidence to be bound to the
+same conversation, and its exact repository commit map to equal the runtime
+envelope. A terminal run manifest or harness success by itself cannot authorize
+parent capture.
 Retained legacy run envelopes that lack usable run/attempt provenance are
 skipped as non-bindable entries during the pre-cleanup scan rather than
 preventing unrelated terminal captures from completing.

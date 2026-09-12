@@ -145,6 +145,12 @@ cleanup and baseline refresh. A terminal harness manifest whose controller
 outcome was lost becomes indeterminate and reruns after resource cleanup and
 baseline refresh. Recovered parent memory grants restore the bearer
 already held by the bound conversation into the reconstructed registry.
+Every recovered parent dispatch carries that expected conversation identity
+into the worker launch boundary. A missing or different conversation manifest
+fails before a replacement harness session can start. Reused turns receive a
+small continuation prompt containing the current run, attempt, generation,
+exact commit map, and receipt contract; the original workflow and repository
+instructions remain in the bound conversation rather than being replayed.
 Terminal success and descendant lease release are
 gated by the durable controller's completed state in both live and recovery
 release paths.

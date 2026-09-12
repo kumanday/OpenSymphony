@@ -1279,7 +1279,7 @@ async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
         .worker_mut()
         .launch_results
         .push_back(Ok(WorkerLaunch {
-            conversation,
+            conversation: conversation.clone(),
             started_at: Some(retry_dispatch_at),
         }));
     scheduler
@@ -1338,7 +1338,7 @@ async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
         .worker_mut()
         .launch_results
         .push_back(Ok(WorkerLaunch {
-            conversation,
+            conversation: conversation.clone(),
             started_at: Some(retry_dispatch_at),
         }));
     scheduler
@@ -1346,6 +1346,13 @@ async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
         .await
         .expect("retry cancelled parent turn");
     assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1]
+            .expected_parent_conversation_id
+            .as_deref(),
+        Some(conversation.conversation_id.as_str()),
+        "the backend must reject a missing or different manifest before retry launch"
+    );
 }
 
 #[tokio::test]

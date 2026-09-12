@@ -232,10 +232,11 @@ pub struct WorkerStartRequest {
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
     pub route: HarnessRouteDecision,
-    /// The issue was restored from durable process-recovery state. A scoped
-    /// memory grant is process-local, so a reused conversation must be
-    /// replaced once before the next worker prompt installs the new bearer.
+    /// The issue was restored from durable process-recovery state.
     pub memory_grant_registry_recovered: bool,
+    /// A parent retry must attach this durable controller-owned conversation.
+    /// The backend rejects a missing or different manifest before session launch.
+    pub expected_parent_conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3401,12 +3402,21 @@ where
             harness_kind.as_deref(),
         )?;
         execution = execution.claim(run.clone())?;
+        let expected_parent_conversation_id = (!recovery_issue.sub_issues.is_empty())
+            .then(|| {
+                self.hierarchy_state
+                    .parent_integrations
+                    .get(issue_id)
+                    .and_then(|controller| controller.conversation_id.clone())
+            })
+            .flatten();
         let start_request = WorkerStartRequest {
             issue: recovery_issue,
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),
             memory_grant_registry_recovered: self.recovered_memory_issue_ids.contains(issue_id),
+            expected_parent_conversation_id,
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -4060,6 +4070,14 @@ where
                 memory_grant_registry_recovered: self
                     .recovered_memory_issue_ids
                     .contains(&issue_id),
+                expected_parent_conversation_id: (!normalized.sub_issues.is_empty())
+                    .then(|| {
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get(&issue_id)
+                            .and_then(|controller| controller.conversation_id.clone())
+                    })
+                    .flatten(),
             };
 
             if !normalized.sub_issues.is_empty() {

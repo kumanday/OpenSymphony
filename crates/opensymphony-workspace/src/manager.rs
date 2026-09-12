@@ -4204,6 +4204,8 @@ impl WorkspaceManager {
         };
 
         if decision == CleanupDecision::Remove {
+            self.unregister_parent_integration_worktrees(workspace)
+                .await?;
             match fs::remove_dir_all(workspace.workspace_path()).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -4220,6 +4222,53 @@ impl WorkspaceManager {
             decision,
             before_remove,
         })
+    }
+
+    async fn unregister_parent_integration_worktrees(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), WorkspaceError> {
+        let Some(_manifest) = self
+            .load_manifest::<ParentExecutionManifest>(workspace, &workspace.parent_manifest_path())
+            .await?
+        else {
+            return Ok(());
+        };
+        let checkout_map = self
+            .load_manifest::<ParentChildCheckoutMap>(workspace, &workspace.child_checkouts_path())
+            .await?
+            .ok_or_else(|| {
+                checkout_verification(
+                    workspace.workspace_path(),
+                    "parent cleanup requires its pinned child checkout map",
+                )
+            })?;
+        for record in checkout_map.repositories.values() {
+            let source = self.validate_parent_retained_checkouts(record).await?;
+            let integration =
+                resolve_path_within_root(workspace.workspace_path(), &record.relative_path)?;
+            let integration_text = integration.to_str().ok_or_else(|| {
+                checkout_verification(&integration, "integration checkout path is not UTF-8")
+            })?;
+            let worktrees = self
+                .git(
+                    source.workspace_path(),
+                    &["worktree", "list", "--porcelain"],
+                )
+                .await?;
+            let registered = worktrees.lines().any(|line| {
+                line.strip_prefix("worktree ")
+                    .is_some_and(|path| path == integration_text)
+            });
+            if registered {
+                self.git_with_isolated_hooks_and_global_config(
+                    source.workspace_path(),
+                    &["worktree", "remove", "--force", "--force", integration_text],
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn load_issue_manifest(
@@ -5877,6 +5926,33 @@ pub fn compose_parent_prompt(
         envelope.workspace_path.display(),
         envelope.requested_execution_scope,
         envelope.effective_containment,
+    )
+}
+
+/// Current attempt facts for a reused parent conversation. This deliberately
+/// excludes the full workflow and repository instructions already supplied to
+/// the conversation, while refreshing the run-bound receipt contract.
+pub fn compose_parent_continuation_prompt(envelope: &ParentRuntimeEnvelope) -> String {
+    let verification_commits = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            format!(
+                "    \"{}\": \"{}\"",
+                checkout.repository_id, checkout.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!(
+        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nThe file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
+        envelope.run_id,
+        envelope.attempt,
+        envelope.hierarchy_generation,
+        envelope.run_id,
+        envelope.attempt,
+        envelope.hierarchy_generation,
+        verification_commits,
     )
 }
 

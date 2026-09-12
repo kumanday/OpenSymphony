@@ -207,6 +207,9 @@ Current repository implementation:
 - `OpenHandsClient::search_all_events` paginates until `next_page_id` is absent
 - `EventCache` deduplicates by event ID, inserts by timestamp order, and can return the newly merged events from reconcile or reconnect passes
 - `RuntimeEventStream` preserves one cache across reconnect cycles and replays ordered state updates into the state mirror after late arrivals
+- the issue-session bridge snapshots known event IDs before each reconcile and
+  forwards every newly inserted event in cache order, so a command start and
+  its later completion cannot collapse into only the final observation
 - the contract suite includes multi-page reconciliation, out-of-order insertion, and reconnect-recovery tests
 
 ## 6.4 Conversation state mirror

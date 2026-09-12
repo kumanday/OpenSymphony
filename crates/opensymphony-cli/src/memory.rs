@@ -62,9 +62,12 @@ use crate::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
         OpenHandsConversationStorePaths,
     },
+    opensymphony_orchestrator::{
+        DurableOrchestratorState, ParentAttemptStatus, ParentIntegrationState,
+    },
     opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
-        CleanupConfig, HookConfig, IssueManifest, RunManifest, WorkspaceManager,
+        CleanupConfig, HookConfig, IssueManifest, RunManifest, RunStatus, WorkspaceManager,
         WorkspaceManagerConfig, checkout_workspace_key, workspace_path_for_root,
     },
 };
@@ -581,6 +584,10 @@ fn load_terminal_capture_bindings_inner(
             if envelope.run_id.trim().is_empty() || envelope.attempt == 0 {
                 continue;
             }
+            let Some(repository_commits) = completed_parent_capture_commits(&root, &run, envelope)?
+            else {
+                continue;
+            };
             let workspace_path =
                 candidate
                     .canonicalize()
@@ -624,16 +631,7 @@ fn load_terminal_capture_bindings_inner(
                     .integration_instruction_hash
                     .clone()
                     .unwrap_or_default(),
-                repository_commits: envelope
-                    .checkouts
-                    .values()
-                    .map(|checkout| {
-                        (
-                            checkout.repository_id.clone(),
-                            checkout.target_commit.clone(),
-                        )
-                    })
-                    .collect(),
+                repository_commits,
             };
             if let Some(previous) = bindings.insert(key.clone(), binding.clone())
                 && previous != binding
@@ -722,6 +720,89 @@ fn load_terminal_capture_bindings_inner(
         }
     }
     Ok(bindings)
+}
+
+fn completed_parent_capture_commits(
+    workspace_root: &Path,
+    run: &RunManifest,
+    envelope: &crate::opensymphony_workspace::ParentRuntimeEnvelope,
+) -> Result<Option<BTreeMap<String, String>>, MemoryError> {
+    if run.status != RunStatus::Succeeded {
+        return Ok(None);
+    }
+    let state_path = workspace_root.join(".opensymphony-orchestrator-state.json");
+    let raw = match fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(MemoryError::ReadFile {
+                path: state_path,
+                source,
+            });
+        }
+    };
+    let state: DurableOrchestratorState = serde_json::from_str(&raw).map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "failed to decode durable parent controller state before terminal capture: {error}"
+        ))
+    })?;
+    state.validate().map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "invalid durable parent controller state before terminal capture: {error}"
+        ))
+    })?;
+    let Some((_, controller)) = state
+        .parent_integrations
+        .iter()
+        .find(|(issue_id, _)| issue_id.as_str() == envelope.parent_issue_id)
+    else {
+        return Ok(None);
+    };
+    if controller.state != ParentIntegrationState::Completed
+        || controller.hierarchy_generation != envelope.hierarchy_generation
+    {
+        return Ok(None);
+    }
+    let Some(final_evidence) = controller.final_evidence.as_ref() else {
+        return Ok(None);
+    };
+    let expected_conversation = envelope.conversation_binding.as_deref();
+    if expected_conversation.is_none()
+        || expected_conversation != Some(final_evidence.conversation_id.as_str())
+    {
+        return Ok(None);
+    }
+    let expected_attempt_key = format!(
+        "parent-run:{}",
+        run.run_id.strip_prefix("run-").unwrap_or(&run.run_id)
+    );
+    let Some(_attempt) = controller.attempts.iter().find(|attempt| {
+        attempt.id == final_evidence.attempt_id
+            && attempt.status == ParentAttemptStatus::Passed
+            && attempt.idempotency_key == expected_attempt_key
+            && attempt.input_version == final_evidence.input_version
+    }) else {
+        return Ok(None);
+    };
+    let controller_commits = final_evidence
+        .repository_commits
+        .iter()
+        .map(|(repository_id, commit)| (repository_id.to_string(), commit.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let envelope_commits = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            (
+                checkout.repository_id.clone(),
+                checkout.target_commit.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if controller_commits != envelope_commits {
+        return Ok(None);
+    }
+    Ok(Some(controller_commits))
 }
 
 fn apply_terminal_capture_bindings(
@@ -2425,6 +2506,7 @@ async fn run_serve(
 
 pub(crate) struct MemoryServerHandle {
     endpoint: String,
+    local_addr: SocketAddr,
     visibility: MemoryVisibility,
     task: Option<JoinHandle<Result<(), String>>>,
     shutdown: watch::Sender<bool>,
@@ -2441,6 +2523,10 @@ impl Drop for MemoryServerHandle {
 impl MemoryServerHandle {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local_addr
     }
 
     pub(crate) fn visibility(&self) -> MemoryVisibility {
@@ -2649,6 +2735,7 @@ async fn start_memory_server_with_auth(
     });
     Ok(MemoryServerHandle {
         endpoint: format!("http://{local_addr}/mcp"),
+        local_addr,
         visibility,
         task: Some(task),
         shutdown,
@@ -14666,7 +14753,7 @@ Public memory concept.
             "workspace_path": parent_workspace,
             "checkouts": {
                 "checkout-a": {
-                    "repository_id": "repo-a",
+                    "repository_id": "github:repository:a",
                     "checkout_handle": "checkout-a",
                     "relative_path": "repositories/repo-a",
                     "target_branch": "develop",
@@ -14675,7 +14762,7 @@ Public memory concept.
                     "instruction_hash": "sha256:a"
                 },
                 "checkout-b": {
-                    "repository_id": "repo-b",
+                    "repository_id": "github:repository:b",
                     "checkout_handle": "checkout-b",
                     "relative_path": "repositories/repo-b",
                     "target_branch": "develop",
@@ -14689,7 +14776,8 @@ Public memory concept.
             "harness": "codex_app_server",
             "model_profile": "default",
             "requested_execution_scope": "parent_integration",
-            "effective_containment": "trusted_host"
+            "effective_containment": "trusted_host",
+            "conversation_binding": "conversation-554"
         }))
         .expect("parent runtime envelope");
         let mut parent_run = run.clone();
@@ -14705,14 +14793,87 @@ Public memory concept.
             serde_json::to_vec(&parent_run).expect("parent run manifest JSON"),
         )
         .expect("parent run manifest");
+        let mut parent_controller =
+            crate::opensymphony_orchestrator::ParentIntegrationController::new(
+                crate::opensymphony_domain::IssueId::new("issue-554").expect("parent id"),
+                4,
+            )
+            .expect("parent controller");
+        parent_controller.state =
+            crate::opensymphony_orchestrator::ParentIntegrationState::Completed;
+        parent_controller.conversation_id = Some("conversation-554".to_owned());
+        parent_controller.attempts = vec![
+            crate::opensymphony_orchestrator::ParentVerificationAttempt {
+                id: "parent-attempt-1".to_owned(),
+                name: "final verification".to_owned(),
+                idempotency_key: "parent-run:554".to_owned(),
+                root: crate::opensymphony_orchestrator::ParentAttemptRoot::ParentRoot,
+                conversation_id: Some("conversation-554".to_owned()),
+                started_at: crate::opensymphony_domain::TimestampMs::new(1),
+                finished_at: Some(crate::opensymphony_domain::TimestampMs::new(2)),
+                timeout_ms: 1_000,
+                status: crate::opensymphony_orchestrator::ParentAttemptStatus::Passed,
+                commands: Vec::new(),
+                exit_code: Some(0),
+                bounded_log: String::new(),
+                log_truncated: false,
+                resources: Vec::new(),
+                cleanup: Some(crate::opensymphony_orchestrator::ParentCleanupReceipt {
+                    status: crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded,
+                    occurred_at: crate::opensymphony_domain::TimestampMs::new(2),
+                    detail: None,
+                }),
+                input_version: "targets:554".to_owned(),
+                verified_repository_commits: BTreeMap::from([
+                    (
+                        crate::opensymphony_domain::CanonicalRepositoryId::new(
+                            "github:repository:a",
+                        )
+                        .expect("repo a"),
+                        "commit-a".to_owned(),
+                    ),
+                    (
+                        crate::opensymphony_domain::CanonicalRepositoryId::new(
+                            "github:repository:b",
+                        )
+                        .expect("repo b"),
+                        "commit-b".to_owned(),
+                    ),
+                ]),
+            },
+        ];
+        parent_controller.final_evidence =
+            Some(crate::opensymphony_orchestrator::ParentFinalEvidence {
+                attempt_id: "parent-attempt-1".to_owned(),
+                conversation_id: "conversation-554".to_owned(),
+                input_version: "targets:554".to_owned(),
+                repository_commits: parent_controller.attempts[0]
+                    .verified_repository_commits
+                    .clone(),
+                recorded_at: crate::opensymphony_domain::TimestampMs::new(2),
+            });
+        let parent_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+            parent_integrations: BTreeMap::from([(
+                crate::opensymphony_domain::IssueId::new("issue-554").expect("parent id"),
+                parent_controller,
+            )]),
+            ..Default::default()
+        };
+        std::fs::write(
+            workspace_root
+                .path()
+                .join(".opensymphony-orchestrator-state.json"),
+            serde_json::to_vec(&parent_state).expect("parent controller state"),
+        )
+        .expect("parent controller state");
         let parent_bindings =
             super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
                 .expect("parent capture binding");
         assert_eq!(
             parent_bindings["coe-554"].repository_commits,
             BTreeMap::from([
-                ("repo-a".to_owned(), "commit-a".to_owned()),
-                ("repo-b".to_owned(), "commit-b".to_owned())
+                ("github:repository:a".to_owned(), "commit-a".to_owned()),
+                ("github:repository:b".to_owned(), "commit-b".to_owned())
             ])
         );
         let mut source = SourceFile {
@@ -14728,6 +14889,54 @@ Public memory concept.
             Some("run-554")
         );
         assert_eq!(source.issues[0].verified_repository_commits.len(), 2);
+
+        let mut incomplete_state = parent_state.clone();
+        let incomplete_controller = incomplete_state
+            .parent_integrations
+            .get_mut(&crate::opensymphony_domain::IssueId::new("issue-554").expect("parent id"))
+            .expect("parent controller");
+        incomplete_controller.state =
+            crate::opensymphony_orchestrator::ParentIntegrationState::Integrating;
+        incomplete_controller.final_evidence = None;
+        std::fs::write(
+            workspace_root
+                .path()
+                .join(".opensymphony-orchestrator-state.json"),
+            serde_json::to_vec(&incomplete_state).expect("incomplete parent controller state"),
+        )
+        .expect("incomplete parent controller state");
+        assert!(
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
+                .expect("incomplete parent capture scan")
+                .is_empty(),
+            "tracker-terminal launch evidence must not bypass controller completion"
+        );
+        std::fs::write(
+            workspace_root
+                .path()
+                .join(".opensymphony-orchestrator-state.json"),
+            serde_json::to_vec(&parent_state).expect("restored parent controller state"),
+        )
+        .expect("restored parent controller state");
+
+        parent_run.status = RunStatus::Failed;
+        std::fs::write(
+            parent_workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&parent_run).expect("failed parent run manifest JSON"),
+        )
+        .expect("failed parent run manifest");
+        assert!(
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
+                .expect("failed parent capture scan")
+                .is_empty(),
+            "a failed parent run must not publish prepared commits"
+        );
+        parent_run.status = RunStatus::Succeeded;
+        std::fs::write(
+            parent_workspace.join(".opensymphony/run.json"),
+            serde_json::to_vec(&parent_run).expect("restored parent run manifest JSON"),
+        )
+        .expect("restored parent run manifest");
 
         let outside = workspace_root.path().join("outside");
         std::fs::create_dir_all(&outside).expect("outside path");

@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::atomic::{AtomicU64, Ordering},
@@ -41,7 +42,7 @@ use crate::opensymphony_workflow::ProcessEnvironment;
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tokio::{
@@ -65,6 +66,15 @@ use self::{
         terminal_state_set,
     },
 };
+
+const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MemoryServerBindState {
+    schema_version: u32,
+    configured_ip: String,
+    selected_addr: String,
+}
 
 #[derive(Debug, Args, Clone)]
 pub struct RunArgs {
@@ -1621,9 +1631,14 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = load_runtime_memory_config(runtime)?;
-    super::memory::start_memory_server_with_resolved_config(
+    let configured_bind = server.bind;
+    let selected_bind = resolve_runtime_memory_server_bind(
+        &runtime.workflow.config.workspace.root,
+        configured_bind,
+    )?;
+    let handle = super::memory::start_memory_server_with_resolved_config(
         config,
-        server.bind,
+        selected_bind,
         server.token.clone(),
         Some(runtime.workflow.config.workspace.root.clone()),
         runtime.config_path.clone(),
@@ -1631,8 +1646,114 @@ async fn start_runtime_memory_server(
         Some(runtime.config_generation.clone()),
     )
     .await
-    .map(Some)
-    .map_err(RunCommandError::MemoryServer)
+    .map_err(RunCommandError::MemoryServer)?;
+    if configured_bind.port() == 0 {
+        persist_runtime_memory_server_bind(
+            &runtime.workflow.config.workspace.root,
+            configured_bind,
+            handle.local_addr(),
+        )?;
+    }
+    Ok(Some(handle))
+}
+
+fn resolve_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+) -> Result<SocketAddr, RunCommandError> {
+    if configured.port() != 0 {
+        return Ok(configured);
+    }
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(configured),
+        Err(error) => {
+            return Err(RunCommandError::MemoryServer(
+                crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                    "failed to read persisted memory server bind {}: {error}",
+                    path.display()
+                )),
+            ));
+        }
+    };
+    let state: MemoryServerBindState = serde_json::from_str(&raw).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to decode persisted memory server bind {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    let selected: SocketAddr = state.selected_addr.parse().map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "persisted memory server bind {} is invalid: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    if state.schema_version != 1
+        || state.configured_ip != configured.ip().to_string()
+        || selected.ip() != configured.ip()
+        || selected.port() == 0
+    {
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "persisted memory server bind {} does not match the configured interface",
+                path.display()
+            )),
+        ));
+    }
+    Ok(selected)
+}
+
+fn persist_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+    selected: SocketAddr,
+) -> Result<(), RunCommandError> {
+    fs::create_dir_all(workspace_root).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to create workspace root {} for memory bind persistence: {error}",
+                workspace_root.display()
+            ),
+        ))
+    })?;
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let state = MemoryServerBindState {
+        schema_version: 1,
+        configured_ip: configured.ip().to_string(),
+        selected_addr: selected.to_string(),
+    };
+    let payload = serde_json::to_vec_pretty(&state).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!("failed to encode persisted memory server bind: {error}"),
+        ))
+    })?;
+    let temporary = workspace_root.join(format!(
+        "{MEMORY_SERVER_BIND_STATE}.{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+    fs::write(&temporary, payload).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to write persisted memory server bind {}: {error}",
+                temporary.display()
+            ),
+        ))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "failed to publish persisted memory server bind {}: {error}",
+                path.display()
+            )),
+        ));
+    }
+    Ok(())
 }
 
 fn load_runtime_memory_config(
@@ -1908,6 +2029,32 @@ mod tests {
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn ephemeral_memory_bind_reuses_its_persisted_port_after_restart() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let configured: SocketAddr = "127.0.0.1:0".parse().expect("configured bind");
+        let selected: SocketAddr = "127.0.0.1:48123".parse().expect("selected bind");
+
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("initial bind"),
+            configured
+        );
+        persist_runtime_memory_server_bind(root.path(), configured, selected)
+            .expect("persist selected bind");
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("recovered bind"),
+            selected
+        );
+        assert!(
+            resolve_runtime_memory_server_bind(
+                root.path(),
+                "0.0.0.0:0".parse().expect("changed interface")
+            )
+            .is_err(),
+            "a changed interface must not silently rotate a bound parent endpoint"
+        );
     }
 
     #[test]

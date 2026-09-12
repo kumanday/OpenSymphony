@@ -89,6 +89,7 @@ pub struct IssueSessionRunnerConfig {
     pub memory: Option<MemoryWorkerAccess>,
     pub repository_instructions: Option<String>,
     pub terminal_prompt: Option<String>,
+    pub continuation_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,10 +102,9 @@ pub struct MemoryWorkerAccess {
     pub authorized_repositories: Vec<String>,
     pub run_id: Option<String>,
     pub attempt: Option<u32>,
-    /// The token is issued by this process's memory server. A recovered
-    /// supervised server may require a replacement conversation because its
-    /// reconstructed grant registry cannot update the bearer stored by the
-    /// existing server-side MCP configuration.
+    /// The token is issued by this process's memory server. A recovered leaf
+    /// run may require a replacement conversation when its bearer rotated;
+    /// parent recovery restores the persisted bearer and keeps this false.
     pub requires_fresh_conversation: bool,
 }
 
@@ -359,6 +359,7 @@ impl Default for IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 }
@@ -385,6 +386,7 @@ impl IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 
@@ -1311,6 +1313,11 @@ impl IssueSessionRunner {
 
     pub fn with_terminal_prompt(mut self, prompt: Option<String>) -> Self {
         self.config.terminal_prompt = prompt;
+        self
+    }
+
+    pub fn with_continuation_prompt(mut self, prompt: Option<String>) -> Self {
+        self.config.continuation_prompt = prompt;
         self
     }
 
@@ -3459,10 +3466,16 @@ impl IssueSessionRunner {
                     })
                     .map_err(|error| error.to_string())
             }
-            IssueSessionPromptKind::Continuation => Ok(append_memory_scope_guidance(
-                build_continuation_guidance(issue, run),
-                self.config.memory.as_ref(),
-            )),
+            IssueSessionPromptKind::Continuation => {
+                let prompt = append_memory_scope_guidance(
+                    build_continuation_guidance(issue, run),
+                    self.config.memory.as_ref(),
+                );
+                Ok(append_attempt_continuation(
+                    prompt,
+                    self.config.continuation_prompt.as_deref(),
+                ))
+            }
         }
     }
 
@@ -3726,10 +3739,21 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        let previously_observed = session
+            .stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
         if let Ok(inserted) = session.stream.reconcile_events().await
             && inserted > 0
         {
-            observe_latest_event(observer, &session.stream);
+            observe_reconciled_events(
+                observer,
+                session.stream.event_cache().items(),
+                &previously_observed,
+            );
             if let Some(tracker) = tracker {
                 tracker.record_reconciled_events(
                     inserted as u64,
@@ -4354,13 +4378,27 @@ where
     );
 }
 
-fn observe_latest_event<O>(observer: &mut O, stream: &RuntimeEventStream)
-where
+fn observe_reconciled_events<O>(
+    observer: &mut O,
+    events: &[EventEnvelope],
+    previously_observed: &HashSet<String>,
+) where
     O: IssueSessionObserver,
 {
-    if let Some(event) = stream.event_cache().items().last() {
+    for event in events
+        .iter()
+        .filter(|event| !previously_observed.contains(&event.id))
+    {
         observe_event(observer, event);
     }
+}
+
+fn append_attempt_continuation(mut prompt: String, continuation: Option<&str>) -> String {
+    if let Some(continuation) = continuation {
+        prompt.push_str("\n\n");
+        prompt.push_str(continuation);
+    }
+    prompt
 }
 
 fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> NormalizedOutcome {
@@ -4759,6 +4797,68 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[derive(Default)]
+    struct ReconciledEventObserver {
+        event_ids: Vec<String>,
+    }
+
+    impl IssueSessionObserver for ReconciledEventObserver {
+        fn on_runtime_event(
+            &mut self,
+            _observed_at: TimestampMs,
+            event_id: Option<String>,
+            _event_kind: Option<String>,
+            _summary: Option<String>,
+            _payload: Option<Value>,
+        ) {
+            if let Some(event_id) = event_id {
+                self.event_ids.push(event_id);
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_forwards_every_new_event_in_cache_order() {
+        let timestamp = Utc::now();
+        let events = vec![
+            EventEnvelope::new("prior", timestamp, "runtime", "MessageEvent", json!({})),
+            EventEnvelope::new(
+                "command-start",
+                timestamp + chrono::Duration::milliseconds(1),
+                "agent",
+                "ActionEvent",
+                json!({"command":"cargo test"}),
+            ),
+            EventEnvelope::new(
+                "command-finish",
+                timestamp + chrono::Duration::milliseconds(2),
+                "tool",
+                "ObservationEvent",
+                json!({"exit_code":0}),
+            ),
+        ];
+        let mut observer = ReconciledEventObserver::default();
+        observe_reconciled_events(&mut observer, &events, &HashSet::from(["prior".to_owned()]));
+
+        assert_eq!(
+            observer.event_ids,
+            vec!["command-start".to_owned(), "command-finish".to_owned()]
+        );
+    }
+
+    #[test]
+    fn reused_conversation_receives_current_attempt_guidance() {
+        let prompt = append_attempt_continuation(
+            "Continue work on the existing issue conversation.".to_owned(),
+            Some("run_id=run-parent-2 attempt=2 receipt=evidence/final-verification.json"),
+        );
+
+        assert!(prompt.contains("Continue work on the existing issue conversation."));
+        assert!(prompt.contains("run_id=run-parent-2"));
+        assert!(prompt.contains("attempt=2"));
+        assert!(prompt.contains("evidence/final-verification.json"));
     }
 
     #[test]
@@ -5406,6 +5506,7 @@ mod tests {
                 memory: None,
                 repository_instructions: None,
                 terminal_prompt: None,
+                continuation_prompt: None,
             },
         );
 
