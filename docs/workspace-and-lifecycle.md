@@ -198,8 +198,12 @@ each state-changing operation and stores its receipt before advancing. Attempt
 timeouts, interrupt uncertainty, resource collisions, and cleanup failures are
 retained with bounded diagnostics. After restart, an attempt without a
 reconciled harness is marked indeterminate; repository refresh cannot proceed
-until its recorded resources are released and cleanup succeeds. Cleanup and
-workspace deletion policy remain owned by the workspace manager.
+until its recorded resources are released and cleanup succeeds. An empty
+resource list does not prove teardown after an uncertain restart. The attempt
+intent is persisted before the worker starts, and the conversation identity is
+attached as a later launch receipt, so a crash cannot leave an unowned parent
+harness. Cleanup and workspace deletion policy remain owned by the workspace
+manager.
 
 The initial launch requires the integration worktrees to match their prepared
 targets exactly. A continuation or failure retry may reattach when the recorded
@@ -213,6 +217,22 @@ runtime revalidates the parent root, envelope, and instructions after the
 and prompt content both exclude its front matter. Project-set integration
 instructions are also re-read and hash-checked after `before_run`; the parent
 prompt is composed only from those final verified bytes.
+
+Before a fresh parent turn, the runtime removes any stale
+`evidence/final-verification.json`. The parent writes a new bounded selector for
+the command whose result should count as final verification. At completion the
+runtime requires a regular file no larger than 64 KiB, checks its run, attempt,
+hierarchy generation, command root, and exact repository commit map, and
+reopens the checkouts at those commits. The selected command must match start
+and completion events observed from the Codex or OpenHands runtime. Those
+events, rather than fields supplied by the parent, provide the orchestrator's
+deadline, exit result, bounded output, foreground-process ownership, and
+teardown receipt. Missing, stale, unobserved, late, or still-active evidence
+converts a generic successful harness turn into a failed parent attempt.
+An acknowledged interrupt counts as foreground-process teardown only after the
+harness has reconciled a stopped state. It does not release separately named
+ports or resources, which continue to fence refresh and retry until their own
+cleanup receipts succeed.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

@@ -852,6 +852,10 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     );
     assert!(prompt.contains(binding_a.repository_id().as_str()));
     assert!(prompt.contains("project-set instructions"));
+    assert!(prompt.contains("evidence/final-verification.json"));
+    assert!(
+        prompt.contains("A successful harness turn or an unobserved command does not complete")
+    );
     assert!(!prompt.contains("frontend repository"));
 
     #[cfg(unix)]

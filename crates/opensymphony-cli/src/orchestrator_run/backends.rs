@@ -24,9 +24,9 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
-    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RepositoryBindingOutcome,
-    RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState, TimestampMs,
-    TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
+    IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, ParentVerificationEvidence,
+    RepositoryBindingOutcome, RepositoryRouting, RetryEntry, RetryReason, RuntimeStreamState,
+    TimestampMs, TrackerErrorCategory, TrackerIssue, TrackerIssueSummary, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
@@ -53,7 +53,7 @@ use crate::opensymphony_workspace::{
     RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
     WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
     checkout_credential_environment_variables, compose_parent_prompt, compose_terminal_prompt,
-    environment_variable_names_equal,
+    environment_variable_names_equal, redact_runtime_diagnostic,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -83,6 +83,184 @@ const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
 const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
+const PARENT_FINAL_VERIFICATION_PATH: &str = "evidence/final-verification.json";
+const MAX_PARENT_VERIFICATION_RECEIPT_BYTES: u64 = 64 * 1024;
+
+async fn parent_verification_receipt_path(workspace: &Path) -> Result<PathBuf, String> {
+    let canonical_workspace = fs::canonicalize(workspace).await.map_err(|error| {
+        format!(
+            "failed to verify parent root {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let evidence_directory = workspace.join("evidence");
+    let metadata = fs::symlink_metadata(&evidence_directory)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to verify parent evidence directory {}: {error}",
+                evidence_directory.display()
+            )
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "parent evidence directory {} must be a real directory",
+            evidence_directory.display()
+        ));
+    }
+    let canonical_evidence = fs::canonicalize(&evidence_directory)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to resolve parent evidence directory {}: {error}",
+                evidence_directory.display()
+            )
+        })?;
+    if !canonical_evidence.starts_with(&canonical_workspace) {
+        return Err("parent evidence directory escapes the verified parent root".to_owned());
+    }
+    Ok(canonical_evidence.join(
+        Path::new(PARENT_FINAL_VERIFICATION_PATH)
+            .file_name()
+            .expect("verification receipt path has a file name"),
+    ))
+}
+
+async fn clear_parent_verification_receipt(workspace: &Path) -> Result<(), String> {
+    let path = parent_verification_receipt_path(workspace).await?;
+    match fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to clear stale parent verification receipt {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+async fn load_parent_verification_receipt(
+    workspace: &Path,
+    envelope: &ParentRuntimeEnvelope,
+) -> Result<ParentVerificationEvidence, String> {
+    let path = parent_verification_receipt_path(workspace).await?;
+    let metadata = fs::symlink_metadata(&path)
+        .await
+        .map_err(|error| format!("parent harness did not write {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "parent verification receipt {} must be a regular file",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_PARENT_VERIFICATION_RECEIPT_BYTES {
+        return Err(format!(
+            "parent verification receipt {} exceeds {} bytes",
+            path.display(),
+            MAX_PARENT_VERIFICATION_RECEIPT_BYTES
+        ));
+    }
+    let bytes = fs::read(&path).await.map_err(|error| {
+        format!(
+            "failed to read parent verification receipt {}: {error}",
+            path.display()
+        )
+    })?;
+    let evidence: ParentVerificationEvidence = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "parent verification receipt {} is invalid JSON: {error}",
+            path.display()
+        )
+    })?;
+    if evidence.run_id != envelope.run_id
+        || evidence.attempt != envelope.attempt
+        || evidence.hierarchy_generation != envelope.hierarchy_generation
+    {
+        return Err(
+            "parent verification receipt does not match the current run envelope".to_owned(),
+        );
+    }
+    let expected_commits = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            CanonicalRepositoryId::new(checkout.repository_id.clone())
+                .map(|repository_id| (repository_id, checkout.target_commit.clone()))
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if evidence.repository_commits != expected_commits {
+        return Err(
+            "parent verification receipt repository commits do not match the runtime envelope"
+                .to_owned(),
+        );
+    }
+    if evidence.root != "parent_root"
+        && !envelope
+            .checkouts
+            .values()
+            .any(|checkout| checkout.checkout_handle == evidence.root)
+    {
+        return Err(
+            "parent verification command root is not a verified checkout handle".to_owned(),
+        );
+    }
+    if redact_runtime_diagnostic(&evidence.command) != evidence.command {
+        return Err(
+            "parent verification command selector contains credential-like material".to_owned(),
+        );
+    }
+    Ok(evidence)
+}
+
+async fn attach_parent_verification_receipt(
+    outcome: &mut WorkerOutcomeRecord,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+    envelope: Option<&ParentRuntimeEnvelope>,
+) {
+    let Some(envelope) = envelope else {
+        return;
+    };
+    let result = async {
+        let verified_parent = workspace_manager
+            .open_parent_execution_root_at(&issue_descriptor(issue), workspace.workspace_path())
+            .await
+            .map_err(|error| {
+                format!(
+                    "parent checkouts no longer match their exact verification targets: {error}"
+                )
+            })?;
+        workspace_manager
+            .verify_parent_runtime_envelope(&verified_parent, envelope)
+            .map_err(|error| {
+                format!("parent runtime envelope changed before completion: {error}")
+            })?;
+        load_parent_verification_receipt(workspace.workspace_path(), envelope).await
+    }
+    .await;
+    apply_parent_verification_receipt_result(outcome, result);
+}
+
+fn apply_parent_verification_receipt_result(
+    outcome: &mut WorkerOutcomeRecord,
+    result: Result<ParentVerificationEvidence, String>,
+) {
+    match result {
+        Ok(evidence) => outcome.parent_verification = Some(evidence),
+        Err(error) => {
+            if outcome.outcome == WorkerOutcomeKind::Succeeded {
+                outcome.outcome = WorkerOutcomeKind::Failed;
+                outcome.summary =
+                    Some("parent final verification evidence was rejected".to_owned());
+            }
+            outcome.error = Some(match outcome.error.take() {
+                Some(existing) => format!("{existing}; {error}"),
+                None => error,
+            });
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -4359,9 +4537,9 @@ impl RuntimeWorkerBackend {
             });
             let memory_grant_requires_fresh_conversation = memory_grant_requires_fresh_conversation
                 || (memory_grant_registry_recovered
-                    && worker_memory_env
-                        .as_ref()
-                        .is_some_and(|memory| memory.scope_grants.is_some()));
+                    && worker_memory_env.as_ref().is_some_and(|memory| {
+                        memory.scope_grants.is_some() && !memory.parent_scope
+                    }));
             let mut worker_environment = worker_env.clone();
             if let Some(memory) = &worker_memory_env {
                 inject_memory_env(&mut worker_environment, memory);
@@ -4731,6 +4909,13 @@ impl RuntimeWorkerBackend {
                 let parent_envelope = parent_runtime_envelope
                     .as_ref()
                     .expect("parent execution always creates a runtime envelope");
+                if !recovered
+                    && let Err(error) =
+                        clear_parent_verification_receipt(ensured.handle.workspace_path()).await
+                {
+                    report_launch_failure(&mut launch_tx, error);
+                    return;
+                }
                 terminal_prompt = Some(compose_parent_prompt(
                     &central_procedure,
                     &format!(
@@ -4766,7 +4951,7 @@ impl RuntimeWorkerBackend {
                 )
                 .await
                 .err();
-                let outcome = WorkerOutcomeRecord::from_run(
+                let mut outcome = WorkerOutcomeRecord::from_run(
                     &run,
                     if finish_error.is_some() {
                         WorkerOutcomeKind::Failed
@@ -4780,6 +4965,14 @@ impl RuntimeWorkerBackend {
                     }),
                     finish_error.map(|error| error.to_string()),
                 );
+                attach_parent_verification_receipt(
+                    &mut outcome,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &issue,
+                    parent_runtime_envelope.as_ref(),
+                )
+                .await;
                 let _ = updates_tx.send(WorkerUpdate::Finished {
                     worker_id: finished_worker_id.clone(),
                     outcome,
@@ -4807,7 +5000,7 @@ impl RuntimeWorkerBackend {
                     .as_ref()
                     .and_then(|memory| memory.scope_grants.clone())
                     .filter(|_| memory_grant_requires_fresh_conversation);
-                let outcome = run_codex_stdio_issue_with_mode(
+                let mut outcome = run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -4827,6 +5020,14 @@ impl RuntimeWorkerBackend {
                     memory_grant_requires_fresh_conversation,
                     fresh_conversation_grants,
                     issue.identifier.as_str(),
+                )
+                .await;
+                attach_parent_verification_receipt(
+                    &mut outcome,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &issue,
+                    parent_runtime_envelope.as_ref(),
                 )
                 .await;
                 if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -4899,7 +5100,7 @@ impl RuntimeWorkerBackend {
                 return;
             }
 
-            let outcome = match result {
+            let mut outcome = match result {
                 Ok(result) => result.worker_outcome,
                 Err(error) => WorkerOutcomeRecord::from_run(
                     &run,
@@ -4909,6 +5110,14 @@ impl RuntimeWorkerBackend {
                     Some(error.to_string()),
                 ),
             };
+            attach_parent_verification_receipt(
+                &mut outcome,
+                &workspace_manager,
+                &ensured.handle,
+                &issue,
+                parent_runtime_envelope.as_ref(),
+            )
+            .await;
             if let Some(previous) = superseded_harness_manifest.as_ref()
                 && let Err(error) = retire_replaced_harness_session_if_durable(
                     &workspace_manager,
@@ -7980,6 +8189,138 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    fn parent_envelope(workspace: &Path) -> ParentRuntimeEnvelope {
+        ParentRuntimeEnvelope {
+            parent_issue_id: "parent-id".to_owned(),
+            parent_identifier: "COE-PARENT".to_owned(),
+            run_id: "run-parent-1".to_owned(),
+            attempt: 1,
+            hierarchy_generation: 7,
+            workspace_path: workspace.to_path_buf(),
+            checkouts: BTreeMap::from([(
+                "checkout-one".to_owned(),
+                crate::opensymphony_workspace::ParentRuntimeCheckout {
+                    repository_id: "github:repository:one".to_owned(),
+                    checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                    instruction_path: PathBuf::from("repositories/one/AGENTS.md"),
+                    instruction_hash: "sha256:test".to_owned(),
+                },
+            )]),
+            integration_instruction_path: None,
+            integration_instruction_hash: None,
+            harness: "codex_app_server".to_owned(),
+            model_profile: "default".to_owned(),
+            model: None,
+            requested_execution_scope: "parent_multi_checkout".to_owned(),
+            effective_containment: "trusted_host".to_owned(),
+            conversation_binding: None,
+        }
+    }
+
+    fn parent_evidence() -> ParentVerificationEvidence {
+        ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent-1".to_owned(),
+            attempt: 1,
+            hierarchy_generation: 7,
+            repository_commits: BTreeMap::from([(
+                CanonicalRepositoryId::new("github:repository:one").expect("repository id"),
+                "abc123".to_owned(),
+            )]),
+            command: "cargo test".to_owned(),
+            root: "parent_root".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_verification_receipt_is_bound_to_exact_run_and_commits() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let evidence_dir = tempdir.path().join("evidence");
+        fs::create_dir_all(&evidence_dir).expect("evidence directory");
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&parent_evidence()).expect("encode evidence"),
+        )
+        .expect("write evidence");
+        let envelope = parent_envelope(tempdir.path());
+        assert_eq!(
+            load_parent_verification_receipt(tempdir.path(), &envelope)
+                .await
+                .expect("valid receipt"),
+            parent_evidence()
+        );
+
+        let mut stale = parent_evidence();
+        stale.repository_commits.insert(
+            CanonicalRepositoryId::new("github:repository:one").expect("repository id"),
+            "different".to_owned(),
+        );
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&stale).expect("encode stale evidence"),
+        )
+        .expect("write stale evidence");
+        assert!(
+            load_parent_verification_receipt(tempdir.path(), &envelope)
+                .await
+                .expect_err("stale commit must be rejected")
+                .contains("repository commits")
+        );
+
+        let mut secret_command = parent_evidence();
+        secret_command.command = "cargo test token=secret".to_owned();
+        fs::write(
+            evidence_dir.join("final-verification.json"),
+            serde_json::to_vec(&secret_command).expect("encode secret command evidence"),
+        )
+        .expect("write secret command evidence");
+        assert!(
+            load_parent_verification_receipt(tempdir.path(), &envelope)
+                .await
+                .expect_err("credential-like command must be rejected")
+                .contains("credential-like")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_parent_turn_without_receipt_becomes_failed() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut outcome = WorkerOutcomeRecord {
+            worker_id: WorkerId::new("parent-worker").expect("worker id"),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: TimestampMs::new(10),
+            finished_at: TimestampMs::new(20),
+            turn_count: 1,
+            summary: Some("generic harness success".to_owned()),
+            error: None,
+            parent_verification: None,
+        };
+
+        apply_parent_verification_receipt_result(
+            &mut outcome,
+            Err(format!(
+                "parent harness did not write {}",
+                tempdir
+                    .path()
+                    .join(PARENT_FINAL_VERIFICATION_PATH)
+                    .display()
+            )),
+        );
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("did not write"))
+        );
+        assert!(outcome.parent_verification.is_none());
+    }
 
     #[tokio::test]
     async fn integration_instructions_are_revalidated_from_current_bytes_before_attach() {

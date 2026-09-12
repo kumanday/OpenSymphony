@@ -6,9 +6,9 @@ use std::{
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, DurationMs, HarnessInterruptCommand, HarnessInterruptReason,
-    HarnessInterruptStatus, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
-    RepositoryInventoryEntry, RepositoryRouting, RepositoryRoutingMode, SafeRemoteFingerprint,
-    TrackerErrorCategory, TrackerIssueRef,
+    HarnessInterruptStatus, ParentVerificationEvidence, RepositoryBinding,
+    RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting,
+    RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory, TrackerIssueRef,
 };
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
@@ -314,6 +314,23 @@ fn conversation(worker_id: &WorkerId) -> ConversationMetadata {
         total_tokens: 0,
         runtime_seconds: 0,
         next_activity_sequence: 0,
+    }
+}
+
+fn parent_verification_evidence(
+    run_id: &str,
+    hierarchy_generation: u64,
+    repository_id: CanonicalRepositoryId,
+    target_commit: &str,
+) -> ParentVerificationEvidence {
+    ParentVerificationEvidence {
+        schema_version: 1,
+        run_id: run_id.to_owned(),
+        attempt: 1,
+        hierarchy_generation,
+        repository_commits: BTreeMap::from([(repository_id, target_commit.to_owned())]),
+        command: "cargo test-system-duckdb --test integration".to_owned(),
+        root: "parent_root".to_owned(),
     }
 }
 
@@ -941,6 +958,19 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             state.clone(),
         )
         .ok()
+        .and_then(|state| {
+            state.parent_integrations[&parent_id]
+                .attempts
+                .first()
+                .cloned()
+        })
+        .is_some_and(|attempt| attempt.conversation_id.is_none())
+    }), "attempt intent must be durable before the worker launch receipt attaches a conversation");
+    assert!(scheduler.workspace().persisted_durable_states.iter().any(|state| {
+        serde_json::from_value::<crate::opensymphony_orchestrator::DurableOrchestratorState>(
+            state.clone(),
+        )
+        .ok()
         .and_then(|state| state.hierarchy.get(&parent_id).cloned())
         .is_some_and(|snapshot| {
             snapshot.dispatch_intended()
@@ -973,23 +1003,98 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             .any(|lease| { lease.kind == LeaseKind::LeafWorker && lease.released_at.is_some() })
     );
 
+    let mut failed_outcome = WorkerOutcomeRecord::from_run(
+        &parent_run,
+        WorkerOutcomeKind::Failed,
+        ts(150),
+        Some("parent verification failed".to_owned()),
+        None,
+    );
+    failed_outcome.parent_verification = Some(parent_verification_evidence(
+        parent_run.worker_id.as_str(),
+        snapshot.generation,
+        resource.repository_id.clone(),
+        "merge-commit",
+    ));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: parent_run.worker_id.clone(),
+            observed_at: ts(120),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("final verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "startedAtMs": 120,
+                    "item": {
+                        "id": "command-final",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration"
+                    }
+                }
+            })),
+        });
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: parent_run.worker_id.clone(),
+            observed_at: ts(140),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/completed".to_owned()),
+            summary: Some("final verification failed".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {
+                    "completedAtMs": 140,
+                    "item": {
+                        "id": "command-final",
+                        "type": "commandExecution",
+                        "command": "cargo test-system-duckdb --test integration",
+                        "exitCode": 1,
+                        "aggregatedOutput": "integration test failed token=secret"
+                    }
+                }
+            })),
+        });
     scheduler
         .worker_mut()
         .updates
         .push_back(WorkerUpdate::Finished {
             worker_id: parent_run.worker_id.clone(),
-            outcome: WorkerOutcomeRecord::from_run(
-                &parent_run,
-                WorkerOutcomeKind::Failed,
-                ts(150),
-                Some("parent verification failed".to_owned()),
-                None,
-            ),
+            outcome: failed_outcome,
         });
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "injected parent outcome persistence failure".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
     scheduler
         .tick(ts(150))
         .await
-        .expect("parent failure should persist before retry");
+        .expect_err("parent outcome persistence failure must remain retryable");
+    let durable_after_failed_write: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            scheduler
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("pre-outcome controller remains durable"),
+        )
+        .expect("durable controller should decode");
+    assert_eq!(
+        durable_after_failed_write.parent_integrations[&parent_id].current_attempt_id(),
+        Some("parent-attempt-1"),
+        "failed persistence must retain the durable running attempt"
+    );
+    scheduler
+        .tick(ts(151))
+        .await
+        .expect("pending parent outcome should persist on retry");
     durable_state = serde_json::from_value(
         scheduler
             .workspace()

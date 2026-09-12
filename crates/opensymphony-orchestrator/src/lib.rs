@@ -23,7 +23,7 @@ pub use hierarchy::{
 };
 pub use parent_integration::{
     ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt, ParentCleanupStatus,
-    ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
+    ParentCommandReceipt, ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
     ParentIntegrationState, ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus,
     ParentRetryClassification, ParentSideEffectIntent, ParentSideEffectReceipt, ParentTransition,
     ParentVerificationAttempt,

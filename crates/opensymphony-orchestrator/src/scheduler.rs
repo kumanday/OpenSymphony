@@ -3376,6 +3376,31 @@ where
             }
         };
         self.recovered_memory_issue_ids.remove(issue_id);
+        if !execution.issue().sub_issues.is_empty() {
+            let conversation_id = launch.conversation.conversation_id.to_string();
+            let attempt_id = self
+                .hierarchy_state
+                .parent_integrations
+                .get(issue_id)
+                .and_then(|controller| controller.current_attempt_id())
+                .map(str::to_owned)
+                .ok_or_else(|| SchedulerError::Workspace {
+                    detail: "recovered parent launch has no durable attempt intent".to_owned(),
+                })?;
+            let previous_state = self.hierarchy_state.clone();
+            self.hierarchy_state
+                .parent_integrations
+                .get_mut(issue_id)
+                .ok_or_else(|| SchedulerError::Workspace {
+                    detail: "recovered parent launch has no durable integration controller"
+                        .to_owned(),
+                })?
+                .attach_attempt_conversation(&attempt_id, &conversation_id)?;
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                return Err(error);
+            }
+        }
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
@@ -3947,6 +3972,7 @@ where
                 continue;
             }
             let execution_before_claim = execution.clone();
+            let unclaimed_execution = execution_before_claim.clone();
             execution = match execution.claim(run.clone()) {
                 Ok(execution) => execution,
                 Err(error) => {
@@ -3978,6 +4004,56 @@ where
                     .contains(&issue_id),
             };
 
+            if !normalized.sub_issues.is_empty() {
+                let previous_state = self.hierarchy_state.clone();
+                let input_version = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .map(parent_controller_input_version)
+                    .unwrap_or_default();
+                let result = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&issue_id)
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: "parent launch has no durable integration controller".to_owned(),
+                    })?
+                    .start_attempt_intent(
+                        "parent integration harness run",
+                        format!("parent-run:{}", claimed_run.worker_id),
+                        ParentAttemptRoot::ParentRoot,
+                        effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
+                        input_version,
+                        observed_at,
+                    );
+                if let Err(error) = result {
+                    self.hierarchy_state = previous_state;
+                    self.insert_execution(issue_id.clone(), unclaimed_execution);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    self.insert_execution(issue_id.clone(), unclaimed_execution);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            }
+
             *planned_running_by_state.entry(state_key).or_default() += 1;
             pending_launches.push((issue_id, execution, claimed_run, start_request));
         }
@@ -4001,12 +4077,15 @@ where
                     let started_at = launch.started_at.unwrap_or(observed_at);
                     if !execution.issue().sub_issues.is_empty() {
                         let conversation_id = launch.conversation.conversation_id.to_string();
-                        let input_version = self
+                        let attempt_id = self
                             .hierarchy_state
                             .parent_integrations
                             .get(&issue_id)
-                            .map(parent_controller_input_version)
-                            .unwrap_or_default();
+                            .and_then(|controller| controller.current_attempt_id())
+                            .map(str::to_owned)
+                            .ok_or_else(|| SchedulerError::Workspace {
+                                detail: "parent launch has no durable attempt intent".to_owned(),
+                            })?;
                         self.hierarchy_state
                             .parent_integrations
                             .get_mut(&issue_id)
@@ -4014,15 +4093,7 @@ where
                                 detail: "parent launch has no durable integration controller"
                                     .to_owned(),
                             })?
-                            .start_attempt(
-                                "parent integration harness run",
-                                format!("parent-run:{}", claimed_run.worker_id),
-                                ParentAttemptRoot::ParentRoot,
-                                conversation_id,
-                                effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
-                                input_version,
-                                started_at,
-                            )?;
+                            .attach_attempt_conversation(&attempt_id, &conversation_id)?;
                     }
                     execution = execution.start_running(
                         observed_at,
@@ -4145,48 +4216,90 @@ where
         execution: &IssueExecution,
         outcome: &WorkerOutcomeRecord,
     ) -> Result<(), SchedulerError> {
+        let previous_state = self.hierarchy_state.clone();
+        let merging_continuation = tracker_merging_interrupt_cancelled(execution, outcome);
         let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(issue_id) else {
             return Ok(());
         };
         let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
             return Ok(());
         };
-        let (status, cleanup_status) = match outcome.outcome {
-            WorkerOutcomeKind::Succeeded => {
-                (ParentAttemptStatus::Passed, ParentCleanupStatus::Succeeded)
+        let launch_never_attached = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .is_some_and(|attempt| attempt.conversation_id.is_none());
+        if execution
+            .interrupt()
+            .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
+        {
+            controller.observe_harness_stopped(
+                &attempt_id,
+                "harness interrupt reconciled a stopped state",
+                outcome.finished_at,
+            )?;
+        }
+        let verification_passed = match outcome.parent_verification.as_ref() {
+            Some(evidence) => {
+                match controller.record_verification_evidence(&attempt_id, evidence) {
+                    Ok(passed) => passed,
+                    Err(error) => {
+                        controller.append_log(
+                            &attempt_id,
+                            &format!("verification receipt rejected: {error}"),
+                        )?;
+                        false
+                    }
+                }
             }
-            WorkerOutcomeKind::Failed => {
-                (ParentAttemptStatus::Failed, ParentCleanupStatus::Succeeded)
-            }
-            WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => (
-                ParentAttemptStatus::TimedOut,
-                ParentCleanupStatus::Succeeded,
-            ),
-            WorkerOutcomeKind::Cancelled => (
-                ParentAttemptStatus::Canceled,
-                ParentCleanupStatus::Succeeded,
-            ),
-            WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => (
-                ParentAttemptStatus::Indeterminate,
-                ParentCleanupStatus::Pending,
-            ),
+            None => false,
         };
-        controller.finish_attempt(
-            &attempt_id,
-            status,
-            None,
-            ParentCleanupReceipt {
-                status: cleanup_status,
-                occurred_at: outcome.finished_at,
-                detail: outcome.error.clone().or_else(|| outcome.summary.clone()),
+        let observed_cleanup = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.cleanup.clone());
+        let status = match outcome.outcome {
+            WorkerOutcomeKind::Succeeded if verification_passed => ParentAttemptStatus::Passed,
+            WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed => ParentAttemptStatus::Failed,
+            WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => {
+                ParentAttemptStatus::TimedOut
+            }
+            WorkerOutcomeKind::Cancelled => ParentAttemptStatus::Canceled,
+            WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => {
+                ParentAttemptStatus::Indeterminate
+            }
+        };
+        let cleanup = observed_cleanup.unwrap_or_else(|| ParentCleanupReceipt {
+            status: if launch_never_attached {
+                ParentCleanupStatus::Succeeded
+            } else {
+                ParentCleanupStatus::Pending
             },
-            outcome.finished_at,
-        )?;
+            occurred_at: outcome.finished_at,
+            detail: Some(if launch_never_attached {
+                "worker launch failed before a parent command could start".to_owned()
+            } else {
+                "parent command teardown receipt was not available".to_owned()
+            }),
+        });
+        let exit_code = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.exit_code);
+        controller.finish_attempt(&attempt_id, status, exit_code, cleanup, outcome.finished_at)?;
         let input_version = parent_controller_input_version(controller);
         if status == ParentAttemptStatus::Passed
             && execution.issue().state.category == IssueStateCategory::Terminal
         {
             controller.complete(&attempt_id, &input_version, outcome.finished_at)?;
+        } else if merging_continuation {
+            controller.prepare_retry(
+                &attempt_id,
+                "tracker merging superseded human-review polling; refresh before continuing",
+                outcome.finished_at,
+            )?;
         } else if matches!(
             status,
             ParentAttemptStatus::Canceled | ParentAttemptStatus::Indeterminate
@@ -4211,7 +4324,12 @@ where
                 outcome.finished_at,
             )?;
         }
-        self.persist_orchestrator_state().await
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            self.hierarchy_state_dirty = true;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn clear_parent_dispatch_intent_after_preparation_failure(
@@ -4276,6 +4394,19 @@ where
                         self.hierarchy_state.parent_integrations.get_mut(&issue_id)
                         && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
                     {
+                        if let Err(error) = observe_parent_command_event(
+                            controller,
+                            &attempt_id,
+                            observed_at,
+                            event_id.as_deref(),
+                            event_kind.as_deref(),
+                            payload.as_ref(),
+                        ) {
+                            controller.append_log(
+                                &attempt_id,
+                                &format!("runtime command evidence rejected: {error}"),
+                            )?;
+                        }
                         controller
                             .append_log(&attempt_id, &redact_runtime_diagnostic(&parent_log))?;
                         self.hierarchy_state_dirty = true;
@@ -4604,15 +4735,37 @@ where
         if let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(&issue_id)
             && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
         {
+            if execution
+                .interrupt()
+                .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
+            {
+                controller.observe_harness_stopped(
+                    &attempt_id,
+                    "harness interrupt reconciled a stopped state",
+                    observed_at,
+                )?;
+            }
+            let observed_cleanup = controller
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| attempt.cleanup.clone());
+            let observed_exit_code = controller
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| attempt.exit_code);
             controller.finish_attempt(
                 &attempt_id,
                 ParentAttemptStatus::Canceled,
-                None,
-                ParentCleanupReceipt {
-                    status: ParentCleanupStatus::Succeeded,
+                observed_exit_code,
+                observed_cleanup.unwrap_or_else(|| ParentCleanupReceipt {
+                    status: ParentCleanupStatus::Pending,
                     occurred_at: observed_at,
-                    detail: Some(format!("scheduler release: {reason:?}")),
-                },
+                    detail: Some(format!(
+                        "scheduler release acknowledged harness stop but has no command teardown receipt: {reason:?}"
+                    )),
+                }),
                 observed_at,
             )?;
             let input_version = parent_controller_input_version(controller);
@@ -6793,6 +6946,110 @@ fn parent_controller_input_version(controller: &ParentIntegrationController) -> 
     )
 }
 
+fn observe_parent_command_event(
+    controller: &mut ParentIntegrationController,
+    attempt_id: &str,
+    observed_at: TimestampMs,
+    event_id: Option<&str>,
+    event_kind: Option<&str>,
+    payload: Option<&serde_json::Value>,
+) -> Result<(), ParentIntegrationError> {
+    let Some(kind) = event_kind else {
+        return Ok(());
+    };
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    if kind == "codex.item/started" || kind == "codex.item/completed" {
+        let params = payload.get("params").unwrap_or(payload);
+        let item = params.get("item").unwrap_or(params);
+        let item_type = item
+            .get("type")
+            .or_else(|| params.get("type"))
+            .and_then(serde_json::Value::as_str);
+        if item_type != Some("commandExecution") {
+            return Ok(());
+        }
+        let command_id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or(event_id);
+        let command = item.get("command").and_then(serde_json::Value::as_str);
+        if kind == "codex.item/started" {
+            if let (Some(command_id), Some(command)) = (command_id, command) {
+                let command = redact_runtime_diagnostic(command);
+                controller.observe_command_started(
+                    attempt_id,
+                    command_id,
+                    &command,
+                    observed_at,
+                )?;
+            }
+            return Ok(());
+        }
+        if let (Some(command_id), Some(exit_code)) = (
+            command_id,
+            item.get("exitCode")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            let output = item
+                .get("aggregatedOutput")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_runtime_diagnostic);
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                output.as_deref(),
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind.ends_with("ActionEvent") {
+        let command = payload.get("command").and_then(serde_json::Value::as_str);
+        let command_id = payload
+            .get("action_id")
+            .and_then(serde_json::Value::as_str)
+            .or(event_id);
+        if let (Some(command_id), Some(command)) = (command_id, command) {
+            let command = redact_runtime_diagnostic(command);
+            controller.observe_command_started(attempt_id, command_id, &command, observed_at)?;
+        }
+    } else if kind.ends_with("ObservationEvent")
+        && let Some(exit_code) = payload
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+        && let Some(command_id) = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| {
+                attempt
+                    .commands
+                    .iter()
+                    .rev()
+                    .find(|command| command.finished_at.is_none())
+                    .map(|command| command.command_id.clone())
+            })
+    {
+        let output = payload
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .map(redact_runtime_diagnostic);
+        controller.observe_command_finished(
+            attempt_id,
+            &command_id,
+            exit_code,
+            output.as_deref(),
+            observed_at,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6865,6 +7122,189 @@ mod tests {
 
         assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
         assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
+
+    #[test]
+    fn openhands_command_events_supply_exit_and_teardown_receipts() {
+        let mut controller = ParentIntegrationController::new(
+            IssueId::new("parent-command-events").expect("parent id"),
+            1,
+        )
+        .expect("controller");
+        controller
+            .admit("hierarchy:1", TimestampMs::new(1))
+            .expect("admit");
+        controller
+            .record_workspace_prepared(
+                [ParentRepositoryTarget {
+                    repository_id: crate::opensymphony_domain::CanonicalRepositoryId::new(
+                        "github:repository:one",
+                    )
+                    .expect("repository id"),
+                    checkout_handle: "checkout-one".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                }],
+                "targets:1",
+                TimestampMs::new(2),
+            )
+            .expect("workspace");
+        let attempt_id = controller
+            .start_attempt(
+                "parent harness",
+                "attempt:1",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            TimestampMs::new(10),
+            Some("action-1"),
+            Some("ActionEvent"),
+            Some(&serde_json::json!({
+                "action_id": "action-1",
+                "tool_name": "terminal",
+                "command": "cargo test"
+            })),
+        )
+        .expect("command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            TimestampMs::new(20),
+            Some("observation-1"),
+            Some("ObservationEvent"),
+            Some(&serde_json::json!({
+                "observation_id": "observation-1",
+                "tool_name": "terminal",
+                "exit_code": 0,
+                "preview": "passed token=secret"
+            })),
+        )
+        .expect("command completion");
+
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt receipt");
+        assert_eq!(
+            attempt
+                .commands
+                .last()
+                .map(|command| command.command.as_str()),
+            Some("cargo test")
+        );
+        assert_eq!(attempt.exit_code, Some(0));
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Succeeded)
+        );
+        assert!(attempt.bounded_log.contains("token=[redacted]"));
+        assert!(attempt.resources.iter().any(|resource| {
+            resource.kind == "foreground_process"
+                && resource.identifier == "action-1"
+                && resource.status
+                    == crate::opensymphony_orchestrator::ParentResourceStatus::Released
+        }));
+    }
+
+    #[test]
+    fn codex_command_events_cannot_backdate_completion_past_orchestrator_deadline() {
+        let mut controller = ParentIntegrationController::new(
+            IssueId::new("parent-command-deadline").expect("parent id"),
+            1,
+        )
+        .expect("controller");
+        controller
+            .admit("hierarchy:1", TimestampMs::new(1))
+            .expect("admit");
+        controller
+            .record_workspace_prepared(
+                [ParentRepositoryTarget {
+                    repository_id: crate::opensymphony_domain::CanonicalRepositoryId::new(
+                        "github:repository:one",
+                    )
+                    .expect("repository id"),
+                    checkout_handle: "checkout-one".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                }],
+                "targets:1",
+                TimestampMs::new(2),
+            )
+            .expect("workspace");
+        let attempt_id = controller
+            .start_attempt(
+                "parent harness",
+                "attempt:1",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            TimestampMs::new(10),
+            Some("command-1"),
+            Some("codex.item/started"),
+            Some(&serde_json::json!({
+                "params": {
+                    "startedAtMs": 1,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "cargo test"
+                    }
+                }
+            })),
+        )
+        .expect("command start");
+        let error = observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            TimestampMs::new(103),
+            Some("command-1"),
+            Some("codex.item/completed"),
+            Some(&serde_json::json!({
+                "params": {
+                    "completedAtMs": 20,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "exitCode": 0,
+                        "aggregatedOutput": "passed"
+                    }
+                }
+            })),
+        )
+        .expect_err("scheduler observation time enforces the absolute deadline");
+        assert!(error.to_string().contains("after the attempt deadline"));
+
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt receipt");
+        assert_eq!(attempt.exit_code, None);
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Pending)
+        );
+        assert!(attempt.resources.iter().any(|resource| {
+            resource.kind == "foreground_process"
+                && resource.identifier == "command-1"
+                && resource.status
+                    == crate::opensymphony_orchestrator::ParentResourceStatus::Allocated
+        }));
     }
 
     #[test]

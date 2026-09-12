@@ -116,9 +116,18 @@ on the shared parent conversation and records its input version, root or opaque
 checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
 a reconciled running attempt attached; an unreconciled attempt becomes
 indeterminate and must pass cleanup and repository refresh before rerun. Final
-evidence maps every canonical repository to the exact verified commit so a
-higher ancestor can consume the completed parent without assigning repository
-roles.
+evidence is accepted only from the run-bound
+`evidence/final-verification.json` receipt. The runtime reopens every checkout
+at its exact prepared commit and uses the file only to select an actual command
+observed through the Codex or OpenHands event stream. The controller supplies
+the deadline, exit result, bounded log, foreground-process ownership, and
+teardown from those runtime events before it can pass the attempt. Generic
+harness success or a prompt-authored claim without matching events is
+insufficient. On timeout or cancellation, a reconciled harness stopped state
+releases the foreground-process receipt; any other named resource remains an
+explicit cleanup fence. The durable final record maps every canonical repository to the
+exact verified commit so a higher ancestor can consume the completed parent
+without assigning repository roles.
 
 ### 3.2 OpenHands is the execution adapter
 

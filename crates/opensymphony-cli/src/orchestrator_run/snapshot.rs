@@ -974,6 +974,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            parent_verification: None,
         });
         let issue = map_single_issue(domain_issue);
         assert_eq!(
@@ -1003,6 +1004,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: None,
+            parent_verification: None,
         });
 
         assert_eq!(map_single_issue(domain_issue).retry_count, 3);
@@ -1042,6 +1044,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            parent_verification: None,
         });
 
         assert_eq!(

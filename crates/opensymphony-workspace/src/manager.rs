@@ -5851,13 +5851,28 @@ pub fn compose_parent_prompt(
     } else {
         repositories
     };
+    let verification_commits = envelope
+        .checkouts
+        .values()
+        .map(|checkout| {
+            format!(
+                "    \"{}\": \"{}\"",
+                checkout.repository_id, checkout.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
     format!(
-        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
+        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nUse the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
         envelope.workspace_path.display(),
         envelope.hierarchy_generation,
         checkout_map,
         integration,
         repositories,
+        envelope.run_id,
+        envelope.attempt,
+        envelope.hierarchy_generation,
+        verification_commits,
         envelope.harness,
         envelope.workspace_path.display(),
         envelope.requested_execution_scope,

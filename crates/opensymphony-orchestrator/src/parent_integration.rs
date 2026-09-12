@@ -1,12 +1,18 @@
 use std::collections::BTreeMap;
 
-use crate::opensymphony_domain::{CanonicalRepositoryId, IssueId, TimestampMs};
+use crate::opensymphony_domain::{
+    CanonicalRepositoryId, IssueId, ParentVerificationEvidence, TimestampMs,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_TRANSITIONS: usize = 256;
 const MAX_ATTEMPTS: usize = 64;
 const MAX_LOG_BYTES: usize = 16 * 1024;
+const MAX_COMMAND_BYTES: usize = 4 * 1024;
+const MAX_COMMAND_ID_BYTES: usize = 256;
+const MAX_RESOURCE_RECEIPTS: usize = 64;
+const MAX_COMMAND_RECEIPTS: usize = MAX_RESOURCE_RECEIPTS / 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,17 +143,31 @@ pub struct ParentCleanupReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentCommandReceipt {
+    pub command_id: String,
+    pub command: String,
+    pub started_at: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentVerificationAttempt {
     pub id: String,
     pub name: String,
     pub idempotency_key: String,
     pub root: ParentAttemptRoot,
-    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub started_at: TimestampMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<TimestampMs>,
     pub timeout_ms: u64,
     pub status: ParentAttemptStatus,
+    #[serde(default)]
+    pub commands: Vec<ParentCommandReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default)]
@@ -159,6 +179,8 @@ pub struct ParentVerificationAttempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ParentCleanupReceipt>,
     pub input_version: String,
+    #[serde(default)]
+    pub verified_repository_commits: BTreeMap<CanonicalRepositoryId, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +246,8 @@ pub enum ParentIntegrationError {
     ResourceCollision { kind: String, identifier: String },
     #[error("final verification requires a passed attempt and at least one repository target")]
     FinalVerificationIncomplete,
+    #[error("parent verification evidence is invalid: {0}")]
+    InvalidVerificationEvidence(String),
 }
 
 impl ParentIntegrationController {
@@ -383,7 +407,45 @@ impl ParentIntegrationController {
         input_version: impl Into<String>,
         started_at: TimestampMs,
     ) -> Result<String, ParentIntegrationError> {
+        let conversation_id = conversation_id.into();
+        let id = self.start_attempt_intent(
+            name,
+            idempotency_key,
+            root,
+            timeout_ms,
+            input_version,
+            started_at,
+        )?;
+        self.attach_attempt_conversation(&id, &conversation_id)?;
+        Ok(id)
+    }
+
+    pub fn start_attempt_intent(
+        &mut self,
+        name: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        root: ParentAttemptRoot,
+        timeout_ms: u64,
+        input_version: impl Into<String>,
+        started_at: TimestampMs,
+    ) -> Result<String, ParentIntegrationError> {
         let name = name.into();
+        let idempotency_key = idempotency_key.into();
+        let input_version = input_version.into();
+        if let Some(existing) = self
+            .attempts
+            .iter()
+            .find(|attempt| attempt.idempotency_key == idempotency_key)
+        {
+            if existing.name == name
+                && existing.root == root
+                && existing.timeout_ms == timeout_ms
+                && existing.input_version == input_version
+            {
+                return Ok(existing.id.clone());
+            }
+            return Err(ParentIntegrationError::IdempotencyConflict(idempotency_key));
+        }
         if !matches!(
             self.state,
             ParentIntegrationState::Integrating | ParentIntegrationState::FinalVerification
@@ -401,24 +463,17 @@ impl ParentIntegrationController {
                 handle.clone(),
             ));
         }
-        let conversation_id = conversation_id.into();
-        if let Some(expected) = &self.conversation_id {
-            if expected != &conversation_id {
-                return Err(ParentIntegrationError::ConversationMismatch {
-                    expected: expected.clone(),
-                    actual: conversation_id,
-                });
-            }
-        } else {
-            self.conversation_id = Some(conversation_id.clone());
-        }
-        let idempotency_key = idempotency_key.into();
-        if let Some(existing) = self
-            .attempts
-            .iter()
-            .find(|attempt| attempt.idempotency_key == idempotency_key)
-        {
-            return Ok(existing.id.clone());
+        if self.attempts.len() >= MAX_ATTEMPTS {
+            let Some(removable) = self
+                .attempts
+                .iter()
+                .position(|attempt| attempt.status.terminal())
+            else {
+                return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                    "nonterminal parent attempt receipts exceed their bound".to_owned(),
+                ));
+            };
+            self.attempts.remove(removable);
         }
         self.next_attempt_sequence = self.next_attempt_sequence.saturating_add(1);
         let id = format!("parent-attempt-{}", self.next_attempt_sequence);
@@ -427,27 +482,302 @@ impl ParentIntegrationController {
             name,
             idempotency_key,
             root,
-            conversation_id,
+            conversation_id: None,
             started_at,
             finished_at: None,
             timeout_ms,
             status: ParentAttemptStatus::Running,
+            commands: Vec::new(),
             exit_code: None,
             bounded_log: String::new(),
             log_truncated: false,
             resources: Vec::new(),
             cleanup: None,
-            input_version: input_version.into(),
+            input_version,
+            verified_repository_commits: BTreeMap::new(),
         });
-        if self.attempts.len() > MAX_ATTEMPTS {
-            let removable = self
-                .attempts
-                .iter()
-                .position(|attempt| attempt.status.terminal())
-                .unwrap_or(0);
-            self.attempts.remove(removable);
-        }
         Ok(id)
+    }
+
+    pub fn attach_attempt_conversation(
+        &mut self,
+        attempt_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), ParentIntegrationError> {
+        if let Some(expected) = &self.conversation_id {
+            if expected != conversation_id {
+                return Err(ParentIntegrationError::ConversationMismatch {
+                    expected: expected.clone(),
+                    actual: conversation_id.to_owned(),
+                });
+            }
+        } else {
+            self.conversation_id = Some(conversation_id.to_owned());
+        }
+        let attempt = self.attempt_mut(attempt_id)?;
+        match &attempt.conversation_id {
+            Some(expected) if expected != conversation_id => {
+                Err(ParentIntegrationError::ConversationMismatch {
+                    expected: expected.clone(),
+                    actual: conversation_id.to_owned(),
+                })
+            }
+            Some(_) => Ok(()),
+            None => {
+                attempt.conversation_id = Some(conversation_id.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    pub fn record_verification_evidence(
+        &mut self,
+        attempt_id: &str,
+        evidence: &ParentVerificationEvidence,
+    ) -> Result<bool, ParentIntegrationError> {
+        if evidence.schema_version != 1 {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "unsupported schema version".to_owned(),
+            ));
+        }
+        let expected_commits = self
+            .targets
+            .iter()
+            .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if evidence.repository_commits != expected_commits {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "repository commits do not match the current target map".to_owned(),
+            ));
+        }
+        let attempt = self.attempt_mut(attempt_id)?;
+        let root_matches = match &attempt.root {
+            ParentAttemptRoot::ParentRoot => evidence.root == "parent_root",
+            ParentAttemptRoot::CheckoutHandle(handle) => evidence.root == *handle,
+        };
+        if !root_matches {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "command root does not match the scheduled attempt root".to_owned(),
+            ));
+        }
+        let selected_exit_code = attempt
+            .commands
+            .iter()
+            .rev()
+            .find(|command| {
+                command.command == evidence.command
+                    && command.finished_at.is_some()
+                    && command.exit_code.is_some()
+            })
+            .and_then(|command| command.exit_code);
+        if evidence.command.trim().is_empty() || selected_exit_code.is_none() {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "selected command does not match a completed runtime command".to_owned(),
+            ));
+        }
+        attempt.exit_code = selected_exit_code;
+        attempt.verified_repository_commits = evidence.repository_commits.clone();
+        Ok(selected_exit_code == Some(0)
+            && attempt
+                .cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
+            && active_resource_keys(attempt).is_empty())
+    }
+
+    pub fn observe_command_started(
+        &mut self,
+        attempt_id: &str,
+        command_id: &str,
+        command: &str,
+        observed_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        if command_id.trim().is_empty() || command.trim().is_empty() {
+            return Ok(());
+        }
+        if command_id.len() > MAX_COMMAND_ID_BYTES || command.len() > MAX_COMMAND_BYTES {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "foreground command identity exceeds its evidence bound".to_owned(),
+            ));
+        }
+        let attempt = self.attempt_mut(attempt_id)?;
+        if attempt.status != ParentAttemptStatus::Running {
+            return Err(ParentIntegrationError::AttemptAlreadyTerminal(
+                attempt_id.to_owned(),
+            ));
+        }
+        if let Some(existing) = attempt
+            .commands
+            .iter()
+            .find(|receipt| receipt.command_id == command_id)
+        {
+            return if existing.command == command {
+                Ok(())
+            } else {
+                Err(ParentIntegrationError::InvalidVerificationEvidence(
+                    "a command id was replayed with different command text".to_owned(),
+                ))
+            };
+        }
+        if observed_at.as_u64()
+            >= attempt
+                .started_at
+                .as_u64()
+                .saturating_add(attempt.timeout_ms)
+        {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "foreground command started after the attempt deadline".to_owned(),
+            ));
+        }
+        if let Some(active_command_id) = attempt
+            .commands
+            .iter()
+            .rev()
+            .find(|receipt| receipt.finished_at.is_none())
+            .map(|receipt| receipt.command_id.as_str())
+        {
+            return Err(ParentIntegrationError::ResourceCollision {
+                kind: "foreground_process".to_owned(),
+                identifier: active_command_id.to_owned(),
+            });
+        }
+        if active_resource_keys(attempt)
+            .into_iter()
+            .any(|(kind, identifier)| kind == "foreground_process" && identifier == command_id)
+        {
+            return Err(ParentIntegrationError::ResourceCollision {
+                kind: "foreground_process".to_owned(),
+                identifier: command_id.to_owned(),
+            });
+        }
+        if attempt.commands.len() >= MAX_COMMAND_RECEIPTS {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "attempt command receipts exceed their bound".to_owned(),
+            ));
+        }
+        if attempt.resources.len() >= MAX_RESOURCE_RECEIPTS.saturating_sub(1) {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "attempt resource receipts cannot reserve a teardown receipt".to_owned(),
+            ));
+        }
+        attempt.commands.push(ParentCommandReceipt {
+            command_id: command_id.to_owned(),
+            command: command.to_owned(),
+            started_at: observed_at,
+            finished_at: None,
+            exit_code: None,
+        });
+        attempt.exit_code = None;
+        attempt.cleanup = Some(ParentCleanupReceipt {
+            status: ParentCleanupStatus::Pending,
+            occurred_at: observed_at,
+            detail: Some("foreground command is running".to_owned()),
+        });
+        self.allocate_resource(attempt_id, "foreground_process", command_id, observed_at)
+    }
+
+    pub fn observe_command_finished(
+        &mut self,
+        attempt_id: &str,
+        command_id: &str,
+        exit_code: i32,
+        redacted_output: Option<&str>,
+        observed_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let attempt = self.attempt_mut(attempt_id)?;
+        let Some(command_index) = attempt
+            .commands
+            .iter()
+            .rposition(|command| command.command_id == command_id)
+        else {
+            return Ok(());
+        };
+        if let Some(finished_at) = attempt.commands[command_index].finished_at {
+            return if attempt.commands[command_index].exit_code == Some(exit_code) {
+                Ok(())
+            } else {
+                Err(ParentIntegrationError::InvalidVerificationEvidence(
+                    format!(
+                        "command {command_id} completion replay changed its exit code after {finished_at:?}"
+                    ),
+                ))
+            };
+        }
+        if observed_at.as_u64()
+            >= attempt
+                .started_at
+                .as_u64()
+                .saturating_add(attempt.timeout_ms)
+        {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "foreground command completed after the attempt deadline".to_owned(),
+            ));
+        }
+        attempt.commands[command_index].finished_at = Some(observed_at);
+        attempt.commands[command_index].exit_code = Some(exit_code);
+        attempt.exit_code = Some(exit_code);
+        attempt.cleanup = Some(ParentCleanupReceipt {
+            status: ParentCleanupStatus::Succeeded,
+            occurred_at: observed_at,
+            detail: Some("harness reported foreground process completion".to_owned()),
+        });
+        if let Some(output) = redacted_output {
+            self.append_log(attempt_id, output)?;
+        }
+        self.release_resource(
+            attempt_id,
+            "foreground_process",
+            command_id,
+            true,
+            Some("harness reported foreground process completion".to_owned()),
+            observed_at,
+        )
+    }
+
+    pub fn observe_harness_stopped(
+        &mut self,
+        attempt_id: &str,
+        detail: &str,
+        observed_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let foreground_processes = {
+            let attempt = self.attempt_mut(attempt_id)?;
+            active_resource_keys(attempt)
+                .into_iter()
+                .filter_map(|(kind, identifier)| {
+                    (kind == "foreground_process").then_some(identifier)
+                })
+                .collect::<Vec<_>>()
+        };
+        for identifier in foreground_processes {
+            self.release_resource(
+                attempt_id,
+                "foreground_process",
+                &identifier,
+                true,
+                Some(detail.to_owned()),
+                observed_at,
+            )?;
+        }
+        let attempt = self.attempt_mut(attempt_id)?;
+        let remaining = active_resource_keys(attempt);
+        attempt.cleanup = Some(ParentCleanupReceipt {
+            status: if remaining.is_empty() {
+                ParentCleanupStatus::Succeeded
+            } else {
+                ParentCleanupStatus::Pending
+            },
+            occurred_at: observed_at,
+            detail: Some(if remaining.is_empty() {
+                detail.to_owned()
+            } else {
+                format!(
+                    "{detail}; {} non-process resource(s) still require cleanup",
+                    remaining.len()
+                )
+            }),
+        });
+        Ok(())
     }
 
     pub fn append_log(
@@ -493,26 +823,31 @@ impl ParentIntegrationController {
                 })
         });
         if collision {
-            self.attempt_mut(attempt_id)?
-                .resources
-                .push(ParentResourceReceipt {
+            let attempt = self.attempt_mut(attempt_id)?;
+            if attempt.resources.len() < MAX_RESOURCE_RECEIPTS.saturating_sub(1) {
+                attempt.resources.push(ParentResourceReceipt {
                     kind: kind.clone(),
                     identifier: identifier.clone(),
                     status: ParentResourceStatus::Collision,
                     occurred_at,
                     detail: Some("resource is owned by another parent attempt".to_owned()),
                 });
+            }
             return Err(ParentIntegrationError::ResourceCollision { kind, identifier });
         }
-        self.attempt_mut(attempt_id)?
-            .resources
-            .push(ParentResourceReceipt {
-                kind,
-                identifier,
-                status: ParentResourceStatus::Allocated,
-                occurred_at,
-                detail: None,
-            });
+        let attempt = self.attempt_mut(attempt_id)?;
+        if attempt.resources.len() >= MAX_RESOURCE_RECEIPTS.saturating_sub(1) {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "attempt resource receipts cannot reserve a teardown receipt".to_owned(),
+            ));
+        }
+        attempt.resources.push(ParentResourceReceipt {
+            kind,
+            identifier,
+            status: ParentResourceStatus::Allocated,
+            occurred_at,
+            detail: None,
+        });
         Ok(())
     }
 
@@ -525,19 +860,23 @@ impl ParentIntegrationController {
         detail: Option<String>,
         occurred_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
-        self.attempt_mut(attempt_id)?
-            .resources
-            .push(ParentResourceReceipt {
-                kind: kind.to_owned(),
-                identifier: identifier.to_owned(),
-                status: if succeeded {
-                    ParentResourceStatus::Released
-                } else {
-                    ParentResourceStatus::CleanupFailed
-                },
-                occurred_at,
-                detail,
-            });
+        let attempt = self.attempt_mut(attempt_id)?;
+        if attempt.resources.len() >= MAX_RESOURCE_RECEIPTS {
+            return Err(ParentIntegrationError::InvalidVerificationEvidence(
+                "attempt resource receipts exceed their bound".to_owned(),
+            ));
+        }
+        attempt.resources.push(ParentResourceReceipt {
+            kind: kind.to_owned(),
+            identifier: identifier.to_owned(),
+            status: if succeeded {
+                ParentResourceStatus::Released
+            } else {
+                ParentResourceStatus::CleanupFailed
+            },
+            occurred_at,
+            detail,
+        });
         Ok(())
     }
 
@@ -627,17 +966,15 @@ impl ParentIntegrationController {
             return Ok(());
         }
         let attempt_id = self.attempts[index].id.clone();
-        let has_allocated_resources = !active_resource_keys(&self.attempts[index]).is_empty();
         self.attempts[index].status = ParentAttemptStatus::Indeterminate;
         self.attempts[index].finished_at = Some(occurred_at);
         self.attempts[index].cleanup = Some(ParentCleanupReceipt {
-            status: if has_allocated_resources {
-                ParentCleanupStatus::Pending
-            } else {
-                ParentCleanupStatus::Succeeded
-            },
+            status: ParentCleanupStatus::Pending,
             occurred_at,
-            detail: Some("harness state was unavailable after restart".to_owned()),
+            detail: Some(
+                "harness state and attempt-owned teardown were unavailable after restart"
+                    .to_owned(),
+            ),
         });
         self.prepare_retry(
             &attempt_id,
@@ -652,11 +989,22 @@ impl ParentIntegrationController {
         input_version: &str,
         occurred_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
-        if self.targets.is_empty()
+        let expected_commits = self
+            .targets
+            .iter()
+            .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if expected_commits.is_empty()
             || !self.attempts.iter().any(|attempt| {
                 attempt.id == attempt_id
                     && attempt.status.passed()
                     && attempt.input_version == input_version
+                    && attempt.exit_code == Some(0)
+                    && attempt
+                        .cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
+                    && attempt.verified_repository_commits == expected_commits
             })
         {
             return Err(ParentIntegrationError::FinalVerificationIncomplete);
@@ -674,16 +1022,11 @@ impl ParentIntegrationController {
             ParentRetryClassification::Retryable,
             occurred_at,
         )?;
-        let repository_commits = self
-            .targets
-            .iter()
-            .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
-            .collect();
         self.final_evidence = Some(ParentFinalEvidence {
             attempt_id: attempt_id.to_owned(),
             conversation_id: self.conversation_id.clone().unwrap_or_default(),
             input_version: input_version.to_owned(),
-            repository_commits,
+            repository_commits: expected_commits,
             recorded_at: occurred_at,
         });
         self.transition(
@@ -775,20 +1118,18 @@ impl ParentIntegrationController {
     }
 
     fn cleanup_complete(&self) -> bool {
-        self.attempts.iter().all(|attempt| {
-            if matches!(
-                attempt.status,
-                ParentAttemptStatus::TimedOut
-                    | ParentAttemptStatus::Canceled
-                    | ParentAttemptStatus::Indeterminate
-            ) {
+        self.attempts.iter().all(|attempt| match attempt.status {
+            ParentAttemptStatus::Running => false,
+            ParentAttemptStatus::Passed
+            | ParentAttemptStatus::Failed
+            | ParentAttemptStatus::TimedOut
+            | ParentAttemptStatus::Canceled
+            | ParentAttemptStatus::Indeterminate => {
                 attempt
                     .cleanup
                     .as_ref()
                     .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
                     && active_resource_keys(attempt).is_empty()
-            } else {
-                true
             }
         })
     }
@@ -955,6 +1296,38 @@ mod tests {
 
     fn finish_passed(controller: &mut ParentIntegrationController, id: &str) {
         controller
+            .observe_command_started(id, "command-final", "cargo test", TimestampMs::new(3))
+            .expect("command start");
+        controller
+            .observe_command_finished(
+                id,
+                "command-final",
+                0,
+                Some("all checks passed"),
+                TimestampMs::new(4),
+            )
+            .expect("command completion");
+        let evidence = ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".to_owned(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".to_owned(),
+            root: "parent_root".to_owned(),
+        };
+        assert!(
+            controller
+                .record_verification_evidence(id, &evidence)
+                .expect("verification receipt")
+        );
+        controller
             .finish_attempt(
                 id,
                 ParentAttemptStatus::Passed,
@@ -1020,9 +1393,9 @@ mod tests {
 
     #[test]
     fn checkout_roots_are_topology_neutral_and_generation_bound() {
-        let mut controller = controller();
+        let mut valid_root = controller();
         assert!(
-            controller
+            valid_root
                 .start_attempt(
                     "repo check",
                     "attempt:repo",
@@ -1034,8 +1407,9 @@ mod tests {
                 )
                 .is_ok()
         );
+        let mut unknown_root = controller();
         assert_eq!(
-            controller.start_attempt(
+            unknown_root.start_attempt(
                 "unknown repo check",
                 "attempt:unknown",
                 ParentAttemptRoot::CheckoutHandle("frontend".to_owned()),
@@ -1089,6 +1463,85 @@ mod tests {
                 .is_err()
         );
 
+        let mut failed_without_teardown = controller();
+        let failed = failed_without_teardown
+            .start_attempt(
+                "integration",
+                "attempt:failed",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+        failed_without_teardown
+            .finish_attempt(
+                &failed,
+                ParentAttemptStatus::Failed,
+                None,
+                ParentCleanupReceipt {
+                    status: ParentCleanupStatus::Pending,
+                    occurred_at: TimestampMs::new(4),
+                    detail: Some("no runtime completion event".to_owned()),
+                },
+                TimestampMs::new(4),
+            )
+            .expect("failed attempt");
+        failed_without_teardown
+            .prepare_retry(&failed, "failed", TimestampMs::new(5))
+            .expect("retry intent");
+        failed_without_teardown
+            .record_baseline_verified("targets:2", TimestampMs::new(6))
+            .expect_err("failed command without teardown blocks baseline refresh");
+
+        let mut stopped_by_harness = controller();
+        let stopped = stopped_by_harness
+            .start_attempt(
+                "integration",
+                "attempt:stopped",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+        stopped_by_harness
+            .observe_command_started(
+                &stopped,
+                "command-running",
+                "cargo test",
+                TimestampMs::new(4),
+            )
+            .expect("command start");
+        stopped_by_harness
+            .observe_harness_stopped(
+                &stopped,
+                "interrupt observed paused state",
+                TimestampMs::new(103),
+            )
+            .expect("stopped-state cleanup");
+        let cleanup = stopped_by_harness.attempts[0]
+            .cleanup
+            .clone()
+            .expect("cleanup receipt");
+        stopped_by_harness
+            .finish_attempt(
+                &stopped,
+                ParentAttemptStatus::TimedOut,
+                None,
+                cleanup,
+                TimestampMs::new(103),
+            )
+            .expect("timed out attempt");
+        stopped_by_harness
+            .prepare_retry(&stopped, "timeout", TimestampMs::new(104))
+            .expect("retry intent");
+        stopped_by_harness
+            .record_baseline_verified("targets:2", TimestampMs::new(105))
+            .expect("stopped-state receipt permits baseline refresh");
+
         let mut restarted = controller();
         let running = restarted
             .start_attempt(
@@ -1115,7 +1568,110 @@ mod tests {
         );
         restarted
             .record_baseline_verified("targets:2", TimestampMs::new(5))
-            .expect("resource-free cleanup permits verified rerun");
+            .expect_err("unknown teardown blocks baseline refresh");
+        restarted
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == running)
+            .expect("attempt")
+            .cleanup = Some(ParentCleanupReceipt {
+            status: ParentCleanupStatus::Succeeded,
+            occurred_at: TimestampMs::new(6),
+            detail: Some("recovery cleanup verified".to_owned()),
+        });
+        restarted
+            .record_baseline_verified("targets:2", TimestampMs::new(7))
+            .expect("explicit cleanup permits verified rerun");
+    }
+
+    #[test]
+    fn verification_selects_real_completed_command_before_receipt_write() {
+        let mut controller = controller();
+        let attempt = controller
+            .start_attempt(
+                "integration",
+                "attempt:commands",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+        controller
+            .observe_command_started(
+                &attempt,
+                "command-verify",
+                "cargo test",
+                TimestampMs::new(4),
+            )
+            .expect("verification start");
+        controller
+            .observe_command_started(
+                &attempt,
+                "command-verify",
+                "cargo test",
+                TimestampMs::new(4),
+            )
+            .expect("duplicate start is idempotent");
+        controller
+            .observe_command_finished(
+                &attempt,
+                "command-verify",
+                0,
+                Some("passed"),
+                TimestampMs::new(5),
+            )
+            .expect("verification finish");
+        controller
+            .observe_command_finished(
+                &attempt,
+                "command-verify",
+                0,
+                Some("passed"),
+                TimestampMs::new(5),
+            )
+            .expect("duplicate finish is idempotent");
+        controller
+            .observe_command_started(
+                &attempt,
+                "command-receipt",
+                "write final-verification.json",
+                TimestampMs::new(6),
+            )
+            .expect("receipt write start");
+        controller
+            .observe_command_finished(&attempt, "command-receipt", 0, None, TimestampMs::new(7))
+            .expect("receipt write finish");
+
+        let evidence = ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".to_owned(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".to_owned(),
+            root: "parent_root".to_owned(),
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt, &evidence)
+                .expect("select observed verification command")
+        );
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|candidate| candidate.id == attempt)
+            .expect("attempt receipt");
+        assert_eq!(attempt.commands.len(), 2);
+        assert_eq!(attempt.resources.len(), 4);
+        assert_eq!(attempt.exit_code, Some(0));
     }
 
     #[test]
@@ -1135,19 +1691,8 @@ mod tests {
         controller
             .allocate_resource(&first, "port", "24001", TimestampMs::new(3))
             .expect("port");
-        let second = controller
-            .start_attempt(
-                "parallel check",
-                "attempt:2",
-                ParentAttemptRoot::ParentRoot,
-                "conversation-1",
-                100,
-                "targets:1",
-                TimestampMs::new(3),
-            )
-            .expect("second");
         assert!(matches!(
-            controller.allocate_resource(&second, "port", "24001", TimestampMs::new(3)),
+            controller.allocate_resource(&first, "port", "24001", TimestampMs::new(3)),
             Err(ParentIntegrationError::ResourceCollision { .. })
         ));
         controller
@@ -1166,12 +1711,12 @@ mod tests {
             .expect("release port");
         assert!(
             controller
-                .allocate_resource(&second, "port", "24001", TimestampMs::new(5))
+                .allocate_resource(&first, "port", "24001", TimestampMs::new(5))
                 .is_ok()
         );
         controller
             .release_resource(
-                &second,
+                &first,
                 "port",
                 "24001",
                 false,
