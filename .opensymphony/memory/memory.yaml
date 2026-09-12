@@ -815,6 +815,7 @@ areas:
       - area:evidence
       - area:experiments
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:outcomes
       - area:process-protocol
@@ -823,6 +824,7 @@ areas:
       - area:runner
       - area:scheduler
       - area:task-packets
+      - area:testing
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -1395,6 +1397,7 @@ areas:
       - area:evidence
       - area:experiments
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:outcomes
       - area:process-protocol
@@ -1403,6 +1406,7 @@ areas:
       - area:runner
       - area:scheduler
       - area:task-packets
+      - area:testing
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -1422,8 +1426,10 @@ areas:
       linear_labels:
       - area:experiments
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:scheduler
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -1665,7 +1671,9 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -2751,8 +2759,10 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:outcomes
+      - area:testing
       - area:verifiers
       - area:workspace-lifecycle
       linear_milestones:
@@ -2856,9 +2866,11 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:process-protocol
       - area:runner
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -2874,9 +2886,11 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:provenance
       - area:task-packets
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -2894,6 +2908,7 @@ areas:
       - area:evidence
       - area:experiments
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:outcomes
       - area:process-protocol
@@ -2902,6 +2917,7 @@ areas:
       - area:runner
       - area:scheduler
       - area:task-packets
+      - area:testing
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -3149,8 +3165,10 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:runner
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3323,8 +3341,10 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:scheduler
+      - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3532,8 +3552,10 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
       - area:task-packets
+      - area:testing
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3720,6 +3742,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -4063,7 +4086,9 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
+      - area:testing
       - area:verifiers
       - area:workspace-lifecycle
       linear_milestones:
@@ -4234,7 +4259,9 @@ areas:
     source_refs:
       linear_labels:
       - area:harness
+      - area:memory
       - area:orchestrator
+      - area:testing
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:

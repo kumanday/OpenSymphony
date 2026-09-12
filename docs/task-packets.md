@@ -12,6 +12,7 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 ## Current model
 
 - COE-553 contributed: PR #236: Add parent execution roots and shared child worktrees (merge `9abff5a`)
+- COE-554 contributed: PR #237: feat: add restart-safe parent integration controller (merge `b4e1b67`)
 - COE-563 contributed: No merged PR source was matched during capture.
 - COE-565 contributed: No merged PR source was matched during capture.
 
@@ -31,12 +32,14 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 ## Recent changes
 
 - COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-565: Implement isolated workspace materialization
 
 ## Source refs
 
 - COE-553
+- COE-554
 - COE-563
 - COE-565
 

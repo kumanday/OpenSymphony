@@ -247,6 +247,7 @@ of dead bridge code.
 - COE-507: Deduplicate query-pack assets for grammar variants
 - COE-508: Cache code-intel parsers and compiled query packs
 - COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
 
 ## Source refs
 
@@ -309,5 +310,6 @@ of dead bridge code.
 - COE-507
 - COE-508
 - COE-553
+- COE-554
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

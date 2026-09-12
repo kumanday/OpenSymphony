@@ -970,6 +970,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
@@ -1135,6 +1136,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-550
 - COE-551
 - COE-553
+- COE-554
 - COE-562
 - COE-563
 - COE-564

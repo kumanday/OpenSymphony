@@ -778,6 +778,7 @@ That document covers:
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-554: Restart-Safe Parent Integration Controller
 
 ## Source refs
 
@@ -927,5 +928,6 @@ That document covers:
 - COE-549
 - COE-550
 - COE-551
+- COE-554
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
