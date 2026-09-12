@@ -11,12 +11,12 @@ last_memory_sync: 2026-08-29T03:08:56.598233+00:00
 
 ## Current model
 
+- COE-553 contributed: PR #236: Add parent execution roots and shared child worktrees (merge `9abff5a`)
 - COE-562 contributed: No merged PR source was matched during capture.
 - COE-563 contributed: No merged PR source was matched during capture.
 - COE-564 contributed: No merged PR source was matched during capture.
 - COE-565 contributed: No merged PR source was matched during capture.
 - COE-566 contributed: No merged PR source was matched during capture.
-- COE-567 contributed: No merged PR source was matched during capture.
 
 ## Important invariants
 
@@ -33,6 +33,7 @@ last_memory_sync: 2026-08-29T03:08:56.598233+00:00
 
 ## Recent changes
 
+- COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
@@ -42,6 +43,7 @@ last_memory_sync: 2026-08-29T03:08:56.598233+00:00
 
 ## Source refs
 
+- COE-553
 - COE-562
 - COE-563
 - COE-564

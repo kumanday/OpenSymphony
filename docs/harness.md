@@ -1,19 +1,17 @@
 ---
 type: topic-doc
-area: task-packets
+area: harness
 visibility: public
-last_memory_sync: 2026-08-31T00:07:01.088374+00:00
+last_memory_sync: 2026-09-12T12:25:39.170247+00:00
 ---
 
-# Task Packets
+# Harness
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
 
 - COE-553 contributed: PR #236: Add parent execution roots and shared child worktrees (merge `9abff5a`)
-- COE-563 contributed: No merged PR source was matched during capture.
-- COE-565 contributed: No merged PR source was matched during capture.
 
 ## Important invariants
 
@@ -31,13 +29,9 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 ## Recent changes
 
 - COE-553: Parent Execution Roots And Child Workspace Reuse
-- COE-563: Implement task-packet admission and freeze tooling
-- COE-565: Implement isolated workspace materialization
 
 ## Source refs
 
 - COE-553
-- COE-563
-- COE-565
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

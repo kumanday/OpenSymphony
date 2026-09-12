@@ -79,6 +79,7 @@ last_memory_sync: 2026-07-02T03:46:15.369986+00:00
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
@@ -134,6 +135,7 @@ last_memory_sync: 2026-07-02T03:46:15.369986+00:00
 - COE-549
 - COE-550
 - COE-551
+- COE-553
 - COE-562
 - COE-563
 - COE-564

@@ -11,6 +11,7 @@ last_memory_sync: 2026-08-31T00:07:01.092515+00:00
 
 ## Current model
 
+- COE-553 contributed: PR #236: Add parent execution roots and shared child worktrees (merge `9abff5a`)
 - COE-564 contributed: No merged PR source was matched during capture.
 
 ## Important invariants
@@ -28,10 +29,12 @@ last_memory_sync: 2026-08-31T00:07:01.092515+00:00
 
 ## Recent changes
 
+- COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-564: Implement verifier execution and outcome records
 
 ## Source refs
 
+- COE-553
 - COE-564
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

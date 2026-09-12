@@ -44,6 +44,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -83,6 +84,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   ai-pr-review-human-setup:
@@ -163,6 +165,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -214,6 +217,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -250,6 +254,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -301,6 +306,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -331,6 +337,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -370,6 +377,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   code-review:
@@ -399,6 +407,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -439,6 +448,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   codex:
@@ -472,6 +482,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -523,6 +534,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -575,6 +587,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -616,6 +629,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   configuration:
@@ -646,6 +660,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -691,6 +706,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M7: Shared Client And Desktop Alpha'
@@ -728,6 +744,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -779,6 +796,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -796,6 +814,8 @@ areas:
       - area:data-contracts
       - area:evidence
       - area:experiments
+      - area:harness
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
@@ -805,8 +825,10 @@ areas:
       - area:task-packets
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   debugging:
     title: Debugging
@@ -834,6 +856,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -873,6 +896,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   deployment-modes:
@@ -921,6 +945,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -972,6 +997,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1007,6 +1033,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1057,6 +1084,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1130,6 +1158,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1181,6 +1210,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1210,6 +1240,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1250,6 +1281,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   duckdb:
@@ -1283,6 +1315,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1334,6 +1367,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1360,6 +1394,8 @@ areas:
       linear_labels:
       - area:evidence
       - area:experiments
+      - area:harness
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
@@ -1369,8 +1405,10 @@ areas:
       - area:task-packets
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   experiments:
     title: Experiments
@@ -1383,8 +1421,12 @@ areas:
     source_refs:
       linear_labels:
       - area:experiments
+      - area:harness
+      - area:orchestrator
       - area:scheduler
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   frontend:
     title: Frontend
@@ -1412,6 +1454,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1451,6 +1494,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   gateway:
@@ -1484,6 +1528,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1535,6 +1580,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1565,6 +1611,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1604,8 +1651,24 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
+  harness:
+    title: Harness
+    docs_target: docs/harness.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - harness
+    source_refs:
+      linear_labels:
+      - area:harness
+      - area:orchestrator
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
   harness-runtime:
     title: Harness Runtime
     docs_target: docs/harness-runtime.md
@@ -1638,6 +1701,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1688,6 +1752,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1800,6 +1865,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1850,6 +1916,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1884,6 +1951,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1935,6 +2003,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1984,6 +2053,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2034,6 +2104,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2074,6 +2145,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2125,6 +2197,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M6.5: Memory Server'
@@ -2159,6 +2232,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2198,6 +2272,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   migration-1-0-0:
@@ -2243,6 +2318,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2293,6 +2369,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2327,6 +2404,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2377,6 +2455,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2435,6 +2514,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2475,6 +2555,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   operations:
@@ -2510,6 +2591,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2562,6 +2644,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M6.5: Memory Server'
@@ -2601,6 +2684,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2652,6 +2736,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2665,9 +2750,13 @@ areas:
     - outcomes
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:outcomes
       - area:verifiers
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   planning:
     title: Planning
@@ -2695,6 +2784,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2734,6 +2824,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   prerequisites:
@@ -2764,9 +2855,13 @@ areas:
     - process-protocol
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:process-protocol
       - area:runner
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   provenance:
     title: Provenance
@@ -2778,9 +2873,13 @@ areas:
     - provenance
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:provenance
       - area:task-packets
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   quality:
     title: Quality
@@ -2794,6 +2893,8 @@ areas:
       linear_labels:
       - area:evidence
       - area:experiments
+      - area:harness
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
@@ -2803,8 +2904,10 @@ areas:
       - area:task-packets
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   query-packs:
     title: Query Packs
@@ -2833,6 +2936,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2872,6 +2976,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   release:
@@ -2900,6 +3005,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2940,6 +3046,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   repository-layout:
@@ -2959,6 +3066,7 @@ areas:
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M9.5: Developer Build Acceleration'
   run-detail:
     title: Run Detail
@@ -2987,6 +3095,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3026,6 +3135,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   runner:
@@ -3038,8 +3148,12 @@ areas:
     - runner
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:runner
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   runtime:
     title: Runtime
@@ -3072,6 +3186,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3123,6 +3238,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3152,6 +3268,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3192,6 +3309,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   scheduler:
@@ -3204,8 +3322,12 @@ areas:
     - scheduler
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:scheduler
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   security:
     title: Security
@@ -3238,6 +3360,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3289,6 +3412,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3353,6 +3477,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3392,6 +3517,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   task-packets:
@@ -3405,9 +3531,13 @@ areas:
     - task-packets
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:task-packets
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   template:
     title: Template
@@ -3435,6 +3565,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3474,6 +3605,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   testing:
@@ -3507,6 +3639,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3558,6 +3691,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3618,6 +3752,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3658,6 +3793,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   threejs:
@@ -3686,6 +3822,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3725,6 +3862,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   tui:
@@ -3758,6 +3896,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3808,6 +3947,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3842,6 +3982,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3892,6 +4033,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3920,8 +4062,12 @@ areas:
     - verifiers
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:verifiers
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   web:
     title: Web
@@ -3949,6 +4095,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3988,6 +4135,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   websocket-runtime:
@@ -4031,6 +4179,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -4071,6 +4220,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   workspace:
@@ -4083,8 +4233,12 @@ areas:
     - workspace
     source_refs:
       linear_labels:
+      - area:harness
+      - area:orchestrator
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
@@ -4127,6 +4281,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -4166,6 +4321,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
 redaction:
