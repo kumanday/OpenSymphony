@@ -859,6 +859,10 @@ pub struct IssueEvidence {
     /// envelope. Project association is only a fallback for legacy captures.
     #[serde(default)]
     pub repository_id: Option<String>,
+    /// Internal marker that prevents a repository-neutral parent capture from
+    /// inheriting leaf ownership through project or default-repository hints.
+    #[serde(skip)]
+    pub parent_integration: bool,
     #[serde(default)]
     pub verified_repository_commits: BTreeMap<String, String>,
     #[serde(default)]

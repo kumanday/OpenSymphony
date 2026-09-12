@@ -573,29 +573,36 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
         .into_iter()
         .flatten()
         .collect::<BTreeSet<_>>();
-    let routed_repository_id = plan.issue.repository_id.clone().or_else(|| {
-        let candidates = config
-            .repository_sources
-            .values()
-            .filter(|source| {
-                !issue_projects.is_empty()
-                    && source
-                        .project_scope_ids
-                        .iter()
-                        .any(|project| issue_projects.contains(project))
+    let routed_repository_id = if plan.issue.parent_integration {
+        None
+    } else {
+        plan.issue
+            .repository_id
+            .clone()
+            .or_else(|| {
+                let candidates = config
+                    .repository_sources
+                    .values()
+                    .filter(|source| {
+                        !issue_projects.is_empty()
+                            && source
+                                .project_scope_ids
+                                .iter()
+                                .any(|project| issue_projects.contains(project))
+                    })
+                    .map(|source| source.repository_id.clone())
+                    .collect::<BTreeSet<_>>();
+                (candidates.len() == 1)
+                    .then(|| candidates.into_iter().next())
+                    .flatten()
+                    .or_else(|| config.default_repository_id.clone())
             })
-            .map(|source| source.repository_id.clone())
-            .collect::<BTreeSet<_>>();
-        (candidates.len() == 1)
-            .then(|| candidates.into_iter().next())
-            .flatten()
-            .or_else(|| config.default_repository_id.clone())
-    })
-        .or_else(|| {
-            (config.repository_sources.len() == 1)
-                .then(|| config.repository_sources.keys().next().cloned())
-                .flatten()
-        });
+            .or_else(|| {
+                (config.repository_sources.len() == 1)
+                    .then(|| config.repository_sources.keys().next().cloned())
+                    .flatten()
+            })
+    };
     if let Some(repository_id) = routed_repository_id.as_deref()
         && !refs
             .iter()

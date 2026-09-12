@@ -816,6 +816,7 @@ fn apply_terminal_capture_bindings(
         let Some(binding) = bindings.get(&issue.identifier.to_ascii_lowercase()) else {
             continue;
         };
+        issue.parent_integration = binding.parent_integration;
         issue.repository_id =
             (!binding.repository_id.is_empty()).then(|| binding.repository_id.clone());
         issue.execution_run_id = Some(binding.run_id.clone());
@@ -1123,6 +1124,16 @@ fn resolve_auto_capture_repository_config(
             )
         })
         .collect::<BTreeSet<_>>();
+    let selected_issue_is_parent_capture = source.issues.iter().any(|issue| {
+        issue_ids.contains(&issue.identifier.to_ascii_lowercase())
+            && (capture_binding_is_parent(capture_bindings, &issue.identifier)
+                || !issue.verified_repository_commits.is_empty())
+    });
+    if selected_issue_is_parent_capture && candidate_repositories.is_empty() {
+        let mut routed = config.clone();
+        routed.default_repository_id = None;
+        return Ok(routed);
+    }
     let repository_id = if candidate_repositories.len() == 1 {
         candidate_repositories.into_iter().next()
     } else if candidate_repositories.is_empty() {
@@ -1130,14 +1141,7 @@ fn resolve_auto_capture_repository_config(
             .issues
             .iter()
             .any(|issue| issue_ids.contains(&issue.identifier.to_ascii_lowercase()));
-        let selected_issue_is_parent_capture = source.issues.iter().any(|issue| {
-            issue_ids.contains(&issue.identifier.to_ascii_lowercase())
-                && (capture_binding_is_parent(capture_bindings, &issue.identifier)
-                    || !issue.verified_repository_commits.is_empty())
-        });
-        if selected_issue_is_parent_capture {
-            None
-        } else if selected_issue_is_known && config.repository_sources.len() > 1 {
+        if selected_issue_is_known && config.repository_sources.len() > 1 {
             return Err(MemoryError::InvalidInput(
                 "cannot auto-capture a terminal issue without a unique repository source"
                     .to_string(),
@@ -9033,12 +9037,12 @@ mod tests {
     use crate::opensymphony_memory::{
         CodeGraphContextQuery, CodeIntelDiagnosticInput, CodeIntelDocumentInput,
         CodeIntelEdgeInput, CodeIntelPersistBatch, CodeIntelSymbolInput, CodeSymbolDiffStatus,
-        IssueEvidence, IssueSelection, MemoryConfig, MemoryError, MemoryRepositorySource,
-        MemoryScopeFilter, MemorySourceKind, MemorySourceRegistrationStatus,
-        RegisteredMemorySource, SourceFile, code_symbol_detail, code_symbol_neighborhood,
-        code_symbols_containing_span, compare_code_symbols, load_issue_capsule_with_scope,
-        persist_code_intel_documents, plan_capture, register_memory_source,
-        registered_memory_sources, write_capture_plan,
+        IssueEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind, MemoryConfig,
+        MemoryError, MemoryRepositorySource, MemoryScopeFilter, MemorySourceKind,
+        MemorySourceRegistrationStatus, RegisteredMemorySource, SourceFile, code_symbol_detail,
+        code_symbol_neighborhood, code_symbols_containing_span, compare_code_symbols,
+        load_issue_capsule_with_scope, persist_code_intel_documents, plan_capture,
+        register_memory_source, registered_memory_sources, write_capture_plan,
     };
     use crate::opensymphony_workspace::{
         IssueManifest, RunManifest, RunStatus, checkout_workspace_key,
@@ -14708,7 +14712,7 @@ Public memory concept.
                 },
             );
         }
-        let source = SourceFile {
+        let mut source = SourceFile {
             issues: vec![IssueEvidence {
                 identifier: "COE-PARENT".to_owned(),
                 project_id: Some("shared-project".to_owned()),
@@ -14732,6 +14736,8 @@ Public memory concept.
                 repository_commits: BTreeMap::new(),
             },
         )]);
+        super::apply_terminal_capture_bindings(&mut source, &bindings);
+        assert!(source.issues[0].parent_integration);
 
         let groups = super::auto_capture_repository_groups(
             &config,
@@ -14753,7 +14759,36 @@ Public memory concept.
         )
         .expect("empty-target parent should not be assigned a leaf repository");
         assert_eq!(routed.repo_root, config.repo_root);
-        assert_eq!(routed.default_repository_id, config.default_repository_id);
+        assert_eq!(routed.default_repository_id, None);
+
+        let plan = plan_capture(
+            &routed,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-PARENT".to_owned()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("empty-target parent capture plan");
+        write_capture_plan(&routed, &plan, false).expect("empty-target parent capture");
+        let connection = Connection::open(&routed.index_path).expect("memory index");
+        let scope_refs_json: String = connection
+            .query_row(
+                "SELECT scope_refs_json FROM issues WHERE issue_key = 'COE-PARENT'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("captured parent scope refs");
+        let scope_refs: Vec<KnowledgeScope> =
+            serde_json::from_str(&scope_refs_json).expect("scope refs JSON");
+        assert!(
+            scope_refs
+                .iter()
+                .all(|scope| scope.kind != KnowledgeScopeKind::Repository),
+            "repository-neutral parent capture must not inherit a default repository"
+        );
     }
 
     #[test]
