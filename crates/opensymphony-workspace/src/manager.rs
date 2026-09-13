@@ -4741,6 +4741,14 @@ impl WorkspaceManager {
                     generation: request.generation,
                 });
         }
+        self.validate_workspace_handle(&workspace).await?;
+        if self
+            .matching_cleanup_tombstone(&workspace, &request)
+            .await?
+            .is_some_and(|tombstone| tombstone.deleted_at.is_none())
+        {
+            return Ok(());
+        }
         let actual_generation = self.cleanup_generation(&workspace).await?;
         if actual_generation != request.generation {
             return Err(WorkspaceError::CleanupGenerationMismatch {
@@ -4793,7 +4801,7 @@ impl WorkspaceManager {
             }
             return Ok(CleanupOutcome {
                 decision: CleanupDecision::Remove,
-                before_remove: None,
+                before_remove: tombstone.before_remove.clone(),
                 tombstone: Some(tombstone),
             });
         }
@@ -4804,6 +4812,30 @@ impl WorkspaceManager {
                 decision: CleanupDecision::Retain,
                 before_remove: None,
                 tombstone: None,
+            });
+        }
+
+        if request.remove
+            && let Some(mut tombstone) =
+                self.matching_cleanup_tombstone(workspace, &request).await?
+            && tombstone.deleted_at.is_none()
+        {
+            match fs::remove_dir_all(workspace.workspace_path()).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(WorkspaceError::RemoveWorkspace {
+                        path: workspace.workspace_path().to_path_buf(),
+                        source: error,
+                    });
+                }
+            }
+            tombstone.deleted_at = Some(Utc::now());
+            self.write_cleanup_tombstone(workspace, &tombstone).await?;
+            return Ok(CleanupOutcome {
+                decision: CleanupDecision::Remove,
+                before_remove: tombstone.before_remove.clone(),
+                tombstone: Some(tombstone),
             });
         }
 
@@ -4857,6 +4889,10 @@ impl WorkspaceManager {
             generation: request.generation,
             outcome: request.outcome,
             deletion_started_at,
+            before_remove: run_manifest
+                .cleanup_intent
+                .as_ref()
+                .and_then(|intent| intent.before_remove.clone()),
             deleted_at: None,
         };
         self.write_cleanup_tombstone(workspace, &tombstone).await?;
@@ -5036,8 +5072,38 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<String, WorkspaceError> {
-        if let Some(generation) = workspace.checkout_generation() {
-            return Ok(generation.to_owned());
+        if workspace.checkout_generation().is_some() {
+            let checkout = self
+                .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
+                .await?
+                .ok_or_else(|| {
+                    checkout_verification(
+                        workspace.workspace_path(),
+                        "cleanup target checkout manifest is missing",
+                    )
+                })?;
+            let issue = self
+                .load_manifest::<IssueManifest>(workspace, &workspace.issue_manifest_path())
+                .await?
+                .ok_or_else(|| {
+                    checkout_verification(
+                        workspace.workspace_path(),
+                        "cleanup target issue manifest is missing",
+                    )
+                })?;
+            if checkout.schema_version != 1
+                || checkout.quarantined
+                || issue.issue_id != workspace.issue_id()
+                || issue.identifier != workspace.identifier()
+                || !issue_manifest_claims_workspace(workspace, &issue)
+                || !issue_manifest_owns_checkout(workspace, &issue, &checkout)
+            {
+                return Err(checkout_verification(
+                    workspace.workspace_path(),
+                    "cleanup target ownership manifests are inconsistent",
+                ));
+            }
+            return Ok(checkout.generation);
         }
         if path_exists(workspace.workspace_path()).await?
             && let Some(parent) = self
@@ -5047,9 +5113,37 @@ impl WorkspaceManager {
                 )
                 .await?
         {
+            if parent.schema_version != 1
+                || parent.parent_issue_id != workspace.issue_id()
+                || parent.parent_identifier != workspace.identifier()
+                || normalize_absolute_path(&parent.workspace_path)? != workspace.workspace_path()
+            {
+                return Err(checkout_verification(
+                    workspace.workspace_path(),
+                    "parent cleanup target manifest is inconsistent",
+                ));
+            }
             return Ok(format!("parent:{}", parent.hierarchy_generation));
         }
         if path_exists(workspace.workspace_path()).await? {
+            let issue = self
+                .load_manifest::<IssueManifest>(workspace, &workspace.issue_manifest_path())
+                .await?
+                .ok_or_else(|| {
+                    checkout_verification(
+                        workspace.workspace_path(),
+                        "cleanup target issue manifest is missing",
+                    )
+                })?;
+            if issue.issue_id != workspace.issue_id()
+                || issue.identifier != workspace.identifier()
+                || !issue_manifest_claims_workspace(workspace, &issue)
+            {
+                return Err(checkout_verification(
+                    workspace.workspace_path(),
+                    "cleanup target issue manifest is inconsistent",
+                ));
+            }
             return Ok(format!("workspace:{}", workspace.issue_id()));
         }
         Err(WorkspaceError::MissingCleanupTombstone {

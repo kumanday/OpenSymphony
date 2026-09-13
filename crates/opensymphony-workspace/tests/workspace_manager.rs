@@ -1107,6 +1107,30 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         generation: "parent:9".to_owned(),
         outcome: CleanupTerminalOutcome::Succeeded,
     };
+    let stale_child_target = CleanupTarget {
+        issue_id: child_a1.handle.issue_id().to_owned(),
+        identifier: child_a1.handle.identifier().to_owned(),
+        workspace: WorkspaceRecord {
+            path: child_a1.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(child_a1.handle.workspace_key().to_owned())
+                .expect("managed key"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        },
+        generation: "stale-retained-generation".to_owned(),
+        outcome: CleanupTerminalOutcome::Succeeded,
+    };
+    assert!(matches!(
+        manager.cleanup_target(&stale_child_target).await,
+        Err(WorkspaceError::CleanupGenerationMismatch { actual, .. })
+            if actual == child_a1.handle.checkout_generation().expect("generation")
+    ));
+    assert!(
+        child_a1.handle.workspace_path().exists(),
+        "an old retained generation must not delete the current checkout"
+    );
     manager
         .prepare_cleanup_target(&cleanup_target)
         .await
@@ -4043,10 +4067,14 @@ async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_to
         serde_json::to_vec_pretty(&incomplete).expect("encode incomplete tombstone"),
     )
     .expect("simulate a crash after deletion and before completion receipt");
+    std::fs::create_dir_all(ensured.handle.metadata_dir())
+        .expect("simulate a partially removed workspace root");
+    std::fs::write(ensured.handle.workspace_path().join("undeleted"), "blocked")
+        .expect("partial deletion should leave visible residue");
     let resumed = manager
         .cleanup_with_request(&ensured.handle, IssueLifecycleState::Terminal, request)
         .await
-        .expect("matching tombstone should make restart cleanup idempotent");
+        .expect("matching tombstone should resume partial deletion");
     assert!(
         resumed
             .tombstone
@@ -4055,6 +4083,11 @@ async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_to
             .is_some(),
         "restart should complete a deletion-started tombstone"
     );
+    assert!(
+        resumed.before_remove.is_some(),
+        "the external tombstone must preserve the successful hook receipt"
+    );
+    assert!(!ensured.handle.workspace_path().exists());
     assert_eq!(
         std::fs::read_to_string(workspace_root.join("hook-count"))
             .expect("hook count")

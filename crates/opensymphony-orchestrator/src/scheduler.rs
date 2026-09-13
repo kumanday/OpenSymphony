@@ -2392,30 +2392,19 @@ where
             let resources = self.hierarchy_state.descendant_resources_for(&parent_id);
             let mut descendants = Vec::with_capacity(resources.len());
             for resource in resources {
-                let cleanup = if let Some(descendant) = self.executions.get(&resource.issue_id)
-                    && let Some(workspace) = descendant.workspace().cloned()
-                {
-                    CleanupTarget {
-                        issue_id: resource.issue_id.to_string(),
-                        identifier: descendant.issue().identifier.to_string(),
-                        workspace,
-                        generation: resource.checkout_generation.clone(),
-                        outcome: CleanupTerminalOutcome::Succeeded,
-                    }
-                } else {
-                    self.workspace
-                        .cleanup_target_for_resource(&resource, CleanupTerminalOutcome::Succeeded)
-                        .await
-                        .map_err(|error| SchedulerError::Workspace {
-                            detail: error.to_string(),
-                        })?
-                        .ok_or_else(|| SchedulerError::Workspace {
-                            detail: format!(
-                                "captured parent {} is missing retained workspace generation {}",
-                                parent_id, resource.checkout_generation
-                            ),
-                        })?
-                };
+                let cleanup = self
+                    .workspace
+                    .cleanup_target_for_resource(&resource, CleanupTerminalOutcome::Succeeded)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: format!(
+                            "captured parent {} is missing retained workspace generation {}",
+                            parent_id, resource.checkout_generation
+                        ),
+                    })?;
                 descendants.push(ParentSubtreeCleanupTarget {
                     resource: Some(resource.clone()),
                     cleanup,
@@ -4350,6 +4339,19 @@ where
                             .map_err(|error| SchedulerError::Workspace {
                                 detail: error.to_string(),
                             })?;
+                        if parent_workspace {
+                            let mut execution =
+                                IssueExecution::new(record.issue.clone(), observed_at);
+                            execution.attach_workspace(record.workspace.clone())?;
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.release(
+                                    observed_at,
+                                    ReleaseReason::TrackerTerminal,
+                                    None,
+                                )?,
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");

@@ -594,6 +594,7 @@ struct FakeWorkspace {
     repair_refresh_commit: Option<String>,
     repair_refresh_instruction_hash: Option<String>,
     repair_refresh_instruction_path: Option<PathBuf>,
+    cleanup_target_requests: Vec<LeaseResource>,
     generation_cleanups: Vec<crate::opensymphony_workspace::CleanupTarget>,
     generation_cleanup_steps: Vec<String>,
 }
@@ -770,6 +771,7 @@ impl WorkspaceBackend for FakeWorkspace {
         resource: &LeaseResource,
         outcome: crate::opensymphony_workspace::CleanupTerminalOutcome,
     ) -> Result<Option<crate::opensymphony_workspace::CleanupTarget>, Self::Error> {
+        self.cleanup_target_requests.push(resource.clone());
         Ok(Some(crate::opensymphony_workspace::CleanupTarget {
             issue_id: resource.issue_id.to_string(),
             identifier: resource.issue_id.to_string(),
@@ -2897,6 +2899,22 @@ async fn completed_parent_stays_materialized_across_later_capture_retries() {
         restarted_state.leases.iter().any(LeaseRecord::active),
         "restart must retain the leases that protect parent evidence"
     );
+
+    restarted
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(3_600_310))
+        .await
+        .expect("a recovered completed parent must remain capture eligible");
+    let captured_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            restarted
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("captured state"),
+        )
+        .expect("decode captured state");
+    assert!(captured_state.leases.iter().all(|lease| !lease.active()));
+    assert_eq!(restarted.workspace().generation_cleanups.len(), 2);
 }
 
 #[tokio::test]
@@ -2928,6 +2946,16 @@ async fn captured_parent_releases_owned_leases_and_cleans_descendants_before_roo
     assert_eq!(cleaned.len(), 2);
     assert_eq!(cleaned[0].issue_id, format!("child-{suffix}"));
     assert_eq!(cleaned[1].issue_id, parent_id.to_string());
+    assert_eq!(
+        scheduler.workspace().cleanup_target_requests,
+        vec![LeaseResource {
+            issue_id: IssueId::new(format!("child-{suffix}")).expect("child id"),
+            repository_id: CanonicalRepositoryId::new(format!("github:repository:{suffix}"))
+                .expect("repository id"),
+            checkout_generation: format!("checkout-{suffix}"),
+        }],
+        "cleanup must resolve the exact retained generation through the workspace backend"
+    );
     assert_eq!(
         scheduler.workspace().generation_cleanup_steps,
         vec![

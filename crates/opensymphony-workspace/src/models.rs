@@ -1011,6 +1011,8 @@ pub struct CleanupTombstone {
     pub outcome: CleanupTerminalOutcome,
     pub deletion_started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
 }
 

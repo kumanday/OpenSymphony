@@ -554,8 +554,10 @@ exist, then removes the parent root and proves the same generation can be
 prepared again without a stale Git registration. Scheduler regressions prove
 capture acknowledgement, parent preparation before descendant removal,
 deepest-first receipt recovery, hook-once behavior, exact-generation
-tombstones, higher-owner preservation, failed/canceled retention, and retry of
-visible cleanup failures. A lower-level regression proves the
+tombstones, partial-directory deletion recovery, on-disk checkout generation
+validation, completed-parent capture after restart, higher-owner preservation,
+failed/canceled retention, and retry of visible cleanup failures. A lower-level
+regression proves the
 orchestrator Git command overrides checkout-controlled fsmonitor configuration
 and default repository hooks at execution time. Focused
 OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope

@@ -238,9 +238,14 @@ therefore preserve their checkout generations.
 
 Run-manifest receipts make the hook and each worktree removal idempotent.
 Generation tombstones outside the deleted workspace are written before root
-deletion and completed afterward. On restart, an incomplete tombstone resumes
-the deletion, while an already missing path is accepted only for an exact
-issue, key, path, outcome, and generation match. Hook, Git, manifest,
+deletion and completed afterward; they also copy the successful hook receipt so
+a partially removed metadata directory cannot cause the hook to run twice. On
+restart, an incomplete tombstone resumes deletion even when part of the root
+remains, while an already missing path is accepted only for an exact issue,
+key, path, outcome, and generation match. Live checkout deletion reads the
+generation and ownership from its on-disk manifests instead of trusting a
+requested handle. Completed parent executions are restored as capture
+candidates during restart recovery. Hook, Git, manifest,
 tombstone, permission, and filesystem failures remain visible on the durable
 cleanup intent and retry on later scheduler ticks.
 
