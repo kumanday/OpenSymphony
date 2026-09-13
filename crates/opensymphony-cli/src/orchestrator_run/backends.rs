@@ -1345,7 +1345,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
             let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
                 LinearError::InvalidResponse("repair pull request identity is missing".to_owned())
             })?;
-            let intended_at = repair
+            let (intended_at, request_input_version) = repair
                 .operations
                 .iter()
                 .rev()
@@ -1354,20 +1354,33 @@ impl TrackerBackend for RuntimeTrackerBackend {
                         == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
                         && operation.receipt.is_none()
                 })
-                .map(|operation| operation.intended_at)
+                .map(|operation| (operation.intended_at, operation.input_version.as_str()))
                 .ok_or_else(|| {
                     LinearError::InvalidResponse(
                         "repair review request has no durable pending intent".to_owned(),
                     )
                 })?;
+            let review_comment_boundary = repair
+                .operations
+                .iter()
+                .rev()
+                .find(|operation| {
+                    operation.kind
+                        == crate::opensymphony_orchestrator::ParentProviderOperationKind::ReconcileReview
+                        && operation.input_version == request_input_version
+                        && operation.receipt.is_some()
+                })
+                .and_then(|operation| operation.receipt.as_ref())
+                .and_then(|receipt| receipt.detail.as_deref())
+                .and_then(|detail| detail.parse::<u64>().ok());
             let comments = self
                 .github_issue_comments(&api_root, &owner, &repository_name, pull_number, repository)
                 .await?;
-            let already_requested = comments.iter().any(|comment| {
-                comment.body.trim() == "@codex review"
-                    && github_provider_evidence_timestamp_ms(&comment.created_at)
-                        .is_some_and(|created| created >= intended_at)
-            });
+            let already_requested = codex_review_request_already_posted(
+                &comments,
+                review_comment_boundary,
+                intended_at,
+            );
             if !already_requested {
                 let endpoint = format!(
                     "{api_root}/repos/{owner}/{repository_name}/issues/{pull_number}/comments"
@@ -1547,6 +1560,7 @@ impl RuntimeTrackerBackend {
                     pull_request_url: None,
                     head_commit: None,
                     review_head_commit: None,
+                    review_request_cursor: None,
                     open: false,
                     checks_passed: false,
                     checks_failed: false,
@@ -1576,49 +1590,88 @@ impl RuntimeTrackerBackend {
         let latest_reviews = latest_github_review_states(
             reviews
                 .into_iter()
-                .filter(|review| review.commit_id.as_deref() == head_commit.as_deref()),
+                .filter(|review| review.commit_id.as_deref() == head_commit.as_deref())
+                .filter(|review| {
+                    !review
+                        .user
+                        .as_ref()
+                        .and_then(|user| user.login.as_deref())
+                        .is_some_and(is_codex_connector_login)
+                }),
         );
-        let (review_head_commit, review_approved, review_rejected, changes_requested) =
-            if repair.policy.review_provider.eq_ignore_ascii_case("codex") {
-                let comments = self
-                    .github_issue_comments(
-                        &api_root,
-                        &owner,
-                        &repository_name,
-                        &pull_number,
-                        repository,
-                    )
-                    .await?;
-                let review_comments = self
-                    .github_pull_request_review_comments(
-                        &api_root,
-                        &owner,
-                        &repository_name,
-                        &pull_number,
-                        repository,
-                    )
-                    .await?;
-                codex_review_state_for_head(head_commit.as_deref(), &comments, &review_comments)
-            } else {
-                let review_head_commit = (!latest_reviews.is_empty())
-                    .then(|| head_commit.clone())
-                    .flatten();
-                let review_approved = latest_reviews
-                    .values()
-                    .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
-                let changes_requested = latest_reviews
-                    .values()
-                    .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
-                let review_rejected = latest_reviews
-                    .values()
-                    .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
-                (
-                    review_head_commit,
-                    review_approved,
-                    review_rejected,
-                    changes_requested,
+        let human_review_approved = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
+        let human_changes_requested = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
+        let human_review_rejected = latest_reviews
+            .values()
+            .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
+        let (
+            review_head_commit,
+            review_request_cursor,
+            review_approved,
+            review_rejected,
+            changes_requested,
+        ) = if repair.policy.review_provider.eq_ignore_ascii_case("codex") {
+            let comments = self
+                .github_issue_comments(
+                    &api_root,
+                    &owner,
+                    &repository_name,
+                    &pull_number,
+                    repository,
                 )
-            };
+                .await?;
+            let review_comments = self
+                .github_pull_request_review_comments(
+                    &api_root,
+                    &owner,
+                    &repository_name,
+                    &pull_number,
+                    repository,
+                )
+                .await?;
+            let review_request_cursor = comments
+                .iter()
+                .map(|comment| comment.id)
+                .max()
+                .map(|id| id.to_string());
+            let (codex_head, codex_approved, codex_rejected, codex_changes_requested) =
+                codex_review_state_for_head(head_commit.as_deref(), &comments, &review_comments);
+            let (review_approved, review_rejected, changes_requested) =
+                combine_codex_and_human_review(
+                    codex_approved,
+                    codex_rejected,
+                    codex_changes_requested,
+                    human_review_approved,
+                    human_review_rejected,
+                    human_changes_requested,
+                );
+            (
+                codex_head.or_else(|| {
+                    (!latest_reviews.is_empty())
+                        .then(|| head_commit.clone())
+                        .flatten()
+                }),
+                review_request_cursor,
+                review_approved,
+                review_rejected,
+                changes_requested,
+            )
+        } else {
+            let review_head_commit = (!latest_reviews.is_empty())
+                .then(|| head_commit.clone())
+                .flatten();
+            (
+                review_head_commit,
+                None,
+                human_review_approved,
+                human_review_rejected,
+                human_changes_requested,
+            )
+        };
         let (checks_passed, checks_failed) = if repair.policy.required_checks {
             if let Some(head) = head_commit.as_deref() {
                 let (total_count, check_runs) = self
@@ -1675,6 +1728,7 @@ impl RuntimeTrackerBackend {
                 pull_request_url: Some(pull.html_url),
                 head_commit,
                 review_head_commit,
+                review_request_cursor,
                 open: pull.state.eq_ignore_ascii_case("open"),
                 checks_passed,
                 checks_failed,
@@ -2682,7 +2736,10 @@ fn github_required_status_checks_endpoint(
 fn github_merge_method_matches(expected_method: &str, parent_count: usize) -> bool {
     match expected_method.trim().to_ascii_lowercase().as_str() {
         "merge" => parent_count > 1,
-        "squash" | "rebase" => parent_count == 1,
+        // GitHub exposes both squash and rebase results as single-parent
+        // commits. Parent count cannot prove which configured method was used
+        // for historical child evidence.
+        "squash" | "rebase" => false,
         _ => false,
     }
 }
@@ -3008,6 +3065,8 @@ struct GitHubPullRequestReview {
 #[derive(Debug, serde::Deserialize)]
 struct GitHubIssueComment {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     body: String,
     #[serde(default)]
     created_at: String,
@@ -3094,10 +3153,43 @@ fn codex_review_state_for_head(
                 == Some(head_commit)
     });
     (
-        (completed || findings).then(|| head_commit.to_owned()),
+        completed.then(|| head_commit.to_owned()),
         completed && !findings,
         false,
-        findings,
+        completed && findings,
+    )
+}
+
+fn codex_review_request_already_posted(
+    comments: &[GitHubIssueComment],
+    prior_comment_id: Option<u64>,
+    intended_at: TimestampMs,
+) -> bool {
+    comments.iter().any(|comment| {
+        comment.body.trim() == "@codex review"
+            && prior_comment_id.map_or_else(
+                || {
+                    github_provider_evidence_timestamp_ms(&comment.created_at).is_some_and(
+                        |created| created.as_u64() / 1_000 >= intended_at.as_u64() / 1_000,
+                    )
+                },
+                |boundary| comment.id > boundary,
+            )
+    })
+}
+
+fn combine_codex_and_human_review(
+    codex_approved: bool,
+    codex_rejected: bool,
+    codex_changes_requested: bool,
+    human_approved: bool,
+    human_rejected: bool,
+    human_changes_requested: bool,
+) -> (bool, bool, bool) {
+    (
+        codex_approved && human_approved,
+        codex_rejected || human_rejected,
+        codex_changes_requested || human_changes_requested,
     )
 }
 
@@ -14065,6 +14157,7 @@ Run the scheduler.
             login: Some("chatgpt-codex-connector[bot]".to_owned()),
         });
         let comments = vec![GitHubIssueComment {
+            id: 1,
             body: "<!-- codex-pull-request-review-summary -->\n| ✅ **Completed** | `abcdef1` |"
                 .to_owned(),
             created_at: "2026-09-12T22:14:35Z".to_owned(),
@@ -14081,12 +14174,35 @@ Run the scheduler.
             user: connector,
         }];
         assert_eq!(
+            codex_review_state_for_head(Some("abcdef123456"), &[], &findings),
+            (None, false, false, false),
+            "inline findings are incomplete until the summary closes the scan"
+        );
+        assert_eq!(
             codex_review_state_for_head(Some("abcdef123456"), &comments, &findings),
             (Some("abcdef123456".to_owned()), false, false, true)
         );
         assert_eq!(
             codex_review_state_for_head(Some("different-head"), &comments, &findings),
             (None, false, false, false)
+        );
+    }
+
+    #[test]
+    fn codex_review_keeps_the_current_human_review_gate() {
+        assert_eq!(
+            combine_codex_and_human_review(true, false, false, false, false, false),
+            (false, false, false),
+            "an automated clean scan is not a human approval"
+        );
+        assert_eq!(
+            combine_codex_and_human_review(true, false, false, true, false, false),
+            (true, false, false)
+        );
+        assert_eq!(
+            combine_codex_and_human_review(true, false, false, true, false, true),
+            (true, false, true),
+            "a current human change request must remain visible"
         );
     }
 
@@ -14105,6 +14221,41 @@ Run the scheduler.
                 .as_u64(),
             1123
         );
+    }
+
+    #[test]
+    fn codex_review_request_replay_uses_comment_boundary_and_second_precision_fallback() {
+        let comments = vec![
+            GitHubIssueComment {
+                id: 40,
+                body: "@codex review".to_owned(),
+                created_at: "1970-01-01T00:00:01Z".to_owned(),
+                user: None,
+            },
+            GitHubIssueComment {
+                id: 42,
+                body: "@codex review".to_owned(),
+                created_at: "1970-01-01T00:00:01Z".to_owned(),
+                user: None,
+            },
+        ];
+        let intended_at = TimestampMs::new(1_400);
+
+        assert!(codex_review_request_already_posted(
+            &comments,
+            Some(41),
+            intended_at,
+        ));
+        assert!(!codex_review_request_already_posted(
+            &comments[..1],
+            Some(41),
+            intended_at,
+        ));
+        assert!(codex_review_request_already_posted(
+            &comments,
+            None,
+            intended_at,
+        ));
     }
 
     #[test]
@@ -14127,8 +14278,8 @@ Run the scheduler.
     fn github_merge_evidence_matches_configured_merge_method() {
         assert!(github_merge_method_matches("merge", 2));
         assert!(!github_merge_method_matches("merge", 1));
-        assert!(github_merge_method_matches("squash", 1));
-        assert!(github_merge_method_matches("rebase", 1));
+        assert!(!github_merge_method_matches("squash", 1));
+        assert!(!github_merge_method_matches("rebase", 1));
     }
 
     #[test]

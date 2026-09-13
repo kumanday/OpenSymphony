@@ -741,17 +741,31 @@ redacted repair diagnostic and retried without stopping the rest of the
 scheduler tick. For a Codex review profile, the PR-open scan is the
 initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
-affect eligibility. The scheduler applies a fresh provider snapshot immediately
-before merge and returns to review if approval, checks, or mergeability are no
-longer current. A failed parent verification selects the repository but does not
-publish immediately: the scheduler creates the repair branch, resumes the same
-parent conversation for an observed implementation-and-check turn, and only
-then commits and pushes through the workspace owner. After a provider merge, refresh fetches the configured target,
-proves the recorded merge-result commit is reachable, and refreshes complete
-instruction provenance before final verification runs again. The configured
-merge call selects merge, squash, or rebase centrally; recovery corroborates a
-merge commit by its multi-parent topology and a squash or rebase result by its
-single-parent topology plus target reachability.
+affect automated-review eligibility. When the central profile requires review,
+a clean Codex scan and a current human approval are both required, and a current
+human change request remains authoritative. Before posting a later trigger, the
+scheduler persists the highest observed provider comment ID so crash recovery
+can find the exact write despite GitHub's second-precision timestamps. The
+scheduler applies a fresh provider snapshot immediately before merge and returns
+to review if approval, checks, or mergeability are no longer current. Repair
+provider writes remain pending while the tracker parent is inactive or terminal,
+the controller is terminal, or the current hierarchy generation is fenced. A
+repair implementation interrupted by restart remains in `fixing` for cleanup and
+retry instead of entering the final-verification refresh path. A failed parent
+verification selects the repository but does not publish immediately: the
+scheduler creates the repair branch, resumes the same parent conversation for an
+observed implementation-and-check turn, and only then commits and pushes through
+the workspace owner. A repair request is accepted only when its receipt selects
+a completed command observed by the harness before the attempt deadline. Repair
+implementation retries stop at the configured scheduler limit, and provider
+rate-limit responses defer all repair lookups until their retry delay expires.
+After a provider merge, refresh fetches the configured target, proves the
+recorded merge-result commit is reachable, and refreshes complete instruction
+provenance before final verification runs again. The configured repair merge
+call selects merge, squash, or rebase centrally. Historical child merge evidence
+can prove a merge commit from its multi-parent topology; GitHub does not expose
+enough evidence to distinguish squash from rebase by a single-parent commit
+alone, so an ambiguous result remains ineligible.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before

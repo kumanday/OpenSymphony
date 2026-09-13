@@ -403,6 +403,7 @@ struct FakeTracker {
     parent_evidence_errors: VecDeque<FakeError>,
     parent_evidence_requests: usize,
     repair_snapshots: VecDeque<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>,
+    repair_snapshot_errors: VecDeque<FakeError>,
     repair_snapshot_requests: usize,
     repair_pull_request: Option<(String, String)>,
     repair_pull_request_creates: usize,
@@ -500,6 +501,9 @@ impl TrackerBackend for FakeTracker {
     ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
     {
         self.repair_snapshot_requests += 1;
+        if let Some(error) = self.repair_snapshot_errors.pop_front() {
+            return Err(error);
+        }
         Ok(self.repair_snapshots.pop_front())
     }
 
@@ -1059,6 +1063,7 @@ fn repair_provider_snapshot(
         pull_request_url: pull_request.then(|| "https://github.com/acme/repo/pull/41".to_owned()),
         head_commit: pull_request.then(|| "repair-commit".to_owned()),
         review_head_commit: pull_request.then(|| "repair-commit".to_owned()),
+        review_request_cursor: None,
         open: pull_request,
         checks_passed: false,
         checks_failed: false,
@@ -1555,6 +1560,199 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
         Some(crate::opensymphony_orchestrator::ParentAttemptStatus::Passed)
     );
     assert_eq!(controller.repair_attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn unobserved_failed_command_cannot_authorize_parent_repair() {
+    let suffix = "REPAIR-UNOBSERVED-COMMAND";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let run = scheduler.worker().launches[0].run.clone();
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    let mut evidence = parent_verification_evidence(
+        run.worker_id.as_str(),
+        controller.hierarchy_generation,
+        repository_id.clone(),
+        &controller.targets[&repository_id].target_commit,
+    );
+    evidence.repair_repository_id = Some(repository_id);
+    let mut outcome = WorkerOutcomeRecord::from_run(
+        &run,
+        WorkerOutcomeKind::Failed,
+        ts(150),
+        Some("worker supplied an unobserved repair receipt".to_owned()),
+        Some("integration failed".to_owned()),
+    );
+    outcome.parent_verification = Some(evidence);
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id,
+            outcome,
+        });
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("invalid repair evidence should fall back to the normal retry path");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert!(
+        state.parent_integrations[&parent_id]
+            .repair_attempts
+            .is_empty()
+    );
+    assert_eq!(scheduler.workspace().repair_branch_creates, 0);
+}
+
+#[tokio::test]
+async fn parent_repair_implementation_honors_the_scheduler_retry_limit() {
+    let suffix = "REPAIR-RETRY-LIMIT";
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let (mut scheduler, parent_id) = launched_parent_scheduler_with_config(suffix, config).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("repair retry exhaustion should be durable");
+    assert!(matches!(
+        scheduler.execution(&parent_id).expect("parent").state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("an exhausted repair must remain parked");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+}
+
+#[tokio::test]
+async fn hierarchy_supersession_fences_pending_parent_repair_provider_writes() {
+    let suffix = "REPAIR-HIERARCHY-FENCE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-fenced", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+
+    scheduler.tracker_mut().active[0]
+        .sub_issues
+        .push(TrackerIssueRef {
+            id: "replacement-repair-fence".to_owned(),
+            identifier: "COE-REPLACEMENT-REPAIR-FENCE".to_owned(),
+            title: Some("Replacement child".to_owned()),
+            url: None,
+            state: "Done".to_owned(),
+            state_kind: TrackerIssueStateKind::Completed,
+        });
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("hierarchy supersession should fence repair writes");
+
+    assert_eq!(scheduler.tracker().repair_review_requests, 0);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.hierarchy[&parent_id].blocked_reason,
+        Some(crate::opensymphony_orchestrator::HierarchyBlockedReason::HierarchyChanged)
+    );
+    assert!(state.parent_integrations[&parent_id].state.terminal());
+}
+
+#[tokio::test]
+async fn parent_repair_provider_rate_limit_honors_retry_after() {
+    let suffix = "REPAIR-PROVIDER-COOLDOWN";
+    let (mut scheduler, _parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification should queue repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation should launch");
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.workspace_mut().repair_has_uncommitted_changes = true;
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("successful repair implementation should publish");
+    let prior_requests = scheduler.tracker().repair_snapshot_requests;
+    scheduler
+        .tracker_mut()
+        .repair_snapshot_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(60)));
+
+    scheduler
+        .tick(ts(3_600_201))
+        .await
+        .expect("provider rate limit should preserve the repair for retry");
+    assert_eq!(
+        scheduler.tracker().repair_snapshot_requests,
+        prior_requests + 1
+    );
+    scheduler
+        .tick(ts(3_600_300))
+        .await
+        .expect("cooldown tick should not repeat provider lookup");
+    assert_eq!(
+        scheduler.tracker().repair_snapshot_requests,
+        prior_requests + 1
+    );
 }
 
 #[tokio::test]

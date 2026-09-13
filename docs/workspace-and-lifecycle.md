@@ -287,8 +287,10 @@ map is empty by definition.
 A parent repair uses the affected repository's existing contained integration
 worktree. The workspace manager resolves it through the opaque checkout handle,
 reloads the pinned instruction provenance, and creates a fresh
-`fix/<parent>-repair-<attempt>` branch at the recorded target. Managed Git
-operations isolate hooks and reject checkout-controlled transport settings.
+`fix/<parent>-g<hierarchy-generation>-repair-<attempt>` branch at the recorded
+target. The hierarchy generation keeps a reactivated or replanned parent from
+colliding with a retained branch from an earlier controller lifecycle. Managed
+Git operations isolate hooks and reject checkout-controlled transport settings.
 Pushes use the configured credential path and reconcile the exact remote branch
 and local intended head before mutation. Requested-change commits reuse that
 branch and pull request, while old-head review results cannot advance the new

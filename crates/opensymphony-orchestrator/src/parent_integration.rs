@@ -374,6 +374,10 @@ pub struct ParentRepairProviderSnapshot {
     pub pull_request_url: Option<String>,
     pub head_commit: Option<String>,
     pub review_head_commit: Option<String>,
+    /// Provider cursor observed before a review request is written. GitHub
+    /// uses the highest issue-comment ID so a crash after an exact trigger can
+    /// reconcile the write without relying on second-precision timestamps.
+    pub review_request_cursor: Option<String>,
     pub open: bool,
     pub checks_passed: bool,
     pub checks_failed: bool,
@@ -1261,11 +1265,15 @@ impl ParentIntegrationController {
                 "harness state and attempt-owned teardown were unavailable after restart".to_owned()
             }),
         });
-        self.prepare_retry(
-            &attempt_id,
-            "nonterminal parent attempt became indeterminate after restart",
-            occurred_at,
-        )
+        if self.repair_implementation_in_progress() {
+            Ok(())
+        } else {
+            self.prepare_retry(
+                &attempt_id,
+                "nonterminal parent attempt became indeterminate after restart",
+                occurred_at,
+            )
+        }
     }
 
     pub fn reconcile_terminal_run_after_restart(
@@ -1297,11 +1305,25 @@ impl ParentIntegrationController {
                     .to_owned()
             }),
         });
-        self.prepare_retry(
-            &attempt_id,
-            "terminal harness outcome was not durably applied before restart",
-            occurred_at,
-        )
+        if self.repair_implementation_in_progress() {
+            Ok(())
+        } else {
+            self.prepare_retry(
+                &attempt_id,
+                "terminal harness outcome was not durably applied before restart",
+                occurred_at,
+            )
+        }
+    }
+
+    fn repair_implementation_in_progress(&self) -> bool {
+        matches!(self.state, ParentIntegrationState::Fixing { .. })
+            && self.repair_attempts.iter().any(|repair| {
+                matches!(
+                    repair.status,
+                    ParentRepairStatus::Implementing | ParentRepairStatus::ChangesRequested
+                ) && !repair.implementation_completed
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1369,7 +1391,10 @@ impl ParentIntegrationController {
             .collect::<String>()
             .trim_matches('-')
             .to_owned();
-        let branch = format!("fix/{branch_parent}-repair-{number}");
+        let branch = format!(
+            "fix/{branch_parent}-g{}-repair-{number}",
+            self.hierarchy_generation
+        );
         let lease_id = format!(
             "repair:{}:{}:{}",
             self.parent_id, self.hierarchy_generation, number
@@ -3114,6 +3139,7 @@ mod tests {
             pull_request_url: Some("https://github.com/example/a/pull/42".to_owned()),
             head_commit: Some("repair-commit-1".to_owned()),
             review_head_commit: Some("repair-commit-1".to_owned()),
+            review_request_cursor: None,
             open: true,
             checks_passed: false,
             checks_failed: false,
@@ -3137,7 +3163,7 @@ mod tests {
 
         assert_eq!(replay, repair_id);
         let repair = controller.repair(&repair_id).expect("repair");
-        assert_eq!(repair.branch, "fix/parent-repair-1");
+        assert_eq!(repair.branch, "fix/parent-g7-repair-1");
         assert_eq!(repair.instruction_hash, "instruction-a");
         assert_eq!(repair.policy, repair_policy());
         assert_eq!(repair.target_commit, "commit-a");
@@ -3500,6 +3526,54 @@ mod tests {
             controller.state,
             ParentIntegrationState::Fixing { .. }
         ));
+    }
+
+    #[test]
+    fn restart_during_repair_implementation_stays_in_fixing() {
+        for terminal_manifest in [false, true] {
+            let mut controller = controller();
+            let repair_id = begin_repair(&mut controller);
+            controller
+                .record_repair_branch_ready(&repair_id)
+                .expect("repair branch");
+            let attempt_id = controller
+                .start_attempt_intent(
+                    "repair implementation",
+                    format!("repair-turn-{terminal_manifest}"),
+                    ParentAttemptRoot::CheckoutHandle("checkout-a".to_owned()),
+                    1_000,
+                    "targets:1",
+                    TimestampMs::new(11),
+                )
+                .expect("repair attempt");
+
+            if terminal_manifest {
+                controller
+                    .reconcile_terminal_run_after_restart(TimestampMs::new(12))
+                    .expect("terminal manifest recovery");
+            } else {
+                controller
+                    .reconcile_restart(false, TimestampMs::new(12))
+                    .expect("missing harness recovery");
+            }
+
+            assert!(matches!(
+                controller.state,
+                ParentIntegrationState::Fixing { .. }
+            ));
+            assert_eq!(
+                controller
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.id == attempt_id)
+                    .map(|attempt| attempt.status),
+                Some(ParentAttemptStatus::Indeterminate)
+            );
+            assert_eq!(
+                controller.repair(&repair_id).expect("repair").status,
+                ParentRepairStatus::Implementing
+            );
+        }
     }
 
     #[test]

@@ -1365,6 +1365,13 @@ fn resolve_central_config(
             review_profile.provider.to_ascii_lowercase().as_str(),
             "github" | "codex"
         );
+        if review_profile.provider.eq_ignore_ascii_case("codex")
+            && !repository.remote.provider.eq_ignore_ascii_case("github")
+        {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.remote.provider"),
+            });
+        }
         if github_merge_evidence_required && !github_backed_review {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("review_profiles.{}.provider", repository.review_profile),
@@ -4018,6 +4025,29 @@ scheduler:
             error,
             CentralConfigError::InvalidReference { field }
                 if field == "review_profiles.github-standard.provider"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_codex_review_for_non_github_repository() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "      provider: github\n      provider_id: repo-42",
+                "      provider: git\n      provider_id: repo-42",
+            )
+            .replace(
+                "review_profiles:\n  github-standard:\n    provider: github",
+                "review_profiles:\n  github-standard:\n    provider: codex",
+            );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("Codex review requires a GitHub repository provider");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "repositories.core-repo.remote.provider"
         ));
     }
 

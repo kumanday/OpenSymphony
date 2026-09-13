@@ -69,10 +69,13 @@ hash, review profile, review provider, review-policy generation, required-check
 and required-review flags, and merge method. Repository instructions guide the
 repair but cannot weaken that central policy. GitHub PR creation and merge use
 the review credential; branch fetch and push use the checkout credential.
-GitHub and Codex review profiles are supported for repair PRs. A Codex profile
+GitHub and Codex review profiles are supported for GitHub repair PRs; selecting
+a Codex review profile for a non-GitHub repository is rejected during central
+configuration validation. A Codex profile
 uses PR opening for its initial scan and the exact `@codex review` comment only
 after a requested-change repair produces a new head. The completed review
-summary and current-head inline findings determine the durable review result.
+summary closes the scan before current-head inline findings determine the
+durable review result.
 Parent checkout maps written before these review fields existed are migrated
 from the current central repository profile before reuse and written back to
 both generation-bound copies.
