@@ -249,6 +249,7 @@ of dead bridge code.
 - COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-554: Restart-Safe Parent Integration Controller
 - COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 
 ## Source refs
 
@@ -313,5 +314,6 @@ of dead bridge code.
 - COE-553
 - COE-554
 - COE-555
+- COE-556
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

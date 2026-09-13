@@ -60,6 +60,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -130,6 +131,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -186,6 +188,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -277,6 +280,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -359,6 +363,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -431,6 +436,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -511,6 +517,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -616,6 +623,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -690,6 +698,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -779,6 +788,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -840,6 +850,7 @@ areas:
       - area:provenance
       - area:provider
       - area:quality
+      - area:recovery
       - area:review
       - area:runner
       - area:scheduler
@@ -894,6 +905,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -988,6 +1000,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1078,6 +1091,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1205,6 +1219,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1286,6 +1301,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1366,6 +1382,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1436,6 +1453,7 @@ areas:
       - area:provenance
       - area:provider
       - area:quality
+      - area:recovery
       - area:review
       - area:runner
       - area:scheduler
@@ -1463,6 +1481,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:scheduler
       - area:testing
@@ -1512,6 +1531,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1591,6 +1611,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1673,6 +1694,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1716,6 +1738,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:testing
       - area:workspace-lifecycle
@@ -1772,6 +1795,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -1938,6 +1962,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2026,6 +2051,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2130,6 +2156,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2224,6 +2251,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2310,6 +2338,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2401,6 +2430,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2489,6 +2519,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2598,6 +2629,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2680,6 +2712,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2775,6 +2808,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2829,6 +2863,7 @@ areas:
       - area:orchestrator
       - area:outcomes
       - area:provider
+      - area:recovery
       - area:review
       - area:testing
       - area:verifiers
@@ -2878,6 +2913,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -2940,6 +2976,7 @@ areas:
       - area:orchestrator
       - area:process-protocol
       - area:provider
+      - area:recovery
       - area:review
       - area:runner
       - area:testing
@@ -2962,6 +2999,7 @@ areas:
       - area:orchestrator
       - area:provenance
       - area:provider
+      - area:recovery
       - area:review
       - area:task-packets
       - area:testing
@@ -2979,7 +3017,9 @@ areas:
     - provider
     source_refs:
       linear_labels:
+      - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:workspace-lifecycle
       linear_milestones:
@@ -3004,6 +3044,7 @@ areas:
       - area:provenance
       - area:provider
       - area:quality
+      - area:recovery
       - area:review
       - area:runner
       - area:scheduler
@@ -3059,6 +3100,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3088,6 +3130,20 @@ areas:
       - 'M12.96: Parent Integration Lifecycle'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
+  recovery:
+    title: Recovery
+    docs_target: docs/recovery.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - recovery
+    source_refs:
+      linear_labels:
+      - area:recovery
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
   release:
     title: Release
     docs_target: docs/release.md
@@ -3130,6 +3186,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3189,6 +3246,8 @@ areas:
     - review
     source_refs:
       linear_labels:
+      - area:orchestrator
+      - area:recovery
       - area:review
       - area:workspace-lifecycle
       linear_milestones:
@@ -3236,6 +3295,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3279,6 +3339,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:runner
       - area:testing
@@ -3336,6 +3397,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3417,6 +3479,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3461,6 +3524,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:scheduler
       - area:testing
@@ -3518,6 +3582,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3634,6 +3699,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3678,6 +3744,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:task-packets
       - area:testing
@@ -3728,6 +3795,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3807,6 +3875,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3920,6 +3989,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -3992,6 +4062,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -4071,6 +4142,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -4159,6 +4231,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -4226,6 +4299,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:testing
       - area:verifiers
@@ -4275,6 +4349,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -4361,6 +4436,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail
@@ -4405,6 +4481,7 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provider
+      - area:recovery
       - area:review
       - area:testing
       - area:workspace
@@ -4469,6 +4546,7 @@ areas:
       - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
       - area:review
       - area:run-detail

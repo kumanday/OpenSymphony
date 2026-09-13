@@ -797,6 +797,7 @@ That document covers:
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-554: Restart-Safe Parent Integration Controller
 - COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 
 ## Source refs
 
@@ -948,5 +949,6 @@ That document covers:
 - COE-551
 - COE-554
 - COE-555
+- COE-556
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

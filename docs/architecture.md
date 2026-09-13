@@ -630,6 +630,7 @@ Notable removals:
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 
 ## Source refs
 
@@ -765,5 +766,6 @@ Notable removals:
 - COE-549
 - COE-550
 - COE-551
+- COE-556
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
