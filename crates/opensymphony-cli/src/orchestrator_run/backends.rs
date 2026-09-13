@@ -2287,28 +2287,28 @@ impl RuntimeTrackerBackend {
             {
                 return Ok(false);
             }
-            if repository.review_provider.eq_ignore_ascii_case("codex") {
-                let comments = self
-                    .github_issue_comments(
-                        api_root,
-                        owner,
-                        repository_name,
-                        pull_number,
-                        repository,
-                    )
-                    .await?;
-                let review_threads = self
-                    .github_review_threads(
-                        api_root,
-                        owner,
-                        repository_name,
-                        pull_number,
-                        repository,
-                    )
-                    .await?;
-                if !codex_child_review_policy_satisfied(review_head, &comments, &review_threads) {
-                    return Ok(false);
-                }
+            let review_threads = self
+                .github_review_threads(api_root, owner, repository_name, pull_number, repository)
+                .await?;
+            let comments = if repository.review_provider.eq_ignore_ascii_case("codex") {
+                self.github_issue_comments(
+                    api_root,
+                    owner,
+                    repository_name,
+                    pull_number,
+                    repository,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            if !child_review_provider_policy_satisfied(
+                &repository.review_provider,
+                review_head,
+                &comments,
+                &review_threads,
+            ) {
+                return Ok(false);
             }
         }
         if repository.required_checks {
@@ -3463,14 +3463,21 @@ fn unresolved_human_threads(review_threads: &[GitHubReviewThread]) -> bool {
     })
 }
 
-fn codex_child_review_policy_satisfied(
+fn child_review_provider_policy_satisfied(
+    review_provider: &str,
     head_commit: &str,
     issue_comments: &[GitHubIssueComment],
     review_threads: &[GitHubReviewThread],
 ) -> bool {
+    if unresolved_human_threads(review_threads) {
+        return false;
+    }
+    if !review_provider.eq_ignore_ascii_case("codex") {
+        return true;
+    }
     let (_, approved, rejected, changes_requested) =
         codex_review_state_for_head(Some(head_commit), issue_comments, review_threads);
-    approved && !rejected && !changes_requested && !unresolved_human_threads(review_threads)
+    approved && !rejected && !changes_requested
 }
 
 fn codex_review_state_for_head(
@@ -14902,15 +14909,52 @@ Run the scheduler.
             },
         }];
 
-        assert!(!codex_child_review_policy_satisfied(
+        assert!(!child_review_provider_policy_satisfied(
+            "codex",
             "abcdef123456",
             &comments,
             &threads
         ));
         threads[0].is_resolved = true;
-        assert!(codex_child_review_policy_satisfied(
+        assert!(child_review_provider_policy_satisfied(
+            "codex",
             "abcdef123456",
             &comments,
+            &threads
+        ));
+    }
+
+    #[test]
+    fn github_child_review_rejects_an_unresolved_human_thread() {
+        let mut threads = vec![GitHubReviewThread {
+            id: "human-commented-thread".to_owned(),
+            is_resolved: false,
+            comments: GitHubReviewThreadComments {
+                nodes: vec![GitHubReviewThreadComment {
+                    body: "Resolve this human finding before integration.".to_owned(),
+                    path: Some("src/review.rs".to_owned()),
+                    line: Some(42),
+                    original_line: Some(42),
+                    commit: None,
+                    original_commit: None,
+                    author: Some(GitHubReviewUser {
+                        login: Some("reviewer".to_owned()),
+                    }),
+                }],
+            },
+        }];
+
+        assert!(!child_review_provider_policy_satisfied(
+            "github",
+            "abcdef123456",
+            &[],
+            &threads
+        ));
+        threads[0].is_resolved = true;
+        assert!(child_review_provider_policy_satisfied(
+            "github",
+            "abcdef123456",
+            &[],
             &threads
         ));
     }
