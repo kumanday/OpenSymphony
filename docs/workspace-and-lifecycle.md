@@ -261,7 +261,10 @@ The scheduler accepts only the root matching the durable controller generation;
 superseded roots remain owned by their generation-specific cleanup state rather
 than overwriting the current execution during restart. A tracker reopen waits
 for pending prior-generation cleanup to complete before replacing the
-controller and preparing a new parent root.
+controller and preparing a new parent root. Capture selects descendants from
+the completed controller generation's active lease owner records rather than
+the newer observed subtree, and an operator replan is rejected until that
+cleanup finishes.
 Hook, Git, manifest,
 tombstone, permission, and filesystem failures remain visible on the durable
 cleanup intent and retry on later scheduler ticks.

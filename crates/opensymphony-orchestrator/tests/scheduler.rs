@@ -3552,6 +3552,50 @@ async fn stale_completed_parent_does_not_release_changed_hierarchy() {
     );
     assert!(scheduler.workspace().cleaned.is_empty());
     assert!(!state.terminal_orchestrator_issues.contains(&parent_id));
+
+    scheduler
+        .workspace_mut()
+        .cleanup_results
+        .push_back(Err(FakeError {
+            message: "cleanup remains retryable".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(3_600_210))
+        .await
+        .expect("capture should retain the completed controller generation");
+    assert_eq!(
+        scheduler.workspace().cleanup_target_requests,
+        vec![LeaseResource {
+            issue_id: IssueId::new(format!("child-{suffix}")).expect("child id"),
+            repository_id: CanonicalRepositoryId::new(format!("github:repository:{suffix}"))
+                .expect("repository id"),
+            checkout_generation: format!("checkout-{suffix}"),
+        }],
+        "capture must select the completed controller's leased generation after scope changes"
+    );
+    let error = scheduler
+        .replan_parent(&parent_id, ts(3_600_220))
+        .await
+        .expect_err("operator replan must preserve incomplete cleanup state");
+    assert!(error.to_string().contains("subtree cleanup is incomplete"));
+    let preserved: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(preserved.hierarchy[&parent_id].generation, 2);
+    assert_eq!(
+        preserved.parent_integrations[&parent_id].hierarchy_generation,
+        1
+    );
+    assert_eq!(
+        preserved.parent_integrations[&parent_id]
+            .subtree_cleanup
+            .as_ref()
+            .expect("cleanup intent")
+            .status,
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Pending
+    );
 }
 
 #[tokio::test]

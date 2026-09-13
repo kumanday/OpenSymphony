@@ -2396,7 +2396,9 @@ where
             };
             let retained = outcome == CleanupTerminalOutcome::Failed
                 && self.workspace.retain_failed_workspaces();
-            let resources = self.hierarchy_state.descendant_resources_for(&parent_id);
+            let resources = self
+                .hierarchy_state
+                .descendant_resources_for_generation(&parent_id, controller.hierarchy_generation);
             let mut descendants = Vec::with_capacity(resources.len());
             for resource in resources {
                 let cleanup = self
@@ -2772,6 +2774,19 @@ where
         };
         if snapshot.blocked_reason != Some(HierarchyBlockedReason::HierarchyChanged) {
             return Ok(false);
+        }
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .and_then(|controller| controller.subtree_cleanup.as_ref())
+            .is_some_and(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed)
+        {
+            return Err(SchedulerError::Workspace {
+                detail: format!(
+                    "cannot replan hierarchy parent {parent_id} while subtree cleanup is incomplete"
+                ),
+            });
         }
         if self.executions.get(parent_id).is_some_and(|execution| {
             matches!(

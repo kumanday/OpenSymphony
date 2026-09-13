@@ -915,6 +915,18 @@ impl DurableOrchestratorState {
         self.resources_for_ancestor_owner(&owner, current_generation, current_subtree)
     }
 
+    pub fn descendant_resources_for_generation(
+        &self,
+        parent_id: &IssueId,
+        hierarchy_generation: u64,
+    ) -> Vec<LeaseResource> {
+        self.resources_for_ancestor_owner(
+            &LeaseOwner::ancestor(parent_id),
+            Some(hierarchy_generation),
+            None,
+        )
+    }
+
     pub fn ancestor_resources_for_child(
         &self,
         parent_id: &IssueId,
@@ -952,7 +964,7 @@ impl DurableOrchestratorState {
                     .is_none_or(|generation| lease.hierarchy_generation == generation)
                 && current_subtree
                     .as_ref()
-                    .is_some_and(|subtree| subtree.contains(&lease.resource.issue_id))
+                    .is_none_or(|subtree| subtree.contains(&lease.resource.issue_id))
             {
                 resources
                     .entry(lease.resource.clone())

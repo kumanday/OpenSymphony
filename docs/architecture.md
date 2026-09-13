@@ -205,9 +205,11 @@ the tombstone matches its issue, workspace key, path, terminal outcome, and
 generation. Failed and canceled parents use the existing failed-workspace
 cleanup semantics without changing terminal classification: `retain_failed`
 applies to failed parents, while canceled parents continue cleanup. Reopened
-parents cannot replace a controller until its acknowledged cleanup completes,
-and restart recovery selects only the parent root matching the controller's
-durable hierarchy generation.
+parents and operator replans cannot replace a controller until its acknowledged
+cleanup completes. Capture selects descendant leases owned by that controller's
+generation even if the observed hierarchy has already advanced, and restart
+recovery selects only the parent root matching the controller's durable
+hierarchy generation.
 
 ### 3.2 OpenHands is the execution adapter
 
