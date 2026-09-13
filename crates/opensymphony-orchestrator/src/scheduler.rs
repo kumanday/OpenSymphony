@@ -2163,12 +2163,19 @@ where
         self.load_recovery_state().await?;
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
+        let retain_failed = self.workspace.retain_failed_workspaces();
         let subtree_cleanup_pending = self
             .hierarchy_state
             .parent_integrations
             .values()
             .filter_map(|controller| controller.subtree_cleanup.as_ref())
-            .any(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed);
+            .any(|cleanup| {
+                matches!(
+                    cleanup.status,
+                    ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                ) || (cleanup.status == ParentSubtreeCleanupStatus::Retained
+                    && (cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed))
+            });
 
         self.expire_linear_cooldown(observed_at);
         let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)

@@ -1840,6 +1840,16 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
             .generation_cleanup_steps
             .is_empty()
     );
+    let full_refreshes = retained_retry.tracker().active_requests;
+    retained_retry
+        .tick(ts(7_300_451))
+        .await
+        .expect("retained failed cleanup should remain idle");
+    assert_eq!(
+        retained_retry.tracker().active_requests,
+        full_refreshes,
+        "retained failed cleanup must not force a full tracker refresh every poll"
+    );
 
     let mut reopened_parent = tracker_issue(
         parent_id.as_str(),
