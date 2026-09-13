@@ -135,13 +135,15 @@ the same attempt and pull request. Provider outages, failed checks, review
 rejection, external closure, force-push, and merge conflicts remain precise,
 resumable states. GitHub is the first provider adapter and remains authoritative
 for PR, review, check, and merge facts. Each scheduler tick checks a fresh full
-tracker snapshot before advancing repair-provider writes, so a newly terminal
-parent fences review, push, and merge operations in the same observation.
+tracker snapshot before advancing repair-provider writes, so any parent absent
+from the current active set fences review, push, and merge operations in the
+same observation.
 After merge, the controller records the provider merge-result commit and the
 workspace manager fetches the configured target through the central credential
-path. The refreshed checkout is accepted only when that merge result is
-reachable from the new target. Squash and rebase results therefore do not
-depend on the replaced repair commit remaining an ancestor. Both copies of the
+path. The refreshed checkout is accepted only when that merge result and every
+retained child merge result are reachable from the new target. Squash and
+rebase results therefore do not depend on the replaced repair commit remaining
+an ancestor. Both copies of the
 generation-bound checkout map and its instruction hash are updated before final
 verification can resume.
 Final evidence is accepted only from the run-bound

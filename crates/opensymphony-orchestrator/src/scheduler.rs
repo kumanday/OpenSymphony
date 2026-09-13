@@ -1366,7 +1366,7 @@ where
     async fn advance_parent_repairs(
         &mut self,
         observed_at: TimestampMs,
-        freshly_terminal_issue_ids: &HashSet<IssueId>,
+        freshly_inactive_issue_ids: &HashSet<IssueId>,
     ) -> Result<(), SchedulerError> {
         let repairs = self
             .hierarchy_state
@@ -1402,7 +1402,7 @@ where
             if !self.parent_repair_advancement_allowed(&parent_id) {
                 continue;
             }
-            if freshly_terminal_issue_ids.contains(&parent_id) {
+            if freshly_inactive_issue_ids.contains(&parent_id) {
                 continue;
             }
             let advancement = async {
@@ -2198,25 +2198,18 @@ where
             })?;
         self.apply_worker_updates(updates).await?;
         if !self.linear_cooldown_active(observed_at) {
-            let freshly_terminal_issue_ids = pre_update_full_snapshot
+            let freshly_inactive_issue_ids = pre_update_full_snapshot
                 .as_ref()
                 .map(|snapshot| {
-                    let mut issue_ids = snapshot
-                        .terminal
-                        .iter()
-                        .filter_map(|issue| IssueId::new(issue.id.clone()).ok())
-                        .collect::<HashSet<_>>();
-                    issue_ids.extend(
-                        snapshot
-                            .state_by_id
-                            .values()
-                            .filter(|state| state.state.is_terminal())
-                            .filter_map(|state| IssueId::new(state.id.clone()).ok()),
-                    );
-                    issue_ids
+                    self.hierarchy_state
+                        .parent_integrations
+                        .keys()
+                        .filter(|parent_id| !snapshot.contains_active(parent_id.as_str()))
+                        .cloned()
+                        .collect::<HashSet<_>>()
                 })
                 .unwrap_or_default();
-            self.advance_parent_repairs(observed_at, &freshly_terminal_issue_ids)
+            self.advance_parent_repairs(observed_at, &freshly_inactive_issue_ids)
                 .await?;
         }
 
@@ -5988,7 +5981,10 @@ where
                 || (repair.status == ParentRepairStatus::Implementing
                     && !repair.implementation_completed)
         });
+        let inactive_repair_implementation = repair_implementation_turn
+            && execution.issue().state.category != IssueStateCategory::Active;
         if status == ParentAttemptStatus::Passed
+            && !inactive_repair_implementation
             && matches!(
                 controller.state,
                 super::ParentIntegrationState::Fixing { .. }
@@ -6014,7 +6010,13 @@ where
                 .as_ref()
                 .and_then(|evidence| evidence.repair_repository_id.as_ref())
                 .is_some();
-        if status == ParentAttemptStatus::Passed
+        if inactive_repair_implementation {
+            controller.cancel_without_harness(
+                "tracker became inactive before the repair implementation turn could be published",
+                &input_version,
+                outcome.finished_at,
+            )?;
+        } else if status == ParentAttemptStatus::Passed
             && execution.issue().state.category == IssueStateCategory::Terminal
         {
             controller.complete(&attempt_id, &input_version, outcome.finished_at)?;

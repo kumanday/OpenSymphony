@@ -1241,6 +1241,7 @@ impl WorkspaceManager {
                     "user.email=opensymphony@localhost",
                     "commit",
                     "--no-verify",
+                    "--no-gpg-sign",
                     "--message",
                     &message,
                 ],
@@ -1324,6 +1325,27 @@ impl WorkspaceManager {
                 parent_root,
                 "provider merge result is not reachable from refreshed target",
             ));
+        }
+        for required_merge_commit in &existing.required_merge_commits {
+            if !self
+                .git_is_ancestor(
+                    source.workspace_path(),
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        required_merge_commit,
+                        &target_commit,
+                    ],
+                )
+                .await?
+            {
+                return Err(checkout_verification(
+                    parent_root,
+                    &format!(
+                        "retained child merge result `{required_merge_commit}` is not reachable from refreshed target"
+                    ),
+                ));
+            }
         }
         let checkout = self
             .resolve_parent_checkout(&parent, checkout_handle)

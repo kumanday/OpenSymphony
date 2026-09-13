@@ -1688,17 +1688,22 @@ impl ParentIntegrationController {
         input_version: &str,
         occurred_at: TimestampMs,
     ) -> Result<(), ParentIntegrationError> {
-        let (repository_id, number) = {
-            let repair = self.repair_mut(repair_id)?;
-            repair.pull_request_id = Some(pull_request_id.to_owned());
-            repair.pull_request_url = Some(pull_request_url.to_owned());
-            repair.status = ParentRepairStatus::AwaitingReview;
-            (repair.repository_id.clone(), repair.number)
-        };
+        let repair = self.repair(repair_id)?.clone();
+        if let Some(existing_pull_request_id) = repair.pull_request_id.as_deref() {
+            return if existing_pull_request_id == pull_request_id
+                && repair.pull_request_url.as_deref() == Some(pull_request_url)
+            {
+                Ok(())
+            } else {
+                Err(ParentIntegrationError::RepairTargetMismatch(
+                    repair_id.to_owned(),
+                ))
+            };
+        }
         self.transition(
             ParentIntegrationState::AwaitingFixReview {
-                repository_id,
-                repair_attempt: number,
+                repository_id: repair.repository_id,
+                repair_attempt: repair.number,
                 pull_request_id: pull_request_id.to_owned(),
             },
             "repair pull request is awaiting configured checks and review",
@@ -1712,6 +1717,10 @@ impl ParentIntegrationController {
             ParentRetryClassification::Retryable,
             occurred_at,
         )?;
+        let repair = self.repair_mut(repair_id)?;
+        repair.pull_request_id = Some(pull_request_id.to_owned());
+        repair.pull_request_url = Some(pull_request_url.to_owned());
+        repair.status = ParentRepairStatus::AwaitingReview;
         Ok(())
     }
 

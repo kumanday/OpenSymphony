@@ -926,6 +926,8 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
     assert!(dirty_non_target.to_string().contains("dirty"));
     std::fs::remove_file(integration_b.join("unrelated-repair.txt"))
         .expect("non-target repair marker should be removed");
+    git(&integration, &["config", "commit.gpgSign", "true"]);
+    git(&integration, &["config", "gpg.program", "false"]);
     let repair_commit = manager
         .publish_parent_repair(
             &parent,
@@ -950,6 +952,34 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             .as_deref(),
         Some(repair_commit.as_str())
     );
+    let target_before_repair_merge = git(&source_a, &["rev-parse", "HEAD"]);
+    let target_tree = git(&source_a, &["write-tree"]);
+    let unrelated_target = git(
+        &source_a,
+        &["commit-tree", &target_tree, "-m", "unrelated target"],
+    );
+    let unrelated_refspec = format!("{unrelated_target}:main");
+    git(
+        &source_a,
+        &["push", "--force", "origin", &unrelated_refspec],
+    );
+    let discarded_children = manager
+        .refresh_parent_repair_target(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            &unrelated_target,
+        )
+        .await
+        .expect_err("refresh must retain every required child merge result");
+    assert!(
+        discarded_children
+            .to_string()
+            .contains("retained child merge result")
+    );
+    let restored_refspec = format!("{target_before_repair_merge}:main");
+    git(&source_a, &["push", "--force", "origin", &restored_refspec]);
     git(&source_a, &["fetch", "origin", repair_branch]);
     git(
         &source_a,

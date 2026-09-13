@@ -1094,6 +1094,24 @@ fn mark_parent_terminal_for_state_lookup(
     suffix: &str,
     updated_at: u64,
 ) {
+    mark_parent_inactive_for_state_lookup(
+        scheduler,
+        parent_id,
+        suffix,
+        "Done",
+        "completed",
+        updated_at,
+    );
+}
+
+fn mark_parent_inactive_for_state_lookup(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    parent_id: &IssueId,
+    suffix: &str,
+    state: &str,
+    tracker_type: &str,
+    updated_at: u64,
+) {
     scheduler.tracker_mut().active.clear();
     scheduler.tracker_mut().terminal.clear();
     scheduler.tracker_mut().states.insert(
@@ -1101,8 +1119,8 @@ fn mark_parent_terminal_for_state_lookup(
         tracker_state_snapshot(
             parent_id.as_str(),
             &format!("COE-PARENT-{suffix}"),
-            "Done",
-            "completed",
+            state,
+            tracker_type,
             updated_at,
         ),
     );
@@ -1695,6 +1713,95 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
 }
 
 #[tokio::test]
+async fn inactive_parent_fences_a_pending_repair_review_before_reconciliation() {
+    let suffix = "REPAIR-INACTIVE-FENCE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-inactive", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+
+    mark_parent_inactive_for_state_lookup(
+        &mut scheduler,
+        &parent_id,
+        suffix,
+        "Human Review",
+        "started",
+        3_900_300,
+    );
+    scheduler
+        .tick(ts(3_900_300))
+        .await
+        .expect("inactive parent should be fenced before provider advancement");
+
+    assert_eq!(
+        scheduler.tracker().repair_review_requests,
+        0,
+        "absence from the fresh active set must fence review writes"
+    );
+}
+
+#[tokio::test]
+async fn terminal_parent_during_repair_implementation_cancels_before_publication() {
+    let suffix = "REPAIR-TURN-TERMINAL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification queues repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation launches");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 3_600_200);
+
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("terminal tracker refresh cancels the completed repair turn");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(matches!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Canceled { .. }
+    ));
+    let repair = controller.repair_attempts.first().expect("repair");
+    assert!(!repair.implementation_completed);
+    assert_eq!(scheduler.workspace().repair_pushes, 0);
+}
+
+#[tokio::test]
 async fn terminal_parent_fences_a_pending_repair_push() {
     let suffix = "REPAIR-PUSH-CANCEL";
     let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
@@ -2206,6 +2313,8 @@ async fn requested_change_publication_pushes_the_new_local_head_to_the_same_pull
         .expect("first publication");
 
     let mut changes = repair_provider_snapshot(true);
+    changes.head_commit = Some("repair-commit-1".to_owned());
+    changes.review_head_commit = Some("repair-commit-1".to_owned());
     changes.changes_requested = true;
     scheduler.tracker_mut().repair_snapshots.push_back(changes);
     scheduler

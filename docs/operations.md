@@ -766,8 +766,9 @@ current and the durable ledger contains the orchestrator's pending merge intent
 for that exact head. A replacement repair push supersedes older pending merge
 intents; an external merge that bypasses those facts is blocked for operator
 recovery. Repair
-provider writes remain pending while the tracker parent is inactive or terminal,
-the controller is terminal, or the current hierarchy generation is fenced. A
+provider writes remain pending whenever a fresh tracker snapshot does not list
+the parent in its active set, the controller is terminal, or the current
+hierarchy generation is fenced. A
 terminal or canceled tracker transition also persists controller cancellation
 while the repair is between harness turns in pull-request, review, merge, or
 refresh processing; no harness interrupt is emitted when no turn is running. A
@@ -783,8 +784,9 @@ a completed command observed by the harness before the attempt deadline. Repair
 implementation retries stop at the configured scheduler limit, and provider
 rate-limit responses defer all repair lookups until their retry delay expires.
 After a provider merge, refresh fetches the configured target, proves the
-recorded merge-result commit is reachable, and refreshes complete instruction
-provenance before final verification runs again. The configured repair merge
+recorded merge-result commit and every retained child merge result are
+reachable, and refreshes complete instruction provenance before final
+verification runs again. The configured repair merge
 call selects merge, squash, or rebase centrally. Historical child merge evidence
 can prove a merge commit from its multi-parent topology; GitHub does not expose
 enough evidence to distinguish squash from rebase by a single-parent commit
