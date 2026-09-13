@@ -2201,11 +2201,19 @@ where
             let freshly_terminal_issue_ids = pre_update_full_snapshot
                 .as_ref()
                 .map(|snapshot| {
-                    snapshot
+                    let mut issue_ids = snapshot
                         .terminal
                         .iter()
                         .filter_map(|issue| IssueId::new(issue.id.clone()).ok())
-                        .collect::<HashSet<_>>()
+                        .collect::<HashSet<_>>();
+                    issue_ids.extend(
+                        snapshot
+                            .state_by_id
+                            .values()
+                            .filter(|state| state.state.is_terminal())
+                            .filter_map(|state| IssueId::new(state.id.clone()).ok()),
+                    );
+                    issue_ids
                 })
                 .unwrap_or_default();
             self.advance_parent_repairs(observed_at, &freshly_terminal_issue_ids)
@@ -6926,6 +6934,17 @@ where
                     ReleaseReason::Completed,
                     Some(outcome),
                 )
+                .await;
+        }
+
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(&issue_id)
+            .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+        {
+            return self
+                .queue_retry_for_outcome(execution, outcome, observed_at)
                 .await;
         }
 

@@ -1088,6 +1088,26 @@ fn repair_provider_snapshot(
     }
 }
 
+fn mark_parent_terminal_for_state_lookup(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    parent_id: &IssueId,
+    suffix: &str,
+    updated_at: u64,
+) {
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal.clear();
+    scheduler.tracker_mut().states.insert(
+        parent_id.to_string(),
+        tracker_state_snapshot(
+            parent_id.as_str(),
+            &format!("COE-PARENT-{suffix}"),
+            "Done",
+            "completed",
+            updated_at,
+        ),
+    );
+}
+
 #[tokio::test]
 async fn parent_repair_searches_before_each_side_effect_and_keeps_one_pr() {
     let suffix = "REPAIR-IDEMPOTENT";
@@ -1639,24 +1659,14 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
     );
     assert!(before.parent_integrations[&parent_id].can_cancel_without_harness());
     let review_requests_before_terminal = scheduler.tracker().repair_review_requests;
-    let merge_requests_before_terminal = scheduler.tracker().repair_merge_requests;
-    let mut stale_approved = repair_provider_snapshot(true);
-    stale_approved.checks_passed = true;
-    stale_approved.review_approved = true;
     scheduler
         .tracker_mut()
         .repair_snapshots
-        .push_back(stale_approved);
+        .push_back(repair_provider_snapshot(true));
 
-    scheduler.tracker_mut().active.clear();
-    scheduler.tracker_mut().terminal = vec![tracker_issue(
-        parent_id.as_str(),
-        &format!("COE-PARENT-{suffix}"),
-        "Done",
-        0,
-    )];
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 7_300_300);
     scheduler
-        .tick(ts(3_900_300))
+        .tick(ts(7_300_300))
         .await
         .expect("terminal reconciliation cancels the provider-waiting controller");
 
@@ -1682,10 +1692,106 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
         review_requests_before_terminal,
         "fresh terminal state must fence review writes before repair advancement"
     );
+}
+
+#[tokio::test]
+async fn terminal_parent_fences_a_pending_repair_push() {
+    let suffix = "REPAIR-PUSH-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.workspace_mut().repair_has_uncommitted_changes = true;
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .workspace_mut()
+        .repair_publish_results
+        .push_back(Err(FakeError {
+            message: "transient repair push failure".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler.tick(ts(150)).await.expect("prepare repair");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("launch repair implementation");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("retain completed implementation after push failure");
+    let pushes_before_terminal = scheduler.workspace().repair_pushes;
+    assert_eq!(pushes_before_terminal, 1);
+
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 7_300_300);
+    scheduler
+        .tick(ts(7_300_300))
+        .await
+        .expect("terminal state fences the pending push");
+
+    assert_eq!(
+        scheduler.workspace().repair_pushes,
+        pushes_before_terminal,
+        "fresh terminal state must fence a repair push before repair advancement"
+    );
+}
+
+#[tokio::test]
+async fn terminal_parent_fences_a_pending_repair_merge() {
+    let suffix = "REPAIR-MERGE-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-merge-cancel", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([repair_provider_snapshot(true), approved.clone()]);
+    scheduler
+        .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+        .await
+        .expect("advance to merge");
+    let merges_before_terminal = scheduler.tracker().repair_merge_requests;
+    scheduler.tracker_mut().repair_snapshots.push_back(approved);
+
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 3_900_300);
+    scheduler
+        .tick(ts(3_900_300))
+        .await
+        .expect("terminal state fences the pending merge");
+
     assert_eq!(
         scheduler.tracker().repair_merge_requests,
-        merge_requests_before_terminal,
-        "fresh terminal state must fence merge writes before repair advancement"
+        merges_before_terminal,
+        "fresh terminal state must fence a merge before repair advancement"
     );
 }
 
@@ -3555,7 +3661,10 @@ async fn parent_outcomes_without_terminal_evidence_retain_ownership_without_reru
         WorkerOutcomeKind::CancelFailed,
     ] {
         let suffix = format!("INDETERMINATE-{outcome_kind:?}");
-        let (mut scheduler, parent_id) = launched_parent_scheduler(&suffix).await;
+        let mut config = scheduler_config();
+        config.max_retry_attempts = Some(0);
+        let (mut scheduler, parent_id) =
+            launched_parent_scheduler_with_config(&suffix, config).await;
         let first_run = scheduler.worker().launches[0].run.clone();
         scheduler
             .worker_mut()
