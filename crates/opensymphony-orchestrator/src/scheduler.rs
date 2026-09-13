@@ -2604,6 +2604,17 @@ where
                 if self
                     .hierarchy_state
                     .active_for_at(resource, observed_at.as_u64())
+                    || self
+                        .executions
+                        .get(&resource.issue_id)
+                        .is_some_and(|execution| {
+                            matches!(
+                                execution.status(),
+                                SchedulerStatus::Claimed | SchedulerStatus::Running
+                            ) && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == target.cleanup.workspace.path
+                            })
+                        })
                 {
                     continue;
                 }

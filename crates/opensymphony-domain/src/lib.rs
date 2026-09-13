@@ -1232,6 +1232,21 @@ mod tests {
     }
 
     #[test]
+    fn attach_workspace_accepts_a_nested_parent_generation_identity() {
+        let issue = sample_issue();
+        let parent_key = "parent-COE-260-0123456789abcdef";
+        let workspace = WorkspaceRecord {
+            path: PathBuf::from(format!("/tmp/workspaces/parents/{parent_key}/4")),
+            workspace_key: must(WorkspaceKey::new(parent_key)),
+            ..sample_workspace()
+        };
+        let mut execution = IssueExecution::new(issue, ts(30));
+
+        must(execution.attach_workspace(workspace.clone()));
+        assert_eq!(execution.workspace(), Some(&workspace));
+    }
+
+    #[test]
     fn retry_queued_execution_adopts_same_key_replacement_generation() {
         let mut execution = claimed_execution();
         let issue = execution.issue().clone();

@@ -837,12 +837,16 @@ fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
 
 fn workspace_key_matches_issue(actual: &WorkspaceKey, expected: &WorkspaceKey) -> bool {
     actual == expected
-        || actual
-            .as_str()
-            .strip_prefix(&format!("{}-", expected.as_str()))
-            .is_some_and(|digest| {
+        || [
+            format!("{}-", expected.as_str()),
+            format!("parent-{}-", expected.as_str()),
+        ]
+        .iter()
+        .any(|prefix| {
+            actual.as_str().strip_prefix(prefix).is_some_and(|digest| {
                 digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
+        })
 }
 
 fn comparable_workspace_path(path: &Path) -> PathBuf {

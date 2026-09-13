@@ -195,7 +195,9 @@ harness conversation and asks the workspace manager to receipt the
 Only then does the scheduler release that parent's lease owners and remove
 unleased descendant generations from deepest to shallowest, followed by the
 non-Git parent root. A lease owned by another ancestor or by an unexpired
-diagnostic hold continues to block its generation.
+diagnostic hold continues to block its generation. A claimed or running child
+bound to the exact retained generation also blocks deletion while its worker is
+active.
 
 The scheduler receipts every prepared or deleted target in the durable parent
 controller. Workspace run manifests hold the hook and integration-worktree

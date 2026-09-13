@@ -3323,6 +3323,72 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
         crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Completed
     );
 
+    let mut active_state = failed_state.clone();
+    active_state
+        .parent_integrations
+        .get_mut(&parent_id)
+        .and_then(|controller| controller.subtree_cleanup.as_mut())
+        .expect("pending cleanup")
+        .descendants[0]
+        .cleanup
+        .workspace = workspace_record(
+        &format!("COE-CHILD-{suffix}"),
+        &format!("/tmp/workspaces/COE-CHILD-{suffix}"),
+    );
+    let active_workspace = active_state.parent_integrations[&parent_id]
+        .subtree_cleanup
+        .as_ref()
+        .expect("pending cleanup")
+        .descendants[0]
+        .cleanup
+        .workspace
+        .clone();
+    let mut active_retry = Scheduler::new(
+        FakeTracker {
+            active: vec![tracker_issue(
+                child_id.as_str(),
+                &format!("COE-CHILD-{suffix}"),
+                "In Progress",
+                165,
+            )],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&active_state).expect("pending state")),
+            records: HashMap::from([(child_id.to_string(), active_workspace)]),
+            cleanup_results: VecDeque::from([Err(FakeError {
+                message: "permission denied before child reactivation".to_owned(),
+                category: None,
+                retry_after: None,
+            })]),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    active_retry
+        .tick(ts(165))
+        .await
+        .expect("failed cleanup may be followed by child reactivation");
+    assert_eq!(
+        active_retry
+            .execution(&child_id)
+            .expect("active child")
+            .status(),
+        SchedulerStatus::Running
+    );
+    let cleanup_steps_before_active_fence =
+        active_retry.workspace().generation_cleanup_steps.clone();
+    active_retry
+        .tick(ts(170))
+        .await
+        .expect("active child must fence the pending cleanup retry");
+    assert_eq!(
+        active_retry.workspace().generation_cleanup_steps,
+        cleanup_steps_before_active_fence,
+        "cleanup must not delete a workspace under a claimed or running child"
+    );
+
     scheduler.tick(ts(170)).await.expect("retry cleanup");
     let recovered_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))

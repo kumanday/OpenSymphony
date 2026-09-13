@@ -241,6 +241,9 @@ Second, the scheduler releases only lease owners belonging to that parent and
 removes descendants deepest first when no other active owner remains. The
 parent root is removed last. Higher ancestors and bounded diagnostic holds
 therefore preserve their checkout generations.
+If a descendant is reactivated after its parent-owned leases are released, a
+claimed or running execution in that exact workspace generation also fences
+deletion until the worker reaches a non-running state.
 
 Run-manifest receipts make the hook and each worktree removal idempotent. A
 failed `before_remove` receipt remains visible but does not block deletion or
