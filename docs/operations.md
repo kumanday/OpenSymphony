@@ -24,6 +24,23 @@ hierarchy and lease artifact before reconciling terminal workspaces. The
 artifact is an internal durable record; operators should not edit it manually.
 Recovery rebuilds ancestor retention before cleanup, and cleanup remains
 blocked while any owner-identified lease for the checkout generation is active.
+For a captured terminal parent, recovery also resumes its durable subtree
+cleanup intent. The persisted order is parent worktree detachment, release of
+that parent's lease owners, deepest-first descendant deletion, and parent-root
+deletion. A higher-ancestor lease or an unexpired diagnostic hold keeps the
+affected generation pending. Cleanup errors remain in the controller and are
+retried on later ticks; operators should correct the reported hook, Git, or
+filesystem condition rather than delete the path manually. A surviving
+terminal descendant already named by an incomplete subtree-cleanup intent stays
+under that intent during bootstrap; recovery does not reacquire a leaf lease or
+route it through generic terminal cleanup.
+Claimed, running, and retry-queued executions fence their exact workspace
+generation. An unavailable OpenHands conversation store or a failed durable
+lease/completion receipt also leaves cleanup pending for the next tick.
+Cleanup refreshes the full tracker snapshot before retrying deletion, so a
+newly reopened descendant is fenced before its workspace generation is
+resolved. Missing generation-bound conversation evidence also blocks removal
+unless a preparation-failed run proves that no conversation binding existed.
 
 ## 2. First-run flow
 
@@ -527,6 +544,17 @@ downloaded fallback `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`
 aliases. Treat that native dependency as part of the hosted deployment threat
 model before enabling memory in a multi-tenant service.
 Memory capture does not archive Linear issues.
+When automatic capture completes a terminal parent capsule, `opensymphony run`
+persists a capture acknowledgement before allowing subtree cleanup. A failed
+capture is not acknowledged, so the parent evidence and protecting leases stay
+available for the next capture attempt. If acknowledgement-state persistence
+fails, the scheduler rolls back the in-memory cleanup intent so the next
+automatic capture retries before any evidence is removed. Cleanup also remains
+fenced while a parent repair provider intent lacks its terminal receipt.
+After acknowledged parent cleanup removes the runtime root, the completed
+cleanup intent remains the restart-safe automatic-capture marker. A malformed
+conversation manifest on any generation-bound cleanup target blocks removal
+until its archival evidence is repaired.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

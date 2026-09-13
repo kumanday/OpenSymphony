@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
     time::Duration,
@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome};
+use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome, WorkspaceRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutRepository {
@@ -53,8 +53,8 @@ pub fn environment_variable_names_equal(left: &str, right: &str) -> bool {
 
 pub fn checkout_credential_environment_variables(
     repositories: &BTreeMap<String, CheckoutRepository>,
-) -> std::collections::BTreeSet<String> {
-    let mut variables = std::collections::BTreeSet::new();
+) -> BTreeSet<String> {
+    let mut variables = BTreeSet::new();
     for repository in repositories.values() {
         if let Some(variable) = repository.credential_env.as_ref() {
             variables.insert(variable.clone());
@@ -944,10 +944,83 @@ pub enum CleanupDecision {
     Remove,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupTerminalOutcome {
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupRequest {
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub remove: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupTarget {
+    pub issue_id: String,
+    pub identifier: String,
+    pub workspace: WorkspaceRecord,
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupIntent {
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub requested_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_integration_worktrees: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl CleanupIntent {
+    pub fn new(request: &CleanupRequest) -> Self {
+        Self {
+            generation: request.generation.clone(),
+            outcome: request.outcome,
+            requested_at: Utc::now(),
+            before_remove: None,
+            removed_integration_worktrees: BTreeSet::new(),
+            deletion_started_at: None,
+            retry_count: 0,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupTombstone {
+    pub schema_version: u32,
+    pub issue_id: String,
+    pub identifier: String,
+    pub sanitized_workspace_key: String,
+    pub workspace_path: PathBuf,
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub deletion_started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupOutcome {
     pub decision: CleanupDecision,
     pub before_remove: Option<HookExecutionRecord>,
+    pub tombstone: Option<CleanupTombstone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1088,6 +1161,8 @@ pub struct RunManifest {
     pub status_detail: Option<String>,
     #[serde(default)]
     pub hooks: Vec<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_intent: Option<CleanupIntent>,
 }
 
 impl RunManifest {
@@ -1117,6 +1192,7 @@ impl RunManifest {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         }
     }
 }

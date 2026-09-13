@@ -216,8 +216,77 @@ active returns through cleanup and baseline refresh. Operator and tracker
 terminal cancellation remains terminal. When a tracker terminal state arrives
 between repair worker turns, cancellation records no harness-interrupt intent or
 acknowledgement only after every attempt has conclusive stopped and cleanup
-evidence. A conversation-bound indeterminate attempt remains retained for stop
-reconciliation or operator recovery.
+evidence and every provider operation has a terminal receipt. A
+conversation-bound indeterminate attempt or provider intent without a receipt
+remains retained for reconciliation or operator recovery.
+
+### Capture-acknowledged subtree cleanup
+
+A completed parent stays materialized until automatic terminal capture reports
+that its workflow completed. The scheduler then persists the parent root and
+every leased descendant as one hierarchy-generation cleanup intent. Failed and
+canceled parents record the same acknowledgement. Failed parents remain
+retained when the existing failed-workspace policy requests diagnostics
+retention; canceled parents follow the existing cancellation cleanup policy.
+Changing failed-workspace retention from enabled to disabled resumes a durable
+retained cleanup intent on the next reconciliation tick. Enabling retention
+while a failed cleanup is incomplete moves it back to retained before the
+parent root is deleted.
+
+Removal has two ordered phases. First, the runtime backend applies its normal
+conversation archival fence and the workspace manager receipts the parent
+`before_remove` hook and removes each registered integration worktree with
+`git worktree remove`. The parent root remains present during this phase.
+Second, the scheduler releases only lease owners belonging to that parent and
+removes descendants deepest first when no other active owner remains. The
+parent root is removed last. Higher ancestors and bounded diagnostic holds
+therefore preserve their checkout generations.
+If a descendant is reactivated after its parent-owned leases are released, a
+claimed, running, or retry-queued execution in that exact workspace generation
+also fences deletion until the execution releases the workspace.
+Before each pending cleanup retry, the scheduler refreshes the full tracker
+snapshot. A newly active descendant fences deletion while its workspace
+generation is unresolved or still matches the cleanup target; a resolved newer
+generation does not keep the old target.
+Lease-owner release and cleanup completion are persisted transactionally; a
+failed state write restores the in-memory leases or incomplete cleanup state so
+the next tick retries the durable receipt.
+
+Run-manifest receipts make the hook and each worktree removal idempotent. The
+manager writes an attempted `before_remove` fence before launching the command;
+if cleanup is interrupted before the result receipt, recovery preserves that
+indeterminate record and does not repeat the best-effort side effect. A failed
+`before_remove` receipt remains visible but does not block deletion.
+Generation tombstones outside the deleted workspace are written before root
+deletion and completed afterward; they also copy the successful hook receipt so
+a partially removed metadata directory cannot cause the hook to run twice. The
+external copy applies the same diagnostic redaction as the run manifest. On
+restart, an incomplete tombstone proves that archival and cleanup preparation
+already completed and resumes deletion even when part of the root remains or
+its run manifest is gone. An already missing path is accepted only for an exact
+issue, key, path, outcome, and generation match. Live checkout deletion reads
+the generation and ownership from its on-disk manifests instead of trusting a
+requested handle. Recovery enumerates both checkout roots and nested
+`parents/<key>/<generation>` roots, so completed parent executions return as
+capture candidates and their conversations pass through the archival fence.
+The scheduler accepts only the root matching the durable controller generation;
+superseded roots remain owned by their generation-specific cleanup state rather
+than overwriting the current execution during restart. A tracker reopen waits
+for pending prior-generation cleanup to complete before replacing the
+controller and preparing a new parent root. Capture selects descendants from
+the completed controller generation's active lease owner records rather than
+the newer observed subtree, and an operator replan is rejected until that
+cleanup finishes. Bootstrap recognizes surviving generations already named by
+an incomplete cleanup intent and leaves them to that ordered phase instead of
+reacquiring a leaf lease or applying generic terminal deletion.
+Malformed conversation manifests fail closed for both checkout and parent
+generation cleanup targets, and OpenHands generation cleanup requires the
+conversation store for parent roots as well as checkouts, so the archival fence
+cannot be bypassed. A missing generation-bound conversation manifest also
+fails closed unless a preparation-failed run manifest proves that no harness
+conversation binding was ever recorded. Hook, Git, manifest, tombstone,
+permission, and filesystem failures remain visible on the durable cleanup
+intent and retry on later scheduler ticks.
 
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient
@@ -273,8 +342,9 @@ controller authorizes terminal success only while its hierarchy generation
 still matches the current unblocked snapshot. COE-554 retains the completed
 parent root and its evidence-protecting leases across later reconciliation and
 daemon restart so automatic capture can retry without losing its runtime
-envelope or source checkouts. OSYM-893 owns durable capture acknowledgement,
-ordered lease release, cleanup intent, tombstones, and deletion.
+envelope or source checkouts. The capture acknowledgement starts durable
+bottom-up cleanup as described above; capture failure leaves the parent root
+and leases unchanged for retry.
 A recovered parent worker must find the exact conversation manifest recorded by
 the controller. Its expected identity crosses the scheduler-to-worker request,
 and a missing or different manifest fails before any harness session is

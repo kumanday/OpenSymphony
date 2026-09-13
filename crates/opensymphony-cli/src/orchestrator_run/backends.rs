@@ -1199,11 +1199,27 @@ fn checkout_env_remove_variables(
 }
 
 fn strict_openhands_cleanup_requires_conversation_store(
-    strict_checkout: bool,
+    generation_bound: bool,
     manifest: &IssueConversationManifest,
     store: Option<&OpenHandsConversationStorePaths>,
 ) -> bool {
-    strict_checkout && !conversation_manifest_is_codex(manifest) && store.is_none()
+    generation_bound && !conversation_manifest_is_codex(manifest) && store.is_none()
+}
+
+fn run_manifest_proves_no_harness_conversation(run: Option<&RunManifest>) -> bool {
+    run.is_some_and(|run| {
+        run.status == RunStatus::PreparationFailed
+            && run
+                .runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref())
+                .is_none()
+            && run
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref())
+                .is_none()
+    })
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -3960,6 +3976,8 @@ impl RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
         force_remove: bool,
+        cleanup_target: Option<&crate::opensymphony_workspace::CleanupTarget>,
+        prepare_only: bool,
     ) -> Result<(), CliWorkspaceError> {
         if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
             if self.workspace_has_active_lease(workspace).await? {
@@ -3969,21 +3987,47 @@ impl RuntimeWorkspaceBackend {
                 );
                 return Err(CliWorkspaceError::CleanupDeferred);
             }
-            let Some(handle) = self
+            let handle = self
                 .manager
                 .list_all_workspaces()
                 .await?
                 .into_iter()
                 .find_map(|(handle, _)| {
                     (handle.workspace_path() == workspace.path).then_some(handle)
-                })
-            else {
+                });
+            let Some(handle) = handle else {
+                if let (Some(scope_grants), Some(target)) = (&self.scope_grants, cleanup_target) {
+                    scope_grants.revoke_issue_generation(&target.identifier, &target.generation);
+                }
+                if let Some(target) = cleanup_target {
+                    if prepare_only {
+                        self.manager.prepare_cleanup_target(target).await?;
+                    } else {
+                        self.manager.cleanup_target(target).await?;
+                    }
+                }
                 return Ok(());
             };
             if let Some(scope_grants) = &self.scope_grants {
-                scope_grants.revoke_issue(handle.identifier());
+                if let Some(target) = cleanup_target {
+                    scope_grants.revoke_issue_generation(&target.identifier, &target.generation);
+                } else {
+                    scope_grants.revoke_issue(handle.identifier());
+                }
             }
-            let removes_workspace = force_remove
+            if let Some(target) = cleanup_target
+                && self.manager.cleanup_target_deletion_started(target).await?
+            {
+                if prepare_only {
+                    self.manager.prepare_cleanup_target(target).await?;
+                } else {
+                    self.manager.cleanup_target(target).await?;
+                }
+                self.terminal_cleanup_paths.insert(workspace.path.clone());
+                return Ok(());
+            }
+            let removes_workspace = cleanup_target.is_some()
+                || force_remove
                 || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
                     == crate::opensymphony_workspace::CleanupDecision::Remove;
             let mut cleanup_run_manifest = self.manager.load_run_manifest(&handle).await?;
@@ -3994,11 +4038,11 @@ impl RuntimeWorkspaceBackend {
             )
             .await?;
             let manifest_path = handle.conversation_manifest_path();
-            if let Some(raw_manifest) = self
+            let raw_conversation_manifest = self
                 .manager
                 .read_text_artifact(&handle, &manifest_path)
-                .await?
-            {
+                .await?;
+            if let Some(raw_manifest) = raw_conversation_manifest {
                 match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
                         let envelope_compatible = if handle.checkout_generation().is_some() {
@@ -4122,7 +4166,7 @@ impl RuntimeWorkspaceBackend {
                                 }
                             }
                         } else if strict_openhands_cleanup_requires_conversation_store(
-                            handle.checkout_generation().is_some(),
+                            cleanup_target.is_some() || handle.checkout_generation().is_some(),
                             &manifest,
                             self.openhands_conversation_store.as_ref(),
                         ) {
@@ -4145,15 +4189,27 @@ impl RuntimeWorkspaceBackend {
                             %error,
                             "continuing terminal cleanup with invalid conversation manifest"
                         );
-                        if handle.checkout_generation().is_some() {
+                        if cleanup_target.is_some() || handle.checkout_generation().is_some() {
                             return Err(CliWorkspaceError::ConversationLifecycle(format!(
-                                "strict terminal conversation manifest is malformed: {error}"
+                                "generation-bound terminal conversation manifest is malformed: {error}"
                             )));
                         }
                     }
                 }
+            } else if cleanup_target.is_some()
+                && !run_manifest_proves_no_harness_conversation(cleanup_run_manifest.as_ref())
+            {
+                return Err(CliWorkspaceError::ConversationLifecycle(
+                    "generation-bound terminal conversation manifest is missing".to_owned(),
+                ));
             }
-            if force_remove {
+            if let Some(target) = cleanup_target {
+                if prepare_only {
+                    self.manager.prepare_cleanup_target(target).await?;
+                } else {
+                    self.manager.cleanup_target(target).await?;
+                }
+            } else if force_remove {
                 self.manager
                     .cleanup_failed_terminal_workspace(&handle)
                     .await?;
@@ -4441,6 +4497,45 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(state.active_for(&resource))
     }
 
+    async fn cleanup_target_for_resource(
+        &mut self,
+        resource: &LeaseResource,
+        outcome: crate::opensymphony_workspace::CleanupTerminalOutcome,
+    ) -> Result<Option<crate::opensymphony_workspace::CleanupTarget>, Self::Error> {
+        Ok(self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find_map(|(handle, manifest)| {
+                let repository_matches = manifest
+                    .repository_binding
+                    .as_ref()
+                    .and_then(RepositoryBindingOutcome::repository_id)
+                    == Some(&resource.repository_id);
+                (manifest.issue_id == resource.issue_id.as_str()
+                    && handle.checkout_generation() == Some(&resource.checkout_generation)
+                    && repository_matches)
+                    .then(|| crate::opensymphony_workspace::CleanupTarget {
+                        issue_id: manifest.issue_id,
+                        identifier: manifest.identifier,
+                        workspace: crate::opensymphony_domain::WorkspaceRecord {
+                            path: handle.workspace_path().to_path_buf(),
+                            workspace_key: WorkspaceKey::new(handle.workspace_key().to_owned())
+                                .expect("managed workspace keys are already validated"),
+                            created_now: false,
+                            created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
+                            updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
+                            last_seen_tracker_refresh_at: manifest
+                                .last_seen_tracker_refresh_at
+                                .map(datetime_to_timestamp_ms),
+                        },
+                        generation: resource.checkout_generation.clone(),
+                        outcome,
+                    })
+            }))
+    }
+
     async fn parent_workspace_targets(
         &mut self,
         issue: &NormalizedIssue,
@@ -4694,7 +4789,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, terminal, false)
+        self.cleanup_workspace_with_policy(workspace, terminal, false, None, false)
             .await
     }
 
@@ -4702,7 +4797,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, true, true)
+        self.cleanup_workspace_with_policy(workspace, true, true, None, false)
             .await
     }
 
@@ -4710,7 +4805,23 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, true, true)
+        self.cleanup_workspace_with_policy(workspace, true, true, None, false)
+            .await
+    }
+
+    async fn cleanup_generation(
+        &mut self,
+        target: &crate::opensymphony_workspace::CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(&target.workspace, true, true, Some(target), false)
+            .await
+    }
+
+    async fn prepare_cleanup_generation(
+        &mut self,
+        target: &crate::opensymphony_workspace::CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(&target.workspace, true, true, Some(target), true)
             .await
     }
 
@@ -6003,7 +6114,12 @@ impl RuntimeWorkerBackend {
                         attempt: scoped.attempt,
                         checkout_generation: runtime_envelope
                             .as_ref()
-                            .map(|envelope| envelope.checkout_generation.clone()),
+                            .map(|envelope| envelope.checkout_generation.clone())
+                            .or_else(|| {
+                                parent_execution.as_ref().map(|parent| {
+                                    format!("parent:{}", parent.manifest.hierarchy_generation)
+                                })
+                            }),
                         target_commit: scoped.target_commit.clone(),
                         checkout_head: scoped.checkout_head.clone(),
                         visibility: scoped.visibility,
@@ -10680,6 +10796,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("legacy-openhands");
         conversation_manifest.prepared_run_id = Some(run_manifest.run_id.clone());
@@ -10756,6 +10873,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("conv-pending");
         conversation_manifest.workflow_prompt_seeded = false;
@@ -10840,6 +10958,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("conv-unsent-prompt");
         conversation_manifest.workflow_prompt_seeded = true;
@@ -11789,6 +11908,265 @@ mod tests {
             .cleanup_failed_workspace(&workspace)
             .await
             .expect("failed cleanup should remove retained terminal workspace");
+        assert!(!ensured.handle.workspace_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_parent_cleanup_archives_codex_before_preparing_nested_root_removal() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut issue = sample_terminal_issue();
+        issue.id = IssueId::new("parent-cleanup").expect("parent id");
+        issue.identifier = IssueIdentifier::new("COE-PARENT-CLEANUP").expect("parent identifier");
+        let parent = workspace_manager
+            .prepare_parent_execution_root(&issue_descriptor(&issue), 9, Vec::new())
+            .await
+            .expect("nested parent root should be prepared");
+        let mut manifest = sample_conversation_manifest("fake-thread");
+        manifest.issue_id = issue.id.clone();
+        manifest.identifier = issue.identifier.clone();
+        manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
+        manifest.runtime_contract_version = Some(CODEX_APP_SERVER_CONTRACT.to_owned());
+        workspace_manager
+            .write_json_artifact(
+                &parent.handle,
+                &parent.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("parent conversation manifest should persist");
+        let log_path = tempdir.path().join("fake-parent-cleanup-codex.log");
+        let fake_codex = tempdir.path().join("fake-parent-cleanup-codex");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let target = crate::opensymphony_workspace::CleanupTarget {
+            issue_id: issue.id.to_string(),
+            identifier: issue.identifier.to_string(),
+            workspace: crate::opensymphony_domain::WorkspaceRecord {
+                path: parent.handle.workspace_path().to_path_buf(),
+                workspace_key: WorkspaceKey::new(parent.handle.workspace_key().to_owned())
+                    .expect("parent workspace key"),
+                created_now: false,
+                created_at: None,
+                updated_at: None,
+                last_seen_tracker_refresh_at: None,
+            },
+            generation: "parent:9".to_owned(),
+            outcome: crate::opensymphony_workspace::CleanupTerminalOutcome::Succeeded,
+        };
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
+        backend.codex_bin = fake_codex.to_string_lossy().into_owned();
+
+        backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect("parent archive fence and cleanup preparation should succeed");
+
+        assert!(parent.handle.workspace_path().is_dir());
+        let log = fs::read_to_string(log_path).expect("Codex lifecycle log should exist");
+        assert!(log.contains(r#""method":"thread/archive""#));
+
+        workspace_manager
+            .write_text_artifact(
+                &parent.handle,
+                &parent.handle.conversation_manifest_path(),
+                "{\"malformed\":true}",
+            )
+            .await
+            .expect("malformed parent conversation manifest should persist");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("generation-bound parent cleanup must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("generation-bound terminal conversation manifest is malformed")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
+
+        let mut openhands_manifest =
+            sample_conversation_manifest("11111111-1111-4111-8111-111111111111");
+        openhands_manifest.issue_id = issue.id.clone();
+        openhands_manifest.identifier = issue.identifier.clone();
+        workspace_manager
+            .write_json_artifact(
+                &parent.handle,
+                &parent.handle.conversation_manifest_path(),
+                &openhands_manifest,
+            )
+            .await
+            .expect("OpenHands parent conversation manifest should persist");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("generation-bound parent cleanup requires its conversation store");
+        assert!(
+            error
+                .to_string()
+                .contains("remote conversation store is unavailable")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
+
+        fs::remove_file(parent.handle.conversation_manifest_path())
+            .expect("parent conversation manifest should be removable for recovery test");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("launched generation-bound parent cleanup needs conversation evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("generation-bound terminal conversation manifest is missing")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_resumes_exact_tombstone_when_checkout_run_manifest_is_missing() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_terminal_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let binding = crate::opensymphony_domain::RepositoryBinding {
+            alias: "test".to_owned(),
+            repository: crate::opensymphony_domain::RepositoryIdentity {
+                id: CanonicalRepositoryId::new("github:repository:test").expect("repository id"),
+                safe_remote_fingerprint:
+                    crate::opensymphony_domain::SafeRemoteFingerprint::from_remote(
+                        "github",
+                        Some("test"),
+                        "example/test",
+                    )
+                    .expect("remote fingerprint"),
+            },
+            config_generation: "config-1".to_owned(),
+            inventory_generation: "inventory-1".to_owned(),
+        };
+        let mut issue_manifest = workspace_manager
+            .load_issue_manifest(&ensured.handle)
+            .await
+            .expect("issue manifest should load")
+            .expect("issue manifest should exist");
+        issue_manifest.repository_binding =
+            Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+        workspace_manager
+            .write_issue_manifest(&ensured.handle, &issue_manifest)
+            .await
+            .expect("repository-bound issue manifest should persist");
+        let now = chrono::Utc::now();
+        let checkout = crate::opensymphony_workspace::CheckoutManifest {
+            schema_version: 1,
+            generation: "checkout-generation-1".to_owned(),
+            issue_id: issue.id.to_string(),
+            identifier: issue.identifier.to_string(),
+            run_id: "checkout-run-1".to_owned(),
+            sanitized_workspace_key: ensured.handle.workspace_key().to_owned(),
+            workspace_path: ensured.handle.workspace_path().to_path_buf(),
+            repository_binding: binding,
+            policy_generation: "policy-1".to_owned(),
+            review_profile: String::new(),
+            review_provider: String::new(),
+            review_policy_generation: String::new(),
+            remote_fingerprint: "sha256:test".to_owned(),
+            target_branch: "develop".to_owned(),
+            target_commit: "abc123".to_owned(),
+            current_branch: "feat/test".to_owned(),
+            head: "abc123".to_owned(),
+            shallow: false,
+            clean: true,
+            instruction: crate::opensymphony_workspace::InstructionProvenance {
+                path: PathBuf::from("AGENTS.md"),
+                content_hash: "sha256:instructions".to_owned(),
+                source_commit: "abc123".to_owned(),
+                source: "AGENTS.md".to_owned(),
+                native_discovery_paths: Vec::new(),
+                native_discovery_hashes: BTreeMap::new(),
+            },
+            created_at: now,
+            verified_at: now,
+            quarantined: false,
+            quarantine_reason: None,
+        };
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.checkout_manifest_path(),
+                &checkout,
+            )
+            .await
+            .expect("checkout manifest should persist");
+        let target = crate::opensymphony_workspace::CleanupTarget {
+            issue_id: issue.id.to_string(),
+            identifier: issue.identifier.to_string(),
+            workspace: crate::opensymphony_domain::WorkspaceRecord {
+                path: ensured.handle.workspace_path().to_path_buf(),
+                workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_owned())
+                    .expect("workspace key"),
+                created_now: false,
+                created_at: None,
+                updated_at: None,
+                last_seen_tracker_refresh_at: None,
+            },
+            generation: checkout.generation.clone(),
+            outcome: crate::opensymphony_workspace::CleanupTerminalOutcome::Succeeded,
+        };
+        let issue_bytes = serde_json::to_vec_pretty(&issue_manifest).expect("encode issue");
+        let checkout_bytes = serde_json::to_vec_pretty(&checkout).expect("encode checkout");
+        workspace_manager
+            .cleanup_target(&target)
+            .await
+            .expect("initial cleanup should create a receipt");
+        let tombstone_path = fs::read_dir(workspace_root.join(".opensymphony-cleanup-tombstones"))
+            .expect("tombstone directory")
+            .next()
+            .expect("tombstone entry")
+            .expect("tombstone path")
+            .path();
+        let mut tombstone: serde_json::Value = serde_json::from_slice(
+            &fs::read(&tombstone_path).expect("completed tombstone should be readable"),
+        )
+        .expect("tombstone should decode");
+        tombstone["deleted_at"] = serde_json::Value::Null;
+        fs::write(
+            &tombstone_path,
+            serde_json::to_vec_pretty(&tombstone).expect("encode incomplete tombstone"),
+        )
+        .expect("incomplete tombstone should persist");
+        fs::create_dir_all(ensured.handle.metadata_dir()).expect("partial workspace should exist");
+        fs::write(ensured.handle.issue_manifest_path(), issue_bytes)
+            .expect("partial issue manifest should persist");
+        fs::write(ensured.handle.checkout_manifest_path(), checkout_bytes)
+            .expect("partial checkout manifest should persist");
+        let mut conversation = sample_conversation_manifest("stale-thread");
+        conversation.transport_target = Some(CODEX_APP_SERVER_KIND.to_owned());
+        conversation.runtime_contract_version = Some(CODEX_APP_SERVER_CONTRACT.to_owned());
+        fs::write(
+            ensured.handle.conversation_manifest_path(),
+            serde_json::to_vec_pretty(&conversation).expect("encode conversation"),
+        )
+        .expect("partial conversation manifest should persist");
+        assert!(!ensured.handle.run_manifest_path().exists());
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+
+        backend
+            .cleanup_generation(&target)
+            .await
+            .expect("exact deletion-started tombstone should bypass missing run metadata");
+
         assert!(!ensured.handle.workspace_path().exists());
     }
 
@@ -13695,6 +14073,49 @@ mod tests {
             RuntimeStreamState::Closed
         );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_discovers_completed_nested_parent_roots() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut issue = sample_terminal_issue();
+        issue.id = IssueId::new("parent-recovery").expect("parent id");
+        issue.identifier = IssueIdentifier::new("COE-PARENT-RECOVERY").expect("parent identifier");
+        let parent = workspace_manager
+            .prepare_parent_execution_root(&issue_descriptor(&issue), 7, Vec::new())
+            .await
+            .expect("nested parent root should be prepared");
+        let mut run = workspace_manager
+            .start_run(
+                &parent.handle,
+                &RunDescriptor::new("parent-run-recovery", 1),
+            )
+            .await
+            .expect("parent run should start");
+        run.status = RunStatus::Succeeded;
+        workspace_manager
+            .write_run_manifest(&parent.handle, &run)
+            .await
+            .expect("completed parent run should persist");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("nested parent recovery should succeed");
+
+        let recovered = recoveries
+            .iter()
+            .find(|record| record.issue.id == issue.id)
+            .expect("nested parent should be returned to the scheduler");
+        assert_eq!(recovered.workspace.path, parent.handle.workspace_path());
+        assert!(recovered.successful_run);
     }
 
     #[tokio::test]

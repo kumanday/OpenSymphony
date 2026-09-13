@@ -711,6 +711,27 @@ impl DurableOrchestratorState {
             {
                 return Err("durable parent integration controller is inconsistent".to_owned());
             }
+            if let Some(cleanup) = controller.subtree_cleanup.as_ref() {
+                let mut resources = BTreeSet::new();
+                if cleanup.hierarchy_generation != controller.hierarchy_generation
+                    || cleanup.parent_root.resource.is_some()
+                    || cleanup.descendants.iter().any(|target| {
+                        target.resource.as_ref().is_none_or(|resource| {
+                            resource.checkout_generation != target.cleanup.generation
+                                || !resources.insert(resource.clone())
+                        })
+                    })
+                    || (cleanup.status == super::ParentSubtreeCleanupStatus::Completed
+                        && (cleanup.parent_root.prepared_at.is_none()
+                            || cleanup.parent_root.cleaned_at.is_none()
+                            || cleanup
+                                .descendants
+                                .iter()
+                                .any(|target| target.cleaned_at.is_none())))
+                {
+                    return Err("durable parent subtree cleanup intent is inconsistent".to_owned());
+                }
+            }
             let mut repair_ids = BTreeSet::new();
             let mut repair_numbers = BTreeSet::new();
             for repair in &controller.repair_attempts {
@@ -830,6 +851,33 @@ impl DurableOrchestratorState {
         self.release_parent_leases_inner(parent_id, released_at, false)
     }
 
+    pub fn release_parent_resource_leases(
+        &mut self,
+        parent_id: &IssueId,
+        resource: &LeaseResource,
+        released_at: u64,
+    ) -> bool {
+        let ancestor_owner = LeaseOwner::ancestor(parent_id);
+        let repair_owner = LeaseOwner::repair(parent_id);
+        let review_prefix = format!("review:{parent_id}:");
+        let mut released = false;
+        for lease in &mut self.leases {
+            if lease.active()
+                && lease.resource == *resource
+                && (lease.owner == ancestor_owner
+                    || lease.owner == repair_owner
+                    || (lease.kind == LeaseKind::Review
+                        && lease.owner.kind == "review"
+                        && lease.owner.id.starts_with(&review_prefix)))
+            {
+                lease.released_at = Some(released_at);
+                released = true;
+            }
+        }
+        self.compact_lease_history();
+        released
+    }
+
     fn release_parent_leases_inner(
         &mut self,
         parent_id: &IssueId,
@@ -865,6 +913,18 @@ impl DurableOrchestratorState {
             .map(|snapshot| snapshot.generation)
             .or_else(|| self.run_hierarchy_generations.get(parent_id).copied());
         self.resources_for_ancestor_owner(&owner, current_generation, current_subtree)
+    }
+
+    pub fn descendant_resources_for_generation(
+        &self,
+        parent_id: &IssueId,
+        hierarchy_generation: u64,
+    ) -> Vec<LeaseResource> {
+        self.resources_for_ancestor_owner(
+            &LeaseOwner::ancestor(parent_id),
+            Some(hierarchy_generation),
+            None,
+        )
     }
 
     pub fn ancestor_resources_for_child(
@@ -904,7 +964,7 @@ impl DurableOrchestratorState {
                     .is_none_or(|generation| lease.hierarchy_generation == generation)
                 && current_subtree
                     .as_ref()
-                    .is_some_and(|subtree| subtree.contains(&lease.resource.issue_id))
+                    .is_none_or(|subtree| subtree.contains(&lease.resource.issue_id))
             {
                 resources
                     .entry(lease.resource.clone())
@@ -1323,9 +1383,13 @@ impl DurableOrchestratorState {
     }
 
     pub fn active_for(&self, resource: &LeaseResource) -> bool {
+        self.active_for_at(resource, current_epoch_millis())
+    }
+
+    pub fn active_for_at(&self, resource: &LeaseResource, now: u64) -> bool {
         self.leases
             .iter()
-            .any(|lease| lease.active() && lease.resource == *resource)
+            .any(|lease| lease.active_at(now) && lease.resource == *resource)
     }
 
     pub fn has_ancestor_edge(&self, child_id: &IssueId) -> bool {
@@ -2016,6 +2080,15 @@ mod tests {
                     expires_at: None,
                     released_at: None,
                 },
+                LeaseRecord {
+                    kind: LeaseKind::DiagnosticHold,
+                    resource: resource.clone(),
+                    owner: LeaseOwner::diagnostic("operator"),
+                    hierarchy_generation: 2,
+                    acquired_at: 3,
+                    expires_at: Some(10),
+                    released_at: None,
+                },
             ])
             .expect("nested leases should acquire");
 
@@ -2023,11 +2096,21 @@ mod tests {
             state.descendant_resources_for(&intermediate),
             vec![resource.clone()]
         );
-        assert!(state.release_parent_leases(&intermediate, 4));
+        assert!(state.release_parent_resource_leases(&intermediate, &resource, 4));
         assert!(
             state.leases.iter().any(|lease| {
                 lease.owner == LeaseOwner::ancestor(&higher) && lease.active_at(4)
             })
+        );
+        assert!(state.leases.iter().any(|lease| {
+            lease.owner == LeaseOwner::diagnostic("operator") && lease.active_at(4)
+        }));
+        assert!(state.active_for_at(&resource, 4));
+        assert!(
+            !state.leases.iter().any(|lease| {
+                lease.owner == LeaseOwner::diagnostic("operator") && lease.active_at(10)
+            }),
+            "diagnostic holds expire at their bounded deadline"
         );
         assert!(
             state

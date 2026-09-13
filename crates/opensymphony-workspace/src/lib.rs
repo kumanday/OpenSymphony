@@ -9,7 +9,8 @@ pub use manager::{
     compose_terminal_prompt,
 };
 pub use models::{
-    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, CleanupOutcome,
+    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, CleanupIntent,
+    CleanupOutcome, CleanupRequest, CleanupTarget, CleanupTerminalOutcome, CleanupTombstone,
     ConversationManifest, EnsureWorkspaceResult, HookConfig, HookDefinition, HookExecutionRecord,
     HookExecutionStatus, HookKind, InstructionProvenance, IssueContextArtifact, IssueDescriptor,
     IssueLifecycleState, IssueManifest, ParentCheckoutRequest, ParentChildCheckoutMap,

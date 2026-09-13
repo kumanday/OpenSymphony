@@ -3,10 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::hierarchy::LeaseResource;
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, ParentVerificationEvidence, TimestampMs,
 };
-use crate::opensymphony_workspace::redact_runtime_diagnostic;
+use crate::opensymphony_workspace::{
+    CleanupTarget, CleanupTerminalOutcome, redact_runtime_diagnostic,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -424,6 +427,41 @@ pub struct ParentFinalEvidence {
     pub recorded_at: TimestampMs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentSubtreeCleanupStatus {
+    Pending,
+    Removing,
+    Retained,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentSubtreeCleanupTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<LeaseResource>,
+    pub cleanup: CleanupTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_at: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned_at: Option<TimestampMs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentSubtreeCleanupIntent {
+    pub hierarchy_generation: u64,
+    pub capture_acknowledged_at: TimestampMs,
+    pub requested_at: TimestampMs,
+    pub outcome: CleanupTerminalOutcome,
+    pub status: ParentSubtreeCleanupStatus,
+    pub parent_root: ParentSubtreeCleanupTarget,
+    pub descendants: Vec<ParentSubtreeCleanupTarget>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentIntegrationController {
     pub parent_id: IssueId,
@@ -449,6 +487,8 @@ pub struct ParentIntegrationController {
     pub repair_attempts: Vec<ParentRepairAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_evidence: Option<ParentFinalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtree_cleanup: Option<ParentSubtreeCleanupIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -513,6 +553,7 @@ impl ParentIntegrationController {
             attempts: Vec::new(),
             repair_attempts: Vec::new(),
             final_evidence: None,
+            subtree_cleanup: None,
         })
     }
 
@@ -2233,6 +2274,7 @@ impl ParentIntegrationController {
 
     pub fn can_cancel_without_harness(&self) -> bool {
         self.current_attempt_id().is_none()
+            && !self.has_unreconciled_provider_operation()
             && self.attempts.iter().all(|attempt| {
                 let cleanup_succeeded = attempt
                     .cleanup
@@ -2248,6 +2290,15 @@ impl ParentIntegrationController {
                         }
                     }
             })
+    }
+
+    pub fn has_unreconciled_provider_operation(&self) -> bool {
+        self.repair_attempts.iter().any(|repair| {
+            repair
+                .operations
+                .iter()
+                .any(|operation| operation.receipt.is_none() || operation.completed_at.is_none())
+        })
     }
 
     pub fn has_unreconciled_harness(&self) -> bool {
@@ -3499,6 +3550,12 @@ mod tests {
         let mut controller = controller();
         let repair_id = begin_repair(&mut controller);
 
+        assert!(controller.has_unreconciled_provider_operation());
+        assert!(
+            !controller.can_cancel_without_harness(),
+            "a provider intent without a receipt must fence terminal cleanup"
+        );
+
         assert!(matches!(
             controller.begin_provider_operation(
                 &repair_id,
@@ -3525,6 +3582,7 @@ mod tests {
                 TimestampMs::new(12),
             )
             .expect("create intent");
+        assert!(!controller.can_cancel_without_harness());
         assert_eq!(
             controller
                 .begin_provider_operation(
@@ -3544,6 +3602,17 @@ mod tests {
                 .len(),
             2
         );
+        controller
+            .record_provider_operation(
+                &repair_id,
+                &create_key,
+                "created",
+                None,
+                TimestampMs::new(14),
+            )
+            .expect("create receipt");
+        assert!(!controller.has_unreconciled_provider_operation());
+        assert!(controller.can_cancel_without_harness());
     }
 
     #[test]

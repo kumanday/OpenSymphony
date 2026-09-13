@@ -819,17 +819,34 @@ fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
                 .to_str()
                 .and_then(|name| name.strip_prefix(&format!("{}--", key.as_str())))
                 .is_some_and(|generation| !generation.is_empty())
+            || (name
+                .to_str()
+                .and_then(|generation| generation.parse::<u64>().ok())
+                .is_some_and(|generation| generation > 0)
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new(key.as_str()))
+                && path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new("parents")))
     })
 }
 
 fn workspace_key_matches_issue(actual: &WorkspaceKey, expected: &WorkspaceKey) -> bool {
     actual == expected
-        || actual
-            .as_str()
-            .strip_prefix(&format!("{}-", expected.as_str()))
-            .is_some_and(|digest| {
+        || [
+            format!("{}-", expected.as_str()),
+            format!("parent-{}-", expected.as_str()),
+        ]
+        .iter()
+        .any(|prefix| {
+            actual.as_str().strip_prefix(prefix).is_some_and(|digest| {
                 digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
+        })
 }
 
 fn comparable_workspace_path(path: &Path) -> PathBuf {
