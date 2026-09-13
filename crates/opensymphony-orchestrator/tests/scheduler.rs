@@ -1832,6 +1832,49 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
             .is_empty()
     );
 
+    let mut reopened_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "In Progress",
+        7_300_460,
+    );
+    reopened_parent.sub_issues = vec![TrackerIssueRef {
+        id: format!("child-{suffix}"),
+        identifier: format!("COE-CHILD-{suffix}"),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let mut reopened_retry = Scheduler::new(
+        FakeTracker {
+            active: vec![reopened_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&legacy_pending).expect("pending state")),
+            retain_failed: true,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    reopened_retry
+        .tick(ts(7_300_460))
+        .await
+        .expect("live reopen should release the diagnostic retention hold");
+    reopened_retry
+        .tick(ts(10_900_460))
+        .await
+        .expect("reopened failed parent should finish prior-generation cleanup");
+    assert!(
+        !reopened_retry
+            .workspace()
+            .generation_cleanup_steps
+            .is_empty(),
+        "active reopen must not oscillate between pending and retained"
+    );
+
     let mut resumed = Scheduler::new(
         FakeTracker::default(),
         FakeWorkspace {

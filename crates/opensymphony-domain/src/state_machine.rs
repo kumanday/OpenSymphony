@@ -821,7 +821,8 @@ fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
                 .is_some_and(|generation| !generation.is_empty())
             || (name
                 .to_str()
-                .is_some_and(|generation| generation.parse::<u64>().is_ok())
+                .and_then(|generation| generation.parse::<u64>().ok())
+                .is_some_and(|generation| generation > 0)
                 && path
                     .parent()
                     .and_then(Path::file_name)

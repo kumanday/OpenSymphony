@@ -2481,7 +2481,10 @@ where
     ) -> Result<(), SchedulerError> {
         let retain_failed = self.workspace.retain_failed_workspaces();
         let mut retention_changed = false;
-        for controller in self.hierarchy_state.parent_integrations.values_mut() {
+        for (parent_id, controller) in &mut self.hierarchy_state.parent_integrations {
+            let tracker_reopened = self.executions.get(parent_id).is_some_and(|execution| {
+                execution.issue().state.category == IssueStateCategory::Active
+            });
             if let Some(cleanup) = controller.subtree_cleanup.as_mut() {
                 let next_status = match cleanup.status {
                     ParentSubtreeCleanupStatus::Retained
@@ -2492,6 +2495,7 @@ where
                     ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
                         if cleanup.outcome == CleanupTerminalOutcome::Failed
                             && retain_failed
+                            && !tracker_reopened
                             && cleanup.parent_root.cleaned_at.is_none() =>
                     {
                         Some(ParentSubtreeCleanupStatus::Retained)
