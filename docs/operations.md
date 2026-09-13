@@ -743,8 +743,9 @@ initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
 affect automated-review eligibility. Crash recovery accepts a trigger comment
 only from the identity behind the configured review credential. Review findings
-come from unresolved provider threads, including current human change-request
-threads; their bounded bodies and locations are persisted for the
+come from unresolved provider threads. Every unresolved non-Codex human thread,
+including a `COMMENTED` review or a thread retained from an earlier head, blocks
+merge until it is resolved; its bounded body and location are persisted for the
 credential-scrubbed repair continuation. Resolving a thread after accepted
 pushback removes it from the current finding set without requiring a no-op
 commit. When the central profile requires review,

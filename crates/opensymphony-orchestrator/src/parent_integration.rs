@@ -2212,6 +2212,20 @@ impl ParentIntegrationController {
             .map(|attempt| attempt.id.as_str())
     }
 
+    pub fn can_cancel_without_harness(&self) -> bool {
+        self.current_attempt_id().is_none()
+            && self.attempts.iter().all(|attempt| {
+                let cleanup_succeeded = attempt
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
+                    && active_resource_keys(attempt).is_empty();
+                cleanup_succeeded
+                    && (attempt.status != ParentAttemptStatus::Indeterminate
+                        || (attempt.conversation_id.is_none() && attempt.commands.is_empty()))
+            })
+    }
+
     pub fn current_attempt_deadline(&self) -> Option<TimestampMs> {
         self.attempts
             .iter()
@@ -2717,6 +2731,10 @@ mod tests {
         restarted
             .reconcile_restart(false, TimestampMs::new(4))
             .expect("restart reconciliation");
+        assert!(
+            !restarted.can_cancel_without_harness(),
+            "a conversation-bound indeterminate attempt still needs stop reconciliation"
+        );
         assert_eq!(
             restarted
                 .attempts
@@ -2766,6 +2784,10 @@ mod tests {
         assert_eq!(
             attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
             Some(ParentCleanupStatus::Succeeded)
+        );
+        assert!(
+            prelaunch.can_cancel_without_harness(),
+            "a never-attached launch intent has conclusive no-harness evidence"
         );
         prelaunch
             .record_baseline_verified("targets:2", TimestampMs::new(5))

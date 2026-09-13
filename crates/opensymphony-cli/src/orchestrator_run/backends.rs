@@ -1662,31 +1662,26 @@ impl RuntimeTrackerBackend {
         let human_review_approved = latest_reviews
             .values()
             .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"));
-        let human_changes_requested = latest_reviews
+        let formal_human_changes_requested = latest_reviews
             .values()
             .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"));
         let human_review_rejected = latest_reviews
             .values()
             .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
         let codex_review = repair.policy.review_provider.eq_ignore_ascii_case("codex");
-        let review_threads = if codex_review || human_changes_requested {
-            self.github_review_threads(
+        let review_threads = self
+            .github_review_threads(
                 &api_root,
                 &owner,
                 &repository_name,
                 &pull_number,
                 repository,
             )
-            .await?
-        } else {
-            Vec::new()
-        };
-        let human_review_feedback = current_human_review_feedback(
-            &reviews,
-            &latest_reviews,
-            head_commit.as_deref(),
-            &review_threads,
-        );
+            .await?;
+        let human_review_feedback =
+            current_human_review_feedback(&reviews, &latest_reviews, &review_threads);
+        let human_changes_requested =
+            formal_human_changes_requested || unresolved_human_threads(&review_threads);
         let (
             review_head_commit,
             review_request_cursor,
@@ -1732,7 +1727,7 @@ impl RuntimeTrackerBackend {
                 );
             (
                 codex_head.or_else(|| {
-                    (!latest_reviews.is_empty())
+                    (!latest_reviews.is_empty() || human_changes_requested)
                         .then(|| head_commit.clone())
                         .flatten()
                 }),
@@ -1743,7 +1738,7 @@ impl RuntimeTrackerBackend {
                 review_feedback,
             )
         } else {
-            let review_head_commit = (!latest_reviews.is_empty())
+            let review_head_commit = (!latest_reviews.is_empty() || human_changes_requested)
                 .then(|| head_commit.clone())
                 .flatten();
             (
@@ -3401,7 +3396,6 @@ fn latest_github_review_states(
 fn current_human_review_feedback(
     reviews: &[GitHubPullRequestReview],
     latest_by_reviewer: &BTreeMap<String, (String, String, u64)>,
-    head_commit: Option<&str>,
     review_threads: &[GitHubReviewThread],
 ) -> Vec<ParentReviewFeedback> {
     let mut feedback = reviews
@@ -3422,9 +3416,6 @@ fn current_human_review_feedback(
         })
         .take(MAX_PARENT_REVIEW_FEEDBACK_ITEMS)
         .collect::<Vec<_>>();
-    let Some(head_commit) = head_commit else {
-        return feedback;
-    };
     let remaining = MAX_PARENT_REVIEW_FEEDBACK_ITEMS.saturating_sub(feedback.len());
     feedback.extend(
         review_threads
@@ -3432,21 +3423,11 @@ fn current_human_review_feedback(
             .filter(|thread| !thread.is_resolved)
             .filter_map(|thread| {
                 let comment = thread.comments.nodes.iter().find(|comment| {
-                    let Some(login) = comment
+                    comment
                         .author
                         .as_ref()
                         .and_then(|author| author.login.as_deref())
-                    else {
-                        return false;
-                    };
-                    latest_by_reviewer.iter().any(|(reviewer, (state, _, _))| {
-                        reviewer.eq_ignore_ascii_case(login)
-                            && state.eq_ignore_ascii_case("changes_requested")
-                    }) && comment
-                        .original_commit
-                        .as_ref()
-                        .or(comment.commit.as_ref())
-                        .is_some_and(|commit| commit.oid == head_commit)
+                        .is_some_and(|login| !is_codex_connector_login(login))
                 })?;
                 Some(ParentReviewFeedback {
                     thread_id: comment_thread_id(&thread.id),
@@ -3458,6 +3439,19 @@ fn current_human_review_feedback(
             .take(remaining),
     );
     feedback
+}
+
+fn unresolved_human_threads(review_threads: &[GitHubReviewThread]) -> bool {
+    review_threads.iter().any(|thread| {
+        !thread.is_resolved
+            && thread.comments.nodes.iter().any(|comment| {
+                comment
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.login.as_deref())
+                    .is_some_and(|login| !is_codex_connector_login(login))
+            })
+    })
 }
 
 fn codex_review_state_for_head(
@@ -14592,7 +14586,7 @@ Run the scheduler.
             ))
         );
         assert_eq!(
-            current_human_review_feedback(&reviews, &latest, None, &[]),
+            current_human_review_feedback(&reviews, &latest, &[]),
             vec![ParentReviewFeedback {
                 thread_id: "review-22".to_owned(),
                 body: "Please cover the private-repository path.".to_owned(),
@@ -14609,7 +14603,7 @@ Run the scheduler.
         });
         let reviews = vec![GitHubPullRequestReview {
             id: 23,
-            state: "changes_requested".to_owned(),
+            state: "commented".to_owned(),
             submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
             commit_id: Some("abcdef123456".to_owned()),
             body: None,
@@ -14629,7 +14623,7 @@ Run the scheduler.
                         oid: "newer-commit".to_owned(),
                     }),
                     original_commit: Some(GitHubGraphQlCommit {
-                        oid: "abcdef123456".to_owned(),
+                        oid: "prior-head".to_owned(),
                     }),
                     author: reviewer,
                 }],
@@ -14637,7 +14631,7 @@ Run the scheduler.
         }];
 
         assert_eq!(
-            current_human_review_feedback(&reviews, &latest, Some("abcdef123456"), &threads,),
+            current_human_review_feedback(&reviews, &latest, &threads),
             vec![ParentReviewFeedback {
                 thread_id: "human-thread".to_owned(),
                 body: "Handle the human inline finding.".to_owned(),
@@ -14645,6 +14639,10 @@ Run the scheduler.
                 line: Some(24),
             }]
         );
+        assert!(unresolved_human_threads(&threads));
+        let mut resolved = threads;
+        resolved[0].is_resolved = true;
+        assert!(!unresolved_human_threads(&resolved));
     }
 
     #[test]

@@ -1637,6 +1637,7 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
             .is_none(),
         "provider waits have no live harness turn"
     );
+    assert!(before.parent_integrations[&parent_id].can_cancel_without_harness());
 
     scheduler.tracker_mut().active.clear();
     scheduler.tracker_mut().terminal = vec![tracker_issue(

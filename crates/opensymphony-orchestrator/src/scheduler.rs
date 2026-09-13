@@ -6497,6 +6497,12 @@ where
                 return Ok(false);
             }
             let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+                if !controller.can_cancel_without_harness() {
+                    // An indeterminate attempt or incomplete teardown can still
+                    // own a live harness. Retain the controller and its leases
+                    // for stop reconciliation or operator recovery.
+                    return Ok(false);
+                }
                 // Provider-side repair stages deliberately have no live
                 // harness turn. A terminal tracker transition still owns the
                 // controller lifecycle, so finish it durably without issuing
