@@ -30,7 +30,10 @@ that parent's lease owners, deepest-first descendant deletion, and parent-root
 deletion. A higher-ancestor lease or an unexpired diagnostic hold keeps the
 affected generation pending. Cleanup errors remain in the controller and are
 retried on later ticks; operators should correct the reported hook, Git, or
-filesystem condition rather than delete the path manually.
+filesystem condition rather than delete the path manually. A surviving
+terminal descendant already named by an incomplete subtree-cleanup intent stays
+under that intent during bootstrap; recovery does not reacquire a leaf lease or
+route it through generic terminal cleanup.
 
 ## 2. First-run flow
 

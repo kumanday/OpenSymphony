@@ -555,11 +555,14 @@ commit map to equal the runtime envelope. A terminal run manifest or harness
 success by itself cannot authorize successful parent capture. Failed and
 canceled controllers receive a repository-neutral parent binding with no
 verified commit claims so their diagnostics can be captured before the explicit
-retention policy runs. The durable binding explicitly marks a parent even when
-its commit map is empty, so repository-neutral capture cannot inherit a
-configured default leaf repository. That capture still records one
-repository-neutral parent-runtime source reference with the durable run and
-attempt identifiers.
+retention policy runs. If restart proves that a parent launch never attached and
+no `run.json` exists, the owned parent manifest plus the matching terminal
+controller supplies only that neutral parent classification; it does not invent
+run, attempt, command, or commit evidence. The durable binding explicitly marks
+a parent even when its commit map is empty, so repository-neutral capture cannot
+inherit a configured default leaf repository. A capture with an actual runtime
+envelope records one repository-neutral parent-runtime source reference with
+the durable run and attempt identifiers.
 Retained legacy run envelopes that lack usable run/attempt provenance are
 skipped as non-bindable entries during the pre-cleanup scan rather than
 preventing unrelated terminal captures from completing.

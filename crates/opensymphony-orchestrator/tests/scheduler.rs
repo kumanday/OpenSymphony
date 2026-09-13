@@ -597,6 +597,7 @@ struct FakeWorkspace {
     cleanup_target_requests: Vec<LeaseResource>,
     generation_cleanups: Vec<crate::opensymphony_workspace::CleanupTarget>,
     generation_cleanup_steps: Vec<String>,
+    lease_resources: HashMap<String, LeaseResource>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -626,6 +627,14 @@ impl WorkspaceBackend for FakeWorkspace {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
         Ok(self.recoveries.clone())
+    }
+
+    async fn workspace_lease_resource(
+        &mut self,
+        issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Option<LeaseResource>, Self::Error> {
+        Ok(self.lease_resources.get(issue.id.as_str()).cloned())
     }
 
     async fn parent_workspace_targets(
@@ -3224,6 +3233,95 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
     assert_eq!(failed.last_error.as_deref(), Some("permission denied"));
     assert!(failed.parent_root.prepared_at.is_some());
     assert!(failed.descendants[0].cleaned_at.is_none());
+
+    let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
+    let resource = failed.descendants[0]
+        .resource
+        .clone()
+        .expect("descendant resource");
+    let mut child = normalized_issue(child_id.as_str(), &format!("COE-CHILD-{suffix}"), "Done");
+    child.parent_id = Some(parent_id.clone());
+    child.sub_issues.clear();
+    let child_workspace = workspace_record(
+        &format!("COE-CHILD-{suffix}"),
+        &format!("/tmp/workspaces/COE-CHILD-{suffix}"),
+    );
+    let mut terminal_parent = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        0,
+    );
+    terminal_parent.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: format!("COE-CHILD-{suffix}"),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    let terminal_child =
+        tracker_issue(child_id.as_str(), &format!("COE-CHILD-{suffix}"), "Done", 0);
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            terminal: vec![terminal_parent, terminal_child],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&failed_state).expect("pending cleanup")),
+            recoveries: vec![RecoveryRecord {
+                issue: child,
+                workspace: child_workspace,
+                successful_run: true,
+                cancelled_run: false,
+                completed_run: true,
+                had_in_flight_run: false,
+                pending_retry: false,
+                normal_retry_count: 0,
+                retry_scheduled_at: None,
+                retry_due_at: None,
+                retry_reason: None,
+                retry_error: None,
+                harness_kind: None,
+                interrupt_reason: None,
+                recovered_run: None,
+            }],
+            lease_resources: HashMap::from([(child_id.to_string(), resource)]),
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    restarted
+        .bootstrap(ts(165))
+        .await
+        .expect("restart should preserve cleanup ownership");
+    let bootstrap_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            restarted
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("bootstrap state"),
+        )
+        .expect("bootstrap state");
+    assert!(bootstrap_state.leases.iter().all(|lease| !lease.active()));
+    assert!(
+        restarted.workspace().cleaned.is_empty(),
+        "generic recovery must not delete a generation owned by subtree cleanup"
+    );
+    restarted.tick(ts(170)).await.expect("retry cleanup");
+    let restarted_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(restarted.workspace().durable_state.clone().expect("state"))
+            .expect("decode state");
+    assert_eq!(
+        restarted_state.parent_integrations[&parent_id]
+            .subtree_cleanup
+            .as_ref()
+            .expect("cleanup intent")
+            .status,
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Completed
+    );
 
     scheduler.tick(ts(170)).await.expect("retry cleanup");
     let recovered_state: crate::opensymphony_orchestrator::DurableOrchestratorState =

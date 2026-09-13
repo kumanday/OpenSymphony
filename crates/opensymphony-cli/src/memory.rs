@@ -67,8 +67,9 @@ use crate::{
     },
     opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition},
     opensymphony_workspace::{
-        CleanupConfig, HookConfig, IssueManifest, RunManifest, RunStatus, WorkspaceManager,
-        WorkspaceManagerConfig, checkout_workspace_key, workspace_path_for_root,
+        CleanupConfig, HookConfig, IssueManifest, ParentExecutionManifest, RunManifest, RunStatus,
+        WorkspaceManager, WorkspaceManagerConfig, checkout_workspace_key, parent_workspace_key,
+        workspace_path_for_root,
     },
 };
 
@@ -560,8 +561,28 @@ fn load_terminal_capture_bindings_inner(
     let mut bindings = BTreeMap::new();
     for candidate in terminal_capture_workspace_candidates(&root)? {
         let run_path = candidate.join(".opensymphony/run.json");
-        let Ok(raw) = fs::read_to_string(&run_path) else {
-            continue;
+        let raw = match fs::read_to_string(&run_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some((identifier, binding)) =
+                    prelaunch_parent_capture_binding(&root, &candidate)?
+                else {
+                    continue;
+                };
+                let key = identifier.to_ascii_lowercase();
+                if requested.is_some_and(|requested| !requested.contains(&key)) {
+                    continue;
+                }
+                if let Some(previous) = bindings.insert(key, binding.clone())
+                    && previous != binding
+                {
+                    return Err(MemoryError::InvalidInput(format!(
+                        "multiple immutable parent manifests were found for `{identifier}`"
+                    )));
+                }
+                continue;
+            }
+            Err(_) => continue,
         };
         let Ok(run) = serde_json::from_str::<RunManifest>(&raw) else {
             continue;
@@ -712,6 +733,111 @@ fn load_terminal_capture_bindings_inner(
         }
     }
     Ok(bindings)
+}
+
+fn prelaunch_parent_capture_binding(
+    workspace_root: &Path,
+    candidate: &Path,
+) -> Result<Option<(String, TerminalCaptureBinding)>, MemoryError> {
+    let manifest_path = candidate.join(".opensymphony/parent.json");
+    let raw = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+    let Ok(manifest) = serde_json::from_str::<ParentExecutionManifest>(&raw) else {
+        return Ok(None);
+    };
+    let workspace_path = candidate
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: candidate.to_path_buf(),
+            source,
+        })?;
+    let manifest_workspace_path =
+        manifest
+            .workspace_path
+            .canonicalize()
+            .map_err(|source| MemoryError::ResolvePath {
+                path: manifest.workspace_path.clone(),
+                source,
+            })?;
+    let expected_parent_key =
+        parent_workspace_key(&manifest.parent_identifier, &manifest.parent_issue_id).map_err(
+            |error| {
+                MemoryError::InvalidInput(format!(
+                    "invalid parent manifest ownership for `{}`: {error}",
+                    manifest.parent_identifier
+                ))
+            },
+        )?;
+    let expected_workspace_path = workspace_root
+        .join("parents")
+        .join(expected_parent_key)
+        .join(manifest.hierarchy_generation.to_string());
+    if workspace_path != manifest_workspace_path
+        || workspace_path != expected_workspace_path
+        || !workspace_path.starts_with(workspace_root)
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "parent manifest for `{}` is outside its configured workspace",
+            manifest.parent_identifier
+        )));
+    }
+    let state_path = workspace_root.join(".opensymphony-orchestrator-state.json");
+    let state_raw = match fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(MemoryError::ReadFile {
+                path: state_path,
+                source,
+            });
+        }
+    };
+    let state: DurableOrchestratorState = serde_json::from_str(&state_raw).map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "failed to decode durable parent controller state before terminal capture: {error}"
+        ))
+    })?;
+    state.validate().map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "invalid durable parent controller state before terminal capture: {error}"
+        ))
+    })?;
+    let Some(controller) = state
+        .parent_integrations
+        .iter()
+        .find_map(|(issue_id, controller)| {
+            (issue_id.as_str() == manifest.parent_issue_id).then_some(controller)
+        })
+    else {
+        return Ok(None);
+    };
+    if controller.hierarchy_generation != manifest.hierarchy_generation
+        || !matches!(
+            controller.state,
+            ParentIntegrationState::Failed { .. } | ParentIntegrationState::Canceled { .. }
+        )
+        || controller.has_unreconciled_harness()
+        || controller.has_unreconciled_provider_operation()
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        manifest.parent_identifier,
+        TerminalCaptureBinding {
+            parent_integration: true,
+            repository_id: String::new(),
+            run_id: String::new(),
+            attempt: 0,
+            target_branch: String::new(),
+            target_commit: String::new(),
+            checkout_head: String::new(),
+            instruction_hash: String::new(),
+            repository_commits: BTreeMap::new(),
+        },
+    )))
 }
 
 fn terminal_capture_workspace_candidates(root: &Path) -> Result<Vec<PathBuf>, MemoryError> {
@@ -870,8 +996,8 @@ fn apply_terminal_capture_bindings(
         issue.parent_integration = binding.parent_integration;
         issue.repository_id =
             (!binding.repository_id.is_empty()).then(|| binding.repository_id.clone());
-        issue.execution_run_id = Some(binding.run_id.clone());
-        issue.execution_attempt = Some(binding.attempt);
+        issue.execution_run_id = (!binding.run_id.is_empty()).then(|| binding.run_id.clone());
+        issue.execution_attempt = (binding.attempt > 0).then_some(binding.attempt);
         issue.target_branch =
             (!binding.target_branch.is_empty()).then(|| binding.target_branch.clone());
         issue.target_commit =
@@ -14971,10 +15097,32 @@ Public memory concept.
         let parent_workspace = workspace_root
             .path()
             .join("parents")
-            .join("COE-554-parent")
+            .join(
+                crate::opensymphony_workspace::parent_workspace_key("COE-554", "issue-554")
+                    .expect("parent workspace key"),
+            )
             .join("4");
         std::fs::create_dir_all(parent_workspace.join(".opensymphony"))
             .expect("parent metadata directory");
+        let now = Utc::now();
+        let parent_manifest = crate::opensymphony_workspace::ParentExecutionManifest {
+            schema_version: 1,
+            parent_issue_id: "issue-554".to_owned(),
+            parent_identifier: "COE-554".to_owned(),
+            hierarchy_generation: 4,
+            workspace_path: parent_workspace.clone(),
+            child_checkout_map: parent_workspace.join(".opensymphony/child-checkouts.json"),
+            integration_plan: parent_workspace.join(".opensymphony/integration-plan.json"),
+            evidence_directory: parent_workspace.join(".opensymphony/evidence"),
+            repositories_directory: parent_workspace.join("repositories"),
+            created_at: now,
+            updated_at: now,
+        };
+        std::fs::write(
+            parent_workspace.join(".opensymphony/parent.json"),
+            serde_json::to_vec(&parent_manifest).expect("parent manifest JSON"),
+        )
+        .expect("parent manifest");
         let parent_envelope = serde_json::from_value(json!({
             "parent_issue_id": "issue-554",
             "parent_identifier": "COE-554",
@@ -15246,6 +15394,79 @@ Public memory concept.
                 .is_empty(),
             "failed parents must route neutral diagnostic capture without claiming commits"
         );
+        let parent_id = crate::opensymphony_domain::IssueId::new("issue-554").expect("parent id");
+        let mut prelaunch_controller =
+            crate::opensymphony_orchestrator::ParentIntegrationController::new(
+                parent_id.clone(),
+                4,
+            )
+            .expect("pre-launch controller");
+        prelaunch_controller
+            .admit(
+                "targets:prelaunch",
+                crate::opensymphony_domain::TimestampMs::new(1),
+            )
+            .expect("pre-launch admission");
+        prelaunch_controller
+            .record_workspace_prepared(
+                Vec::<crate::opensymphony_orchestrator::ParentRepositoryTarget>::new(),
+                "targets:prelaunch",
+                crate::opensymphony_domain::TimestampMs::new(2),
+            )
+            .expect("pre-launch workspace");
+        prelaunch_controller
+            .start_attempt_intent(
+                "integration",
+                "attempt:prelaunch",
+                crate::opensymphony_orchestrator::ParentAttemptRoot::ParentRoot,
+                1_000,
+                "targets:prelaunch",
+                crate::opensymphony_domain::TimestampMs::new(3),
+            )
+            .expect("persisted launch intent");
+        prelaunch_controller
+            .reconcile_restart(false, crate::opensymphony_domain::TimestampMs::new(4))
+            .expect("pre-launch restart reconciliation");
+        assert!(prelaunch_controller.can_cancel_without_harness());
+        prelaunch_controller
+            .cancel_without_harness(
+                "tracker canceled before launch",
+                "targets:prelaunch",
+                crate::opensymphony_domain::TimestampMs::new(5),
+            )
+            .expect("pre-launch cancellation");
+        let prelaunch_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
+            parent_integrations: BTreeMap::from([(parent_id, prelaunch_controller)]),
+            ..Default::default()
+        };
+        std::fs::write(
+            workspace_root
+                .path()
+                .join(".opensymphony-orchestrator-state.json"),
+            serde_json::to_vec(&prelaunch_state).expect("pre-launch parent state"),
+        )
+        .expect("pre-launch parent state");
+        std::fs::remove_file(parent_workspace.join(".opensymphony/run.json"))
+            .expect("remove pre-launch run manifest");
+        let prelaunch_bindings =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
+                .expect("pre-launch canceled parent capture binding");
+        let prelaunch_binding = &prelaunch_bindings["coe-554"];
+        assert!(prelaunch_binding.parent_integration);
+        assert!(prelaunch_binding.repository_commits.is_empty());
+        assert!(prelaunch_binding.run_id.is_empty());
+        assert_eq!(prelaunch_binding.attempt, 0);
+        let mut prelaunch_source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-554".to_owned(),
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        super::apply_terminal_capture_bindings(&mut prelaunch_source, &prelaunch_bindings);
+        assert!(prelaunch_source.issues[0].parent_integration);
+        assert!(prelaunch_source.issues[0].execution_run_id.is_none());
+        assert!(prelaunch_source.issues[0].execution_attempt.is_none());
         parent_run.status = RunStatus::Succeeded;
         std::fs::write(
             parent_workspace.join(".opensymphony/run.json"),

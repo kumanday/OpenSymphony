@@ -4388,6 +4388,21 @@ where
                     self.terminal_child_failure_ids.insert(issue_id.clone());
                     continue;
                 }
+                let owned_by_subtree_cleanup = match self
+                    .workspace_is_owned_by_subtree_cleanup(&record.issue, &record.workspace)
+                    .await
+                {
+                    Ok(owned) => owned,
+                    Err(error) => {
+                        retry_records.push(record);
+                        retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                        self.pending_recovery = Some(retry_records);
+                        return Err(error);
+                    }
+                };
+                if owned_by_subtree_cleanup {
+                    continue;
+                }
                 if let Err(error) = self
                     .retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
                     .await
@@ -8550,6 +8565,33 @@ where
             return Err(error);
         }
         Ok(true)
+    }
+
+    async fn workspace_is_owned_by_subtree_cleanup(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .filter(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed)
+            .flat_map(|cleanup| cleanup.descendants.iter())
+            .any(|target| {
+                target.cleaned_at.is_none() && target.resource.as_ref() == Some(&resource)
+            }))
     }
 
     async fn workspace_has_active_lease(

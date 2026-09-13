@@ -264,7 +264,9 @@ for pending prior-generation cleanup to complete before replacing the
 controller and preparing a new parent root. Capture selects descendants from
 the completed controller generation's active lease owner records rather than
 the newer observed subtree, and an operator replan is rejected until that
-cleanup finishes.
+cleanup finishes. Bootstrap recognizes surviving generations already named by
+an incomplete cleanup intent and leaves them to that ordered phase instead of
+reacquiring a leaf lease or applying generic terminal deletion.
 Hook, Git, manifest,
 tombstone, permission, and filesystem failures remain visible on the durable
 cleanup intent and retry on later scheduler ticks.
