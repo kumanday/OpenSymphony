@@ -549,8 +549,13 @@ root into a Git repository. It also covers parent `after_create`
 receipt/reuse/failure behavior and proves a child-controlled direct or
 worktree-conditional fsmonitor executable is rejected without running before
 the incomplete parent root is rolled back. Terminal cleanup also unregisters
-the real integration worktrees and proves the same generation can be prepared
-again without a stale Git registration. A lower-level regression proves the
+the real integration worktrees while the parent and source generations still
+exist, then removes the parent root and proves the same generation can be
+prepared again without a stale Git registration. Scheduler regressions prove
+capture acknowledgement, parent preparation before descendant removal,
+deepest-first receipt recovery, hook-once behavior, exact-generation
+tombstones, higher-owner preservation, failed/canceled retention, and retry of
+visible cleanup failures. A lower-level regression proves the
 orchestrator Git command overrides checkout-controlled fsmonitor configuration
 and default repository hooks at execution time. Focused
 OpenHands and Codex tests bind the same logical `parent_multi_checkout` envelope

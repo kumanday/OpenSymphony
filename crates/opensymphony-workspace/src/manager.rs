@@ -29,7 +29,8 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    CheckoutManifest, CheckoutRepository, CleanupDecision, CleanupOutcome, ConversationManifest,
+    CheckoutManifest, CheckoutRepository, CleanupDecision, CleanupIntent, CleanupOutcome,
+    CleanupRequest, CleanupTarget, CleanupTerminalOutcome, CleanupTombstone, ConversationManifest,
     EnsureWorkspaceResult, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
     IssueContextArtifact, IssueDescriptor, IssueLifecycleState, IssueManifest,
     ParentCheckoutRequest, ParentChildCheckoutMap, ParentExecutionManifest, ParentExecutionRoot,
@@ -594,6 +595,8 @@ impl WorkspaceManager {
                 .await?;
             let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
             debug_assert_eq!(issue_manifest.workspace_path, handle.workspace_path());
+            self.remove_cleanup_tombstone(&handle, &format!("parent:{hierarchy_generation}"))
+                .await?;
             Ok(ParentExecutionRoot {
                 handle,
                 manifest,
@@ -2369,6 +2372,10 @@ impl WorkspaceManager {
         };
         self.bootstrap_workspace_layout(&handle).await?;
         let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+        if created {
+            self.remove_cleanup_tombstone(&handle, &format!("workspace:{}", issue.issue_id))
+                .await?;
+        }
 
         Ok(EnsureWorkspaceResult {
             handle,
@@ -4664,10 +4671,15 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         state: IssueLifecycleState,
     ) -> Result<CleanupOutcome, WorkspaceError> {
-        self.cleanup_with_terminal_removal(
+        let generation = self.cleanup_generation(workspace).await?;
+        self.cleanup_with_request(
             workspace,
             state,
-            self.config.cleanup.remove_terminal_workspaces,
+            CleanupRequest {
+                generation,
+                outcome: CleanupTerminalOutcome::Succeeded,
+                remove: self.config.cleanup.remove_terminal_workspaces,
+            },
         )
         .await
     }
@@ -4679,24 +4691,110 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<CleanupOutcome, WorkspaceError> {
-        self.cleanup_with_terminal_removal(workspace, IssueLifecycleState::Terminal, true)
-            .await
+        let generation = self.cleanup_generation(workspace).await?;
+        self.cleanup_with_request(
+            workspace,
+            IssueLifecycleState::Terminal,
+            CleanupRequest {
+                generation,
+                outcome: CleanupTerminalOutcome::Failed,
+                remove: true,
+            },
+        )
+        .await
     }
 
-    async fn cleanup_with_terminal_removal(
+    pub async fn cleanup_target(
+        &self,
+        target: &CleanupTarget,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
+        let workspace = Self::workspace_handle_for_cleanup_target(target);
+        self.cleanup_with_request(
+            &workspace,
+            IssueLifecycleState::Terminal,
+            CleanupRequest {
+                generation: target.generation.clone(),
+                outcome: target.outcome,
+                remove: true,
+            },
+        )
+        .await
+    }
+
+    pub async fn prepare_cleanup_target(
+        &self,
+        target: &CleanupTarget,
+    ) -> Result<(), WorkspaceError> {
+        let workspace = Self::workspace_handle_for_cleanup_target(target);
+        let request = CleanupRequest {
+            generation: target.generation.clone(),
+            outcome: target.outcome,
+            remove: true,
+        };
+        if !path_exists(workspace.workspace_path()).await? {
+            return self
+                .matching_cleanup_tombstone(&workspace, &request)
+                .await?
+                .map(|_| ())
+                .ok_or_else(|| WorkspaceError::MissingCleanupTombstone {
+                    path: workspace.workspace_path().to_path_buf(),
+                    generation: request.generation,
+                });
+        }
+        let actual_generation = self.cleanup_generation(&workspace).await?;
+        if actual_generation != request.generation {
+            return Err(WorkspaceError::CleanupGenerationMismatch {
+                path: workspace.workspace_path().to_path_buf(),
+                expected: request.generation,
+                actual: actual_generation,
+            });
+        }
+        self.prepare_removal(&workspace, &request).await?;
+        Ok(())
+    }
+
+    fn workspace_handle_for_cleanup_target(target: &CleanupTarget) -> WorkspaceHandle {
+        let mut workspace = WorkspaceHandle::new(
+            target.issue_id.clone(),
+            target.identifier.clone(),
+            target.workspace.workspace_key.to_string(),
+            target.workspace.path.clone(),
+        );
+        if !target.generation.starts_with("parent:") && !target.generation.starts_with("workspace:")
+        {
+            workspace = workspace.with_checkout_generation(target.generation.clone());
+        }
+        workspace
+    }
+
+    pub async fn cleanup_with_request(
         &self,
         workspace: &WorkspaceHandle,
         state: IssueLifecycleState,
-        remove_terminal_workspaces: bool,
+        request: CleanupRequest,
     ) -> Result<CleanupOutcome, WorkspaceError> {
         if !path_exists(workspace.workspace_path()).await? {
+            if state != IssueLifecycleState::Terminal || !request.remove {
+                return Err(WorkspaceError::MissingCleanupTombstone {
+                    path: workspace.workspace_path().to_path_buf(),
+                    generation: request.generation,
+                });
+            }
+            let mut tombstone = self
+                .matching_cleanup_tombstone(workspace, &request)
+                .await?
+                .ok_or_else(|| WorkspaceError::MissingCleanupTombstone {
+                    path: workspace.workspace_path().to_path_buf(),
+                    generation: request.generation.clone(),
+                })?;
+            if tombstone.deleted_at.is_none() {
+                tombstone.deleted_at = Some(Utc::now());
+                self.write_cleanup_tombstone(workspace, &tombstone).await?;
+            }
             return Ok(CleanupOutcome {
-                decision: if state == IssueLifecycleState::Terminal && remove_terminal_workspaces {
-                    CleanupDecision::Remove
-                } else {
-                    CleanupDecision::Retain
-                },
+                decision: CleanupDecision::Remove,
                 before_remove: None,
+                tombstone: Some(tombstone),
             });
         }
 
@@ -4705,43 +4803,177 @@ impl WorkspaceManager {
             return Ok(CleanupOutcome {
                 decision: CleanupDecision::Retain,
                 before_remove: None,
+                tombstone: None,
             });
         }
 
-        let before_remove = match self.execute_hook(HookKind::BeforeRemove, workspace).await {
-            Ok(record) => record,
-            Err(failure) => Some(failure.record),
-        };
-        let decision = if remove_terminal_workspaces {
+        let actual_generation = self.cleanup_generation(workspace).await?;
+        if actual_generation != request.generation {
+            return Err(WorkspaceError::CleanupGenerationMismatch {
+                path: workspace.workspace_path().to_path_buf(),
+                expected: request.generation,
+                actual: actual_generation,
+            });
+        }
+        let decision = if request.remove {
             CleanupDecision::Remove
         } else {
             CleanupDecision::Retain
         };
 
-        if decision == CleanupDecision::Remove {
-            self.unregister_parent_integration_worktrees(workspace)
-                .await?;
-            match fs::remove_dir_all(workspace.workspace_path()).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(WorkspaceError::RemoveWorkspace {
-                        path: workspace.workspace_path().to_path_buf(),
-                        source: error,
-                    });
+        if decision == CleanupDecision::Retain {
+            let before_remove = match self.execute_hook(HookKind::BeforeRemove, workspace).await {
+                Ok(record) => record,
+                Err(failure) => Some(failure.record),
+            };
+            return Ok(CleanupOutcome {
+                decision,
+                before_remove,
+                tombstone: None,
+            });
+        }
+
+        let mut run_manifest = self.prepare_removal(workspace, &request).await?;
+        let deletion_started_at = run_manifest
+            .cleanup_intent
+            .as_ref()
+            .and_then(|intent| intent.deletion_started_at)
+            .unwrap_or_else(Utc::now);
+        {
+            let intent = run_manifest
+                .cleanup_intent
+                .as_mut()
+                .expect("cleanup intent was initialized");
+            intent.deletion_started_at = Some(deletion_started_at);
+            intent.last_error = None;
+        }
+        self.write_run_manifest(workspace, &run_manifest).await?;
+        let mut tombstone = CleanupTombstone {
+            schema_version: 1,
+            issue_id: workspace.issue_id().to_owned(),
+            identifier: workspace.identifier().to_owned(),
+            sanitized_workspace_key: workspace.workspace_key().to_owned(),
+            workspace_path: workspace.workspace_path().to_path_buf(),
+            generation: request.generation,
+            outcome: request.outcome,
+            deletion_started_at,
+            deleted_at: None,
+        };
+        self.write_cleanup_tombstone(workspace, &tombstone).await?;
+        match fs::remove_dir_all(workspace.workspace_path()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(WorkspaceError::RemoveWorkspace {
+                    path: workspace.workspace_path().to_path_buf(),
+                    source: error,
+                });
+            }
+        }
+        tombstone.deleted_at = Some(Utc::now());
+        self.write_cleanup_tombstone(workspace, &tombstone).await?;
+        Ok(CleanupOutcome {
+            decision,
+            before_remove: run_manifest
+                .cleanup_intent
+                .and_then(|intent| intent.before_remove),
+            tombstone: Some(tombstone),
+        })
+    }
+
+    async fn prepare_removal(
+        &self,
+        workspace: &WorkspaceHandle,
+        request: &CleanupRequest,
+    ) -> Result<RunManifest, WorkspaceError> {
+        let mut run_manifest = match self.load_run_manifest(workspace).await? {
+            Some(manifest) => manifest,
+            None => RunManifest::new(
+                workspace,
+                &RunDescriptor::new(format!("cleanup:{}", request.generation), 0),
+            ),
+        };
+        match run_manifest.cleanup_intent.as_ref() {
+            Some(intent) if intent.generation != request.generation => {
+                return Err(WorkspaceError::CleanupGenerationMismatch {
+                    path: workspace.workspace_path().to_path_buf(),
+                    expected: request.generation.clone(),
+                    actual: intent.generation.clone(),
+                });
+            }
+            Some(intent) if intent.outcome != request.outcome => {
+                return Err(WorkspaceError::CleanupOutcomeMismatch {
+                    path: workspace.workspace_path().to_path_buf(),
+                    expected: format!("{:?}", request.outcome),
+                    actual: format!("{:?}", intent.outcome),
+                });
+            }
+            Some(_) => {}
+            None => {
+                run_manifest.cleanup_intent = Some(CleanupIntent::new(request));
+                self.write_run_manifest(workspace, &run_manifest).await?;
+            }
+        }
+
+        let before_remove_succeeded = run_manifest
+            .cleanup_intent
+            .as_ref()
+            .and_then(|intent| intent.before_remove.as_ref())
+            .is_some_and(|receipt| receipt.status == HookExecutionStatus::Succeeded);
+        if !before_remove_succeeded {
+            match self.execute_hook(HookKind::BeforeRemove, workspace).await {
+                Ok(record) => {
+                    if let Some(record) = record {
+                        run_manifest.hooks.push(record.clone());
+                        run_manifest
+                            .cleanup_intent
+                            .as_mut()
+                            .expect("cleanup intent was initialized")
+                            .before_remove = Some(record);
+                    }
+                    let intent = run_manifest
+                        .cleanup_intent
+                        .as_mut()
+                        .expect("cleanup intent was initialized");
+                    intent.last_error = None;
+                    self.write_run_manifest(workspace, &run_manifest).await?;
+                }
+                Err(failure) => {
+                    run_manifest.hooks.push(failure.record.clone());
+                    let intent = run_manifest
+                        .cleanup_intent
+                        .as_mut()
+                        .expect("cleanup intent was initialized");
+                    intent.before_remove = Some(failure.record);
+                    intent.retry_count = intent.retry_count.saturating_add(1);
+                    intent.last_error = Some(failure.error.to_string());
+                    self.write_run_manifest(workspace, &run_manifest).await?;
+                    return Err(failure.error);
                 }
             }
         }
 
-        Ok(CleanupOutcome {
-            decision,
-            before_remove,
-        })
+        if let Err(error) = self
+            .unregister_parent_integration_worktrees(workspace, &mut run_manifest)
+            .await
+        {
+            let intent = run_manifest
+                .cleanup_intent
+                .as_mut()
+                .expect("cleanup intent was initialized");
+            intent.retry_count = intent.retry_count.saturating_add(1);
+            intent.last_error = Some(error.to_string());
+            self.write_run_manifest(workspace, &run_manifest).await?;
+            return Err(error);
+        }
+
+        Ok(run_manifest)
     }
 
     async fn unregister_parent_integration_worktrees(
         &self,
         workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
     ) -> Result<(), WorkspaceError> {
         let Some(_manifest) = self
             .load_manifest::<ParentExecutionManifest>(workspace, &workspace.parent_manifest_path())
@@ -4759,6 +4991,13 @@ impl WorkspaceManager {
                 )
             })?;
         for record in checkout_map.repositories.values() {
+            if run_manifest.cleanup_intent.as_ref().is_some_and(|intent| {
+                intent
+                    .removed_integration_worktrees
+                    .contains(&record.checkout_handle)
+            }) {
+                continue;
+            }
             let source = self.validate_parent_retained_checkouts(record).await?;
             let integration =
                 resolve_path_within_root(workspace.workspace_path(), &record.relative_path)?;
@@ -4782,8 +5021,110 @@ impl WorkspaceManager {
                 )
                 .await?;
             }
+            run_manifest
+                .cleanup_intent
+                .as_mut()
+                .expect("parent worktree cleanup requires an initialized intent")
+                .removed_integration_worktrees
+                .insert(record.checkout_handle.clone());
+            self.write_run_manifest(workspace, run_manifest).await?;
         }
         Ok(())
+    }
+
+    async fn cleanup_generation(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<String, WorkspaceError> {
+        if let Some(generation) = workspace.checkout_generation() {
+            return Ok(generation.to_owned());
+        }
+        if path_exists(workspace.workspace_path()).await?
+            && let Some(parent) = self
+                .load_manifest::<ParentExecutionManifest>(
+                    workspace,
+                    &workspace.parent_manifest_path(),
+                )
+                .await?
+        {
+            return Ok(format!("parent:{}", parent.hierarchy_generation));
+        }
+        if path_exists(workspace.workspace_path()).await? {
+            return Ok(format!("workspace:{}", workspace.issue_id()));
+        }
+        Err(WorkspaceError::MissingCleanupTombstone {
+            path: workspace.workspace_path().to_path_buf(),
+            generation: "unknown".to_owned(),
+        })
+    }
+
+    async fn matching_cleanup_tombstone(
+        &self,
+        workspace: &WorkspaceHandle,
+        request: &CleanupRequest,
+    ) -> Result<Option<CleanupTombstone>, WorkspaceError> {
+        if !path_exists(&self.config.root).await? {
+            return Ok(None);
+        }
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root.clone());
+        let path = self.cleanup_tombstone_path(&canonical_root, workspace, &request.generation);
+        let tombstone = self
+            .load_manifest::<CleanupTombstone>(&handle, &path)
+            .await?;
+        Ok(tombstone.filter(|tombstone| {
+            tombstone.schema_version == 1
+                && tombstone.issue_id == workspace.issue_id()
+                && tombstone.identifier == workspace.identifier()
+                && tombstone.sanitized_workspace_key == workspace.workspace_key()
+                && tombstone.workspace_path == workspace.workspace_path()
+                && tombstone.generation == request.generation
+                && tombstone.outcome == request.outcome
+        }))
+    }
+
+    async fn write_cleanup_tombstone(
+        &self,
+        workspace: &WorkspaceHandle,
+        tombstone: &CleanupTombstone,
+    ) -> Result<(), WorkspaceError> {
+        self.create_directory(&self.config.root).await?;
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root.clone());
+        let path = self.cleanup_tombstone_path(&canonical_root, workspace, &tombstone.generation);
+        self.write_manifest_atomically(&handle, &path, tombstone)
+            .await
+    }
+
+    async fn remove_cleanup_tombstone(
+        &self,
+        workspace: &WorkspaceHandle,
+        generation: &str,
+    ) -> Result<(), WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let path = self.cleanup_tombstone_path(&canonical_root, workspace, generation);
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(WorkspaceError::WriteManifest { path, source }),
+        }
+    }
+
+    fn cleanup_tombstone_path(
+        &self,
+        canonical_root: &Path,
+        workspace: &WorkspaceHandle,
+        generation: &str,
+    ) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(workspace.issue_id().as_bytes());
+        hasher.update([0]);
+        hasher.update(workspace.workspace_path().as_os_str().as_encoded_bytes());
+        hasher.update([0]);
+        hasher.update(generation.as_bytes());
+        canonical_root
+            .join(".opensymphony-cleanup-tombstones")
+            .join(format!("{:x}.json", hasher.finalize()))
     }
 
     pub async fn load_issue_manifest(
@@ -5094,6 +5435,14 @@ impl WorkspaceManager {
             hook.command = redact_runtime_diagnostic(&hook.command);
             hook.stdout = redact_runtime_diagnostic(&hook.stdout);
             hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+        }
+        if let Some(cleanup) = sanitized.cleanup_intent.as_mut() {
+            cleanup.last_error = cleanup.last_error.as_deref().map(redact_runtime_diagnostic);
+            if let Some(hook) = cleanup.before_remove.as_mut() {
+                hook.command = redact_runtime_diagnostic(&hook.command);
+                hook.stdout = redact_runtime_diagnostic(&hook.stdout);
+                hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+            }
         }
         self.write_manifest_atomically(workspace, &workspace.run_manifest_path(), &sanitized)
             .await

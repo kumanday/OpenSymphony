@@ -24,6 +24,13 @@ hierarchy and lease artifact before reconciling terminal workspaces. The
 artifact is an internal durable record; operators should not edit it manually.
 Recovery rebuilds ancestor retention before cleanup, and cleanup remains
 blocked while any owner-identified lease for the checkout generation is active.
+For a captured terminal parent, recovery also resumes its durable subtree
+cleanup intent. The persisted order is parent worktree detachment, release of
+that parent's lease owners, deepest-first descendant deletion, and parent-root
+deletion. A higher-ancestor lease or an unexpired diagnostic hold keeps the
+affected generation pending. Cleanup errors remain in the controller and are
+retried on later ticks; operators should correct the reported hook, Git, or
+filesystem condition rather than delete the path manually.
 
 ## 2. First-run flow
 
@@ -527,6 +534,10 @@ downloaded fallback `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`
 aliases. Treat that native dependency as part of the hosted deployment threat
 model before enabling memory in a multi-tenant service.
 Memory capture does not archive Linear issues.
+When automatic capture completes a terminal parent capsule, `opensymphony run`
+persists a capture acknowledgement before allowing subtree cleanup. A failed
+capture is not acknowledged, so the parent evidence and protecting leases stay
+available for the next capture attempt.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

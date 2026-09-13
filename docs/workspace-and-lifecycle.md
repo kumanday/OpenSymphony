@@ -219,6 +219,31 @@ acknowledgement only after every attempt has conclusive stopped and cleanup
 evidence. A conversation-bound indeterminate attempt remains retained for stop
 reconciliation or operator recovery.
 
+### Capture-acknowledged subtree cleanup
+
+A completed parent stays materialized until automatic terminal capture reports
+that its workflow completed. The scheduler then persists the parent root and
+every leased descendant as one hierarchy-generation cleanup intent. Failed and
+canceled parents record the same acknowledgement but remain retained when the
+existing failed-workspace policy requests diagnostics retention.
+
+Removal has two ordered phases. First, the runtime backend applies its normal
+conversation archival fence and the workspace manager receipts the parent
+`before_remove` hook and removes each registered integration worktree with
+`git worktree remove`. The parent root remains present during this phase.
+Second, the scheduler releases only lease owners belonging to that parent and
+removes descendants deepest first when no other active owner remains. The
+parent root is removed last. Higher ancestors and bounded diagnostic holds
+therefore preserve their checkout generations.
+
+Run-manifest receipts make the hook and each worktree removal idempotent.
+Generation tombstones outside the deleted workspace are written before root
+deletion and completed afterward. On restart, an incomplete tombstone resumes
+the deletion, while an already missing path is accepted only for an exact
+issue, key, path, outcome, and generation match. Hook, Git, manifest,
+tombstone, permission, and filesystem failures remain visible on the durable
+cleanup intent and retry on later scheduler ticks.
+
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient
 exact text, then persists only the identity and a bounded redacted diagnostic.
@@ -273,8 +298,9 @@ controller authorizes terminal success only while its hierarchy generation
 still matches the current unblocked snapshot. COE-554 retains the completed
 parent root and its evidence-protecting leases across later reconciliation and
 daemon restart so automatic capture can retry without losing its runtime
-envelope or source checkouts. OSYM-893 owns durable capture acknowledgement,
-ordered lease release, cleanup intent, tombstones, and deletion.
+envelope or source checkouts. The capture acknowledgement starts durable
+bottom-up cleanup as described above; capture failure leaves the parent root
+and leases unchanged for retry.
 A recovered parent worker must find the exact conversation manifest recorded by
 the controller. Its expected identity crosses the scheduler-to-worker request,
 and a missing or different manifest fails before any harness session is

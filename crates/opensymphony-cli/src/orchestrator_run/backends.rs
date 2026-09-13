@@ -3960,6 +3960,8 @@ impl RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
         force_remove: bool,
+        cleanup_target: Option<&crate::opensymphony_workspace::CleanupTarget>,
+        prepare_only: bool,
     ) -> Result<(), CliWorkspaceError> {
         if terminal && (force_remove || !self.terminal_cleanup_paths.contains(&workspace.path)) {
             if self.workspace_has_active_lease(workspace).await? {
@@ -3969,21 +3971,29 @@ impl RuntimeWorkspaceBackend {
                 );
                 return Err(CliWorkspaceError::CleanupDeferred);
             }
-            let Some(handle) = self
+            let handle = self
                 .manager
                 .list_all_workspaces()
                 .await?
                 .into_iter()
                 .find_map(|(handle, _)| {
                     (handle.workspace_path() == workspace.path).then_some(handle)
-                })
-            else {
+                });
+            let Some(handle) = handle else {
+                if let Some(target) = cleanup_target {
+                    if prepare_only {
+                        self.manager.prepare_cleanup_target(target).await?;
+                    } else {
+                        self.manager.cleanup_target(target).await?;
+                    }
+                }
                 return Ok(());
             };
             if let Some(scope_grants) = &self.scope_grants {
                 scope_grants.revoke_issue(handle.identifier());
             }
-            let removes_workspace = force_remove
+            let removes_workspace = cleanup_target.is_some()
+                || force_remove
                 || self.manager.cleanup_decision(IssueLifecycleState::Terminal)
                     == crate::opensymphony_workspace::CleanupDecision::Remove;
             let mut cleanup_run_manifest = self.manager.load_run_manifest(&handle).await?;
@@ -4153,7 +4163,13 @@ impl RuntimeWorkspaceBackend {
                     }
                 }
             }
-            if force_remove {
+            if let Some(target) = cleanup_target {
+                if prepare_only {
+                    self.manager.prepare_cleanup_target(target).await?;
+                } else {
+                    self.manager.cleanup_target(target).await?;
+                }
+            } else if force_remove {
                 self.manager
                     .cleanup_failed_terminal_workspace(&handle)
                     .await?;
@@ -4441,6 +4457,45 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         Ok(state.active_for(&resource))
     }
 
+    async fn cleanup_target_for_resource(
+        &mut self,
+        resource: &LeaseResource,
+        outcome: crate::opensymphony_workspace::CleanupTerminalOutcome,
+    ) -> Result<Option<crate::opensymphony_workspace::CleanupTarget>, Self::Error> {
+        Ok(self
+            .manager
+            .list_all_workspaces()
+            .await?
+            .into_iter()
+            .find_map(|(handle, manifest)| {
+                let repository_matches = manifest
+                    .repository_binding
+                    .as_ref()
+                    .and_then(RepositoryBindingOutcome::repository_id)
+                    == Some(&resource.repository_id);
+                (manifest.issue_id == resource.issue_id.as_str()
+                    && handle.checkout_generation() == Some(&resource.checkout_generation)
+                    && repository_matches)
+                    .then(|| crate::opensymphony_workspace::CleanupTarget {
+                        issue_id: manifest.issue_id,
+                        identifier: manifest.identifier,
+                        workspace: crate::opensymphony_domain::WorkspaceRecord {
+                            path: handle.workspace_path().to_path_buf(),
+                            workspace_key: WorkspaceKey::new(handle.workspace_key().to_owned())
+                                .expect("managed workspace keys are already validated"),
+                            created_now: false,
+                            created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
+                            updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
+                            last_seen_tracker_refresh_at: manifest
+                                .last_seen_tracker_refresh_at
+                                .map(datetime_to_timestamp_ms),
+                        },
+                        generation: resource.checkout_generation.clone(),
+                        outcome,
+                    })
+            }))
+    }
+
     async fn parent_workspace_targets(
         &mut self,
         issue: &NormalizedIssue,
@@ -4694,7 +4749,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, terminal, false)
+        self.cleanup_workspace_with_policy(workspace, terminal, false, None, false)
             .await
     }
 
@@ -4702,7 +4757,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, true, true)
+        self.cleanup_workspace_with_policy(workspace, true, true, None, false)
             .await
     }
 
@@ -4710,7 +4765,23 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         &mut self,
         workspace: &crate::opensymphony_domain::WorkspaceRecord,
     ) -> Result<(), Self::Error> {
-        self.cleanup_workspace_with_policy(workspace, true, true)
+        self.cleanup_workspace_with_policy(workspace, true, true, None, false)
+            .await
+    }
+
+    async fn cleanup_generation(
+        &mut self,
+        target: &crate::opensymphony_workspace::CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(&target.workspace, true, true, Some(target), false)
+            .await
+    }
+
+    async fn prepare_cleanup_generation(
+        &mut self,
+        target: &crate::opensymphony_workspace::CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        self.cleanup_workspace_with_policy(&target.workspace, true, true, Some(target), true)
             .await
     }
 
@@ -10680,6 +10751,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("legacy-openhands");
         conversation_manifest.prepared_run_id = Some(run_manifest.run_id.clone());
@@ -10756,6 +10828,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("conv-pending");
         conversation_manifest.workflow_prompt_seeded = false;
@@ -10840,6 +10913,7 @@ mod tests {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         let mut conversation_manifest = sample_conversation_manifest("conv-unsent-prompt");
         conversation_manifest.workflow_prompt_seeded = true;

@@ -541,7 +541,12 @@ Completed parent roots remain retained across reconciliation and restart so a
 transient capture failure cannot erase the repository/run provenance needed for
 the next attempt. Their descendant leases remain active with the root so leaf
 cleanup cannot invalidate registered integration worktrees before OSYM-893
-records capture acknowledgement and performs ordered cleanup.
+records capture acknowledgement and performs ordered cleanup. The run loop
+records that acknowledgement only after the capture workflow completes for the
+selected parent. Cleanup first receipts hook execution and detaches the parent
+integration worktrees, then removes unleased descendants bottom-up and the
+parent root last. Failure to persist the acknowledgement leaves the capture
+candidate eligible for retry.
 For a parent, the capture path also reads validated durable controller state
 and requires the matching lifecycle to be `completed`, its final attempt to be
 passed for the same run and input version, its final evidence to be bound to the

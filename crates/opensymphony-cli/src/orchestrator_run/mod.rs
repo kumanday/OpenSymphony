@@ -1372,11 +1372,35 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 }
                                 Err(error) => Err(error),
                             };
-                            mark_auto_capture_completed(
-                                &mut auto_capture_completed_issues,
-                                &auto_capture_candidates,
-                                &auto_capture_result,
-                            );
+                            let cleanup_acknowledged = match &auto_capture_result {
+                                Ok(report) if report.workflow_completed() => {
+                                    let completed = if report.completed_issue_keys.is_empty()
+                                        && report.warnings.is_empty()
+                                    {
+                                        auto_capture_candidates.clone()
+                                    } else {
+                                        report.completed_issue_keys.clone()
+                                    };
+                                    match scheduler
+                                        .acknowledge_terminal_capture(&completed, observed_at)
+                                        .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            warn!(%error, "failed to persist terminal capture acknowledgement; cleanup will wait for retry");
+                                            false
+                                        }
+                                    }
+                                }
+                                _ => true,
+                            };
+                            if cleanup_acknowledged {
+                                mark_auto_capture_completed(
+                                    &mut auto_capture_completed_issues,
+                                    &auto_capture_candidates,
+                                    &auto_capture_result,
+                                );
+                            }
                             publish_auto_capture_event(
                                 auto_capture_result,
                                 &snapshot,

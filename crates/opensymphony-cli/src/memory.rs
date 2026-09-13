@@ -14913,6 +14913,7 @@ Public memory concept.
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         std::fs::write(
             workspace.join(".opensymphony/run.json"),
