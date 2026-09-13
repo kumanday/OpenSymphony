@@ -2238,6 +2238,17 @@ impl ParentIntegrationController {
             })
     }
 
+    pub fn has_unreconciled_harness(&self) -> bool {
+        self.attempts.iter().any(|attempt| {
+            attempt.conversation_id.is_some()
+                && attempt.harness_stopped_at.is_none()
+                && matches!(
+                    attempt.status,
+                    ParentAttemptStatus::Running | ParentAttemptStatus::Indeterminate
+                )
+        })
+    }
+
     pub fn current_attempt_deadline(&self) -> Option<TimestampMs> {
         self.attempts
             .iter()

@@ -154,7 +154,8 @@ harness success or a prompt-authored claim without matching events is
 insufficient. Each accepted command or resource event is persisted with the
 controller before the worker reaches a terminal outcome. The adapter records
 stopped-turn evidence only after a terminal runtime state or acknowledged stop;
-a transport-level failed outcome cannot substitute for that evidence. On timeout
+a backward-compatible run-manifest flag carries that fact across restart, and a
+transport-level failed outcome cannot substitute for it. On timeout
 or cancellation, a reconciled harness stopped state
 releases the foreground-process receipt; any other named resource remains an
 explicit cleanup fence. The durable final record maps every canonical repository to the

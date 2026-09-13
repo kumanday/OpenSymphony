@@ -5995,10 +5995,15 @@ where
                 "tracker merging superseded human-review polling; refresh before continuing",
                 outcome.finished_at,
             )?;
-        } else if status == ParentAttemptStatus::Indeterminate
-            || (status == ParentAttemptStatus::Canceled
-                && (execution.issue().state.category != IssueStateCategory::Active
-                    || acknowledged_operator_cancel_terminal(execution, outcome)))
+        } else if status == ParentAttemptStatus::Indeterminate {
+            controller.prepare_retry(
+                &attempt_id,
+                "parent harness outcome is indeterminate; retain ownership until terminal state is reconciled",
+                outcome.finished_at,
+            )?;
+        } else if status == ParentAttemptStatus::Canceled
+            && (execution.issue().state.category != IssueStateCategory::Active
+                || acknowledged_operator_cancel_terminal(execution, outcome))
         {
             controller.cancel(
                 outcome
@@ -6742,6 +6747,19 @@ where
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
             self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
+            if matches!(
+                outcome.outcome,
+                WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
+            ) && self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+            {
+                return self
+                    .queue_retry_for_outcome(execution, outcome, observed_at)
+                    .await;
+            }
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
@@ -6757,6 +6775,16 @@ where
         ) {
             self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
+            if self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+            {
+                return self
+                    .queue_retry_for_outcome(execution, outcome, observed_at)
+                    .await;
+            }
             return self
                 .release_finished_execution(
                     execution,
@@ -7218,6 +7246,14 @@ where
         allow_retry: bool,
         reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<bool, SchedulerError> {
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(&normalized.id)
+            .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+        {
+            return Ok(false);
+        }
         if allow_retry
             && self
                 .hierarchy_state

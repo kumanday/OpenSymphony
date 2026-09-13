@@ -1074,6 +1074,11 @@ pub struct RunManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
     pub status: RunStatus,
+    /// True only when the harness adapter observed a terminal runtime state or
+    /// a reconciled interrupt acknowledgement. A failed transport alone does
+    /// not prove the remote turn stopped.
+    #[serde(default)]
+    pub harness_stopped: bool,
     pub created_at: DateTime<Utc>,
     /// Durable boundary for fencing provider evidence after a run restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1106,6 +1111,7 @@ impl RunManifest {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Preparing,
+            harness_stopped: false,
             created_at: now,
             started_at: None,
             updated_at: now,

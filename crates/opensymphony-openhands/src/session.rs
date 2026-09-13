@@ -3912,11 +3912,12 @@ impl IssueSessionRunner {
                 .clone()
                 .unwrap_or_else(|| outcome.summary.clone()),
         );
+        let harness_stopped = session.stream.state_mirror().terminal_status().is_some();
+        run_manifest.harness_stopped = harness_stopped;
         workspace_manager
             .finish_run(workspace, run_manifest, run_status)
             .await?;
 
-        let harness_stopped = session.stream.state_mirror().terminal_status().is_some();
         let mut worker_outcome = WorkerOutcomeRecord::from_run(
             observed_run,
             outcome.kind,

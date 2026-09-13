@@ -3494,7 +3494,7 @@ fn unresolved_codex_feedback_for_head(
         .iter()
         .filter(|thread| !thread.is_resolved)
         .filter_map(|thread| {
-            let comment = thread.comments.nodes.iter().find(|comment| {
+            let comment = thread.comments.nodes.first().filter(|comment| {
                 comment
                     .author
                     .as_ref()
@@ -4284,10 +4284,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     .as_ref()
                     .is_some_and(|run| run.status == RunStatus::Cancelled),
                 completed_run: run_manifest.as_ref().is_some_and(|run| {
-                    matches!(
-                        run.status,
-                        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
-                    )
+                    matches!(run.status, RunStatus::Succeeded | RunStatus::Cancelled)
+                        || (run.status == RunStatus::Failed && run.harness_stopped)
                 }),
                 had_in_flight_run,
                 pending_retry: run_manifest.as_ref().is_some_and(|run| run.pending_retry),
@@ -7157,8 +7155,14 @@ async fn run_codex_stdio_issue_with_mode(
     .await
     {
         Ok((outcome, status)) => {
-            match finish_codex_workspace_run(workspace_manager, workspace, run_manifest, status)
-                .await
+            match finish_codex_workspace_run(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                status,
+                true,
+            )
+            .await
             {
                 Ok(()) => outcome,
                 Err(error) => {
@@ -7188,6 +7192,7 @@ async fn run_codex_stdio_issue_with_mode(
                 workspace,
                 run_manifest,
                 RunStatus::Failed,
+                false,
             )
             .await
             {
@@ -9062,8 +9067,10 @@ async fn finish_codex_workspace_run(
     workspace: &WorkspaceHandle,
     run_manifest: &mut RunManifest,
     status: RunStatus,
+    harness_stopped: bool,
 ) -> Result<(), WorkspaceError> {
     run_manifest.status = status;
+    run_manifest.harness_stopped = harness_stopped;
     run_manifest.status_detail = Some(format!("Codex app-server route ended with {status}"));
     workspace_manager
         .finish_run(workspace, run_manifest, status)
@@ -10642,6 +10649,7 @@ mod tests {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Prepared,
+            harness_stopped: false,
             created_at: now,
             started_at: None,
             updated_at: now,
@@ -10717,6 +10725,7 @@ mod tests {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Prepared,
+            harness_stopped: false,
             created_at: now,
             started_at: None,
             updated_at: now,
@@ -10800,6 +10809,7 @@ mod tests {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Prepared,
+            harness_stopped: false,
             created_at: now,
             started_at: None,
             updated_at: now,
@@ -13857,6 +13867,10 @@ mod tests {
         assert_eq!(recoveries.len(), 1);
         assert!(!recoveries[0].had_in_flight_run);
         assert!(recoveries[0].pending_retry);
+        assert!(
+            !recoveries[0].completed_run,
+            "a failed manifest without adapter terminal evidence remains indeterminate"
+        );
         assert_eq!(recoveries[0].normal_retry_count, 0);
         assert_eq!(
             recoveries[0].retry_scheduled_at,
@@ -14679,6 +14693,47 @@ Run the scheduler.
         let mut resolved = threads;
         resolved[0].is_resolved = true;
         assert!(!unresolved_human_threads(&resolved));
+    }
+
+    #[test]
+    fn codex_feedback_uses_the_originating_thread_comment() {
+        let connector = Some(GitHubReviewUser {
+            login: Some("chatgpt-codex-connector[bot]".to_owned()),
+        });
+        let threads = vec![GitHubReviewThread {
+            id: "human-thread-with-codex-reply".to_owned(),
+            is_resolved: false,
+            comments: GitHubReviewThreadComments {
+                nodes: vec![
+                    GitHubReviewThreadComment {
+                        body: "Human finding.".to_owned(),
+                        path: Some("src/review.rs".to_owned()),
+                        line: Some(24),
+                        original_line: Some(23),
+                        commit: Some(GitHubGraphQlCommit {
+                            oid: "abcdef123456".to_owned(),
+                        }),
+                        original_commit: None,
+                        author: Some(GitHubReviewUser {
+                            login: Some("reviewer".to_owned()),
+                        }),
+                    },
+                    GitHubReviewThreadComment {
+                        body: "Codex reply.".to_owned(),
+                        path: Some("src/review.rs".to_owned()),
+                        line: Some(24),
+                        original_line: Some(23),
+                        commit: Some(GitHubGraphQlCommit {
+                            oid: "abcdef123456".to_owned(),
+                        }),
+                        original_commit: None,
+                        author: connector,
+                    },
+                ],
+            },
+        }];
+
+        assert!(unresolved_codex_feedback_for_head("abcdef123456", &threads).is_empty());
     }
 
     #[test]

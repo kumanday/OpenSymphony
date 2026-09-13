@@ -3527,6 +3527,54 @@ async fn failed_parent_turn_without_terminal_status_retains_conversation() {
 }
 
 #[tokio::test]
+async fn indeterminate_parent_outcomes_retain_ownership_without_rerunning() {
+    for outcome_kind in [WorkerOutcomeKind::Detached, WorkerOutcomeKind::CancelFailed] {
+        let suffix = format!("INDETERMINATE-{outcome_kind:?}");
+        let (mut scheduler, parent_id) = launched_parent_scheduler(&suffix).await;
+        let first_run = scheduler.worker().launches[0].run.clone();
+        scheduler
+            .worker_mut()
+            .updates
+            .push_back(WorkerUpdate::Finished {
+                worker_id: first_run.worker_id.clone(),
+                outcome: WorkerOutcomeRecord::from_run(
+                    &first_run,
+                    outcome_kind,
+                    ts(150),
+                    Some("transport ended without terminal runtime evidence".to_owned()),
+                    None,
+                ),
+            });
+
+        scheduler.tick(ts(150)).await.expect("record outcome");
+        let retry_due_at = scheduler.executions()[&parent_id]
+            .retry()
+            .expect("retained reconciliation retry")
+            .due_at;
+        let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+            serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+                .expect("decode state");
+        let controller = &state.parent_integrations[&parent_id];
+        assert!(controller.has_unreconciled_harness());
+        assert_eq!(
+            controller.state,
+            crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+        );
+
+        scheduler
+            .tick(retry_due_at.max(ts(3_600_100)))
+            .await
+            .expect("unreconciled harness should remain fenced");
+        assert_eq!(
+            scheduler.worker().launches.len(),
+            1,
+            "an indeterminate conversation must not be duplicated"
+        );
+        assert!(scheduler.execution(&parent_id).is_some());
+    }
+}
+
+#[tokio::test]
 async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
     let (mut scheduler, parent_id) = launched_parent_scheduler("CANCELLED").await;
     let first_run = scheduler.worker().launches[0].run.clone();

@@ -209,7 +209,9 @@ replacement session starts. A runtime-terminal successful, failed, or canceled
 turn supplies stopped-turn evidence and releases its foreground-process receipt;
 an outcome created by transport loss or local persistence failure does not. A
 timeout, stall, detach, or failed-cancel path still requires explicit stopped
-state reconciliation. An ordinary cancellation while the tracker parent remains
+state reconciliation. The run manifest persists this adapter observation as a
+separate backward-compatible flag; a legacy or current `failed` status alone is
+not terminal harness evidence during restart recovery. An ordinary cancellation while the tracker parent remains
 active returns through cleanup and baseline refresh. Operator and tracker
 terminal cancellation remains terminal. When a tracker terminal state arrives
 between repair worker turns, cancellation records no harness-interrupt intent or

@@ -14907,6 +14907,7 @@ Public memory concept.
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Succeeded,
+            harness_stopped: true,
             created_at: now,
             started_at: Some(now),
             updated_at: now,
