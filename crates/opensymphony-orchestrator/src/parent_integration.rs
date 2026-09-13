@@ -2244,7 +2244,10 @@ impl ParentIntegrationController {
                 && attempt.harness_stopped_at.is_none()
                 && matches!(
                     attempt.status,
-                    ParentAttemptStatus::Running | ParentAttemptStatus::Indeterminate
+                    ParentAttemptStatus::Running
+                        | ParentAttemptStatus::Failed
+                        | ParentAttemptStatus::TimedOut
+                        | ParentAttemptStatus::Indeterminate
                 )
         })
     }

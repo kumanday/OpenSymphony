@@ -3423,11 +3423,11 @@ fn current_human_review_feedback(
             .filter(|thread| !thread.is_resolved)
             .filter_map(|thread| {
                 let comment = thread.comments.nodes.first()?;
-                if !comment
+                if comment
                     .author
                     .as_ref()
                     .and_then(|author| author.login.as_deref())
-                    .is_some_and(|login| !is_codex_connector_login(login))
+                    .is_some_and(is_codex_connector_login)
                 {
                     return None;
                 }
@@ -3447,11 +3447,11 @@ fn unresolved_human_threads(review_threads: &[GitHubReviewThread]) -> bool {
     review_threads.iter().any(|thread| {
         !thread.is_resolved
             && thread.comments.nodes.first().is_some_and(|comment| {
-                comment
+                !comment
                     .author
                     .as_ref()
                     .and_then(|author| author.login.as_deref())
-                    .is_some_and(|login| !is_codex_connector_login(login))
+                    .is_some_and(is_codex_connector_login)
             })
     })
 }
@@ -14734,6 +14734,31 @@ Run the scheduler.
         }];
 
         assert!(unresolved_codex_feedback_for_head("abcdef123456", &threads).is_empty());
+    }
+
+    #[test]
+    fn unknown_review_thread_authors_remain_blocking_human_feedback() {
+        let threads = vec![GitHubReviewThread {
+            id: "unknown-author-thread".to_owned(),
+            is_resolved: false,
+            comments: GitHubReviewThreadComments {
+                nodes: vec![GitHubReviewThreadComment {
+                    body: "Preserve this finding after account deletion.".to_owned(),
+                    path: Some("src/review.rs".to_owned()),
+                    line: Some(24),
+                    original_line: Some(23),
+                    commit: None,
+                    original_commit: None,
+                    author: None,
+                }],
+            },
+        }];
+
+        assert!(unresolved_human_threads(&threads));
+        assert_eq!(
+            current_human_review_feedback(&[], &BTreeMap::new(), &threads)[0].thread_id,
+            "unknown-author-thread"
+        );
     }
 
     #[test]

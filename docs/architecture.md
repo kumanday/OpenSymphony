@@ -134,7 +134,9 @@ an existing result before repeating a side effect. Requested changes stay on
 the same attempt and pull request. Provider outages, failed checks, review
 rejection, external closure, force-push, and merge conflicts remain precise,
 resumable states. GitHub is the first provider adapter and remains authoritative
-for PR, review, check, and merge facts.
+for PR, review, check, and merge facts. Each scheduler tick checks a fresh full
+tracker snapshot before advancing repair-provider writes, so a newly terminal
+parent fences review, push, and merge operations in the same observation.
 After merge, the controller records the provider merge-result commit and the
 workspace manager fetches the configured target through the central credential
 path. The refreshed checkout is accepted only when that merge result is

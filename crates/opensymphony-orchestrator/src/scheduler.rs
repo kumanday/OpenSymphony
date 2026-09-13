@@ -1366,6 +1366,7 @@ where
     async fn advance_parent_repairs(
         &mut self,
         observed_at: TimestampMs,
+        freshly_terminal_issue_ids: &HashSet<IssueId>,
     ) -> Result<(), SchedulerError> {
         let repairs = self
             .hierarchy_state
@@ -1399,6 +1400,9 @@ where
                 break;
             }
             if !self.parent_repair_advancement_allowed(&parent_id) {
+                continue;
+            }
+            if freshly_terminal_issue_ids.contains(&parent_id) {
                 continue;
             }
             let advancement = async {
@@ -2194,7 +2198,18 @@ where
             })?;
         self.apply_worker_updates(updates).await?;
         if !self.linear_cooldown_active(observed_at) {
-            self.advance_parent_repairs(observed_at).await?;
+            let freshly_terminal_issue_ids = pre_update_full_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .terminal
+                        .iter()
+                        .filter_map(|issue| IssueId::new(issue.id.clone()).ok())
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            self.advance_parent_repairs(observed_at, &freshly_terminal_issue_ids)
+                .await?;
         }
 
         let mut dispatch_candidates = None;
@@ -5916,15 +5931,26 @@ where
             .iter()
             .find(|attempt| attempt.id == attempt_id)
             .and_then(|attempt| attempt.cleanup.clone());
-        let status = match outcome.outcome {
-            WorkerOutcomeKind::Succeeded if verification_passed => ParentAttemptStatus::Passed,
-            WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed => ParentAttemptStatus::Failed,
-            WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => {
-                ParentAttemptStatus::TimedOut
-            }
-            WorkerOutcomeKind::Cancelled => ParentAttemptStatus::Canceled,
-            WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => {
-                ParentAttemptStatus::Indeterminate
+        let harness_stopped = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .is_some_and(|attempt| attempt.harness_stopped_at.is_some());
+        let status = if !launch_never_attached && !harness_stopped {
+            ParentAttemptStatus::Indeterminate
+        } else {
+            match outcome.outcome {
+                WorkerOutcomeKind::Succeeded if verification_passed => ParentAttemptStatus::Passed,
+                WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed => {
+                    ParentAttemptStatus::Failed
+                }
+                WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => {
+                    ParentAttemptStatus::TimedOut
+                }
+                WorkerOutcomeKind::Cancelled => ParentAttemptStatus::Canceled,
+                WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => {
+                    ParentAttemptStatus::Indeterminate
+                }
             }
         };
         let cleanup = observed_cleanup.unwrap_or_else(|| ParentCleanupReceipt {
@@ -6747,10 +6773,7 @@ where
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
             self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                 .await?;
-            if matches!(
-                outcome.outcome,
-                WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
-            ) && self
+            if self
                 .hierarchy_state
                 .parent_integrations
                 .get(&issue_id)
@@ -6819,6 +6842,16 @@ where
             {
                 self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
                     .await?;
+                if self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+                {
+                    return self
+                        .queue_retry_for_outcome(execution, outcome, observed_at)
+                        .await;
+                }
                 return self
                     .release_finished_execution(execution, observed_at, reason, Some(outcome))
                     .await;

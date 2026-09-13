@@ -1638,6 +1638,15 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
         "provider waits have no live harness turn"
     );
     assert!(before.parent_integrations[&parent_id].can_cancel_without_harness());
+    let review_requests_before_terminal = scheduler.tracker().repair_review_requests;
+    let merge_requests_before_terminal = scheduler.tracker().repair_merge_requests;
+    let mut stale_approved = repair_provider_snapshot(true);
+    stale_approved.checks_passed = true;
+    stale_approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(stale_approved);
 
     scheduler.tracker_mut().active.clear();
     scheduler.tracker_mut().terminal = vec![tracker_issue(
@@ -1667,6 +1676,16 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
     assert_eq!(
         scheduler.execution(&parent_id).expect("parent").status(),
         SchedulerStatus::Released
+    );
+    assert_eq!(
+        scheduler.tracker().repair_review_requests,
+        review_requests_before_terminal,
+        "fresh terminal state must fence review writes before repair advancement"
+    );
+    assert_eq!(
+        scheduler.tracker().repair_merge_requests,
+        merge_requests_before_terminal,
+        "fresh terminal state must fence merge writes before repair advancement"
     );
 }
 
@@ -3527,8 +3546,14 @@ async fn failed_parent_turn_without_terminal_status_retains_conversation() {
 }
 
 #[tokio::test]
-async fn indeterminate_parent_outcomes_retain_ownership_without_rerunning() {
-    for outcome_kind in [WorkerOutcomeKind::Detached, WorkerOutcomeKind::CancelFailed] {
+async fn parent_outcomes_without_terminal_evidence_retain_ownership_without_rerunning() {
+    for outcome_kind in [
+        WorkerOutcomeKind::Failed,
+        WorkerOutcomeKind::TimedOut,
+        WorkerOutcomeKind::Stalled,
+        WorkerOutcomeKind::Detached,
+        WorkerOutcomeKind::CancelFailed,
+    ] {
         let suffix = format!("INDETERMINATE-{outcome_kind:?}");
         let (mut scheduler, parent_id) = launched_parent_scheduler(&suffix).await;
         let first_run = scheduler.worker().launches[0].run.clone();
