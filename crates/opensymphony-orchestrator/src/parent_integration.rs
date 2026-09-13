@@ -2274,6 +2274,7 @@ impl ParentIntegrationController {
 
     pub fn can_cancel_without_harness(&self) -> bool {
         self.current_attempt_id().is_none()
+            && !self.has_unreconciled_provider_operation()
             && self.attempts.iter().all(|attempt| {
                 let cleanup_succeeded = attempt
                     .cleanup
@@ -2289,6 +2290,15 @@ impl ParentIntegrationController {
                         }
                     }
             })
+    }
+
+    pub fn has_unreconciled_provider_operation(&self) -> bool {
+        self.repair_attempts.iter().any(|repair| {
+            repair
+                .operations
+                .iter()
+                .any(|operation| operation.receipt.is_none() || operation.completed_at.is_none())
+        })
     }
 
     pub fn has_unreconciled_harness(&self) -> bool {
@@ -3540,6 +3550,12 @@ mod tests {
         let mut controller = controller();
         let repair_id = begin_repair(&mut controller);
 
+        assert!(controller.has_unreconciled_provider_operation());
+        assert!(
+            !controller.can_cancel_without_harness(),
+            "a provider intent without a receipt must fence terminal cleanup"
+        );
+
         assert!(matches!(
             controller.begin_provider_operation(
                 &repair_id,
@@ -3566,6 +3582,7 @@ mod tests {
                 TimestampMs::new(12),
             )
             .expect("create intent");
+        assert!(!controller.can_cancel_without_harness());
         assert_eq!(
             controller
                 .begin_provider_operation(
@@ -3585,6 +3602,17 @@ mod tests {
                 .len(),
             2
         );
+        controller
+            .record_provider_operation(
+                &repair_id,
+                &create_key,
+                "created",
+                None,
+                TimestampMs::new(14),
+            )
+            .expect("create receipt");
+        assert!(!controller.has_unreconciled_provider_operation());
+        assert!(controller.can_cancel_without_harness());
     }
 
     #[test]

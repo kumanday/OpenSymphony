@@ -1787,6 +1787,51 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
     for descendant in &mut cleanup.descendants {
         descendant.cleaned_at = None;
     }
+    let mut legacy_pending = legacy_retained.clone();
+    legacy_pending
+        .parent_integrations
+        .get_mut(&parent_id)
+        .and_then(|controller| controller.subtree_cleanup.as_mut())
+        .expect("cleanup intent")
+        .status = crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Pending;
+    let mut retained_retry = Scheduler::new(
+        FakeTracker::default(),
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&legacy_pending).expect("pending state")),
+            retain_failed: true,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    retained_retry
+        .tick(ts(7_300_450))
+        .await
+        .expect("enabling failed retention must stop an incomplete cleanup");
+    let retained_retry_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(
+            retained_retry
+                .workspace()
+                .durable_state
+                .clone()
+                .expect("state"),
+        )
+        .expect("retained retry state");
+    assert_eq!(
+        retained_retry_state.parent_integrations[&parent_id]
+            .subtree_cleanup
+            .as_ref()
+            .expect("cleanup")
+            .status,
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Retained
+    );
+    assert!(
+        retained_retry
+            .workspace()
+            .generation_cleanup_steps
+            .is_empty()
+    );
+
     let mut resumed = Scheduler::new(
         FakeTracker::default(),
         FakeWorkspace {
@@ -1950,6 +1995,19 @@ async fn terminal_parent_fences_a_pending_repair_push() {
         pushes_before_terminal,
         "fresh terminal state must fence a repair push before repair advancement"
     );
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(controller.has_unreconciled_provider_operation());
+    assert!(
+        !controller.state.terminal(),
+        "a parent cannot become cleanup eligible while a provider write is unresolved"
+    );
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(7_300_400))
+        .await
+        .expect_err("unresolved provider intent must fence capture cleanup");
 }
 
 #[tokio::test]
@@ -3032,6 +3090,53 @@ async fn captured_parent_releases_owned_leases_and_cleans_descendants_before_roo
 }
 
 #[tokio::test]
+async fn capture_acknowledgement_rolls_back_cleanup_intent_when_persistence_fails() {
+    let suffix = "CAPTURE-ACK-ROLLBACK";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler.tick(ts(150)).await.expect("complete parent");
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "capture acknowledgement persistence failed".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(160))
+        .await
+        .expect_err("capture acknowledgement must fail closed");
+
+    assert!(scheduler.workspace().generation_cleanup_steps.is_empty());
+    assert_eq!(scheduler.workspace().cleanup_target_requests.len(), 1);
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(170))
+        .await
+        .expect("capture acknowledgement should be retryable");
+    assert_eq!(
+        scheduler.workspace().cleanup_target_requests.len(),
+        2,
+        "retry must reconstruct the cleanup intent after rollback"
+    );
+    assert_eq!(scheduler.workspace().generation_cleanups.len(), 2);
+}
+
+#[tokio::test]
 async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
     let suffix = "CAPTURE-CLEANUP-RETRY";
     let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
@@ -3098,6 +3203,105 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
             format!("cleanup:{parent_id}"),
         ],
         "the durable parent preparation receipt must not be repeated"
+    );
+}
+
+#[tokio::test]
+async fn reopened_parent_waits_for_pending_subtree_cleanup_before_replanning() {
+    let suffix = "CAPTURE-REOPEN-CLEANUP";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler.tick(ts(150)).await.expect("complete parent");
+    scheduler.workspace_mut().cleanup_results = VecDeque::from([
+        Ok(()),
+        Err(FakeError {
+            message: "diagnostic hold".to_owned(),
+            category: None,
+            retry_after: None,
+        }),
+    ]);
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(160))
+        .await
+        .expect("cleanup failure is retryable");
+
+    let mut reopened = tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "In Progress",
+        3_600_170,
+    );
+    reopened.sub_issues = vec![TrackerIssueRef {
+        id: child_id.to_string(),
+        identifier: format!("COE-CHILD-{suffix}"),
+        title: Some("Child".to_owned()),
+        url: None,
+        state: "Done".to_owned(),
+        state_kind: TrackerIssueStateKind::Completed,
+    }];
+    scheduler.tracker_mut().active = vec![reopened];
+    scheduler.tracker_mut().states.clear();
+    scheduler
+        .workspace_mut()
+        .cleanup_results
+        .push_back(Err(FakeError {
+            message: "diagnostic hold remains".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+
+    scheduler
+        .tick(ts(3_600_170))
+        .await
+        .expect("reopen must leave the old controller intact while cleanup is blocked");
+    let blocked: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("blocked state");
+    let blocked_controller = &blocked.parent_integrations[&parent_id];
+    assert!(matches!(
+        blocked_controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
+    ));
+    assert_eq!(
+        blocked_controller
+            .subtree_cleanup
+            .as_ref()
+            .expect("old cleanup intent")
+            .status,
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Pending
+    );
+    assert_eq!(scheduler.worker().launches.len(), 1);
+
+    scheduler
+        .tick(ts(7_200_170))
+        .await
+        .expect("reopen may replan after the prior subtree is removed");
+    let replanned: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("replanned state");
+    assert!(
+        replanned.parent_integrations[&parent_id]
+            .subtree_cleanup
+            .is_none(),
+        "the new controller is installed only after the prior cleanup completes"
+    );
+    assert_ne!(
+        replanned.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Completed
     );
 }
 
@@ -3428,6 +3632,79 @@ async fn parent_release_restores_execution_and_controller_when_persistence_fails
         before.parent_integrations[&parent_id]
     );
     assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_selects_only_the_controller_parent_generation() {
+    let suffix = "RECOVERY-PARENT-GENERATION";
+    let (scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let active_parent = scheduler.tracker().active[0].clone();
+    let parent_targets = scheduler.workspace().parent_targets.clone();
+    let durable_state = scheduler
+        .workspace()
+        .durable_state
+        .clone()
+        .expect("durable state");
+    let generation = serde_json::from_value::<
+        crate::opensymphony_orchestrator::DurableOrchestratorState,
+    >(durable_state.clone())
+    .expect("decode durable state")
+    .parent_integrations[&parent_id]
+        .hierarchy_generation;
+    let recovery = |generation: u64| RecoveryRecord {
+        issue: normalized_issue(
+            parent_id.as_str(),
+            &format!("COE-PARENT-{suffix}"),
+            "In Progress",
+        ),
+        workspace: workspace_record(
+            &format!("COE-PARENT-{suffix}"),
+            &format!("/tmp/workspaces/parents/COE-PARENT-{suffix}/{generation}"),
+        ),
+        successful_run: false,
+        cancelled_run: false,
+        completed_run: false,
+        had_in_flight_run: false,
+        pending_retry: false,
+        normal_retry_count: 0,
+        retry_scheduled_at: None,
+        retry_due_at: None,
+        retry_reason: None,
+        retry_error: None,
+        harness_kind: None,
+        interrupt_reason: None,
+        recovered_run: None,
+    };
+    let current_path = recovery(generation).workspace.path;
+    let recoveries = vec![recovery(generation), recovery(generation + 1)];
+    let mut restarted = Scheduler::new(
+        FakeTracker {
+            active: vec![active_parent],
+            ..Default::default()
+        },
+        FakeWorkspace {
+            durable_state: Some(durable_state),
+            recoveries,
+            parent_targets,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+
+    restarted
+        .tick(ts(200))
+        .await
+        .expect("scheduler recovery should select the durable controller generation");
+
+    assert_eq!(
+        restarted
+            .execution(&parent_id)
+            .and_then(|execution| execution.workspace())
+            .map(|workspace| workspace.path.clone()),
+        Some(current_path),
+        "a newer unrelated parent root must not overwrite the controller's exact generation"
+    );
 }
 
 #[tokio::test]

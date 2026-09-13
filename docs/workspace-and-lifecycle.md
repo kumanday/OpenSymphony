@@ -216,8 +216,9 @@ active returns through cleanup and baseline refresh. Operator and tracker
 terminal cancellation remains terminal. When a tracker terminal state arrives
 between repair worker turns, cancellation records no harness-interrupt intent or
 acknowledgement only after every attempt has conclusive stopped and cleanup
-evidence. A conversation-bound indeterminate attempt remains retained for stop
-reconciliation or operator recovery.
+evidence and every provider operation has a terminal receipt. A
+conversation-bound indeterminate attempt or provider intent without a receipt
+remains retained for reconciliation or operator recovery.
 
 ### Capture-acknowledged subtree cleanup
 
@@ -228,7 +229,9 @@ canceled parents record the same acknowledgement. Failed parents remain
 retained when the existing failed-workspace policy requests diagnostics
 retention; canceled parents follow the existing cancellation cleanup policy.
 Changing failed-workspace retention from enabled to disabled resumes a durable
-retained cleanup intent on the next reconciliation tick.
+retained cleanup intent on the next reconciliation tick. Enabling retention
+while a failed cleanup is incomplete moves it back to retained before the
+parent root is deleted.
 
 Removal has two ordered phases. First, the runtime backend applies its normal
 conversation archival fence and the workspace manager receipts the parent
@@ -254,6 +257,11 @@ the generation and ownership from its on-disk manifests instead of trusting a
 requested handle. Recovery enumerates both checkout roots and nested
 `parents/<key>/<generation>` roots, so completed parent executions return as
 capture candidates and their conversations pass through the archival fence.
+The scheduler accepts only the root matching the durable controller generation;
+superseded roots remain owned by their generation-specific cleanup state rather
+than overwriting the current execution during restart. A tracker reopen waits
+for pending prior-generation cleanup to complete before replacing the
+controller and preparing a new parent root.
 Hook, Git, manifest,
 tombstone, permission, and filesystem failures remain visible on the durable
 cleanup intent and retry on later scheduler ticks.

@@ -2333,7 +2333,7 @@ where
             })
             .map(|(issue_id, _)| issue_id.clone())
             .collect::<Vec<_>>();
-        let mut changed = false;
+        let mut intents = Vec::new();
         for parent_id in parent_ids {
             let Some(execution) = self.executions.get(&parent_id).cloned() else {
                 continue;
@@ -2356,6 +2356,13 @@ where
                 return Err(SchedulerError::Workspace {
                     detail: format!(
                         "captured parent {parent_id} still has an unreconciled harness cleanup fence"
+                    ),
+                });
+            }
+            if controller.has_unreconciled_provider_operation() {
+                return Err(SchedulerError::Workspace {
+                    detail: format!(
+                        "captured parent {parent_id} still has an unreconciled provider operation cleanup fence"
                     ),
                 });
             }
@@ -2449,15 +2456,21 @@ where
                 retry_count: 0,
                 last_error: None,
             };
-            self.hierarchy_state
-                .parent_integrations
-                .get_mut(&parent_id)
-                .expect("parent controller was cloned")
-                .subtree_cleanup = Some(intent);
-            changed = true;
+            intents.push((parent_id, intent));
         }
-        if changed {
-            self.persist_orchestrator_state().await?;
+        if !intents.is_empty() {
+            let previous_state = self.hierarchy_state.clone();
+            for (parent_id, intent) in intents {
+                self.hierarchy_state
+                    .parent_integrations
+                    .get_mut(&parent_id)
+                    .expect("parent controller was cloned")
+                    .subtree_cleanup = Some(intent);
+            }
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                return Err(error);
+            }
         }
         self.reconcile_parent_subtree_cleanup(observed_at).await
     }
@@ -2469,13 +2482,27 @@ where
         let retain_failed = self.workspace.retain_failed_workspaces();
         let mut retention_changed = false;
         for controller in self.hierarchy_state.parent_integrations.values_mut() {
-            if let Some(cleanup) = controller.subtree_cleanup.as_mut()
-                && cleanup.status == ParentSubtreeCleanupStatus::Retained
-                && (cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed)
-            {
-                cleanup.status = ParentSubtreeCleanupStatus::Pending;
-                cleanup.last_error = None;
-                retention_changed = true;
+            if let Some(cleanup) = controller.subtree_cleanup.as_mut() {
+                let next_status = match cleanup.status {
+                    ParentSubtreeCleanupStatus::Retained
+                        if cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed =>
+                    {
+                        Some(ParentSubtreeCleanupStatus::Pending)
+                    }
+                    ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                        if cleanup.outcome == CleanupTerminalOutcome::Failed
+                            && retain_failed
+                            && cleanup.parent_root.cleaned_at.is_none() =>
+                    {
+                        Some(ParentSubtreeCleanupStatus::Retained)
+                    }
+                    _ => None,
+                };
+                if let Some(next_status) = next_status {
+                    cleanup.status = next_status;
+                    cleanup.last_error = None;
+                    retention_changed = true;
+                }
             }
         }
         if retention_changed {
@@ -3371,6 +3398,28 @@ where
                     || snapshot.frozen
                     || snapshot.blocked_reason.is_some()
             });
+        let cleanup_blocks_reconciliation = self
+            .hierarchy_state
+            .parent_integrations
+            .get(&normalized.id)
+            .and_then(|controller| controller.subtree_cleanup.as_ref())
+            .is_some_and(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed);
+        if cleanup_blocks_reconciliation {
+            let mut changed = false;
+            if normalized.state.category == IssueStateCategory::Active
+                && let Some(cleanup) = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&normalized.id)
+                    .and_then(|controller| controller.subtree_cleanup.as_mut())
+                && cleanup.status == ParentSubtreeCleanupStatus::Retained
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                cleanup.last_error = None;
+                changed = true;
+            }
+            return Ok(changed);
+        }
         if !should_retain_parent_identity {
             self.parent_issue_ids.remove(&normalized.id);
             self.terminal_undispatched_parent_ids.remove(&normalized.id);
@@ -3695,6 +3744,34 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        records.retain(|record| {
+            let Some(generation) = recovered_parent_hierarchy_generation(&record.workspace.path)
+            else {
+                return true;
+            };
+            let expected_generation = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&record.issue.id)
+                .map(|controller| controller.hierarchy_generation)
+                .or_else(|| {
+                    self.hierarchy_state
+                        .hierarchy
+                        .get(&record.issue.id)
+                        .map(|snapshot| snapshot.generation)
+                });
+            let current = expected_generation.is_none_or(|expected| generation == expected);
+            if !current {
+                tracing::warn!(
+                    issue = %record.issue.id,
+                    recovered_generation = generation,
+                    controller_generation = expected_generation,
+                    path = %record.workspace.path.display(),
+                    "skipping superseded parent execution root during scheduler recovery"
+                );
+            }
+            current
+        });
         if self
             .migrate_legacy_in_flight_parent_controllers(&records, observed_at)
             .await?
@@ -9312,6 +9389,11 @@ fn hierarchy_depth(
         }
     }
     0
+}
+
+fn recovered_parent_hierarchy_generation(path: &Path) -> Option<u64> {
+    let generation = path.file_name()?.to_str()?.parse::<u64>().ok()?;
+    (path.parent()?.parent()?.file_name()?.to_str()? == "parents").then_some(generation)
 }
 
 fn conversation_id_suffix(value: &str) -> &str {

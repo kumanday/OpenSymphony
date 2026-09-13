@@ -537,7 +537,10 @@ Memory capture does not archive Linear issues.
 When automatic capture completes a terminal parent capsule, `opensymphony run`
 persists a capture acknowledgement before allowing subtree cleanup. A failed
 capture is not acknowledged, so the parent evidence and protecting leases stay
-available for the next capture attempt.
+available for the next capture attempt. If acknowledgement-state persistence
+fails, the scheduler rolls back the in-memory cleanup intent so the next
+automatic capture retries before any evidence is removed. Cleanup also remains
+fenced while a parent repair provider intent lacks its terminal receipt.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

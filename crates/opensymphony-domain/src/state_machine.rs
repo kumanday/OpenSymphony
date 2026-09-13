@@ -819,6 +819,18 @@ fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
                 .to_str()
                 .and_then(|name| name.strip_prefix(&format!("{}--", key.as_str())))
                 .is_some_and(|generation| !generation.is_empty())
+            || (name
+                .to_str()
+                .is_some_and(|generation| generation.parse::<u64>().is_ok())
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new(key.as_str()))
+                && path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new("parents")))
     })
 }
 
