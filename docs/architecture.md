@@ -202,7 +202,10 @@ active.
 The scheduler receipts every prepared or deleted target in the durable parent
 controller. Workspace run manifests hold the hook and integration-worktree
 receipts, while root-level generation tombstones bracket recursive deletion.
-Restart repeats only an incomplete step. A missing path is successful only when
+Lease releases roll back in memory when their atomic state write fails, and the
+workspace manager persists an attempted hook fence before `before_remove` can
+perform side effects. Restart repeats only an incomplete step without rerunning
+an indeterminate hook attempt. A missing path is successful only when
 the tombstone matches its issue, workspace key, path, terminal outcome, and
 generation. Failed and canceled parents use the existing failed-workspace
 cleanup semantics without changing terminal classification: `retain_failed`
@@ -212,6 +215,9 @@ cleanup completes. Capture selects descendant leases owned by that controller's
 generation even if the observed hierarchy has already advanced, and restart
 recovery selects only the parent root matching the controller's durable
 hierarchy generation.
+The completed cleanup intent remains in orchestrator state after the parent root
+is removed and seeds automatic-capture completion after daemon restart, so a
+terminal parent is not routed and captured again without first reopening.
 
 ### 3.2 OpenHands is the execution adapter
 

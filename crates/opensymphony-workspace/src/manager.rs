@@ -4973,33 +4973,77 @@ impl WorkspaceManager {
             .and_then(|intent| intent.before_remove.as_ref())
             .is_some();
         if !before_remove_recorded {
-            match self.execute_hook(HookKind::BeforeRemove, workspace).await {
-                Ok(record) => {
-                    if let Some(record) = record {
-                        run_manifest.hooks.push(record.clone());
+            let mut run_before_remove = true;
+            if let Some(hook) = self.hook_definition(HookKind::BeforeRemove).cloned() {
+                let started_at = Utc::now();
+                match self
+                    .resolve_hook_cwd(workspace, HookKind::BeforeRemove, &hook)
+                    .await
+                {
+                    Ok(cwd) => {
                         run_manifest
                             .cleanup_intent
                             .as_mut()
                             .expect("cleanup intent was initialized")
-                            .before_remove = Some(record);
+                            .before_remove = Some(HookExecutionRecord {
+                            kind: HookKind::BeforeRemove,
+                            command: hook.command,
+                            cwd,
+                            best_effort: true,
+                            status: HookExecutionStatus::Failed,
+                            started_at,
+                            finished_at: started_at,
+                            duration_ms: 0,
+                            exit_code: None,
+                            stdout: String::new(),
+                            stderr: "hook outcome is indeterminate after an interrupted cleanup; the hook will not be repeated"
+                                .to_owned(),
+                        });
+                        self.write_run_manifest(workspace, &run_manifest).await?;
                     }
-                    let intent = run_manifest
-                        .cleanup_intent
-                        .as_mut()
-                        .expect("cleanup intent was initialized");
-                    intent.last_error = None;
-                    self.write_run_manifest(workspace, &run_manifest).await?;
+                    Err(failure) => {
+                        run_manifest.hooks.push(failure.record.clone());
+                        let intent = run_manifest
+                            .cleanup_intent
+                            .as_mut()
+                            .expect("cleanup intent was initialized");
+                        intent.before_remove = Some(failure.record);
+                        intent.retry_count = intent.retry_count.saturating_add(1);
+                        intent.last_error = Some(failure.error.to_string());
+                        self.write_run_manifest(workspace, &run_manifest).await?;
+                        run_before_remove = false;
+                    }
                 }
-                Err(failure) => {
-                    run_manifest.hooks.push(failure.record.clone());
-                    let intent = run_manifest
-                        .cleanup_intent
-                        .as_mut()
-                        .expect("cleanup intent was initialized");
-                    intent.before_remove = Some(failure.record);
-                    intent.retry_count = intent.retry_count.saturating_add(1);
-                    intent.last_error = Some(failure.error.to_string());
-                    self.write_run_manifest(workspace, &run_manifest).await?;
+            }
+            if run_before_remove {
+                match self.execute_hook(HookKind::BeforeRemove, workspace).await {
+                    Ok(record) => {
+                        if let Some(record) = record {
+                            run_manifest.hooks.push(record.clone());
+                            run_manifest
+                                .cleanup_intent
+                                .as_mut()
+                                .expect("cleanup intent was initialized")
+                                .before_remove = Some(record);
+                        }
+                        let intent = run_manifest
+                            .cleanup_intent
+                            .as_mut()
+                            .expect("cleanup intent was initialized");
+                        intent.last_error = None;
+                        self.write_run_manifest(workspace, &run_manifest).await?;
+                    }
+                    Err(failure) => {
+                        run_manifest.hooks.push(failure.record.clone());
+                        let intent = run_manifest
+                            .cleanup_intent
+                            .as_mut()
+                            .expect("cleanup intent was initialized");
+                        intent.before_remove = Some(failure.record);
+                        intent.retry_count = intent.retry_count.saturating_add(1);
+                        intent.last_error = Some(failure.error.to_string());
+                        self.write_run_manifest(workspace, &run_manifest).await?;
+                    }
                 }
             }
         }

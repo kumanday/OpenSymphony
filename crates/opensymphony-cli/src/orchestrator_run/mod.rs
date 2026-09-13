@@ -1254,8 +1254,10 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         },
     };
     let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let recovered_completed_parent_captures = scheduler.completed_subtree_cleanup_identifiers();
     let mut auto_capture_completed_issues = initial_auto_capture_completed_issues(
         &startup_terminal_issues,
+        &recovered_completed_parent_captures,
         runtime.memory.auto_capture,
     );
     push_recent_event(
@@ -2024,10 +2026,11 @@ fn auto_capture_candidates(
 
 fn initial_auto_capture_completed_issues(
     startup_terminal_issues: &BTreeSet<String>,
+    recovered_completed_parent_captures: &BTreeSet<String>,
     auto_capture_enabled: bool,
 ) -> BTreeSet<String> {
     if auto_capture_enabled {
-        BTreeSet::new()
+        recovered_completed_parent_captures.clone()
     } else {
         startup_terminal_issues.clone()
     }
@@ -2544,10 +2547,24 @@ mod tests {
     #[test]
     fn startup_terminal_issues_retry_capture_after_daemon_restart() {
         let terminal = issue_set(&["COE-1", "COE-2"]);
-        assert!(initial_auto_capture_completed_issues(&terminal, true).is_empty());
+        assert!(
+            initial_auto_capture_completed_issues(&terminal, &BTreeSet::new(), true).is_empty()
+        );
         assert_eq!(
-            initial_auto_capture_completed_issues(&terminal, false),
+            initial_auto_capture_completed_issues(&terminal, &BTreeSet::new(), false),
             terminal
+        );
+    }
+
+    #[test]
+    fn startup_preserves_durable_completed_parent_capture_markers() {
+        let terminal = issue_set(&["COE-PARENT", "COE-LEAF"]);
+        let recovered = issue_set(&["COE-PARENT"]);
+
+        let mut completed = initial_auto_capture_completed_issues(&terminal, &recovered, true);
+        assert_eq!(
+            auto_capture_candidates(&terminal, &mut completed, true),
+            vec!["COE-LEAF".to_owned()]
         );
     }
 

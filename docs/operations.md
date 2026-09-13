@@ -544,6 +544,10 @@ available for the next capture attempt. If acknowledgement-state persistence
 fails, the scheduler rolls back the in-memory cleanup intent so the next
 automatic capture retries before any evidence is removed. Cleanup also remains
 fenced while a parent repair provider intent lacks its terminal receipt.
+After acknowledged parent cleanup removes the runtime root, the completed
+cleanup intent remains the restart-safe automatic-capture marker. A malformed
+conversation manifest on any generation-bound cleanup target blocks removal
+until its archival evidence is repaired.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

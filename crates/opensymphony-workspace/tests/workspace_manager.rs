@@ -3992,7 +3992,7 @@ async fn terminal_cleanup_receipts_best_effort_hook_and_accepts_only_its_generat
         &workspace_root,
         HookConfig {
             before_remove: Some(HookDefinition::shell(
-                "printf 'token=hook-secret\\n' >> ../hook-count; if [ -f .cleanup-ready ]; then exit 0; else touch .cleanup-ready; exit 7; fi",
+                "grep -q '\"before_remove\"' .opensymphony/run.json || exit 9; printf 'token=hook-secret\\n' >> ../hook-count; if [ -f .cleanup-ready ]; then exit 0; else touch .cleanup-ready; exit 7; fi",
             )),
             ..HookConfig::default()
         },

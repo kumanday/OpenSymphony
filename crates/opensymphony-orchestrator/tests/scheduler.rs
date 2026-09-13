@@ -3132,6 +3132,11 @@ async fn captured_parent_releases_owned_leases_and_cleans_descendants_before_roo
         crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Completed
     );
     assert_eq!(cleanup.capture_acknowledged_at, ts(160));
+    assert_eq!(
+        scheduler.completed_subtree_cleanup_identifiers(),
+        [format!("COE-PARENT-{suffix}")].into_iter().collect(),
+        "completed cleanup remains the durable restart marker for automatic capture"
+    );
 
     scheduler.tick(ts(170)).await.expect("repeat cleanup tick");
     assert_eq!(
@@ -3185,6 +3190,65 @@ async fn capture_acknowledgement_rolls_back_cleanup_intent_when_persistence_fail
         2,
         "retry must reconstruct the cleanup intent after rollback"
     );
+    assert_eq!(scheduler.workspace().generation_cleanups.len(), 2);
+}
+
+#[tokio::test]
+async fn subtree_cleanup_rolls_back_unpersisted_lease_release() {
+    let suffix = "CAPTURE-LEASE-ROLLBACK";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler.tick(ts(150)).await.expect("complete parent");
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "lease release persistence failed".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(160))
+        .await
+        .expect_err("unpersisted lease release must stop cleanup");
+    assert!(scheduler.workspace().generation_cleanups.is_empty());
+
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "lease release retry persistence failed".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(170))
+        .await
+        .expect_err("rolled-back lease release must retry durable persistence");
+    assert!(scheduler.workspace().generation_cleanups.is_empty());
+
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(180))
+        .await
+        .expect("persisted lease release should allow cleanup");
     assert_eq!(scheduler.workspace().generation_cleanups.len(), 2);
 }
 

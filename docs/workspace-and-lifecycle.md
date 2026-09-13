@@ -244,10 +244,14 @@ therefore preserve their checkout generations.
 If a descendant is reactivated after its parent-owned leases are released, a
 claimed or running execution in that exact workspace generation also fences
 deletion until the worker reaches a non-running state.
+Lease-owner release is persisted transactionally; a failed state write restores
+the in-memory leases so the next tick retries the durable release.
 
-Run-manifest receipts make the hook and each worktree removal idempotent. A
-failed `before_remove` receipt remains visible but does not block deletion or
-run the best-effort hook again.
+Run-manifest receipts make the hook and each worktree removal idempotent. The
+manager writes an attempted `before_remove` fence before launching the command;
+if cleanup is interrupted before the result receipt, recovery preserves that
+indeterminate record and does not repeat the best-effort side effect. A failed
+`before_remove` receipt remains visible but does not block deletion.
 Generation tombstones outside the deleted workspace are written before root
 deletion and completed afterward; they also copy the successful hook receipt so
 a partially removed metadata directory cannot cause the hook to run twice. The
@@ -270,9 +274,10 @@ the newer observed subtree, and an operator replan is rejected until that
 cleanup finishes. Bootstrap recognizes surviving generations already named by
 an incomplete cleanup intent and leaves them to that ordered phase instead of
 reacquiring a leaf lease or applying generic terminal deletion.
-Hook, Git, manifest,
-tombstone, permission, and filesystem failures remain visible on the durable
-cleanup intent and retry on later scheduler ticks.
+Malformed conversation manifests fail closed for both checkout and parent
+generation cleanup targets so the archival fence cannot be bypassed. Hook, Git,
+manifest, tombstone, permission, and filesystem failures remain visible on the
+durable cleanup intent and retry on later scheduler ticks.
 
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient

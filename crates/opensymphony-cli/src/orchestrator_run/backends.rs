@@ -4169,9 +4169,9 @@ impl RuntimeWorkspaceBackend {
                             %error,
                             "continuing terminal cleanup with invalid conversation manifest"
                         );
-                        if handle.checkout_generation().is_some() {
+                        if cleanup_target.is_some() || handle.checkout_generation().is_some() {
                             return Err(CliWorkspaceError::ConversationLifecycle(format!(
-                                "strict terminal conversation manifest is malformed: {error}"
+                                "generation-bound terminal conversation manifest is malformed: {error}"
                             )));
                         }
                     }
@@ -11928,7 +11928,7 @@ mod tests {
             generation: "parent:9".to_owned(),
             outcome: crate::opensymphony_workspace::CleanupTerminalOutcome::Succeeded,
         };
-        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let mut backend = RuntimeWorkspaceBackend::new(Arc::clone(&workspace_manager), &workflow);
         backend.codex_bin = fake_codex.to_string_lossy().into_owned();
 
         backend
@@ -11939,6 +11939,25 @@ mod tests {
         assert!(parent.handle.workspace_path().is_dir());
         let log = fs::read_to_string(log_path).expect("Codex lifecycle log should exist");
         assert!(log.contains(r#""method":"thread/archive""#));
+
+        workspace_manager
+            .write_text_artifact(
+                &parent.handle,
+                &parent.handle.conversation_manifest_path(),
+                "{\"malformed\":true}",
+            )
+            .await
+            .expect("malformed parent conversation manifest should persist");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("generation-bound parent cleanup must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("generation-bound terminal conversation manifest is malformed")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
     }
 
     #[tokio::test]

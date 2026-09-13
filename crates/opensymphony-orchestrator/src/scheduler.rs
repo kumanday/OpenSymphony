@@ -2059,6 +2059,16 @@ where
         self.executions.get(issue_id)
     }
 
+    pub fn completed_subtree_cleanup_identifiers(&self) -> BTreeSet<String> {
+        self.hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .filter(|cleanup| cleanup.status == ParentSubtreeCleanupStatus::Completed)
+            .map(|cleanup| cleanup.parent_root.cleanup.identifier.clone())
+            .collect()
+    }
+
     pub fn snapshot(&self, generated_at: TimestampMs) -> OrchestratorSnapshot {
         let mut issues = self
             .executions
@@ -2574,6 +2584,8 @@ where
                 .and_then(|controller| controller.subtree_cleanup.as_ref())
                 .map(|cleanup| cleanup.descendants.clone())
                 .unwrap_or_default();
+            let previous_state = self.hierarchy_state.clone();
+            let mut leases_released = false;
             for target in &descendants {
                 let resource = target.resource.as_ref().expect("descendant resource");
                 if self.hierarchy_state.release_parent_resource_leases(
@@ -2581,8 +2593,12 @@ where
                     resource,
                     observed_at.as_u64(),
                 ) {
-                    self.persist_orchestrator_state().await?;
+                    leases_released = true;
                 }
+            }
+            if leases_released && let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                return Err(error);
             }
             if let Some(cleanup) = self
                 .hierarchy_state
