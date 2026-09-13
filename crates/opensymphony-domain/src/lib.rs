@@ -805,6 +805,7 @@ mod tests {
             turn_count: 0,
             summary: None,
             error: Some("boom".to_owned()),
+            harness_stopped: false,
             parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
@@ -1313,6 +1314,7 @@ mod tests {
             turn_count: 0,
             summary: Some("stale worker".to_owned()),
             error: Some("boom".to_owned()),
+            harness_stopped: false,
             parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
@@ -1368,6 +1370,7 @@ mod tests {
             turn_count: 1,
             summary: Some("old attempt".to_owned()),
             error: Some("boom".to_owned()),
+            harness_stopped: false,
             parent_verification: None,
         };
         let retry = must(RetryEntry::failure(

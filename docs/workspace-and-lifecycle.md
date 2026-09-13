@@ -207,7 +207,8 @@ manager.
 Once that conversation is bound, a parent harness change is rejected before a
 replacement session starts. A runtime-terminal successful, failed, or canceled
 turn supplies stopped-turn evidence and releases its foreground-process receipt;
-timeout, stall, detach, and failed-cancel paths still require explicit stopped
+an outcome created by transport loss or local persistence failure does not. A
+timeout, stall, detach, or failed-cancel path still requires explicit stopped
 state reconciliation. An ordinary cancellation while the tracker parent remains
 active returns through cleanup and baseline refresh. Operator and tracker
 terminal cancellation remains terminal. When a tracker terminal state arrives

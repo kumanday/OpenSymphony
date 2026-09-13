@@ -2274,7 +2274,8 @@ fn enqueue_successful_parent_completion(
         ts(finished_at),
         Some("parent integration verified".to_owned()),
         None,
-    );
+    )
+    .with_harness_stopped();
     let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("durable state");
@@ -2366,7 +2367,8 @@ fn enqueue_failed_parent_repair_request(
         ts(finished_at),
         Some("parent integration failed and isolated one repair".to_owned()),
         Some("integration failed".to_owned()),
-    );
+    )
+    .with_harness_stopped();
     outcome.parent_verification = Some(evidence);
     scheduler
         .worker_mut()
@@ -3324,7 +3326,8 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         ts(150),
         Some("worker claimed success despite failed verification".to_owned()),
         None,
-    );
+    )
+    .with_harness_stopped();
     failed_outcome.parent_verification = Some(parent_verification_evidence(
         parent_run.worker_id.as_str(),
         snapshot.generation,
@@ -3460,14 +3463,9 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
 }
 
 #[tokio::test]
-async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
+async fn failed_parent_turn_without_terminal_status_retains_conversation() {
     let (mut scheduler, parent_id) = launched_parent_scheduler("FAILED-NO-COMMAND").await;
     let first_run = scheduler.worker().launches[0].run.clone();
-    let conversation = scheduler
-        .execution(&parent_id)
-        .and_then(|execution| execution.conversation())
-        .cloned()
-        .expect("parent conversation");
     scheduler
         .worker_mut()
         .updates
@@ -3496,32 +3494,35 @@ async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
             .cleanup
             .as_ref()
             .map(|cleanup| cleanup.status),
-        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded)
+        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Pending)
     );
+    assert!(controller.attempts[0].harness_stopped_at.is_none());
+    assert!(!controller.can_cancel_without_harness());
     assert_eq!(
         controller.state,
         crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
     );
 
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue(
+        parent_id.as_str(),
+        "COE-PARENT-FAILED-NO-COMMAND",
+        "Done",
+        0,
+    )];
     let retry_dispatch_at = retry_due_at.max(ts(3_600_100));
-    scheduler
-        .worker_mut()
-        .launch_results
-        .push_back(Ok(WorkerLaunch {
-            conversation: conversation.clone(),
-            started_at: Some(retry_dispatch_at),
-        }));
     scheduler
         .tick(retry_dispatch_at)
         .await
-        .expect("retry after stopped failed turn");
-    assert_eq!(scheduler.worker().launches.len(), 2);
+        .expect("terminal reconciliation retains an unacknowledged remote turn");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.execution(&parent_id).is_some());
     let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("decode state");
     assert_eq!(
-        state.parent_integrations[&parent_id].current_attempt_id(),
-        Some("parent-attempt-2")
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
     );
 }
 
@@ -3545,7 +3546,8 @@ async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
                 ts(150),
                 Some("runtime cancelled the active turn".to_owned()),
                 None,
-            ),
+            )
+            .with_harness_stopped(),
         });
     scheduler.tick(ts(150)).await.expect("record cancellation");
 

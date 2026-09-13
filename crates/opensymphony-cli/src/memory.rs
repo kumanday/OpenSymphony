@@ -15042,6 +15042,7 @@ Public memory concept.
                     occurred_at: crate::opensymphony_domain::TimestampMs::new(2),
                     detail: None,
                 }),
+                harness_stopped_at: Some(crate::opensymphony_domain::TimestampMs::new(2)),
                 input_version: "targets:554".to_owned(),
                 verified_repository_commits: BTreeMap::from([
                     (

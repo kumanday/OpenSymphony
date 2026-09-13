@@ -85,6 +85,7 @@ Why fakes matter:
   reconciliation with side-effect counters; persistence failure before branch
   creation; bounded current-head feedback for credential-scrubbed workers;
   resolved-thread pushback; controller cancellation between repair turns;
+  retention after a conversation-bound transport failure without terminal proof;
   requested changes on one PR; failed checks, rejection, outage,
   external closure, force-push, and conflict states; squash/rebase merge-result
   reachability; and separately auditable attempts across repositories

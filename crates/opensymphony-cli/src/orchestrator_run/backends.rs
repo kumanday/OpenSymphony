@@ -3422,13 +3422,15 @@ fn current_human_review_feedback(
             .iter()
             .filter(|thread| !thread.is_resolved)
             .filter_map(|thread| {
-                let comment = thread.comments.nodes.iter().find(|comment| {
-                    comment
-                        .author
-                        .as_ref()
-                        .and_then(|author| author.login.as_deref())
-                        .is_some_and(|login| !is_codex_connector_login(login))
-                })?;
+                let comment = thread.comments.nodes.first()?;
+                if !comment
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.login.as_deref())
+                    .is_some_and(|login| !is_codex_connector_login(login))
+                {
+                    return None;
+                }
                 Some(ParentReviewFeedback {
                     thread_id: comment_thread_id(&thread.id),
                     body: bounded_review_feedback_text(&comment.body),
@@ -3444,7 +3446,7 @@ fn current_human_review_feedback(
 fn unresolved_human_threads(review_threads: &[GitHubReviewThread]) -> bool {
     review_threads.iter().any(|thread| {
         !thread.is_resolved
-            && thread.comments.nodes.iter().any(|comment| {
+            && thread.comments.nodes.first().is_some_and(|comment| {
                 comment
                     .author
                     .as_ref()
@@ -7175,6 +7177,7 @@ async fn run_codex_stdio_issue_with_mode(
                         Some("Codex app-server workspace finalization failed".into()),
                         Some(detail),
                     )
+                    .with_harness_stopped()
                 }
             }
         }
@@ -7779,7 +7782,8 @@ async fn try_run_codex_stdio_issue(
                 now_timestamp(),
                 Some(summary),
                 None,
-            ),
+            )
+            .with_harness_stopped(),
             terminal.status,
         ));
     }
@@ -7936,7 +7940,8 @@ async fn try_run_codex_stdio_issue(
     let _ = child.kill().await;
     stderr_task.abort();
     Ok((
-        WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
+        WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None)
+            .with_harness_stopped(),
         terminal.status,
     ))
 }
@@ -10126,6 +10131,7 @@ mod tests {
             turn_count: 1,
             summary: Some("generic harness success".to_owned()),
             error: None,
+            harness_stopped: false,
             parent_verification: None,
         };
 
@@ -14610,25 +14616,55 @@ Run the scheduler.
             user: reviewer.clone(),
         }];
         let latest = latest_github_review_states(reviews.iter().cloned());
-        let threads = vec![GitHubReviewThread {
-            id: "human-thread".to_owned(),
-            is_resolved: false,
-            comments: GitHubReviewThreadComments {
-                nodes: vec![GitHubReviewThreadComment {
-                    body: "Handle the human inline finding.".to_owned(),
-                    path: Some("src/review.rs".to_owned()),
-                    line: Some(24),
-                    original_line: Some(23),
-                    commit: Some(GitHubGraphQlCommit {
-                        oid: "newer-commit".to_owned(),
-                    }),
-                    original_commit: Some(GitHubGraphQlCommit {
-                        oid: "prior-head".to_owned(),
-                    }),
-                    author: reviewer,
-                }],
+        let threads = vec![
+            GitHubReviewThread {
+                id: "human-thread".to_owned(),
+                is_resolved: false,
+                comments: GitHubReviewThreadComments {
+                    nodes: vec![GitHubReviewThreadComment {
+                        body: "Handle the human inline finding.".to_owned(),
+                        path: Some("src/review.rs".to_owned()),
+                        line: Some(24),
+                        original_line: Some(23),
+                        commit: Some(GitHubGraphQlCommit {
+                            oid: "newer-commit".to_owned(),
+                        }),
+                        original_commit: Some(GitHubGraphQlCommit {
+                            oid: "prior-head".to_owned(),
+                        }),
+                        author: reviewer.clone(),
+                    }],
+                },
             },
-        }];
+            GitHubReviewThread {
+                id: "codex-thread-with-human-reply".to_owned(),
+                is_resolved: false,
+                comments: GitHubReviewThreadComments {
+                    nodes: vec![
+                        GitHubReviewThreadComment {
+                            body: "Automated finding.".to_owned(),
+                            path: Some("src/review.rs".to_owned()),
+                            line: Some(30),
+                            original_line: Some(30),
+                            commit: None,
+                            original_commit: None,
+                            author: Some(GitHubReviewUser {
+                                login: Some("chatgpt-codex-connector[bot]".to_owned()),
+                            }),
+                        },
+                        GitHubReviewThreadComment {
+                            body: "Human reply.".to_owned(),
+                            path: Some("src/review.rs".to_owned()),
+                            line: Some(30),
+                            original_line: Some(30),
+                            commit: None,
+                            original_commit: None,
+                            author: reviewer,
+                        },
+                    ],
+                },
+            },
+        ];
 
         assert_eq!(
             current_human_review_feedback(&reviews, &latest, &threads),

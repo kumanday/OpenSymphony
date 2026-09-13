@@ -5904,13 +5904,10 @@ where
             }
         };
         enforce_parent_outcome_trust(outcome, deadline_reached, verification_passed);
-        if matches!(
-            outcome.outcome,
-            WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed | WorkerOutcomeKind::Cancelled
-        ) {
+        if outcome.harness_stopped {
             controller.observe_harness_stopped(
                 &attempt_id,
-                "terminal worker outcome reconciled the harness turn as stopped",
+                "harness adapter observed a terminal runtime state",
                 outcome.finished_at,
             )?;
         }
@@ -9099,6 +9096,7 @@ mod tests {
             turn_count: 1,
             summary: Some("claimed success".to_owned()),
             error: None,
+            harness_stopped: false,
             parent_verification: None,
         };
         let mut late = outcome();

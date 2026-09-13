@@ -3916,13 +3916,15 @@ impl IssueSessionRunner {
             .finish_run(workspace, run_manifest, run_status)
             .await?;
 
-        let worker_outcome = WorkerOutcomeRecord::from_run(
+        let harness_stopped = session.stream.state_mirror().terminal_status().is_some();
+        let mut worker_outcome = WorkerOutcomeRecord::from_run(
             observed_run,
             outcome.kind,
             timestamp_ms_from_datetime(Utc::now()),
             Some(outcome.summary.clone()),
             outcome.error.clone(),
         );
+        worker_outcome.harness_stopped = harness_stopped;
 
         workspace_manager
             .write_json_artifact(

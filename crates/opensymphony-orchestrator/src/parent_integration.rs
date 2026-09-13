@@ -212,6 +212,10 @@ pub struct ParentVerificationAttempt {
     pub resources: Vec<ParentResourceReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ParentCleanupReceipt>,
+    /// Orchestrator-observed proof that a conversation-bound harness turn
+    /// reached a terminal state or acknowledged an interrupt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_stopped_at: Option<TimestampMs>,
     pub input_version: String,
     #[serde(default)]
     pub verified_repository_commits: BTreeMap<CanonicalRepositoryId, String>,
@@ -785,6 +789,7 @@ impl ParentIntegrationController {
             log_truncated: false,
             resources: Vec::new(),
             cleanup: None,
+            harness_stopped_at: None,
             input_version,
             verified_repository_commits: BTreeMap::new(),
         });
@@ -1058,6 +1063,7 @@ impl ParentIntegrationController {
             )?;
         }
         let attempt = self.attempt_mut(attempt_id)?;
+        attempt.harness_stopped_at = Some(observed_at);
         let remaining = active_resource_keys(attempt);
         attempt.cleanup = Some(ParentCleanupReceipt {
             status: if remaining.is_empty() {
@@ -1308,6 +1314,7 @@ impl ParentIntegrationController {
         let resources_released = active_resource_keys(&self.attempts[index]).is_empty();
         self.attempts[index].status = ParentAttemptStatus::Indeterminate;
         self.attempts[index].finished_at = Some(occurred_at);
+        self.attempts[index].harness_stopped_at = Some(occurred_at);
         self.attempts[index].cleanup = Some(ParentCleanupReceipt {
             status: if resources_released {
                 ParentCleanupStatus::Succeeded
@@ -2221,8 +2228,13 @@ impl ParentIntegrationController {
                     .is_some_and(|cleanup| cleanup.status == ParentCleanupStatus::Succeeded)
                     && active_resource_keys(attempt).is_empty();
                 cleanup_succeeded
-                    && (attempt.status != ParentAttemptStatus::Indeterminate
-                        || (attempt.conversation_id.is_none() && attempt.commands.is_empty()))
+                    && match attempt.conversation_id.as_ref() {
+                        Some(_) => attempt.harness_stopped_at.is_some(),
+                        None => {
+                            attempt.status != ParentAttemptStatus::Indeterminate
+                                || attempt.commands.is_empty()
+                        }
+                    }
             })
     }
 
@@ -2757,8 +2769,20 @@ mod tests {
             occurred_at: TimestampMs::new(6),
             detail: Some("recovery cleanup verified".to_owned()),
         });
+        assert!(
+            !restarted.can_cancel_without_harness(),
+            "resource cleanup alone cannot prove that a conversation-bound turn stopped"
+        );
         restarted
-            .record_baseline_verified("targets:2", TimestampMs::new(7))
+            .observe_harness_stopped(
+                &running,
+                "recovery observed terminal harness state",
+                TimestampMs::new(7),
+            )
+            .expect("terminal reconciliation");
+        assert!(restarted.can_cancel_without_harness());
+        restarted
+            .record_baseline_verified("targets:2", TimestampMs::new(8))
             .expect("explicit cleanup permits verified rerun");
 
         let mut prelaunch = controller();
