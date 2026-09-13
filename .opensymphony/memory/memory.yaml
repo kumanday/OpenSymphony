@@ -57,9 +57,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -181,9 +183,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -270,9 +274,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -350,9 +356,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -420,9 +428,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -498,9 +508,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -601,9 +613,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -673,9 +687,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -760,9 +776,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -820,7 +838,9 @@ areas:
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:review
       - area:runner
       - area:scheduler
       - area:task-packets
@@ -871,9 +891,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -963,9 +985,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1051,9 +1075,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1176,9 +1202,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1255,9 +1283,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -1333,9 +1363,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1402,7 +1434,9 @@ areas:
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:review
       - area:runner
       - area:scheduler
       - area:task-packets
@@ -1428,6 +1462,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:scheduler
       - area:testing
       - area:workspace-lifecycle
@@ -1473,9 +1509,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -1550,9 +1588,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1630,9 +1670,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -1673,6 +1715,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:testing
       - area:workspace-lifecycle
       linear_milestones:
@@ -1725,9 +1769,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1889,9 +1935,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1975,9 +2023,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2077,9 +2127,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2169,9 +2221,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2253,9 +2307,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -2342,9 +2398,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2428,9 +2486,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2535,9 +2595,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -2615,9 +2677,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2708,9 +2772,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2762,6 +2828,8 @@ areas:
       - area:memory
       - area:orchestrator
       - area:outcomes
+      - area:provider
+      - area:review
       - area:testing
       - area:verifiers
       - area:workspace-lifecycle
@@ -2807,9 +2875,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -2869,6 +2939,8 @@ areas:
       - area:memory
       - area:orchestrator
       - area:process-protocol
+      - area:provider
+      - area:review
       - area:runner
       - area:testing
       - area:workspace-lifecycle
@@ -2889,12 +2961,29 @@ areas:
       - area:memory
       - area:orchestrator
       - area:provenance
+      - area:provider
+      - area:review
       - area:task-packets
       - area:testing
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
       - 'M1: Task And Run Orchestration'
+  provider:
+    title: Provider
+    docs_target: docs/provider.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - provider
+    source_refs:
+      linear_labels:
+      - area:provider
+      - area:review
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
   quality:
     title: Quality
     docs_target: docs/quality.md
@@ -2913,7 +3002,9 @@ areas:
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:review
       - area:runner
       - area:scheduler
       - area:task-packets
@@ -2965,9 +3056,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3034,9 +3127,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3084,6 +3179,20 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.96: Parent Integration Lifecycle'
       - 'M9.5: Developer Build Acceleration'
+  review:
+    title: Review
+    docs_target: docs/review.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - review
+    source_refs:
+      linear_labels:
+      - area:review
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
   run-detail:
     title: Run Detail
     docs_target: docs/run-detail.md
@@ -3124,9 +3233,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3167,6 +3278,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:runner
       - area:testing
       - area:workspace-lifecycle
@@ -3220,9 +3333,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3299,9 +3414,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3343,6 +3460,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:scheduler
       - area:testing
       - area:workspace-lifecycle
@@ -3396,9 +3515,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3510,9 +3631,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3554,6 +3677,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:task-packets
       - area:testing
       - area:workspace
@@ -3600,9 +3725,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3677,9 +3804,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3788,9 +3917,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3858,9 +3989,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -3935,9 +4068,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -4021,9 +4156,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -4088,6 +4225,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:testing
       - area:verifiers
       - area:workspace-lifecycle
@@ -4133,9 +4272,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -4217,9 +4358,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust
@@ -4261,6 +4404,8 @@ areas:
       - area:harness
       - area:memory
       - area:orchestrator
+      - area:provider
+      - area:review
       - area:testing
       - area:workspace
       - area:workspace-lifecycle
@@ -4321,9 +4466,11 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:rust

@@ -248,6 +248,7 @@ of dead bridge code.
 - COE-508: Cache code-intel parsers and compiled query packs
 - COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
 
 ## Source refs
 
@@ -311,5 +312,6 @@ of dead bridge code.
 - COE-508
 - COE-553
 - COE-554
+- COE-555
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

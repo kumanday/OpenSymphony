@@ -13,6 +13,7 @@ last_memory_sync: 2026-08-31T00:07:01.093837+00:00
 
 - COE-553 contributed: PR #236: Add parent execution roots and shared child worktrees (merge `9abff5a`)
 - COE-554 contributed: PR #237: feat: add restart-safe parent integration controller (merge `b4e1b67`)
+- COE-555 contributed: PR #238: COE-555: Add parent repair review and merge lifecycle (merge `52d3ba3`)
 - COE-565 contributed: No merged PR source was matched during capture.
 
 ## Important invariants
@@ -32,12 +33,14 @@ last_memory_sync: 2026-08-31T00:07:01.093837+00:00
 
 - COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
 - COE-565: Implement isolated workspace materialization
 
 ## Source refs
 
 - COE-553
 - COE-554
+- COE-555
 - COE-565
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

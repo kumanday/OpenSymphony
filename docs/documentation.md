@@ -83,6 +83,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-553: Parent Execution Roots And Child Workspace Reuse
 - COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
@@ -142,6 +143,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-551
 - COE-553
 - COE-554
+- COE-555
 - COE-562
 - COE-563
 - COE-564

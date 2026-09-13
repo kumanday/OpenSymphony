@@ -789,6 +789,7 @@ That document covers:
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
 
 ## Source refs
 
@@ -939,5 +940,6 @@ That document covers:
 - COE-550
 - COE-551
 - COE-554
+- COE-555
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
