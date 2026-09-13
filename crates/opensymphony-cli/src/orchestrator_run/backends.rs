@@ -1345,34 +1345,12 @@ impl TrackerBackend for RuntimeTrackerBackend {
             let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
                 LinearError::InvalidResponse("repair pull request identity is missing".to_owned())
             })?;
-            let (intended_at, request_input_version) = repair
-                .operations
-                .iter()
-                .rev()
-                .find(|operation| {
-                    operation.kind
-                        == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
-                        && operation.receipt.is_none()
-                })
-                .map(|operation| (operation.intended_at, operation.input_version.as_str()))
-                .ok_or_else(|| {
+            let (intended_at, review_comment_boundary) =
+                pending_codex_review_request_context(&repair.operations).ok_or_else(|| {
                     LinearError::InvalidResponse(
                         "repair review request has no durable pending intent".to_owned(),
                     )
                 })?;
-            let review_comment_boundary = repair
-                .operations
-                .iter()
-                .rev()
-                .find(|operation| {
-                    operation.kind
-                        == crate::opensymphony_orchestrator::ParentProviderOperationKind::ReconcileReview
-                        && operation.input_version == request_input_version
-                        && operation.receipt.is_some()
-                })
-                .and_then(|operation| operation.receipt.as_ref())
-                .and_then(|receipt| receipt.detail.as_deref())
-                .and_then(|detail| detail.parse::<u64>().ok());
             let comments = self
                 .github_issue_comments(&api_root, &owner, &repository_name, pull_number, repository)
                 .await?;
@@ -3176,6 +3154,29 @@ fn codex_review_request_already_posted(
                 |boundary| comment.id > boundary,
             )
     })
+}
+
+fn pending_codex_review_request_context(
+    operations: &[crate::opensymphony_orchestrator::ParentProviderOperation],
+) -> Option<(TimestampMs, Option<u64>)> {
+    let (request_index, request) = operations.iter().enumerate().rev().find(|(_, operation)| {
+        operation.kind
+            == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
+            && operation.receipt.is_none()
+    })?;
+    let boundary = operations[..request_index]
+        .iter()
+        .rev()
+        .find(|operation| {
+            operation.kind
+                == crate::opensymphony_orchestrator::ParentProviderOperationKind::ReconcileReview
+                && operation.input_version == request.input_version
+                && operation.receipt.is_some()
+        })
+        .and_then(|operation| operation.receipt.as_ref())
+        .and_then(|receipt| receipt.detail.as_deref())
+        .and_then(|detail| detail.parse::<u64>().ok());
+    Some((request.intended_at, boundary))
 }
 
 fn combine_codex_and_human_review(
@@ -14256,6 +14257,51 @@ Run the scheduler.
             None,
             intended_at,
         ));
+    }
+
+    #[test]
+    fn codex_review_request_replay_keeps_the_pre_write_cursor() {
+        use crate::opensymphony_orchestrator::{
+            ParentProviderOperation, ParentProviderOperationKind, ParentSideEffectReceipt,
+        };
+
+        let operations = vec![
+            ParentProviderOperation {
+                kind: ParentProviderOperationKind::ReconcileReview,
+                idempotency_key: "reconcile-1".to_owned(),
+                input_version: "head:a".to_owned(),
+                intended_at: TimestampMs::new(100),
+                receipt: Some(ParentSideEffectReceipt {
+                    status: "pending".to_owned(),
+                    detail: Some("41".to_owned()),
+                }),
+                completed_at: Some(TimestampMs::new(101)),
+            },
+            ParentProviderOperation {
+                kind: ParentProviderOperationKind::RequestReview,
+                idempotency_key: "request-1".to_owned(),
+                input_version: "head:a".to_owned(),
+                intended_at: TimestampMs::new(102),
+                receipt: None,
+                completed_at: None,
+            },
+            ParentProviderOperation {
+                kind: ParentProviderOperationKind::ReconcileReview,
+                idempotency_key: "reconcile-2".to_owned(),
+                input_version: "head:a".to_owned(),
+                intended_at: TimestampMs::new(103),
+                receipt: Some(ParentSideEffectReceipt {
+                    status: "pending".to_owned(),
+                    detail: Some("42".to_owned()),
+                }),
+                completed_at: Some(TimestampMs::new(104)),
+            },
+        ];
+
+        assert_eq!(
+            pending_codex_review_request_context(&operations),
+            Some((TimestampMs::new(102), Some(41)))
+        );
     }
 
     #[test]

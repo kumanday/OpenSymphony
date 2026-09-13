@@ -745,9 +745,15 @@ affect automated-review eligibility. When the central profile requires review,
 a clean Codex scan and a current human approval are both required, and a current
 human change request remains authoritative. Before posting a later trigger, the
 scheduler persists the highest observed provider comment ID so crash recovery
-can find the exact write despite GitHub's second-precision timestamps. The
+can find the exact write despite GitHub's second-precision timestamps. Recovery
+keeps the cursor captured before the pending trigger instead of replacing it
+with a later reconciliation snapshot. The
 scheduler applies a fresh provider snapshot immediately before merge and returns
-to review if approval, checks, or mergeability are no longer current. Repair
+to review if approval, checks, or mergeability are no longer current. A merged
+provider snapshot advances only when the pushed head and policy evidence remain
+current and the durable ledger contains the orchestrator's pending merge intent;
+an external merge that bypasses those facts is blocked for operator recovery.
+Repair
 provider writes remain pending while the tracker parent is inactive or terminal,
 the controller is terminal, or the current hierarchy generation is fenced. A
 repair implementation interrupted by restart remains in `fixing` for cleanup and
@@ -755,7 +761,9 @@ retry instead of entering the final-verification refresh path. A failed parent
 verification selects the repository but does not publish immediately: the
 scheduler creates the repair branch, resumes the same parent conversation for an
 observed implementation-and-check turn, and only then commits and pushes through
-the workspace owner. A repair request is accepted only when its receipt selects
+the workspace owner. If that turn leaves no commit beyond the recorded target,
+the scheduler clears its completion marker and queues another implementation
+continuation. A repair request is accepted only when its receipt selects
 a completed command observed by the harness before the attempt deadline. Repair
 implementation retries stop at the configured scheduler limit, and provider
 rate-limit responses defer all repair lookups until their retry delay expires.

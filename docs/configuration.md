@@ -70,8 +70,8 @@ and required-review flags, and merge method. Repository instructions guide the
 repair but cannot weaken that central policy. GitHub PR creation and merge use
 the review credential; branch fetch and push use the checkout credential.
 GitHub and Codex review profiles are supported for GitHub repair PRs; selecting
-a Codex review profile for a non-GitHub repository is rejected during central
-configuration validation. A Codex profile
+either GitHub-backed profile for a non-GitHub repository is rejected during
+central configuration validation. A Codex profile
 uses PR opening for its initial scan and the exact `@codex review` comment only
 after a requested-change repair produces a new head. The completed review
 summary closes the scan before current-head inline findings determine the

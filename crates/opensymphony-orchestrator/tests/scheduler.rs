@@ -1199,6 +1199,27 @@ async fn parent_repair_recovers_a_created_branch_before_repeating_creation() {
         .await
         .expect("branch lookup recovers external result");
     assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let create = state.parent_integrations[&parent_id]
+        .repair_attempts
+        .first()
+        .expect("repair")
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind
+                == crate::opensymphony_orchestrator::ParentProviderOperationKind::CreateBranch
+        })
+        .expect("create branch operation");
+    assert_eq!(
+        create
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.status.as_str()),
+        Some("reconciled")
+    );
 }
 
 #[tokio::test]
@@ -1560,6 +1581,60 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
         Some(crate::opensymphony_orchestrator::ParentAttemptStatus::Passed)
     );
     assert_eq!(controller.repair_attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn parent_repair_without_a_commit_requeues_implementation() {
+    let suffix = "REPAIR-NO-COMMIT";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification should queue repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation should launch");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("a no-commit repair should remain actionable");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let repair = state.parent_integrations[&parent_id]
+        .repair_attempts
+        .first()
+        .expect("repair");
+    assert_eq!(
+        repair.status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Implementing
+    );
+    assert!(!repair.implementation_completed);
+    assert_eq!(scheduler.workspace().repair_pushes, 0);
+
+    scheduler
+        .tick(ts(3_600_201))
+        .await
+        .expect("the actionable repair should queue another continuation");
+    assert_eq!(
+        scheduler.execution(&parent_id).expect("parent").status(),
+        SchedulerStatus::RetryQueued
+    );
+    scheduler
+        .tick(ts(7_200_201))
+        .await
+        .expect("the due repair continuation should relaunch");
+    assert_eq!(scheduler.worker().launches.len(), 3);
+    assert!(scheduler.worker().launches[2].parent_repair.is_some());
 }
 
 #[tokio::test]

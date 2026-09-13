@@ -965,6 +965,19 @@ where
                     ),
                 });
             }
+            if repair.operations.iter().any(|operation| {
+                operation.kind == ParentProviderOperationKind::CreateBranch
+                    && operation.receipt.is_none()
+            }) {
+                self.complete_repair_operation(
+                    parent_id,
+                    &repair_id,
+                    ParentProviderOperationKind::CreateBranch,
+                    "reconciled",
+                    observed_at,
+                )
+                .await?;
+            }
         } else {
             self.persist_repair_intent(
                 parent_id,
@@ -1062,14 +1075,16 @@ where
                 detail: "remote repair branch was force-pushed".to_owned(),
             });
         }
+        if !has_uncommitted_changes && local_commit == repair.target_commit {
+            self.mark_parent_repair_implementation_required(parent_id, repair_id)
+                .await?;
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: "repair branch has no commit beyond its recorded target".to_owned(),
+            });
+        }
         let publish_required =
             has_uncommitted_changes || remote_commit.as_deref() != Some(local_commit.as_str());
         let commit = if !publish_required {
-            if local_commit == repair.target_commit {
-                return Err(SchedulerError::ParentRepairUnavailable {
-                    detail: "repair branch has no commit beyond its recorded target".to_owned(),
-                });
-            }
             if repair.operations.iter().any(|operation| {
                 operation.kind == ParentProviderOperationKind::Push
                     && operation.input_version == publication_input_version
@@ -1105,6 +1120,8 @@ where
                     detail: "workspace backend does not support repair publication".to_owned(),
                 })?;
             if commit == repair.target_commit {
+                self.mark_parent_repair_implementation_required(parent_id, repair_id)
+                    .await?;
                 return Err(SchedulerError::ParentRepairUnavailable {
                     detail: "repair branch has no commit beyond its recorded target".to_owned(),
                 });
@@ -1712,14 +1729,6 @@ where
             .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
                 detail: "provider backend does not support repair merge".to_owned(),
             })?;
-        self.complete_repair_operation(
-            parent_id,
-            repair_id,
-            ParentProviderOperationKind::Merge,
-            "merged",
-            observed_at,
-        )
-        .await?;
         self.apply_parent_repair_snapshot(
             parent_id,
             repair_id,
@@ -1728,6 +1737,26 @@ where
             observed_at,
         )
         .await
+    }
+
+    async fn mark_parent_repair_implementation_required(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+    ) -> Result<(), SchedulerError> {
+        let previous = self.hierarchy_state.clone();
+        self.hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?
+            .record_repair_implementation_required(repair_id)?;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn refresh_parent_repair(

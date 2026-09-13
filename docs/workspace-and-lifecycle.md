@@ -291,6 +291,10 @@ reloads the pinned instruction provenance, and creates a fresh
 target. The hierarchy generation keeps a reactivated or replanned parent from
 colliding with a retained branch from an earlier controller lifecycle. Managed
 Git operations isolate hooks and reject checkout-controlled transport settings.
+If crash recovery finds the deterministic branch after its create call, the
+workspace reconciliation completes the original branch intent before the repair
+advances. A successful repair turn that leaves the branch at its target commit
+returns to implementation instead of retrying publication forever.
 Pushes use the configured credential path and reconcile the exact remote branch
 and local intended head before mutation. Requested-change commits reuse that
 branch and pull request, while old-head review results cannot advance the new
@@ -307,7 +311,9 @@ repository. The scheduler creates its repair branch and resumes the same parent
 conversation with that authorized checkout; publication waits for a successful,
 harness-observed repair turn. Ordinary final verification still requires exact
 clean targets, while the repair turn may verify descendant or dirty work on its
-recorded repair branch before the workspace owner commits and pushes it. Capture
+recorded repair branch before the workspace owner commits and pushes it. An
+externally observed merge advances only with current pushed-head policy evidence
+and a pending scheduler-owned merge intent. Capture
 acknowledgement and ordered release of evidence-protecting roots and leases
 remain part of the later cleanup lifecycle.
 
