@@ -853,6 +853,47 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
         .await
         .expect("authorized repair completion may verify dirty branch changes");
+    manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect("repair completion accepts changes only on its recorded branch");
+    git(&integration, &["checkout", "--detach"]);
+    let wrong_branch = manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect_err("detached repair work must not produce a successful receipt");
+    assert!(wrong_branch.to_string().contains("recorded branch"));
+    git(&integration, &["checkout", repair_branch]);
+    let integration_b = prepared.handle.workspace_path().join(
+        &prepared.child_checkout_map.repositories[binding_b.repository_id().as_str()].relative_path,
+    );
+    std::fs::write(integration_b.join("unrelated-repair.txt"), "unrelated\n")
+        .expect("non-target repair marker should be written");
+    let dirty_non_target = manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect_err("repair completion must keep non-target checkouts clean");
+    assert!(dirty_non_target.to_string().contains("dirty"));
+    std::fs::remove_file(integration_b.join("unrelated-repair.txt"))
+        .expect("non-target repair marker should be removed");
     let repair_commit = manager
         .publish_parent_repair(
             &parent,

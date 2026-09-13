@@ -1682,7 +1682,11 @@ fn build_repository_checkouts(
             review_policy_generation,
             required_checks: review_profile.required_checks,
             required_review: review_profile.required_review,
-            merge_method: review_profile.merge_method.clone(),
+            merge_method: review_profile
+                .merge_method
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase),
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())
@@ -3492,6 +3496,7 @@ scheduler:
             .expect("base checkout should exist");
         assert_eq!(base_checkout.review_profile, "github-standard");
         assert_eq!(base_checkout.review_provider, "github");
+        assert_eq!(base_checkout.merge_method.as_deref(), Some("merge"));
         assert_ne!(
             base_checkout.policy_generation,
             base.repository_routing.config_generation
@@ -3557,6 +3562,24 @@ scheduler:
             review_checkout.review_policy_generation
         );
         assert_eq!(review_checkout.review_provider, "github");
+    }
+
+    #[test]
+    fn central_config_canonicalizes_case_variant_merge_methods() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source =
+            central_fixture(root.path()).replace("merge_method: merge", "merge_method: ' Squash '");
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("case-variant merge method should resolve");
+        let checkout = resolved
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("checkout should exist");
+        assert_eq!(checkout.merge_method.as_deref(), Some("squash"));
     }
 
     #[test]

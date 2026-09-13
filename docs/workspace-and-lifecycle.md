@@ -311,7 +311,9 @@ repository. The scheduler creates its repair branch and resumes the same parent
 conversation with that authorized checkout; publication waits for a successful,
 harness-observed repair turn. Ordinary final verification still requires exact
 clean targets, while the repair turn may verify descendant or dirty work on its
-recorded repair branch before the workspace owner commits and pushes it. An
+recorded repair branch before the workspace owner commits and pushes it. Its
+successful receipt requires that exact branch, and every non-target checkout
+must remain pinned and clean. An
 externally observed merge advances only with current pushed-head policy evidence
 and a pending scheduler-owned merge intent bound to that head. Publishing a
 replacement head supersedes any older pending merge intent. Capture

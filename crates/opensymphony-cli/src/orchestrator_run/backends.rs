@@ -82,6 +82,7 @@ const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
 const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
 const MAX_PARENT_PULL_REQUEST_EVIDENCE_CANDIDATES: usize = 32;
+const MAX_CODEX_REVIEW_RETRIGGERS: u32 = 7;
 const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
@@ -250,17 +251,20 @@ async fn attach_parent_verification_receipt(
     workspace: &WorkspaceHandle,
     issue: &NormalizedIssue,
     envelope: Option<&ParentRuntimeEnvelope>,
-    allow_repair_changes: bool,
+    repair: Option<&crate::opensymphony_orchestrator::ParentRepairAttempt>,
 ) {
     let Some(envelope) = envelope else {
         return;
     };
     let result = async {
-        let verified_parent = if allow_repair_changes {
+        let verified_parent = if let Some(repair) = repair {
             workspace_manager
-                .open_parent_execution_root_at_for_retry(
+                .open_parent_execution_root_at_for_repair(
                     &issue_descriptor(issue),
                     workspace.workspace_path(),
+                    &repair.checkout_handle,
+                    repair.repository_id.as_str(),
+                    &repair.branch,
                 )
                 .await
         } else {
@@ -1337,7 +1341,7 @@ impl TrackerBackend for RuntimeTrackerBackend {
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
     ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
     {
-        if repair.requested_change_count > 0
+        if codex_review_retrigger_allowed(repair.requested_change_count)
             && repair.policy.review_provider.eq_ignore_ascii_case("codex")
         {
             let repository = self.repository_for_repair(repair)?;
@@ -1760,7 +1764,7 @@ impl RuntimeTrackerBackend {
         } else {
             repository.review_provider.as_str()
         };
-        if !review_provider.eq_ignore_ascii_case("github")
+        if !github_backed_review_provider(review_provider)
             || !repository.provider.eq_ignore_ascii_case("github")
         {
             return Ok(Some(GithubMergeEvidence::incompatible()));
@@ -2150,10 +2154,24 @@ impl RuntimeTrackerBackend {
         check_commit_sha: Option<&str>,
     ) -> Result<bool, LinearError> {
         if repository.required_review {
+            let Some(review_head) = check_commit_sha.filter(|sha| !sha.trim().is_empty()) else {
+                return Ok(false);
+            };
             let reviews = self
                 .github_reviews(api_root, owner, repository_name, pull_number, repository)
                 .await?;
-            let latest_by_reviewer = latest_github_review_states(reviews);
+            let latest_by_reviewer = latest_github_review_states(
+                reviews
+                    .into_iter()
+                    .filter(|review| review.commit_id.as_deref() == Some(review_head))
+                    .filter(|review| {
+                        !review
+                            .user
+                            .as_ref()
+                            .and_then(|user| user.login.as_deref())
+                            .is_some_and(is_codex_connector_login)
+                    }),
+            );
             if !latest_by_reviewer
                 .values()
                 .any(|(state, _, _)| state.eq_ignore_ascii_case("approved"))
@@ -2162,6 +2180,31 @@ impl RuntimeTrackerBackend {
                     .any(|(state, _, _)| state.eq_ignore_ascii_case("changes_requested"))
             {
                 return Ok(false);
+            }
+            if repository.review_provider.eq_ignore_ascii_case("codex") {
+                let comments = self
+                    .github_issue_comments(
+                        api_root,
+                        owner,
+                        repository_name,
+                        pull_number,
+                        repository,
+                    )
+                    .await?;
+                let review_comments = self
+                    .github_pull_request_review_comments(
+                        api_root,
+                        owner,
+                        repository_name,
+                        pull_number,
+                        repository,
+                    )
+                    .await?;
+                let (_, approved, rejected, changes_requested) =
+                    codex_review_state_for_head(Some(review_head), &comments, &review_comments);
+                if !approved || rejected || changes_requested {
+                    return Ok(false);
+                }
             }
         }
         if repository.required_checks {
@@ -3154,6 +3197,14 @@ fn codex_review_request_already_posted(
                 |boundary| comment.id > boundary,
             )
     })
+}
+
+fn codex_review_retrigger_allowed(requested_change_count: u32) -> bool {
+    (1..=MAX_CODEX_REVIEW_RETRIGGERS).contains(&requested_change_count)
+}
+
+fn github_backed_review_provider(provider: &str) -> bool {
+    matches!(provider.to_ascii_lowercase().as_str(), "github" | "codex")
 }
 
 fn pending_codex_review_request_context(
@@ -5088,7 +5139,17 @@ impl RuntimeWorkerBackend {
                     }
                 }
             } else {
-                let parent = if is_parent_retry {
+                let parent = if let Some(repair) = parent_repair.as_ref() {
+                    workspace_manager
+                        .open_parent_execution_root_at_for_repair(
+                            &workspace_issue,
+                            &run.workspace_path,
+                            &repair.checkout_handle,
+                            repair.repository_id.as_str(),
+                            &repair.branch,
+                        )
+                        .await
+                } else if is_parent_retry {
                     workspace_manager
                         .open_parent_execution_root_at_for_retry(
                             &workspace_issue,
@@ -5890,7 +5951,17 @@ impl RuntimeWorkerBackend {
             }
 
             if let Some(parent) = parent_execution.as_ref() {
-                let verified_parent = match if is_parent_retry {
+                let verified_parent = match if let Some(repair) = parent_repair.as_ref() {
+                    workspace_manager
+                        .open_parent_execution_root_at_for_repair(
+                            &workspace_issue,
+                            parent.handle.workspace_path(),
+                            &repair.checkout_handle,
+                            repair.repository_id.as_str(),
+                            &repair.branch,
+                        )
+                        .await
+                } else if is_parent_retry {
                     workspace_manager
                         .open_parent_execution_root_at_for_retry(
                             &workspace_issue,
@@ -6093,7 +6164,7 @@ impl RuntimeWorkerBackend {
                     &ensured.handle,
                     &issue,
                     parent_runtime_envelope.as_ref(),
-                    parent_repair.is_some(),
+                    parent_repair.as_ref(),
                 )
                 .await;
                 if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -6182,7 +6253,7 @@ impl RuntimeWorkerBackend {
                 &ensured.handle,
                 &issue,
                 parent_runtime_envelope.as_ref(),
-                parent_repair.is_some(),
+                parent_repair.as_ref(),
             )
             .await;
             if let Some(previous) = superseded_harness_manifest.as_ref()
@@ -14257,6 +14328,22 @@ Run the scheduler.
             None,
             intended_at,
         ));
+    }
+
+    #[test]
+    fn codex_review_retriggers_stop_after_seven_explicit_requests() {
+        assert!(!codex_review_retrigger_allowed(0));
+        assert!(codex_review_retrigger_allowed(1));
+        assert!(codex_review_retrigger_allowed(7));
+        assert!(!codex_review_retrigger_allowed(8));
+        assert!(!codex_review_retrigger_allowed(u32::MAX));
+    }
+
+    #[test]
+    fn github_merge_evidence_supports_codex_review_profiles() {
+        assert!(github_backed_review_provider("github"));
+        assert!(github_backed_review_provider("Codex"));
+        assert!(!github_backed_review_provider("gitlab"));
     }
 
     #[test]

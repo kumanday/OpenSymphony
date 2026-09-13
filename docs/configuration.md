@@ -66,16 +66,18 @@ clones. Active GitHub review profiles must separately resolve to an
 not use the checkout transport credential or ambient authentication.
 Parent repairs snapshot the selected repository's target branch, instruction
 hash, review profile, review provider, review-policy generation, required-check
-and required-review flags, and merge method. Repository instructions guide the
-repair but cannot weaken that central policy. GitHub PR creation and merge use
-the review credential; branch fetch and push use the checkout credential.
+and required-review flags, and canonical lowercase merge method. Repository
+instructions guide the repair but cannot weaken that central policy. GitHub PR
+creation and merge use the review credential; branch fetch and push use the
+checkout credential.
 GitHub and Codex review profiles are supported for GitHub repair PRs; selecting
 either GitHub-backed profile for a non-GitHub repository is rejected during
 central configuration validation. A Codex profile
 uses PR opening for its initial scan and the exact `@codex review` comment only
 after a requested-change repair produces a new head. The completed review
 summary closes the scan before current-head inline findings determine the
-durable review result.
+durable review result. The same current-head Codex and human evidence is used
+when a completed child PR contributes merge evidence to a project-set parent.
 Parent checkout maps written before these review fields existed are migrated
 from the current central repository profile before reuse and written back to
 both generation-bound copies.

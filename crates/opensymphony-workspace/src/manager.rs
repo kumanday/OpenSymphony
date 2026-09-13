@@ -853,6 +853,51 @@ impl WorkspaceManager {
         .await
     }
 
+    pub async fn open_parent_execution_root_at_for_repair(
+        &self,
+        issue: &IssueDescriptor,
+        root: &Path,
+        checkout_handle: &str,
+        repository_id: &str,
+        branch: &str,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, root)
+            .await?;
+        let target = parent
+            .child_checkout_map
+            .repositories
+            .get(repository_id)
+            .filter(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| checkout_verification(root, "repair checkout handle is stale"))?;
+        let target_path = parent.handle.workspace_path().join(&target.relative_path);
+        let current_branch = self
+            .git(&target_path, &["branch", "--show-current"])
+            .await?;
+        if current_branch != branch {
+            return Err(checkout_verification(
+                &target_path,
+                "repair checkout is not on its recorded branch",
+            ));
+        }
+        for record in parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .filter(|record| record.checkout_handle != checkout_handle)
+        {
+            let source = self.validate_parent_retained_checkouts(record).await?;
+            checkout_operation_with_timeout(
+                Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+                parent.handle.workspace_path(),
+                "verify non-target parent integration worktree",
+                self.verify_parent_integration_checkout(&parent.handle, record, &source, false),
+            )
+            .await?;
+        }
+        Ok(parent)
+    }
+
     pub async fn resolve_parent_checkout(
         &self,
         parent: &ParentExecutionRoot,

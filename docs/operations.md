@@ -743,9 +743,12 @@ initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
 affect automated-review eligibility. When the central profile requires review,
 a clean Codex scan and a current human approval are both required, and a current
-human change request remains authoritative. Before posting a later trigger, the
-scheduler persists the highest observed provider comment ID so crash recovery
-can find the exact write despite GitHub's second-precision timestamps. Recovery
+human change request remains authoritative. At most seven later triggers are
+posted, so the initial scan plus retriggers cannot exceed eight; remediation
+after that ceiling uses the documented exact-commit local review path. Before
+posting a later trigger, the scheduler persists the highest observed provider
+comment ID so crash recovery can find the exact write despite GitHub's
+second-precision timestamps. Recovery
 keeps the cursor captured before the pending trigger instead of replacing it
 with a later reconciliation snapshot. The
 scheduler applies a fresh provider snapshot immediately before merge and returns
