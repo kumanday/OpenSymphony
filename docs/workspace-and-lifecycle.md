@@ -298,7 +298,12 @@ returns to implementation instead of retrying publication forever.
 Pushes use the configured credential path and reconcile the exact remote branch
 and local intended head before mutation. Requested-change commits reuse that
 branch and pull request, while old-head review results cannot advance the new
-head. One repair does not open or modify another repository's checkout.
+head. The provider adapter reads unresolved review threads, persists a bounded
+copy of current-head feedback, and includes that copy in the repair continuation
+so a private-repository worker does not need provider credentials. Resolved
+threads, including accepted same-thread pushback, stop counting as findings on
+the unchanged head. One repair does not open or modify another repository's
+checkout.
 
 The repair lease and completed parent root remain durable after refresh. Final
 verification resumes only after every affected checkout and both copies of its

@@ -1078,6 +1078,7 @@ fn repair_provider_snapshot(
         review_approved: false,
         review_rejected: false,
         changes_requested: false,
+        review_feedback: Vec::new(),
         mergeable: true,
         merge_conflict: false,
         merged: false,
@@ -1589,6 +1590,77 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
         Some(crate::opensymphony_orchestrator::ParentAttemptStatus::Passed)
     );
     assert_eq!(controller.repair_attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controller() {
+    let suffix = "REPAIR-WAIT-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification queues repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation launches");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("repair publication reaches provider wait");
+
+    let before: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert!(matches!(
+        before.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::AwaitingFixReview { .. }
+    ));
+    assert!(
+        before.parent_integrations[&parent_id]
+            .current_attempt_id()
+            .is_none(),
+        "provider waits have no live harness turn"
+    );
+
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        0,
+    )];
+    scheduler
+        .tick(ts(3_900_300))
+        .await
+        .expect("terminal reconciliation cancels the provider-waiting controller");
+
+    let persisted: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("restart should decode the canceled controller");
+    assert!(matches!(
+        persisted.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Canceled { .. }
+    ));
+    assert_eq!(
+        scheduler.execution(&parent_id).expect("parent").status(),
+        SchedulerStatus::Released
+    );
 }
 
 #[tokio::test]

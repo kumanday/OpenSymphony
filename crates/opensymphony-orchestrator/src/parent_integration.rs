@@ -359,8 +359,23 @@ pub struct ParentRepairAttempt {
     pub refreshed_target_commit: Option<String>,
     #[serde(default)]
     pub requested_change_count: u32,
+    /// Bounded provider-owned feedback for the current pushed commit. This is
+    /// persisted so a resumed repair worker does not need direct provider
+    /// credentials to learn what the central review requested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_feedback: Vec<ParentReviewFeedback>,
     #[serde(default)]
     pub operations: Vec<ParentProviderOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentReviewFeedback {
+    pub thread_id: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +400,7 @@ pub struct ParentRepairProviderSnapshot {
     pub review_approved: bool,
     pub review_rejected: bool,
     pub changes_requested: bool,
+    pub review_feedback: Vec<ParentReviewFeedback>,
     pub mergeable: bool,
     pub merge_conflict: bool,
     pub merged: bool,
@@ -1435,6 +1451,7 @@ impl ParentIntegrationController {
             merge_result_commit: None,
             refreshed_target_commit: None,
             requested_change_count: 0,
+            review_feedback: Vec::new(),
             operations: vec![ParentProviderOperation {
                 kind: ParentProviderOperationKind::ReconcileBranch,
                 idempotency_key: idempotency_key.to_owned(),
@@ -1622,6 +1639,9 @@ impl ParentIntegrationController {
                 }
             }
             repair.pushed_commit = Some(commit.to_owned());
+            if !unchanged {
+                repair.review_feedback.clear();
+            }
             repair.status = if repair.pull_request_id.is_some() {
                 ParentRepairStatus::AwaitingReview
             } else {
@@ -1846,6 +1866,9 @@ impl ParentIntegrationController {
         }
         let review_is_current =
             snapshot.review_head_commit.as_deref() == current.pushed_commit.as_deref();
+        if review_is_current {
+            self.repair_mut(repair_id)?.review_feedback = snapshot.review_feedback.clone();
+        }
         if snapshot.changes_requested && review_is_current {
             if current.status == ParentRepairStatus::ChangesRequested {
                 return Ok(());
@@ -1875,6 +1898,29 @@ impl ParentIntegrationController {
                 occurred_at,
             )?;
             return Ok(());
+        }
+        if current.status == ParentRepairStatus::ChangesRequested && review_is_current {
+            let pull_request_id = current.pull_request_id.clone().ok_or_else(|| {
+                ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
+            })?;
+            self.repair_mut(repair_id)?.status = ParentRepairStatus::AwaitingReview;
+            self.transition(
+                ParentIntegrationState::AwaitingFixReview {
+                    repository_id: current.repository_id.clone(),
+                    repair_attempt: current.number,
+                    pull_request_id,
+                },
+                "provider feedback was resolved on the unchanged repair head",
+                format!("{repair_id}:feedback-resolved:{}", self.state_version),
+                input_version,
+                Some(intent(
+                    "reconcile_provider",
+                    format!("{repair_id}:feedback-resolved:{}", self.state_version),
+                )),
+                Some(receipt("resolved", None)),
+                ParentRetryClassification::Retryable,
+                occurred_at,
+            )?;
         }
         if snapshot.review_rejected && review_is_current {
             self.repair_mut(repair_id)?.status = ParentRepairStatus::ReviewRejected;
@@ -3226,6 +3272,7 @@ mod tests {
             review_approved: false,
             review_rejected: false,
             changes_requested: false,
+            review_feedback: Vec::new(),
             mergeable: true,
             merge_conflict: false,
             merged: false,
@@ -3429,6 +3476,12 @@ mod tests {
 
         let mut changes = review_snapshot();
         changes.changes_requested = true;
+        changes.review_feedback = vec![ParentReviewFeedback {
+            thread_id: "thread-1".to_owned(),
+            body: "Keep the repair branch isolated.".to_owned(),
+            path: Some("src/repair.rs".to_owned()),
+            line: Some(42),
+        }];
         controller
             .reconcile_repair_provider(
                 &repair_id,
@@ -3451,6 +3504,24 @@ mod tests {
                 .expect("repair")
                 .requested_change_count,
             1
+        );
+        assert_eq!(
+            controller
+                .repair(&repair_id)
+                .expect("repair")
+                .review_feedback,
+            changes.review_feedback
+        );
+        let recovered: ParentIntegrationController = serde_json::from_value(
+            serde_json::to_value(&controller).expect("persist repair feedback"),
+        )
+        .expect("recover repair feedback");
+        assert_eq!(
+            recovered
+                .repair(&repair_id)
+                .expect("recovered repair")
+                .review_feedback,
+            changes.review_feedback
         );
         controller
             .record_repair_push(
@@ -3498,6 +3569,52 @@ mod tests {
             "target-after-squash-result"
         );
         assert_eq!(controller.state, ParentIntegrationState::Integrating);
+    }
+
+    #[test]
+    fn resolved_feedback_on_unchanged_head_can_satisfy_review_without_a_worker_turn() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("push");
+        controller
+            .record_repair_pull_request(
+                &repair_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pull request");
+        let mut changes = review_snapshot();
+        changes.changes_requested = true;
+        changes.review_feedback = vec![ParentReviewFeedback {
+            thread_id: "thread-pushback".to_owned(),
+            body: "Question the existing ownership boundary.".to_owned(),
+            path: None,
+            line: None,
+        }];
+        controller
+            .reconcile_repair_provider(&repair_id, changes, "targets:1", TimestampMs::new(13))
+            .expect("requested changes");
+
+        let mut resolved = review_snapshot();
+        resolved.checks_passed = true;
+        resolved.review_approved = true;
+        controller
+            .reconcile_repair_provider(&repair_id, resolved, "targets:1", TimestampMs::new(14))
+            .expect("resolved thread");
+
+        let repair = controller.repair(&repair_id).expect("repair");
+        assert_eq!(repair.status, ParentRepairStatus::AwaitingMerge);
+        assert_eq!(repair.requested_change_count, 1);
+        assert!(repair.review_feedback.is_empty());
     }
 
     #[test]

@@ -83,7 +83,9 @@ Why fakes matter:
   durable outcome write
 - parent repair branch, push, pull-request, review, merge, and refresh
   reconciliation with side-effect counters; persistence failure before branch
-  creation; requested changes on one PR; failed checks, rejection, outage,
+  creation; bounded current-head feedback for credential-scrubbed workers;
+  resolved-thread pushback; controller cancellation between repair turns;
+  requested changes on one PR; failed checks, rejection, outage,
   external closure, force-push, and conflict states; squash/rebase merge-result
   reachability; and separately auditable attempts across repositories
 

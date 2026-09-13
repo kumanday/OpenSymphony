@@ -741,7 +741,11 @@ redacted repair diagnostic and retried without stopping the rest of the
 scheduler tick. For a Codex review profile, the PR-open scan is the
 initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
-affect automated-review eligibility. When the central profile requires review,
+affect automated-review eligibility. Review findings come from unresolved
+provider threads; their bounded bodies and locations are persisted for the
+credential-scrubbed repair continuation. Resolving a thread after accepted
+pushback removes it from the current finding set without requiring a no-op
+commit. When the central profile requires review,
 a clean Codex scan and a current human approval are both required, and a current
 human change request remains authoritative. At most seven later triggers are
 posted, so the initial scan plus retriggers cannot exceed eight; remediation
@@ -761,6 +765,9 @@ intents; an external merge that bypasses those facts is blocked for operator
 recovery. Repair
 provider writes remain pending while the tracker parent is inactive or terminal,
 the controller is terminal, or the current hierarchy generation is fenced. A
+terminal or canceled tracker transition also persists controller cancellation
+while the repair is between harness turns in pull-request, review, merge, or
+refresh processing; no harness interrupt is emitted when no turn is running. A
 repair implementation interrupted by restart remains in `fixing` for cleanup and
 retry instead of entering the final-verification refresh path. A failed parent
 verification selects the repository but does not publish immediately: the

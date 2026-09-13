@@ -6472,6 +6472,7 @@ where
             };
             if execution.issue().state.category == IssueStateCategory::Terminal
                 && !controller.state.terminal()
+                && matches!(controller.state, super::ParentIntegrationState::Integrating)
                 && controller.current_attempt_id().is_none()
                 && let Some(attempt_id) = controller
                     .attempts
@@ -6492,8 +6493,22 @@ where
                     Err(error) => return Err(error.into()),
                 }
             }
-            let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+            if controller.state.terminal() {
                 return Ok(false);
+            }
+            let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+                // Provider-side repair stages deliberately have no live
+                // harness turn. A terminal tracker transition still owns the
+                // controller lifecycle, so finish it durably without issuing
+                // a fictitious worker interrupt.
+                let input_version = parent_controller_input_version(controller);
+                controller.cancel(
+                    format!("scheduler released parent integration: {reason:?}"),
+                    &input_version,
+                    true,
+                    observed_at,
+                )?;
+                return Ok(true);
             };
             if execution
                 .interrupt()
@@ -8848,6 +8863,7 @@ fn unavailable_provider_snapshot(
         review_approved: false,
         review_rejected: false,
         changes_requested: false,
+        review_feedback: Vec::new(),
         mergeable: false,
         merge_conflict: false,
         merged: false,
