@@ -34,6 +34,9 @@ filesystem condition rather than delete the path manually. A surviving
 terminal descendant already named by an incomplete subtree-cleanup intent stays
 under that intent during bootstrap; recovery does not reacquire a leaf lease or
 route it through generic terminal cleanup.
+Claimed, running, and retry-queued executions fence their exact workspace
+generation. An unavailable OpenHands conversation store or a failed durable
+lease/completion receipt also leaves cleanup pending for the next tick.
 
 ## 2. First-run flow
 

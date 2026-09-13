@@ -1199,11 +1199,11 @@ fn checkout_env_remove_variables(
 }
 
 fn strict_openhands_cleanup_requires_conversation_store(
-    strict_checkout: bool,
+    generation_bound: bool,
     manifest: &IssueConversationManifest,
     store: Option<&OpenHandsConversationStorePaths>,
 ) -> bool {
-    strict_checkout && !conversation_manifest_is_codex(manifest) && store.is_none()
+    generation_bound && !conversation_manifest_is_codex(manifest) && store.is_none()
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {
@@ -3981,7 +3981,7 @@ impl RuntimeWorkspaceBackend {
                 });
             let Some(handle) = handle else {
                 if let (Some(scope_grants), Some(target)) = (&self.scope_grants, cleanup_target) {
-                    scope_grants.revoke_issue(&target.identifier);
+                    scope_grants.revoke_issue_generation(&target.identifier, &target.generation);
                 }
                 if let Some(target) = cleanup_target {
                     if prepare_only {
@@ -3993,7 +3993,11 @@ impl RuntimeWorkspaceBackend {
                 return Ok(());
             };
             if let Some(scope_grants) = &self.scope_grants {
-                scope_grants.revoke_issue(handle.identifier());
+                if let Some(target) = cleanup_target {
+                    scope_grants.revoke_issue_generation(&target.identifier, &target.generation);
+                } else {
+                    scope_grants.revoke_issue(handle.identifier());
+                }
             }
             if let Some(target) = cleanup_target
                 && self.manager.cleanup_target_deletion_started(target).await?
@@ -4146,7 +4150,7 @@ impl RuntimeWorkspaceBackend {
                                 }
                             }
                         } else if strict_openhands_cleanup_requires_conversation_store(
-                            handle.checkout_generation().is_some(),
+                            cleanup_target.is_some() || handle.checkout_generation().is_some(),
                             &manifest,
                             self.openhands_conversation_store.as_ref(),
                         ) {
@@ -6088,7 +6092,12 @@ impl RuntimeWorkerBackend {
                         attempt: scoped.attempt,
                         checkout_generation: runtime_envelope
                             .as_ref()
-                            .map(|envelope| envelope.checkout_generation.clone()),
+                            .map(|envelope| envelope.checkout_generation.clone())
+                            .or_else(|| {
+                                parent_execution.as_ref().map(|parent| {
+                                    format!("parent:{}", parent.manifest.hierarchy_generation)
+                                })
+                            }),
                         target_commit: scoped.target_commit.clone(),
                         checkout_head: scoped.checkout_head.clone(),
                         visibility: scoped.visibility,
@@ -11956,6 +11965,29 @@ mod tests {
             error
                 .to_string()
                 .contains("generation-bound terminal conversation manifest is malformed")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
+
+        let mut openhands_manifest =
+            sample_conversation_manifest("11111111-1111-4111-8111-111111111111");
+        openhands_manifest.issue_id = issue.id.clone();
+        openhands_manifest.identifier = issue.identifier.clone();
+        workspace_manager
+            .write_json_artifact(
+                &parent.handle,
+                &parent.handle.conversation_manifest_path(),
+                &openhands_manifest,
+            )
+            .await
+            .expect("OpenHands parent conversation manifest should persist");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("generation-bound parent cleanup requires its conversation store");
+        assert!(
+            error
+                .to_string()
+                .contains("remote conversation store is unavailable")
         );
         assert!(parent.handle.workspace_path().is_dir());
     }

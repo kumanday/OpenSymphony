@@ -242,10 +242,11 @@ removes descendants deepest first when no other active owner remains. The
 parent root is removed last. Higher ancestors and bounded diagnostic holds
 therefore preserve their checkout generations.
 If a descendant is reactivated after its parent-owned leases are released, a
-claimed or running execution in that exact workspace generation also fences
-deletion until the worker reaches a non-running state.
-Lease-owner release is persisted transactionally; a failed state write restores
-the in-memory leases so the next tick retries the durable release.
+claimed, running, or retry-queued execution in that exact workspace generation
+also fences deletion until the execution releases the workspace.
+Lease-owner release and cleanup completion are persisted transactionally; a
+failed state write restores the in-memory leases or incomplete cleanup state so
+the next tick retries the durable receipt.
 
 Run-manifest receipts make the hook and each worktree removal idempotent. The
 manager writes an attempted `before_remove` fence before launching the command;
@@ -275,9 +276,11 @@ cleanup finishes. Bootstrap recognizes surviving generations already named by
 an incomplete cleanup intent and leaves them to that ordered phase instead of
 reacquiring a leaf lease or applying generic terminal deletion.
 Malformed conversation manifests fail closed for both checkout and parent
-generation cleanup targets so the archival fence cannot be bypassed. Hook, Git,
-manifest, tombstone, permission, and filesystem failures remain visible on the
-durable cleanup intent and retry on later scheduler ticks.
+generation cleanup targets, and OpenHands generation cleanup requires the
+conversation store for parent roots as well as checkouts, so the archival fence
+cannot be bypassed. Hook, Git, manifest, tombstone, permission, and filesystem
+failures remain visible on the durable cleanup intent and retry on later
+scheduler ticks.
 
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient

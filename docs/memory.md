@@ -529,6 +529,10 @@ Terminal, inactive, and binding-superseded lifecycles issue the stop/cancel
 fence before revoking the issue grant. Raw bearer tokens are never persisted in
 manifests or diagnostics. With automatic capture enabled, terminal issues seen
 at daemon startup remain capture candidates instead of being assumed captured.
+Subtree cleanup revokes a bearer only when its checkout generation matches the
+cleanup target. If a newer generation for the same issue already holds the
+live grant, old-generation cleanup leaves that bearer and its lifecycle state
+unchanged.
 This grant applies to direct `memory.show` capsule reads as well as search,
 context, brief, related, docs, status, and code-intelligence tools. If the
 central service stops, the control-plane status is explicitly degraded and

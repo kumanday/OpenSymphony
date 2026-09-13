@@ -195,17 +195,19 @@ harness conversation and asks the workspace manager to receipt the
 Only then does the scheduler release that parent's lease owners and remove
 unleased descendant generations from deepest to shallowest, followed by the
 non-Git parent root. A lease owned by another ancestor or by an unexpired
-diagnostic hold continues to block its generation. A claimed or running child
-bound to the exact retained generation also blocks deletion while its worker is
-active.
+diagnostic hold continues to block its generation. A claimed, running, or
+retry-queued child bound to the exact retained generation also blocks deletion
+while that execution still owns the workspace.
 
 The scheduler receipts every prepared or deleted target in the durable parent
 controller. Workspace run manifests hold the hook and integration-worktree
 receipts, while root-level generation tombstones bracket recursive deletion.
-Lease releases roll back in memory when their atomic state write fails, and the
-workspace manager persists an attempted hook fence before `before_remove` can
-perform side effects. Restart repeats only an incomplete step without rerunning
-an indeterminate hook attempt. A missing path is successful only when
+Lease releases and final completion transitions roll back in memory when their
+atomic state writes fail, and the workspace manager persists an attempted hook
+fence before `before_remove` can perform side effects. Restart repeats only an
+incomplete step without rerunning an indeterminate hook attempt. Generation
+cleanup revokes only the matching memory bearer, so a newer run for the same
+issue keeps its authorization. A missing path is successful only when
 the tombstone matches its issue, workspace key, path, terminal outcome, and
 generation. Failed and canceled parents use the existing failed-workspace
 cleanup semantics without changing terminal classification: `retain_failed`
@@ -215,6 +217,8 @@ cleanup completes. Capture selects descendant leases owned by that controller's
 generation even if the observed hierarchy has already advanced, and restart
 recovery selects only the parent root matching the controller's durable
 hierarchy generation.
+Generation-bound OpenHands cleanup, including a parent root, also requires its
+conversation store before workspace preparation can proceed.
 The completed cleanup intent remains in orchestrator state after the parent root
 is removed and seeds automatic-capture completion after daemon restart, so a
 terminal parent is not routed and captured again without first reopening.

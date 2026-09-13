@@ -3253,6 +3253,67 @@ async fn subtree_cleanup_rolls_back_unpersisted_lease_release() {
 }
 
 #[tokio::test]
+async fn subtree_cleanup_rolls_back_unpersisted_completion_receipt() {
+    let suffix = "CAPTURE-COMPLETION-ROLLBACK";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        140,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 150);
+    scheduler.tick(ts(150)).await.expect("complete parent");
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "completion receipt persistence failed".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(160))
+        .await
+        .expect_err("unpersisted completion must remain retryable");
+    assert!(scheduler.completed_subtree_cleanup_identifiers().is_empty());
+    assert_eq!(scheduler.workspace().generation_cleanups.len(), 2);
+    assert!(
+        scheduler
+            .execution(&parent_id)
+            .expect("parent execution")
+            .workspace()
+            .is_some(),
+        "the in-memory parent binding must roll back with its completion receipt"
+    );
+
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(170))
+        .await
+        .expect("the matching deletion tombstone should complete the retry");
+    assert_eq!(
+        scheduler.completed_subtree_cleanup_identifiers(),
+        [format!("COE-PARENT-{suffix}")].into_iter().collect()
+    );
+    assert_eq!(scheduler.workspace().generation_cleanups.len(), 3);
+}
+
+#[tokio::test]
 async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
     let suffix = "CAPTURE-CLEANUP-RETRY";
     let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
@@ -3451,6 +3512,41 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
         active_retry.workspace().generation_cleanup_steps,
         cleanup_steps_before_active_fence,
         "cleanup must not delete a workspace under a claimed or running child"
+    );
+
+    let retry_run = active_retry.worker().launches[0].run.clone();
+    active_retry
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: retry_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &retry_run,
+                WorkerOutcomeKind::Failed,
+                ts(175),
+                None,
+                Some("retryable descendant failure".to_owned()),
+            ),
+        });
+    active_retry
+        .tick(ts(175))
+        .await
+        .expect("the failed descendant should queue a continuation");
+    assert_eq!(
+        active_retry
+            .execution(&child_id)
+            .expect("retrying child")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+    active_retry
+        .tick(ts(180))
+        .await
+        .expect("retry-queued child must fence old-generation cleanup");
+    assert_eq!(
+        active_retry.workspace().generation_cleanup_steps,
+        cleanup_steps_before_active_fence,
+        "cleanup must retain a workspace queued for continuation"
     );
 
     scheduler.tick(ts(170)).await.expect("retry cleanup");

@@ -2626,7 +2626,9 @@ where
                         .is_some_and(|execution| {
                             matches!(
                                 execution.status(),
-                                SchedulerStatus::Claimed | SchedulerStatus::Running
+                                SchedulerStatus::Claimed
+                                    | SchedulerStatus::Running
+                                    | SchedulerStatus::RetryQueued
                             ) && execution.workspace().is_some_and(|workspace| {
                                 workspace.path == target.cleanup.workspace.path
                             })
@@ -2695,6 +2697,8 @@ where
                 continue;
             }
             if cleanup.parent_root.cleaned_at.is_none() {
+                let previous_state = self.hierarchy_state.clone();
+                let previous_execution = self.executions.get(&parent_id).cloned();
                 match self
                     .workspace
                     .cleanup_generation(&cleanup.parent_root.cleanup)
@@ -2717,7 +2721,13 @@ where
                         cleanup.parent_root.cleaned_at = Some(observed_at);
                         cleanup.status = ParentSubtreeCleanupStatus::Completed;
                         cleanup.last_error = None;
-                        self.persist_orchestrator_state().await?;
+                        if let Err(error) = self.persist_orchestrator_state().await {
+                            self.hierarchy_state = previous_state;
+                            if let Some(execution) = previous_execution {
+                                self.executions.insert(parent_id.clone(), execution);
+                            }
+                            return Err(error);
+                        }
                     }
                     Err(error) => {
                         let cleanup = self

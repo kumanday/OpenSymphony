@@ -2662,6 +2662,26 @@ impl MemoryScopeGrantRegistry {
         revoked
     }
 
+    pub(crate) fn revoke_issue_generation(&self, issue: &str, generation: &str) -> bool {
+        let mut state = self.state.write().expect("memory grant registry poisoned");
+        let tokens = state
+            .grants
+            .iter()
+            .filter(|(_, grant)| {
+                grant.issue == issue && grant.checkout_generation.as_deref() == Some(generation)
+            })
+            .map(|(token, _)| token.clone())
+            .collect::<Vec<_>>();
+        let revoked = !tokens.is_empty();
+        for token in tokens {
+            state.grants.remove(&token);
+        }
+        if !state.grants.values().any(|grant| grant.issue == issue) {
+            state.revoked_issues.insert(issue.to_owned());
+        }
+        revoked
+    }
+
     fn get(&self, token: Option<&str>) -> Option<MemoryScopeGrant> {
         token.and_then(|token| {
             self.state
@@ -14395,6 +14415,49 @@ Public memory concept.
         );
 
         assert!(requires_fresh_conversation);
+    }
+
+    #[test]
+    fn old_generation_cleanup_preserves_a_newer_memory_grant() {
+        let registry = MemoryScopeGrantRegistry::default();
+        let _ = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-1".to_owned()),
+        );
+        let (new_token, rotated) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-2".to_owned()),
+        );
+        assert!(rotated);
+
+        assert!(!registry.revoke_issue_generation("COE-549", "generation-1"));
+        assert!(registry.get(Some(&new_token)).is_some());
+        let (same_token, requires_fresh) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-2".to_owned()),
+        );
+        assert_eq!(same_token, new_token);
+        assert!(!requires_fresh);
+
+        assert!(registry.revoke_issue_generation("COE-549", "generation-2"));
+        assert!(registry.get(Some(&new_token)).is_none());
+        let (_, requires_fresh) = registry.issue_or_refresh_with_lifecycle(
+            "project-alpha",
+            "repo-alpha",
+            BTreeSet::from(["repo-alpha".to_owned()]),
+            "COE-549",
+            Some("generation-3".to_owned()),
+        );
+        assert!(requires_fresh);
     }
 
     #[test]
