@@ -4721,6 +4721,22 @@ impl WorkspaceManager {
         .await
     }
 
+    pub async fn cleanup_target_deletion_started(
+        &self,
+        target: &CleanupTarget,
+    ) -> Result<bool, WorkspaceError> {
+        let workspace = Self::workspace_handle_for_cleanup_target(target);
+        let request = CleanupRequest {
+            generation: target.generation.clone(),
+            outcome: target.outcome,
+            remove: true,
+        };
+        Ok(self
+            .matching_cleanup_tombstone(&workspace, &request)
+            .await?
+            .is_some_and(|tombstone| tombstone.deleted_at.is_none()))
+    }
+
     pub async fn prepare_cleanup_target(
         &self,
         target: &CleanupTarget,
@@ -5185,7 +5201,11 @@ impl WorkspaceManager {
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let handle = self.orchestrator_state_handle(canonical_root.clone());
         let path = self.cleanup_tombstone_path(&canonical_root, workspace, &tombstone.generation);
-        self.write_manifest_atomically(&handle, &path, tombstone)
+        let mut sanitized = tombstone.clone();
+        if let Some(hook) = sanitized.before_remove.as_mut() {
+            redact_hook_execution_record(hook);
+        }
+        self.write_manifest_atomically(&handle, &path, &sanitized)
             .await
     }
 
@@ -5487,6 +5507,132 @@ impl WorkspaceManager {
             }
         }
 
+        let parents_root = self.config.root.join("parents");
+        self.reject_symlinked_path_components(&self.config.root, Path::new("parents"))
+            .await?;
+        let mut parent_keys = match fs::read_dir(&parents_root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(workspaces),
+            Err(source) => {
+                return Err(WorkspaceError::ReadDirectory {
+                    path: parents_root,
+                    source,
+                });
+            }
+        };
+        while let Some(parent_key) =
+            parent_keys
+                .next_entry()
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: parents_root.clone(),
+                    source,
+                })?
+        {
+            if !parent_key
+                .file_type()
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: parent_key.path(),
+                    source,
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let parent_key_path = parent_key.path();
+            let mut generations = fs::read_dir(&parent_key_path).await.map_err(|source| {
+                WorkspaceError::ReadDirectory {
+                    path: parent_key_path.clone(),
+                    source,
+                }
+            })?;
+            while let Some(generation) =
+                generations
+                    .next_entry()
+                    .await
+                    .map_err(|source| WorkspaceError::ReadDirectory {
+                        path: parent_key_path.clone(),
+                        source,
+                    })?
+            {
+                if !generation
+                    .file_type()
+                    .await
+                    .map_err(|source| WorkspaceError::ReadDirectory {
+                        path: generation.path(),
+                        source,
+                    })?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let path = generation.path();
+                let loaded = match self.load_workspace_from_directory(&path).await {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "skipping invalid parent execution root during recovery"
+                        );
+                        continue;
+                    }
+                };
+                let Some((handle, issue)) = loaded else {
+                    continue;
+                };
+                let parent = match self
+                    .load_manifest::<ParentExecutionManifest>(
+                        &handle,
+                        &handle.parent_manifest_path(),
+                    )
+                    .await
+                {
+                    Ok(Some(parent)) => parent,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "skipping parent execution root with invalid manifest during recovery"
+                        );
+                        continue;
+                    }
+                };
+                let expected_generation = generation
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok());
+                let expected_key = parent_key.file_name();
+                let generated_key = parent_workspace_key(&issue.identifier, &issue.issue_id).ok();
+                if parent.schema_version != 1
+                    || parent.parent_issue_id != issue.issue_id
+                    || parent.parent_identifier != issue.identifier
+                    || handle.checkout_generation().is_some()
+                    || expected_generation != Some(parent.hierarchy_generation)
+                    || expected_key.to_str() != Some(handle.workspace_key())
+                    || generated_key.as_deref() != Some(handle.workspace_key())
+                    || normalize_absolute_path(&parent.workspace_path)
+                        .ok()
+                        .as_deref()
+                        != Some(handle.workspace_path())
+                    || parent.child_checkout_map != Path::new("child-checkouts.json")
+                    || parent.integration_plan != Path::new("integration-plan.md")
+                    || parent.evidence_directory != Path::new("evidence")
+                    || parent.repositories_directory != Path::new("repositories")
+                    || path_exists(&handle.workspace_path().join(".git")).await?
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "skipping parent execution root with inconsistent identity during recovery"
+                    );
+                    continue;
+                }
+                workspaces.push((handle, issue));
+            }
+        }
+
         Ok(workspaces)
     }
 
@@ -5525,16 +5671,12 @@ impl WorkspaceManager {
             .as_deref()
             .map(redact_runtime_diagnostic);
         for hook in &mut sanitized.hooks {
-            hook.command = redact_runtime_diagnostic(&hook.command);
-            hook.stdout = redact_runtime_diagnostic(&hook.stdout);
-            hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+            redact_hook_execution_record(hook);
         }
         if let Some(cleanup) = sanitized.cleanup_intent.as_mut() {
             cleanup.last_error = cleanup.last_error.as_deref().map(redact_runtime_diagnostic);
             if let Some(hook) = cleanup.before_remove.as_mut() {
-                hook.command = redact_runtime_diagnostic(&hook.command);
-                hook.stdout = redact_runtime_diagnostic(&hook.stdout);
-                hook.stderr = redact_runtime_diagnostic(&hook.stderr);
+                redact_hook_execution_record(hook);
             }
         }
         self.write_manifest_atomically(workspace, &workspace.run_manifest_path(), &sanitized)
@@ -7725,6 +7867,12 @@ fn issue_manifest_owns_checkout(
         && checkout.sanitized_workspace_key == manifest.sanitized_workspace_key
         && checkout.workspace_path == handle.workspace_path()
         && issue_manifest_binding_matches_checkout(manifest, checkout)
+}
+
+fn redact_hook_execution_record(record: &mut HookExecutionRecord) {
+    record.command = redact_runtime_diagnostic(&record.command);
+    record.stdout = redact_runtime_diagnostic(&record.stdout);
+    record.stderr = redact_runtime_diagnostic(&record.stderr);
 }
 
 fn ensure_descendant(root: &Path, candidate: &Path) -> Result<(), WorkspaceError> {

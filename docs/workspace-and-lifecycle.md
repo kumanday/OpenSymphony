@@ -244,13 +244,17 @@ failed `before_remove` receipt remains visible but does not block deletion or
 run the best-effort hook again.
 Generation tombstones outside the deleted workspace are written before root
 deletion and completed afterward; they also copy the successful hook receipt so
-a partially removed metadata directory cannot cause the hook to run twice. On
-restart, an incomplete tombstone resumes deletion even when part of the root
-remains, while an already missing path is accepted only for an exact issue,
-key, path, outcome, and generation match. Live checkout deletion reads the
-generation and ownership from its on-disk manifests instead of trusting a
-requested handle. Completed parent executions are restored as capture
-candidates during restart recovery. Hook, Git, manifest,
+a partially removed metadata directory cannot cause the hook to run twice. The
+external copy applies the same diagnostic redaction as the run manifest. On
+restart, an incomplete tombstone proves that archival and cleanup preparation
+already completed and resumes deletion even when part of the root remains or
+its run manifest is gone. An already missing path is accepted only for an exact
+issue, key, path, outcome, and generation match. Live checkout deletion reads
+the generation and ownership from its on-disk manifests instead of trusting a
+requested handle. Recovery enumerates both checkout roots and nested
+`parents/<key>/<generation>` roots, so completed parent executions return as
+capture candidates and their conversations pass through the archival fence.
+Hook, Git, manifest,
 tombstone, permission, and filesystem failures remain visible on the durable
 cleanup intent and retry on later scheduler ticks.
 

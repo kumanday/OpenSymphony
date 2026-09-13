@@ -1203,6 +1203,15 @@ async fn parent_execution_root_supports_no_required_child_checkouts() {
         .await
         .expect("a parent with no required child checkouts should still get an execution root");
 
+    let discovered = manager
+        .list_all_workspaces()
+        .await
+        .expect("nested parent roots should be discoverable for recovery");
+    assert!(discovered.iter().any(|(handle, manifest)| {
+        handle.workspace_path() == prepared.handle.workspace_path()
+            && manifest.issue_id == parent.issue_id
+    }));
+
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert!(prepared.child_checkout_map.repositories.is_empty());
     assert!(
@@ -3983,7 +3992,7 @@ async fn terminal_cleanup_receipts_best_effort_hook_and_accepts_only_its_generat
         &workspace_root,
         HookConfig {
             before_remove: Some(HookDefinition::shell(
-                "printf 'run\\n' >> ../hook-count; if [ -f .cleanup-ready ]; then exit 0; else touch .cleanup-ready; exit 7; fi",
+                "printf 'token=hook-secret\\n' >> ../hook-count; if [ -f .cleanup-ready ]; then exit 0; else touch .cleanup-ready; exit 7; fi",
             )),
             ..HookConfig::default()
         },
@@ -4069,6 +4078,10 @@ async fn terminal_cleanup_receipts_best_effort_hook_and_accepts_only_its_generat
     let mut incomplete: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&tombstone_path).expect("read completed tombstone"))
             .expect("decode tombstone");
+    let completed_tombstone =
+        std::fs::read_to_string(&tombstone_path).expect("read tombstone text");
+    assert!(!completed_tombstone.contains("hook-secret"));
+    assert!(completed_tombstone.contains("[redacted]"));
     incomplete["deleted_at"] = serde_json::Value::Null;
     std::fs::write(
         &tombstone_path,
