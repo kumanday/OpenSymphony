@@ -1645,11 +1645,15 @@ where
                 detail: format!("repair {repair_id} has not satisfied central review policy"),
             });
         }
+        let merge_input_version = format!(
+            "{input_version};repair-head:{}",
+            repair.pushed_commit.as_deref().unwrap_or("missing")
+        );
         self.persist_repair_intent(
             parent_id,
             repair_id,
             ParentProviderOperationKind::ReconcileMerge,
-            &input_version,
+            &merge_input_version,
             observed_at,
         )
         .await?;
@@ -1717,7 +1721,7 @@ where
             parent_id,
             repair_id,
             ParentProviderOperationKind::Merge,
-            &input_version,
+            &merge_input_version,
             observed_at,
         )
         .await?;

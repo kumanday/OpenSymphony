@@ -751,9 +751,10 @@ with a later reconciliation snapshot. The
 scheduler applies a fresh provider snapshot immediately before merge and returns
 to review if approval, checks, or mergeability are no longer current. A merged
 provider snapshot advances only when the pushed head and policy evidence remain
-current and the durable ledger contains the orchestrator's pending merge intent;
-an external merge that bypasses those facts is blocked for operator recovery.
-Repair
+current and the durable ledger contains the orchestrator's pending merge intent
+for that exact head. A replacement repair push supersedes older pending merge
+intents; an external merge that bypasses those facts is blocked for operator
+recovery. Repair
 provider writes remain pending while the tracker parent is inactive or terminal,
 the controller is terminal, or the current hierarchy generation is fenced. A
 repair implementation interrupted by restart remains in `fixing` for cleanup and

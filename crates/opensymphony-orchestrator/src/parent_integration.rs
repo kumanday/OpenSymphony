@@ -1593,6 +1593,18 @@ impl ParentIntegrationController {
         let review_state = {
             let repair = self.repair_mut(repair_id)?;
             let unchanged = repair.pushed_commit.as_deref() == Some(commit);
+            if !unchanged {
+                for operation in repair.operations.iter_mut().filter(|operation| {
+                    matches!(
+                        operation.kind,
+                        ParentProviderOperationKind::ReconcileMerge
+                            | ParentProviderOperationKind::Merge
+                    ) && operation.receipt.is_none()
+                }) {
+                    operation.receipt = Some(receipt("superseded", None));
+                    operation.completed_at = Some(occurred_at);
+                }
+            }
             repair.pushed_commit = Some(commit.to_owned());
             repair.status = if repair.pull_request_id.is_some() {
                 ParentRepairStatus::AwaitingReview
@@ -1718,9 +1730,13 @@ impl ParentIntegrationController {
                     && !snapshot.changes_requested);
             let head_is_current =
                 snapshot.head_commit.as_deref() == current.pushed_commit.as_deref();
+            let merge_input_version = format!(
+                "{input_version};repair-head:{}",
+                current.pushed_commit.as_deref().unwrap_or("missing")
+            );
             let pending_merge = current.operations.iter().rev().find(|operation| {
                 operation.kind == ParentProviderOperationKind::Merge
-                    && operation.input_version == input_version
+                    && operation.input_version == merge_input_version
                     && operation.receipt.is_none()
             });
             if !head_is_current || !checks_satisfied || !review_satisfied || pending_merge.is_none()
@@ -3207,6 +3223,7 @@ mod tests {
         head_commit: &str,
         occurred_at: u64,
     ) {
+        let merge_input_version = format!("targets:1;repair-head:{head_commit}");
         let mut approved = review_snapshot();
         approved.head_commit = Some(head_commit.to_owned());
         approved.review_head_commit = Some(head_commit.to_owned());
@@ -3224,7 +3241,7 @@ mod tests {
             .begin_provider_operation(
                 repair_id,
                 ParentProviderOperationKind::ReconcileMerge,
-                "targets:1",
+                &merge_input_version,
                 TimestampMs::new(occurred_at + 1),
             )
             .expect("merge reconciliation intent");
@@ -3241,7 +3258,7 @@ mod tests {
             .begin_provider_operation(
                 repair_id,
                 ParentProviderOperationKind::Merge,
-                "targets:1",
+                &merge_input_version,
                 TimestampMs::new(occurred_at + 3),
             )
             .expect("merge intent");
@@ -3575,6 +3592,74 @@ mod tests {
             controller.state,
             ParentIntegrationState::Blocked { .. }
         ));
+    }
+
+    #[test]
+    fn merge_intent_for_superseded_repair_head_does_not_authorize_replacement() {
+        let mut controller = controller();
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_branch_ready(&repair_id)
+            .expect("branch ready");
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("first push");
+        controller
+            .record_repair_pull_request(
+                &repair_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pull request");
+        authorize_repair_merge(&mut controller, &repair_id, "repair-commit-1", 13);
+
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-2",
+                "targets:1",
+                TimestampMs::new(17),
+            )
+            .expect("replacement push");
+        let stale_merge = controller
+            .repair(&repair_id)
+            .expect("repair")
+            .operations
+            .iter()
+            .find(|operation| operation.kind == ParentProviderOperationKind::Merge)
+            .expect("stale merge intent");
+        assert_eq!(
+            stale_merge
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.status.as_str()),
+            Some("superseded")
+        );
+
+        let mut merged = review_snapshot();
+        merged.head_commit = Some("repair-commit-2".to_owned());
+        merged.review_head_commit = Some("repair-commit-2".to_owned());
+        merged.open = false;
+        merged.merged = true;
+        merged.checks_passed = true;
+        merged.review_approved = true;
+        merged.merge_result_commit = Some("external-squash".to_owned());
+        merged.target_contains_merge_result = true;
+        controller
+            .reconcile_repair_provider(&repair_id, merged, "targets:1", TimestampMs::new(18))
+            .expect("stale intent is rejected");
+
+        assert_eq!(
+            controller.repair(&repair_id).expect("repair").status,
+            ParentRepairStatus::ExternallyClosed
+        );
     }
 
     #[test]

@@ -313,7 +313,8 @@ harness-observed repair turn. Ordinary final verification still requires exact
 clean targets, while the repair turn may verify descendant or dirty work on its
 recorded repair branch before the workspace owner commits and pushes it. An
 externally observed merge advances only with current pushed-head policy evidence
-and a pending scheduler-owned merge intent. Capture
+and a pending scheduler-owned merge intent bound to that head. Publishing a
+replacement head supersedes any older pending merge intent. Capture
 acknowledgement and ordered release of evidence-protecting roots and leases
 remain part of the later cleanup lifecycle.
 
