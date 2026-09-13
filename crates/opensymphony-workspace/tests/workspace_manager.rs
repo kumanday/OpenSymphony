@@ -2,16 +2,16 @@ use std::{collections::BTreeMap, process::Command, time::Duration};
 
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, RepositoryBinding, RepositoryBindingOutcome, RepositoryIdentity,
-    SafeRemoteFingerprint,
+    SafeRemoteFingerprint, WorkspaceKey, WorkspaceRecord,
 };
 use crate::opensymphony_workspace::{
-    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, ConversationManifest,
-    HookConfig, HookDefinition, HookExecutionRecord, HookExecutionStatus, HookKind,
-    IssueContextArtifact, IssueDescriptor, IssueLifecycleState, ParentCheckoutRequest,
-    ParentRuntimeDescriptor, PromptCaptureDescriptor, PromptKind, RunDescriptor, RunManifest,
-    RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
-    compose_parent_continuation_prompt, compose_parent_prompt, compose_terminal_prompt,
-    parent_workspace_key,
+    CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, CleanupRequest,
+    CleanupTarget, CleanupTerminalOutcome, ConversationManifest, HookConfig, HookDefinition,
+    HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
+    IssueLifecycleState, ParentCheckoutRequest, ParentRuntimeDescriptor, PromptCaptureDescriptor,
+    PromptKind, RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError,
+    WorkspaceManager, WorkspaceManagerConfig, compose_parent_continuation_prompt,
+    compose_parent_prompt, compose_terminal_prompt, parent_workspace_key,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -1092,11 +1092,53 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
                 .join(&checkout.relative_path)
         })
         .collect::<Vec<_>>();
+    let cleanup_target = CleanupTarget {
+        issue_id: parent.issue_id.clone(),
+        identifier: parent.identifier.clone(),
+        workspace: WorkspaceRecord {
+            path: cleanup_parent.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(cleanup_parent.handle.workspace_key().to_owned())
+                .expect("managed key"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        },
+        generation: "parent:9".to_owned(),
+        outcome: CleanupTerminalOutcome::Succeeded,
+    };
+    let stale_child_target = CleanupTarget {
+        issue_id: child_a1.handle.issue_id().to_owned(),
+        identifier: child_a1.handle.identifier().to_owned(),
+        workspace: WorkspaceRecord {
+            path: child_a1.handle.workspace_path().to_path_buf(),
+            workspace_key: WorkspaceKey::new(child_a1.handle.workspace_key().to_owned())
+                .expect("managed key"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        },
+        generation: "stale-retained-generation".to_owned(),
+        outcome: CleanupTerminalOutcome::Succeeded,
+    };
+    assert!(matches!(
+        manager.cleanup_target(&stale_child_target).await,
+        Err(WorkspaceError::CleanupGenerationMismatch { actual, .. })
+            if actual == child_a1.handle.checkout_generation().expect("generation")
+    ));
+    assert!(
+        child_a1.handle.workspace_path().exists(),
+        "an old retained generation must not delete the current checkout"
+    );
     manager
-        .cleanup_failed_terminal_workspace(&cleanup_parent.handle)
+        .prepare_cleanup_target(&cleanup_target)
         .await
-        .expect("terminal parent cleanup should unregister integration worktrees");
-    assert!(!cleanup_parent.handle.workspace_path().exists());
+        .expect("parent preparation should unregister integration worktrees");
+    assert!(
+        cleanup_parent.handle.workspace_path().exists(),
+        "preparation must preserve the parent root until descendants are cleaned"
+    );
     let registered_worktrees = [
         child_a1.handle.workspace_path(),
         child_b.handle.workspace_path(),
@@ -1112,6 +1154,11 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             "terminal cleanup must remove the Git worktree registration"
         );
     }
+    manager
+        .cleanup_target(&cleanup_target)
+        .await
+        .expect("terminal parent cleanup should remove its prepared root");
+    assert!(!cleanup_parent.handle.workspace_path().exists());
     manager
         .prepare_parent_execution_root(&parent, 9, repeat_requests.clone())
         .await
@@ -1155,6 +1202,15 @@ async fn parent_execution_root_supports_no_required_child_checkouts() {
         .prepare_parent_execution_root(&parent, 1, Vec::new())
         .await
         .expect("a parent with no required child checkouts should still get an execution root");
+
+    let discovered = manager
+        .list_all_workspaces()
+        .await
+        .expect("nested parent roots should be discoverable for recovery");
+    assert!(discovered.iter().any(|(handle, manifest)| {
+        handle.workspace_path() == prepared.handle.workspace_path()
+            && manifest.issue_id == parent.issue_id
+    }));
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert!(prepared.child_checkout_map.repositories.is_empty());
@@ -3926,6 +3982,219 @@ async fn terminal_cleanup_can_delete_workspace() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn terminal_cleanup_receipts_best_effort_hook_and_accepts_only_its_generation_tombstone() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            before_remove: Some(HookDefinition::shell(
+                "printf 'token=hook-secret\\n' >> ../hook-count; if [ -f .cleanup-ready ]; then exit 0; else touch .cleanup-ready; exit 7; fi",
+            )),
+            ..HookConfig::default()
+        },
+        CleanupConfig {
+            remove_terminal_workspaces: true,
+        },
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-terminal-retry");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+    let request = CleanupRequest {
+        generation: format!("workspace:{}", issue.issue_id),
+        outcome: CleanupTerminalOutcome::Succeeded,
+        remove: true,
+    };
+
+    manager
+        .prepare_cleanup_target(&CleanupTarget {
+            issue_id: issue.issue_id.clone(),
+            identifier: issue.identifier.clone(),
+            workspace: WorkspaceRecord {
+                path: ensured.handle.workspace_path().to_path_buf(),
+                workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_owned())
+                    .expect("managed key"),
+                created_now: false,
+                created_at: None,
+                updated_at: None,
+                last_seen_tracker_refresh_at: None,
+            },
+            generation: request.generation.clone(),
+            outcome: request.outcome,
+        })
+        .await
+        .expect("a best-effort hook failure must not block cleanup preparation");
+    assert!(ensured.handle.workspace_path().exists());
+    let failed_manifest = manager
+        .load_run_manifest(&ensured.handle)
+        .await
+        .expect("manifest should load")
+        .expect("cleanup intent should exist");
+    assert_eq!(
+        failed_manifest.cleanup_intent.expect("intent").retry_count,
+        1
+    );
+    let tombstone_directory = workspace_root.join(".opensymphony-cleanup-tombstones");
+    std::fs::write(&tombstone_directory, "blocked")
+        .expect("simulate a tombstone permission/path failure");
+    manager
+        .cleanup_with_request(
+            &ensured.handle,
+            IssueLifecycleState::Terminal,
+            request.clone(),
+        )
+        .await
+        .expect_err("tombstone failure must leave the prepared workspace retryable");
+    assert!(ensured.handle.workspace_path().exists());
+    std::fs::remove_file(&tombstone_directory).expect("repair tombstone directory");
+
+    let removed = manager
+        .cleanup_with_request(
+            &ensured.handle,
+            IssueLifecycleState::Terminal,
+            request.clone(),
+        )
+        .await
+        .expect("retry should remove the intended generation");
+    assert!(
+        removed
+            .tombstone
+            .as_ref()
+            .and_then(|t| t.deleted_at)
+            .is_some()
+    );
+    let tombstone_path = std::fs::read_dir(&tombstone_directory)
+        .expect("tombstone directory")
+        .next()
+        .expect("tombstone entry")
+        .expect("tombstone path")
+        .path();
+    let mut incomplete: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&tombstone_path).expect("read completed tombstone"))
+            .expect("decode tombstone");
+    let completed_tombstone =
+        std::fs::read_to_string(&tombstone_path).expect("read tombstone text");
+    assert!(!completed_tombstone.contains("hook-secret"));
+    assert!(completed_tombstone.contains("[redacted]"));
+    incomplete["deleted_at"] = serde_json::Value::Null;
+    std::fs::write(
+        &tombstone_path,
+        serde_json::to_vec_pretty(&incomplete).expect("encode incomplete tombstone"),
+    )
+    .expect("simulate a crash after deletion and before completion receipt");
+    std::fs::create_dir_all(ensured.handle.metadata_dir())
+        .expect("simulate a partially removed workspace root");
+    std::fs::write(ensured.handle.workspace_path().join("undeleted"), "blocked")
+        .expect("partial deletion should leave visible residue");
+    let resumed = manager
+        .cleanup_with_request(&ensured.handle, IssueLifecycleState::Terminal, request)
+        .await
+        .expect("matching tombstone should resume partial deletion");
+    assert!(
+        resumed
+            .tombstone
+            .as_ref()
+            .and_then(|tombstone| tombstone.deleted_at)
+            .is_some(),
+        "restart should complete a deletion-started tombstone"
+    );
+    assert!(
+        resumed.before_remove.is_some(),
+        "the external tombstone must preserve the successful hook receipt"
+    );
+    assert!(!ensured.handle.workspace_path().exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("hook-count"))
+            .expect("hook count")
+            .lines()
+            .count(),
+        1,
+        "a best-effort hook receipt must not be rerun after deletion starts"
+    );
+
+    let recreated = manager
+        .ensure(&issue)
+        .await
+        .expect("the issue workspace may be recreated after cleanup");
+    std::fs::remove_dir_all(recreated.handle.workspace_path())
+        .expect("simulate deletion of the recreated generation");
+    let stale = manager
+        .cleanup_with_request(
+            &recreated.handle,
+            IssueLifecycleState::Terminal,
+            CleanupRequest {
+                generation: format!("workspace:{}", issue.issue_id),
+                outcome: CleanupTerminalOutcome::Succeeded,
+                remove: true,
+            },
+        )
+        .await
+        .expect_err("recreation must invalidate the earlier tombstone");
+    assert!(matches!(
+        stale,
+        WorkspaceError::MissingCleanupTombstone { .. }
+    ));
+}
+
+#[tokio::test]
+async fn missing_workspace_without_matching_generation_tombstone_is_not_cleanup_success() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig {
+            remove_terminal_workspaces: true,
+        },
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-missing-no-tombstone");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+    let mismatch = manager
+        .cleanup_with_request(
+            &ensured.handle,
+            IssueLifecycleState::Terminal,
+            CleanupRequest {
+                generation: "workspace:other-generation".to_owned(),
+                outcome: CleanupTerminalOutcome::Succeeded,
+                remove: true,
+            },
+        )
+        .await
+        .expect_err("a live workspace must reject another generation");
+    assert!(matches!(
+        mismatch,
+        WorkspaceError::CleanupGenerationMismatch { .. }
+    ));
+    tokio::fs::remove_dir_all(ensured.handle.workspace_path())
+        .await
+        .expect("simulate external deletion");
+
+    let error = manager
+        .cleanup_with_request(
+            &ensured.handle,
+            IssueLifecycleState::Terminal,
+            CleanupRequest {
+                generation: format!("workspace:{}", issue.issue_id),
+                outcome: CleanupTerminalOutcome::Succeeded,
+                remove: true,
+            },
+        )
+        .await
+        .expect_err("missing path without a tombstone must remain visible");
+    assert!(matches!(
+        error,
+        WorkspaceError::MissingCleanupTombstone { .. }
+    ));
 }
 
 #[tokio::test]

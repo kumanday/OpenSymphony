@@ -20,7 +20,8 @@ use crate::opensymphony_domain::{
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
 use crate::opensymphony_workspace::{
-    checkout_workspace_key, redact_runtime_diagnostic, sanitize_workspace_key,
+    CleanupTarget, CleanupTerminalOutcome, checkout_workspace_key, redact_runtime_diagnostic,
+    sanitize_workspace_key,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,8 @@ use super::{
     LeaseResource, ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt,
     ParentCleanupStatus, ParentEligibilityEvidence, ParentIntegrationController,
     ParentIntegrationError, ParentProviderOperationKind, ParentRepairAttempt, ParentRepairPolicy,
-    ParentRepairStatus, ParentRepositoryTarget,
+    ParentRepairStatus, ParentRepositoryTarget, ParentSubtreeCleanupIntent,
+    ParentSubtreeCleanupStatus, ParentSubtreeCleanupTarget,
 };
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
@@ -470,6 +472,14 @@ pub trait WorkspaceBackend {
         Ok(false)
     }
 
+    async fn cleanup_target_for_resource(
+        &mut self,
+        _resource: &LeaseResource,
+        _outcome: CleanupTerminalOutcome,
+    ) -> Result<Option<CleanupTarget>, Self::Error> {
+        Ok(None)
+    }
+
     async fn parent_workspace_targets(
         &mut self,
         _issue: &NormalizedIssue,
@@ -553,6 +563,17 @@ pub trait WorkspaceBackend {
 
     async fn remove_workspace(&mut self, workspace: &WorkspaceRecord) -> Result<(), Self::Error> {
         self.cleanup_workspace(workspace, true).await
+    }
+
+    async fn cleanup_generation(&mut self, target: &CleanupTarget) -> Result<(), Self::Error> {
+        self.cleanup_workspace(&target.workspace, true).await
+    }
+
+    async fn prepare_cleanup_generation(
+        &mut self,
+        _target: &CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     async fn persist_retry_count(
@@ -2132,6 +2153,7 @@ where
         self.load_recovery_state().await?;
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
+        self.reconcile_parent_subtree_cleanup(observed_at).await?;
 
         self.expire_linear_cooldown(observed_at);
         let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
@@ -2291,6 +2313,368 @@ where
         self.last_poll_at = Some(observed_at);
         self.refresh_health_from_linear_cooldown(observed_at);
         Ok(self.snapshot(observed_at))
+    }
+
+    pub async fn acknowledge_terminal_capture(
+        &mut self,
+        issue_identifiers: &[String],
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let captured = issue_identifiers.iter().collect::<BTreeSet<_>>();
+        let parent_ids = self
+            .executions
+            .iter()
+            .filter(|(_, execution)| {
+                captured.contains(&execution.issue().identifier.to_string())
+                    && self
+                        .hierarchy_state
+                        .parent_integrations
+                        .contains_key(&execution.issue().id)
+            })
+            .map(|(issue_id, _)| issue_id.clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for parent_id in parent_ids {
+            let Some(execution) = self.executions.get(&parent_id).cloned() else {
+                continue;
+            };
+            let Some(parent_workspace) = execution.workspace().cloned() else {
+                continue;
+            };
+            let Some(controller) = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if controller.subtree_cleanup.is_some() {
+                continue;
+            }
+            if controller.has_unreconciled_harness() {
+                return Err(SchedulerError::Workspace {
+                    detail: format!(
+                        "captured parent {parent_id} still has an unreconciled harness cleanup fence"
+                    ),
+                });
+            }
+            let outcome = match controller.state {
+                super::ParentIntegrationState::Completed => {
+                    if controller.final_evidence.is_none()
+                        || controller.repair_attempts.iter().any(|repair| {
+                            repair.status != ParentRepairStatus::Completed
+                                || repair.operations.iter().any(|operation| {
+                                    operation.receipt.is_none() || operation.completed_at.is_none()
+                                })
+                        })
+                    {
+                        return Err(SchedulerError::Workspace {
+                            detail: format!(
+                                "captured parent {parent_id} is missing final evidence or repair receipts"
+                            ),
+                        });
+                    }
+                    CleanupTerminalOutcome::Succeeded
+                }
+                super::ParentIntegrationState::Failed { .. } => CleanupTerminalOutcome::Failed,
+                super::ParentIntegrationState::Canceled { .. } => CleanupTerminalOutcome::Canceled,
+                _ => {
+                    return Err(SchedulerError::Workspace {
+                        detail: format!(
+                            "captured parent {parent_id} has not reached a terminal controller state"
+                        ),
+                    });
+                }
+            };
+            let retained = outcome == CleanupTerminalOutcome::Failed
+                && self.workspace.retain_failed_workspaces();
+            let resources = self.hierarchy_state.descendant_resources_for(&parent_id);
+            let mut descendants = Vec::with_capacity(resources.len());
+            for resource in resources {
+                let cleanup = self
+                    .workspace
+                    .cleanup_target_for_resource(&resource, CleanupTerminalOutcome::Succeeded)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: format!(
+                            "captured parent {} is missing retained workspace generation {}",
+                            parent_id, resource.checkout_generation
+                        ),
+                    })?;
+                descendants.push(ParentSubtreeCleanupTarget {
+                    resource: Some(resource.clone()),
+                    cleanup,
+                    prepared_at: None,
+                    cleaned_at: None,
+                });
+            }
+            descendants.sort_by(|left, right| {
+                let left_resource = left.resource.as_ref().expect("descendant resource");
+                let right_resource = right.resource.as_ref().expect("descendant resource");
+                hierarchy_depth(&self.hierarchy_state, &parent_id, &right_resource.issue_id)
+                    .cmp(&hierarchy_depth(
+                        &self.hierarchy_state,
+                        &parent_id,
+                        &left_resource.issue_id,
+                    ))
+                    .then_with(|| left_resource.cmp(right_resource))
+            });
+            let intent = ParentSubtreeCleanupIntent {
+                hierarchy_generation: controller.hierarchy_generation,
+                capture_acknowledged_at: observed_at,
+                requested_at: observed_at,
+                outcome,
+                status: if retained {
+                    ParentSubtreeCleanupStatus::Retained
+                } else {
+                    ParentSubtreeCleanupStatus::Pending
+                },
+                parent_root: ParentSubtreeCleanupTarget {
+                    resource: None,
+                    cleanup: CleanupTarget {
+                        issue_id: parent_id.to_string(),
+                        identifier: execution.issue().identifier.to_string(),
+                        workspace: parent_workspace,
+                        generation: format!("parent:{}", controller.hierarchy_generation),
+                        outcome,
+                    },
+                    prepared_at: None,
+                    cleaned_at: None,
+                },
+                descendants,
+                retry_count: 0,
+                last_error: None,
+            };
+            self.hierarchy_state
+                .parent_integrations
+                .get_mut(&parent_id)
+                .expect("parent controller was cloned")
+                .subtree_cleanup = Some(intent);
+            changed = true;
+        }
+        if changed {
+            self.persist_orchestrator_state().await?;
+        }
+        self.reconcile_parent_subtree_cleanup(observed_at).await
+    }
+
+    async fn reconcile_parent_subtree_cleanup(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let retain_failed = self.workspace.retain_failed_workspaces();
+        let mut retention_changed = false;
+        for controller in self.hierarchy_state.parent_integrations.values_mut() {
+            if let Some(cleanup) = controller.subtree_cleanup.as_mut()
+                && cleanup.status == ParentSubtreeCleanupStatus::Retained
+                && (cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed)
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                cleanup.last_error = None;
+                retention_changed = true;
+            }
+        }
+        if retention_changed {
+            self.persist_orchestrator_state().await?;
+        }
+        let parent_ids = self
+            .hierarchy_state
+            .parent_integrations
+            .iter()
+            .filter(|(_, controller)| {
+                controller.subtree_cleanup.as_ref().is_some_and(|cleanup| {
+                    matches!(
+                        cleanup.status,
+                        ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                    )
+                })
+            })
+            .map(|(parent_id, _)| parent_id.clone())
+            .collect::<Vec<_>>();
+        for parent_id in parent_ids {
+            let parent_root = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .map(|cleanup| cleanup.parent_root.clone())
+                .expect("cleanup intent exists");
+            if parent_root.prepared_at.is_none() {
+                match self
+                    .workspace
+                    .prepare_cleanup_generation(&parent_root.cleanup)
+                    .await
+                {
+                    Ok(()) => {
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists")
+                            .parent_root
+                            .prepared_at = Some(observed_at);
+                        self.persist_orchestrator_state().await?;
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                        continue;
+                    }
+                }
+            }
+            let descendants = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .map(|cleanup| cleanup.descendants.clone())
+                .unwrap_or_default();
+            for target in &descendants {
+                let resource = target.resource.as_ref().expect("descendant resource");
+                if self.hierarchy_state.release_parent_resource_leases(
+                    &parent_id,
+                    resource,
+                    observed_at.as_u64(),
+                ) {
+                    self.persist_orchestrator_state().await?;
+                }
+            }
+            if let Some(cleanup) = self
+                .hierarchy_state
+                .parent_integrations
+                .get_mut(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_mut())
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Removing;
+                cleanup.last_error = None;
+            }
+            self.persist_orchestrator_state().await?;
+
+            let mut failed = false;
+            for (index, target) in descendants.iter().enumerate() {
+                if target.cleaned_at.is_some() {
+                    continue;
+                }
+                let resource = target.resource.as_ref().expect("descendant resource");
+                if self
+                    .hierarchy_state
+                    .active_for_at(resource, observed_at.as_u64())
+                {
+                    continue;
+                }
+                match self.workspace.cleanup_generation(&target.cleanup).await {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&resource.issue_id)
+                            && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == target.cleanup.workspace.path
+                            })
+                        {
+                            execution.clear_workspace();
+                        }
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists")
+                            .descendants[index]
+                            .cleaned_at = Some(observed_at);
+                        self.persist_orchestrator_state().await?;
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                continue;
+            }
+            let cleanup = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .expect("cleanup intent exists")
+                .clone();
+            if cleanup
+                .descendants
+                .iter()
+                .any(|target| target.cleaned_at.is_none())
+            {
+                if let Some(cleanup) = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&parent_id)
+                    .and_then(|controller| controller.subtree_cleanup.as_mut())
+                {
+                    cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                }
+                self.persist_orchestrator_state().await?;
+                continue;
+            }
+            if cleanup.parent_root.cleaned_at.is_none() {
+                match self
+                    .workspace
+                    .cleanup_generation(&cleanup.parent_root.cleanup)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&parent_id)
+                            && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == cleanup.parent_root.cleanup.workspace.path
+                            })
+                        {
+                            execution.clear_workspace();
+                        }
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.parent_root.cleaned_at = Some(observed_at);
+                        cleanup.status = ParentSubtreeCleanupStatus::Completed;
+                        cleanup.last_error = None;
+                        self.persist_orchestrator_state().await?;
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn interrupt_operator_cancel(
@@ -3970,6 +4354,19 @@ where
                             .map_err(|error| SchedulerError::Workspace {
                                 detail: error.to_string(),
                             })?;
+                        if parent_workspace {
+                            let mut execution =
+                                IssueExecution::new(record.issue.clone(), observed_at);
+                            execution.attach_workspace(record.workspace.clone())?;
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.release(
+                                    observed_at,
+                                    ReleaseReason::TrackerTerminal,
+                                    None,
+                                )?,
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
@@ -8888,6 +9285,33 @@ fn current_epoch_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn hierarchy_depth(
+    state: &DurableOrchestratorState,
+    parent_id: &IssueId,
+    target_id: &IssueId,
+) -> usize {
+    let mut pending = vec![(parent_id.clone(), 0usize)];
+    let mut visited = BTreeSet::new();
+    while let Some((issue_id, depth)) = pending.pop() {
+        if !visited.insert(issue_id.clone()) {
+            continue;
+        }
+        if &issue_id == target_id {
+            return depth;
+        }
+        if let Some(snapshot) = state.hierarchy.get(&issue_id) {
+            pending.extend(
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| (edge.child_id.clone(), depth.saturating_add(1))),
+            );
+        }
+    }
+    0
 }
 
 fn conversation_id_suffix(value: &str) -> &str {

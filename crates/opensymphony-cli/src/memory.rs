@@ -771,9 +771,6 @@ fn completed_parent_capture_commits(
     run: &RunManifest,
     envelope: &crate::opensymphony_workspace::ParentRuntimeEnvelope,
 ) -> Result<Option<BTreeMap<String, String>>, MemoryError> {
-    if run.status != RunStatus::Succeeded {
-        return Ok(None);
-    }
     let state_path = workspace_root.join(".opensymphony-orchestrator-state.json");
     let raw = match fs::read_to_string(&state_path) {
         Ok(raw) => raw,
@@ -802,9 +799,22 @@ fn completed_parent_capture_commits(
     else {
         return Ok(None);
     };
-    if controller.state != ParentIntegrationState::Completed
-        || controller.hierarchy_generation != envelope.hierarchy_generation
-    {
+    if controller.hierarchy_generation != envelope.hierarchy_generation {
+        return Ok(None);
+    }
+    if matches!(
+        controller.state,
+        ParentIntegrationState::Failed { .. } | ParentIntegrationState::Canceled { .. }
+    ) && matches!(
+        run.status,
+        RunStatus::Succeeded
+            | RunStatus::Failed
+            | RunStatus::Cancelled
+            | RunStatus::PreparationFailed
+    ) {
+        return Ok(Some(BTreeMap::new()));
+    }
+    if controller.state != ParentIntegrationState::Completed || run.status != RunStatus::Succeeded {
         return Ok(None);
     }
     let Some(final_evidence) = controller.final_evidence.as_ref() else {
@@ -14913,6 +14923,7 @@ Public memory concept.
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         };
         std::fs::write(
             workspace.join(".opensymphony/run.json"),
@@ -15207,6 +15218,33 @@ Public memory concept.
                 .expect("failed parent capture scan")
                 .is_empty(),
             "a failed parent run must not publish prepared commits"
+        );
+        let mut failed_parent_state = parent_state.clone();
+        let failed_controller = failed_parent_state
+            .parent_integrations
+            .get_mut(&crate::opensymphony_domain::IssueId::new("issue-554").expect("parent id"))
+            .expect("parent controller");
+        failed_controller.state =
+            crate::opensymphony_orchestrator::ParentIntegrationState::Failed {
+                reason: "final verification failed".to_owned(),
+            };
+        failed_controller.final_evidence = None;
+        std::fs::write(
+            workspace_root
+                .path()
+                .join(".opensymphony-orchestrator-state.json"),
+            serde_json::to_vec(&failed_parent_state).expect("failed parent controller state"),
+        )
+        .expect("failed parent controller state");
+        let failed_parent_bindings =
+            super::load_terminal_capture_bindings(workspace_root.path(), &["COE-554".to_owned()])
+                .expect("terminal failed parent capture binding");
+        assert!(failed_parent_bindings["coe-554"].parent_integration);
+        assert!(
+            failed_parent_bindings["coe-554"]
+                .repository_commits
+                .is_empty(),
+            "failed parents must route neutral diagnostic capture without claiming commits"
         );
         parent_run.status = RunStatus::Succeeded;
         std::fs::write(

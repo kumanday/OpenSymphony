@@ -187,7 +187,23 @@ instructions remain in the bound conversation rather than being replayed.
 Terminal success is gated by the durable controller's completed state in both
 live and recovery release paths. Completed parent roots and their descendant
 leases remain durable for capture retry; OSYM-893 consumes that terminal state
-for ordered worktree cleanup and lease release.
+for ordered worktree cleanup and lease release. After automatic capture commits
+all selected parent capsules, the run loop asks the scheduler to persist a
+generation-bound subtree cleanup intent. Cleanup first archives the stopped
+harness conversation and asks the workspace manager to receipt the
+`before_remove` hook and detach every parent integration worktree through Git.
+Only then does the scheduler release that parent's lease owners and remove
+unleased descendant generations from deepest to shallowest, followed by the
+non-Git parent root. A lease owned by another ancestor or by an unexpired
+diagnostic hold continues to block its generation.
+
+The scheduler receipts every prepared or deleted target in the durable parent
+controller. Workspace run manifests hold the hook and integration-worktree
+receipts, while root-level generation tombstones bracket recursive deletion.
+Restart repeats only an incomplete step. A missing path is successful only when
+the tombstone matches its issue, workspace key, path, terminal outcome, and
+generation. Failed and canceled parents use the existing failed-workspace
+retention policy instead of changing terminal classification during cleanup.
 
 ### 3.2 OpenHands is the execution adapter
 

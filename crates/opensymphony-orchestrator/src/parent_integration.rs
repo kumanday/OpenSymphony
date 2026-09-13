@@ -3,10 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::hierarchy::LeaseResource;
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, IssueId, ParentVerificationEvidence, TimestampMs,
 };
-use crate::opensymphony_workspace::redact_runtime_diagnostic;
+use crate::opensymphony_workspace::{
+    CleanupTarget, CleanupTerminalOutcome, redact_runtime_diagnostic,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -424,6 +427,41 @@ pub struct ParentFinalEvidence {
     pub recorded_at: TimestampMs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentSubtreeCleanupStatus {
+    Pending,
+    Removing,
+    Retained,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentSubtreeCleanupTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<LeaseResource>,
+    pub cleanup: CleanupTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_at: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned_at: Option<TimestampMs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentSubtreeCleanupIntent {
+    pub hierarchy_generation: u64,
+    pub capture_acknowledged_at: TimestampMs,
+    pub requested_at: TimestampMs,
+    pub outcome: CleanupTerminalOutcome,
+    pub status: ParentSubtreeCleanupStatus,
+    pub parent_root: ParentSubtreeCleanupTarget,
+    pub descendants: Vec<ParentSubtreeCleanupTarget>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentIntegrationController {
     pub parent_id: IssueId,
@@ -449,6 +487,8 @@ pub struct ParentIntegrationController {
     pub repair_attempts: Vec<ParentRepairAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_evidence: Option<ParentFinalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtree_cleanup: Option<ParentSubtreeCleanupIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -513,6 +553,7 @@ impl ParentIntegrationController {
             attempts: Vec::new(),
             repair_attempts: Vec::new(),
             final_evidence: None,
+            subtree_cleanup: None,
         })
     }
 

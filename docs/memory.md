@@ -541,15 +541,23 @@ Completed parent roots remain retained across reconciliation and restart so a
 transient capture failure cannot erase the repository/run provenance needed for
 the next attempt. Their descendant leases remain active with the root so leaf
 cleanup cannot invalidate registered integration worktrees before OSYM-893
-records capture acknowledgement and performs ordered cleanup.
+records capture acknowledgement and performs ordered cleanup. The run loop
+records that acknowledgement only after the capture workflow completes for the
+selected parent. Cleanup first receipts hook execution and detaches the parent
+integration worktrees, then removes unleased descendants bottom-up and the
+parent root last. Failure to persist the acknowledgement leaves the capture
+candidate eligible for retry.
 For a parent, the capture path also reads validated durable controller state
-and requires the matching lifecycle to be `completed`, its final attempt to be
-passed for the same run and input version, its final evidence to be bound to the
-same conversation, and its exact repository commit map to equal the runtime
-envelope. A terminal run manifest or harness success by itself cannot authorize
-parent capture. The durable binding explicitly marks a parent even when this
-verified commit map is empty, so repository-neutral capture cannot inherit a
-configured default leaf repository. That empty-target capture still records one
+and requires a matching terminal lifecycle. Successful completion additionally
+requires its final attempt to be passed for the same run and input version, its
+final evidence to be bound to the same conversation, and its exact repository
+commit map to equal the runtime envelope. A terminal run manifest or harness
+success by itself cannot authorize successful parent capture. Failed and
+canceled controllers receive a repository-neutral parent binding with no
+verified commit claims so their diagnostics can be captured before the explicit
+retention policy runs. The durable binding explicitly marks a parent even when
+its commit map is empty, so repository-neutral capture cannot inherit a
+configured default leaf repository. That capture still records one
 repository-neutral parent-runtime source reference with the durable run and
 attempt identifiers.
 Retained legacy run envelopes that lack usable run/attempt provenance are
