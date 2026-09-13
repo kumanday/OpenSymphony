@@ -2179,6 +2179,31 @@ impl ParentIntegrationController {
         Ok(())
     }
 
+    pub fn cancel_without_harness(
+        &mut self,
+        reason: impl Into<String>,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        let reason = reason.into();
+        self.transition(
+            ParentIntegrationState::Canceled {
+                reason: reason.clone(),
+            },
+            reason,
+            format!(
+                "parent:{}:{}:cancel",
+                self.parent_id, self.hierarchy_generation
+            ),
+            input_version,
+            None,
+            None,
+            ParentRetryClassification::Terminal,
+            occurred_at,
+        )?;
+        Ok(())
+    }
+
     pub fn current_attempt_id(&self) -> Option<&str> {
         self.attempts
             .iter()

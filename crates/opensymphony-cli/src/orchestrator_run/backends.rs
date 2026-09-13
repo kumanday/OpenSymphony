@@ -1391,6 +1391,17 @@ impl TrackerBackend for RuntimeTrackerBackend {
                             "repair review request has no durable pending intent".to_owned(),
                         )
                     })?;
+                let authenticated_login = self
+                    .github_get_json::<GitHubReviewUser>(&format!("{api_root}/user"), repository)
+                    .await?
+                    .login
+                    .filter(|login| !login.trim().is_empty())
+                    .ok_or_else(|| {
+                        LinearError::InvalidResponse(
+                            "GitHub authenticated-user response omitted the review identity"
+                                .to_owned(),
+                        )
+                    })?;
                 let comments = self
                     .github_issue_comments(
                         &api_root,
@@ -1404,19 +1415,33 @@ impl TrackerBackend for RuntimeTrackerBackend {
                     &comments,
                     review_comment_boundary,
                     intended_at,
+                    &authenticated_login,
                 );
                 if !already_requested {
                     let endpoint = format!(
                         "{api_root}/repos/{owner}/{repository_name}/issues/{pull_number}/comments"
                     );
                     let body = serde_json::json!({"body": "@codex review"});
-                    self.github_send_json::<GitHubIssueComment>(
-                        reqwest::Method::POST,
-                        &endpoint,
-                        repository,
-                        Some(&body),
-                    )
-                    .await?;
+                    let comment = self
+                        .github_send_json::<GitHubIssueComment>(
+                            reqwest::Method::POST,
+                            &endpoint,
+                            repository,
+                            Some(&body),
+                        )
+                        .await?;
+                    if comment.body.trim() != "@codex review"
+                        || !comment
+                            .user
+                            .as_ref()
+                            .and_then(|user| user.login.as_deref())
+                            .is_some_and(|login| login.eq_ignore_ascii_case(&authenticated_login))
+                    {
+                        return Err(LinearError::InvalidResponse(
+                            "GitHub review-trigger response did not match the authenticated review identity"
+                                .to_owned(),
+                        ));
+                    }
                 }
             }
         }
@@ -1643,7 +1668,25 @@ impl RuntimeTrackerBackend {
         let human_review_rejected = latest_reviews
             .values()
             .any(|(state, _, _)| state.eq_ignore_ascii_case("rejected"));
-        let human_review_feedback = current_human_review_feedback(&reviews, &latest_reviews);
+        let codex_review = repair.policy.review_provider.eq_ignore_ascii_case("codex");
+        let review_threads = if codex_review || human_changes_requested {
+            self.github_review_threads(
+                &api_root,
+                &owner,
+                &repository_name,
+                &pull_number,
+                repository,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let human_review_feedback = current_human_review_feedback(
+            &reviews,
+            &latest_reviews,
+            head_commit.as_deref(),
+            &review_threads,
+        );
         let (
             review_head_commit,
             review_request_cursor,
@@ -1651,18 +1694,9 @@ impl RuntimeTrackerBackend {
             review_rejected,
             changes_requested,
             review_feedback,
-        ) = if repair.policy.review_provider.eq_ignore_ascii_case("codex") {
+        ) = if codex_review {
             let comments = self
                 .github_issue_comments(
-                    &api_root,
-                    &owner,
-                    &repository_name,
-                    &pull_number,
-                    repository,
-                )
-                .await?;
-            let review_threads = self
-                .github_review_threads(
                     &api_root,
                     &owner,
                     &repository_name,
@@ -3367,8 +3401,10 @@ fn latest_github_review_states(
 fn current_human_review_feedback(
     reviews: &[GitHubPullRequestReview],
     latest_by_reviewer: &BTreeMap<String, (String, String, u64)>,
+    head_commit: Option<&str>,
+    review_threads: &[GitHubReviewThread],
 ) -> Vec<ParentReviewFeedback> {
-    reviews
+    let mut feedback = reviews
         .iter()
         .filter(|review| {
             latest_by_reviewer.values().any(|(state, _, id)| {
@@ -3385,7 +3421,43 @@ fn current_human_review_feedback(
             })
         })
         .take(MAX_PARENT_REVIEW_FEEDBACK_ITEMS)
-        .collect()
+        .collect::<Vec<_>>();
+    let Some(head_commit) = head_commit else {
+        return feedback;
+    };
+    let remaining = MAX_PARENT_REVIEW_FEEDBACK_ITEMS.saturating_sub(feedback.len());
+    feedback.extend(
+        review_threads
+            .iter()
+            .filter(|thread| !thread.is_resolved)
+            .filter_map(|thread| {
+                let comment = thread.comments.nodes.iter().find(|comment| {
+                    let Some(login) = comment
+                        .author
+                        .as_ref()
+                        .and_then(|author| author.login.as_deref())
+                    else {
+                        return false;
+                    };
+                    latest_by_reviewer.iter().any(|(reviewer, (state, _, _))| {
+                        reviewer.eq_ignore_ascii_case(login)
+                            && state.eq_ignore_ascii_case("changes_requested")
+                    }) && comment
+                        .original_commit
+                        .as_ref()
+                        .or(comment.commit.as_ref())
+                        .is_some_and(|commit| commit.oid == head_commit)
+                })?;
+                Some(ParentReviewFeedback {
+                    thread_id: comment_thread_id(&thread.id),
+                    body: bounded_review_feedback_text(&comment.body),
+                    path: comment.path.as_deref().map(bounded_review_feedback_text),
+                    line: comment.line.or(comment.original_line),
+                })
+            })
+            .take(remaining),
+    );
+    feedback
 }
 
 fn codex_review_state_for_head(
@@ -3470,9 +3542,15 @@ fn codex_review_request_already_posted(
     comments: &[GitHubIssueComment],
     prior_comment_id: Option<u64>,
     intended_at: TimestampMs,
+    authenticated_login: &str,
 ) -> bool {
     comments.iter().any(|comment| {
         comment.body.trim() == "@codex review"
+            && comment
+                .user
+                .as_ref()
+                .and_then(|user| user.login.as_deref())
+                .is_some_and(|login| login.eq_ignore_ascii_case(authenticated_login))
             && prior_comment_id.map_or_else(
                 || {
                     github_provider_evidence_timestamp_ms(&comment.created_at).is_some_and(
@@ -14514,12 +14592,57 @@ Run the scheduler.
             ))
         );
         assert_eq!(
-            current_human_review_feedback(&reviews, &latest),
+            current_human_review_feedback(&reviews, &latest, None, &[]),
             vec![ParentReviewFeedback {
                 thread_id: "review-22".to_owned(),
                 body: "Please cover the private-repository path.".to_owned(),
                 path: None,
                 line: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn human_inline_feedback_is_preserved_for_the_current_head() {
+        let reviewer = Some(GitHubReviewUser {
+            login: Some("reviewer".to_owned()),
+        });
+        let reviews = vec![GitHubPullRequestReview {
+            id: 23,
+            state: "changes_requested".to_owned(),
+            submitted_at: Some("2026-08-14T15:00:00Z".to_owned()),
+            commit_id: Some("abcdef123456".to_owned()),
+            body: None,
+            user: reviewer.clone(),
+        }];
+        let latest = latest_github_review_states(reviews.iter().cloned());
+        let threads = vec![GitHubReviewThread {
+            id: "human-thread".to_owned(),
+            is_resolved: false,
+            comments: GitHubReviewThreadComments {
+                nodes: vec![GitHubReviewThreadComment {
+                    body: "Handle the human inline finding.".to_owned(),
+                    path: Some("src/review.rs".to_owned()),
+                    line: Some(24),
+                    original_line: Some(23),
+                    commit: Some(GitHubGraphQlCommit {
+                        oid: "newer-commit".to_owned(),
+                    }),
+                    original_commit: Some(GitHubGraphQlCommit {
+                        oid: "abcdef123456".to_owned(),
+                    }),
+                    author: reviewer,
+                }],
+            },
+        }];
+
+        assert_eq!(
+            current_human_review_feedback(&reviews, &latest, Some("abcdef123456"), &threads,),
+            vec![ParentReviewFeedback {
+                thread_id: "human-thread".to_owned(),
+                body: "Handle the human inline finding.".to_owned(),
+                path: Some("src/review.rs".to_owned()),
+                line: Some(24),
             }]
         );
     }
@@ -14630,18 +14753,29 @@ Run the scheduler.
 
     #[test]
     fn codex_review_request_replay_uses_comment_boundary_and_second_precision_fallback() {
+        let orchestrator = Some(GitHubReviewUser {
+            login: Some("opensymphony-operator".to_owned()),
+        });
         let comments = vec![
             GitHubIssueComment {
                 id: 40,
                 body: "@codex review".to_owned(),
                 created_at: "1970-01-01T00:00:01Z".to_owned(),
-                user: None,
+                user: orchestrator.clone(),
             },
             GitHubIssueComment {
                 id: 42,
                 body: "@codex review".to_owned(),
                 created_at: "1970-01-01T00:00:01Z".to_owned(),
-                user: None,
+                user: orchestrator,
+            },
+            GitHubIssueComment {
+                id: 43,
+                body: "@codex review".to_owned(),
+                created_at: "1970-01-01T00:00:02Z".to_owned(),
+                user: Some(GitHubReviewUser {
+                    login: Some("other-collaborator".to_owned()),
+                }),
             },
         ];
         let intended_at = TimestampMs::new(1_400);
@@ -14650,16 +14784,25 @@ Run the scheduler.
             &comments,
             Some(41),
             intended_at,
+            "opensymphony-operator",
         ));
         assert!(!codex_review_request_already_posted(
             &comments[..1],
             Some(41),
             intended_at,
+            "opensymphony-operator",
         ));
         assert!(codex_review_request_already_posted(
             &comments,
             None,
             intended_at,
+            "opensymphony-operator",
+        ));
+        assert!(!codex_review_request_already_posted(
+            &comments[2..],
+            Some(41),
+            intended_at,
+            "opensymphony-operator",
         ));
     }
 

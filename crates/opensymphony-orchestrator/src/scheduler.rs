@@ -6502,10 +6502,9 @@ where
                 // controller lifecycle, so finish it durably without issuing
                 // a fictitious worker interrupt.
                 let input_version = parent_controller_input_version(controller);
-                controller.cancel(
+                controller.cancel_without_harness(
                     format!("scheduler released parent integration: {reason:?}"),
                     &input_version,
-                    true,
                     observed_at,
                 )?;
                 return Ok(true);

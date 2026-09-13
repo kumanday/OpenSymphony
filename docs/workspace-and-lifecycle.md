@@ -210,7 +210,9 @@ turn supplies stopped-turn evidence and releases its foreground-process receipt;
 timeout, stall, detach, and failed-cancel paths still require explicit stopped
 state reconciliation. An ordinary cancellation while the tracker parent remains
 active returns through cleanup and baseline refresh. Operator and tracker
-terminal cancellation remains terminal.
+terminal cancellation remains terminal. When a tracker terminal state arrives
+between repair worker turns, cancellation records no harness-interrupt intent or
+acknowledgement because no worker is running.
 
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient

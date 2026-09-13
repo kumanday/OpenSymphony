@@ -1657,6 +1657,12 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
         persisted.parent_integrations[&parent_id].state,
         crate::opensymphony_orchestrator::ParentIntegrationState::Canceled { .. }
     ));
+    let cancellation = persisted.parent_integrations[&parent_id]
+        .transitions
+        .last()
+        .expect("terminal cancellation transition");
+    assert!(cancellation.side_effect_intent.is_none());
+    assert!(cancellation.result_receipt.is_none());
     assert_eq!(
         scheduler.execution(&parent_id).expect("parent").status(),
         SchedulerStatus::Released

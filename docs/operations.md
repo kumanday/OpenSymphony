@@ -741,8 +741,10 @@ redacted repair diagnostic and retried without stopping the rest of the
 scheduler tick. For a Codex review profile, the PR-open scan is the
 initial request and later requested-change heads use an exact `@codex review`
 comment; only completion and findings associated with the current pushed head
-affect automated-review eligibility. Review findings come from unresolved
-provider threads; their bounded bodies and locations are persisted for the
+affect automated-review eligibility. Crash recovery accepts a trigger comment
+only from the identity behind the configured review credential. Review findings
+come from unresolved provider threads, including current human change-request
+threads; their bounded bodies and locations are persisted for the
 credential-scrubbed repair continuation. Resolving a thread after accepted
 pushback removes it from the current finding set without requiring a no-op
 commit. When the central profile requires review,
