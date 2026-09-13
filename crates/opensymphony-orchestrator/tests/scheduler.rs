@@ -3481,11 +3481,6 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
         FakeWorkspace {
             durable_state: Some(serde_json::to_value(&active_state).expect("pending state")),
             records: HashMap::from([(child_id.to_string(), active_workspace)]),
-            cleanup_results: VecDeque::from([Err(FakeError {
-                message: "permission denied before child reactivation".to_owned(),
-                category: None,
-                retry_after: None,
-            })]),
             ..Default::default()
         },
         FakeWorker::default(),
@@ -3494,7 +3489,7 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
     active_retry
         .tick(ts(165))
         .await
-        .expect("failed cleanup may be followed by child reactivation");
+        .expect("fresh tracker state must fence cleanup before child reactivation");
     assert_eq!(
         active_retry
             .execution(&child_id)
@@ -3504,6 +3499,10 @@ async fn failed_subtree_cleanup_retries_only_incomplete_receipts() {
     );
     let cleanup_steps_before_active_fence =
         active_retry.workspace().generation_cleanup_steps.clone();
+    assert!(
+        cleanup_steps_before_active_fence.is_empty(),
+        "cleanup must not run before the tick observes and dispatches the reopened child"
+    );
     active_retry
         .tick(ts(170))
         .await

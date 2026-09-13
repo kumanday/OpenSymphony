@@ -198,6 +198,9 @@ non-Git parent root. A lease owned by another ancestor or by an unexpired
 diagnostic hold continues to block its generation. A claimed, running, or
 retry-queued child bound to the exact retained generation also blocks deletion
 while that execution still owns the workspace.
+Every pending cleanup tick refreshes the full tracker snapshot first. A newly
+active descendant with an unresolved or matching workspace generation fences
+deletion; an already resolved newer generation does not retain the old target.
 
 The scheduler receipts every prepared or deleted target in the durable parent
 controller. Workspace run manifests hold the hook and integration-worktree
@@ -218,7 +221,9 @@ generation even if the observed hierarchy has already advanced, and restart
 recovery selects only the parent root matching the controller's durable
 hierarchy generation.
 Generation-bound OpenHands cleanup, including a parent root, also requires its
-conversation store before workspace preparation can proceed.
+conversation store before workspace preparation can proceed. Missing
+conversation evidence fails closed unless the run manifest proves preparation
+failed without ever recording a conversation binding.
 The completed cleanup intent remains in orchestrator state after the parent root
 is removed and seeds automatic-capture completion after daemon restart, so a
 terminal parent is not routed and captured again without first reopening.

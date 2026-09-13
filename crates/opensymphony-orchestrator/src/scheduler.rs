@@ -2163,15 +2163,21 @@ where
         self.load_recovery_state().await?;
         self.flush_pending_retry_persistence().await?;
         self.flush_pending_retry_exhaustion_persistence().await?;
-        self.reconcile_parent_subtree_cleanup(observed_at).await?;
+        let subtree_cleanup_pending = self
+            .hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .any(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed);
 
         self.expire_linear_cooldown(observed_at);
         let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
-            && due(
-                self.last_full_detail_refresh_at,
-                FULL_DETAIL_REFRESH_INTERVAL_MS,
-                observed_at,
-            ) {
+            && (subtree_cleanup_pending
+                || due(
+                    self.last_full_detail_refresh_at,
+                    FULL_DETAIL_REFRESH_INTERVAL_MS,
+                    observed_at,
+                )) {
             if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
                 self.record_full_detail_refresh(observed_at);
                 let hierarchy_changed = self.reconcile_hierarchy_snapshots(&tracker_snapshot)?;
@@ -2251,6 +2257,13 @@ where
                 .await?;
             self.reconcile_tracker_state(tracker_snapshot, observed_at)
                 .await?;
+            let active_issue_ids = tracker_snapshot
+                .active
+                .iter()
+                .map(|issue| issue.id.clone())
+                .collect::<HashSet<_>>();
+            self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
+                .await?;
             dispatch_candidates = Some(DispatchCandidates::Full {
                 issues: tracker_snapshot.active.clone(),
                 reachable_child_edges: self
@@ -2270,6 +2283,13 @@ where
                     self.bootstrap_recovery(&tracker_snapshot, observed_at)
                         .await?;
                     self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+                        .await?;
+                    let active_issue_ids = tracker_snapshot
+                        .active
+                        .iter()
+                        .map(|issue| issue.id.clone())
+                        .collect::<HashSet<_>>();
+                    self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
                         .await?;
                     dispatch_candidates = Some(DispatchCandidates::Full {
                         reachable_child_edges: self
@@ -2484,12 +2504,22 @@ where
                 return Err(error);
             }
         }
-        self.reconcile_parent_subtree_cleanup(observed_at).await
+        let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? else {
+            return Ok(());
+        };
+        let active_issue_ids = tracker_snapshot
+            .active
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect::<HashSet<_>>();
+        self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
+            .await
     }
 
     async fn reconcile_parent_subtree_cleanup(
         &mut self,
         observed_at: TimestampMs,
+        freshly_active_issue_ids: &HashSet<String>,
     ) -> Result<(), SchedulerError> {
         let retain_failed = self.workspace.retain_failed_workspaces();
         let mut retention_changed = false;
@@ -2617,9 +2647,17 @@ where
                     continue;
                 }
                 let resource = target.resource.as_ref().expect("descendant resource");
+                let fresh_tracker_fence = freshly_active_issue_ids
+                    .contains(resource.issue_id.as_str())
+                    && !self
+                        .executions
+                        .get(&resource.issue_id)
+                        .and_then(IssueExecution::workspace)
+                        .is_some_and(|workspace| workspace.path != target.cleanup.workspace.path);
                 if self
                     .hierarchy_state
                     .active_for_at(resource, observed_at.as_u64())
+                    || fresh_tracker_fence
                     || self
                         .executions
                         .get(&resource.issue_id)

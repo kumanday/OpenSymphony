@@ -37,6 +37,10 @@ route it through generic terminal cleanup.
 Claimed, running, and retry-queued executions fence their exact workspace
 generation. An unavailable OpenHands conversation store or a failed durable
 lease/completion receipt also leaves cleanup pending for the next tick.
+Cleanup refreshes the full tracker snapshot before retrying deletion, so a
+newly reopened descendant is fenced before its workspace generation is
+resolved. Missing generation-bound conversation evidence also blocks removal
+unless a preparation-failed run proves that no conversation binding existed.
 
 ## 2. First-run flow
 

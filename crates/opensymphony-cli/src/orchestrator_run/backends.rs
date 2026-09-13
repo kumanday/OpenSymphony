@@ -1206,6 +1206,22 @@ fn strict_openhands_cleanup_requires_conversation_store(
     generation_bound && !conversation_manifest_is_codex(manifest) && store.is_none()
 }
 
+fn run_manifest_proves_no_harness_conversation(run: Option<&RunManifest>) -> bool {
+    run.is_some_and(|run| {
+        run.status == RunStatus::PreparationFailed
+            && run
+                .runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref())
+                .is_none()
+            && run
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref())
+                .is_none()
+    })
+}
+
 impl TrackerBackend for RuntimeTrackerBackend {
     type Error = LinearError;
 
@@ -4022,11 +4038,11 @@ impl RuntimeWorkspaceBackend {
             )
             .await?;
             let manifest_path = handle.conversation_manifest_path();
-            if let Some(raw_manifest) = self
+            let raw_conversation_manifest = self
                 .manager
                 .read_text_artifact(&handle, &manifest_path)
-                .await?
-            {
+                .await?;
+            if let Some(raw_manifest) = raw_conversation_manifest {
                 match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
                         let envelope_compatible = if handle.checkout_generation().is_some() {
@@ -4180,6 +4196,12 @@ impl RuntimeWorkspaceBackend {
                         }
                     }
                 }
+            } else if cleanup_target.is_some()
+                && !run_manifest_proves_no_harness_conversation(cleanup_run_manifest.as_ref())
+            {
+                return Err(CliWorkspaceError::ConversationLifecycle(
+                    "generation-bound terminal conversation manifest is missing".to_owned(),
+                ));
             }
             if let Some(target) = cleanup_target {
                 if prepare_only {
@@ -11988,6 +12010,19 @@ mod tests {
             error
                 .to_string()
                 .contains("remote conversation store is unavailable")
+        );
+        assert!(parent.handle.workspace_path().is_dir());
+
+        fs::remove_file(parent.handle.conversation_manifest_path())
+            .expect("parent conversation manifest should be removable for recovery test");
+        let error = backend
+            .prepare_cleanup_generation(&target)
+            .await
+            .expect_err("launched generation-bound parent cleanup needs conversation evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("generation-bound terminal conversation manifest is missing")
         );
         assert!(parent.handle.workspace_path().is_dir());
     }
