@@ -1099,9 +1099,7 @@ fn resolve_central_config(
                 merge_method.to_ascii_lowercase().as_str(),
                 "merge" | "squash" | "rebase"
             );
-            let unsupported_github_method = profile.provider.eq_ignore_ascii_case("github")
-                && !merge_method.eq_ignore_ascii_case("merge");
-            if !known_method || unsupported_github_method {
+            if !known_method {
                 return Err(CentralConfigError::InvalidReference {
                     field: format!("review_profiles.{profile_id}.merge_method"),
                 });
@@ -1363,15 +1361,21 @@ fn resolve_central_config(
             || repository.remote.provider.eq_ignore_ascii_case("github")
             || review_profile.required_checks
             || review_profile.required_review;
-        if github_merge_evidence_required && !review_profile.provider.eq_ignore_ascii_case("github")
-        {
+        let github_backed_review = matches!(
+            review_profile.provider.to_ascii_lowercase().as_str(),
+            "github" | "codex"
+        );
+        if github_backed_review && !repository.remote.provider.eq_ignore_ascii_case("github") {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.remote.provider"),
+            });
+        }
+        if github_merge_evidence_required && !github_backed_review {
             return Err(CentralConfigError::InvalidReference {
                 field: format!("review_profiles.{}.provider", repository.review_profile),
             });
         }
-        if repository.remote.provider.eq_ignore_ascii_case("github")
-            || review_profile.provider.eq_ignore_ascii_case("github")
-        {
+        if repository.remote.provider.eq_ignore_ascii_case("github") || github_backed_review {
             let credential = config
                 .credentials
                 .get(&review_profile.credential)
@@ -1678,7 +1682,11 @@ fn build_repository_checkouts(
             review_policy_generation,
             required_checks: review_profile.required_checks,
             required_review: review_profile.required_review,
-            merge_method: review_profile.merge_method.clone(),
+            merge_method: review_profile
+                .merge_method
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase),
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())
@@ -3488,6 +3496,7 @@ scheduler:
             .expect("base checkout should exist");
         assert_eq!(base_checkout.review_profile, "github-standard");
         assert_eq!(base_checkout.review_provider, "github");
+        assert_eq!(base_checkout.merge_method.as_deref(), Some("merge"));
         assert_ne!(
             base_checkout.policy_generation,
             base.repository_routing.config_generation
@@ -3553,6 +3562,24 @@ scheduler:
             review_checkout.review_policy_generation
         );
         assert_eq!(review_checkout.review_provider, "github");
+    }
+
+    #[test]
+    fn central_config_canonicalizes_case_variant_merge_methods() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source =
+            central_fixture(root.path()).replace("merge_method: merge", "merge_method: ' Squash '");
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("case-variant merge method should resolve");
+        let checkout = resolved
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("checkout should exist");
+        assert_eq!(checkout.merge_method.as_deref(), Some("squash"));
     }
 
     #[test]
@@ -4020,6 +4047,31 @@ scheduler:
             CentralConfigError::InvalidReference { field }
                 if field == "review_profiles.github-standard.provider"
         ));
+    }
+
+    #[test]
+    fn central_config_rejects_github_backed_review_for_non_github_repository() {
+        for provider in ["github", "codex"] {
+            let root = tempfile::tempdir().expect("central config root should exist");
+            std::fs::write(root.path().join("integration.md"), "integration\n")
+                .expect("integration instructions should be written");
+            let source = central_fixture(root.path())
+                .replace(
+                    "      provider: github\n      provider_id: repo-42",
+                    "      provider: git\n      provider_id: repo-42",
+                )
+                .replace(
+                    "review_profiles:\n  github-standard:\n    provider: github",
+                    &format!("review_profiles:\n  github-standard:\n    provider: {provider}"),
+                );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("GitHub-backed review requires a GitHub repository provider");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "repositories.core-repo.remote.provider"
+            ));
+        }
     }
 
     #[test]

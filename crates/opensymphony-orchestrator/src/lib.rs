@@ -24,8 +24,10 @@ pub use hierarchy::{
 pub use parent_integration::{
     ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt, ParentCleanupStatus,
     ParentCommandReceipt, ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
-    ParentIntegrationState, ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus,
-    ParentRetryClassification, ParentSideEffectIntent, ParentSideEffectReceipt, ParentTransition,
+    ParentIntegrationState, ParentProviderOperation, ParentProviderOperationKind,
+    ParentRepairAttempt, ParentRepairPolicy, ParentRepairProviderSnapshot, ParentRepairStatus,
+    ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus, ParentRetryClassification,
+    ParentReviewFeedback, ParentSideEffectIntent, ParentSideEffectReceipt, ParentTransition,
     ParentVerificationAttempt, parent_command_identity,
 };
 pub use scheduler::{

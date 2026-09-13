@@ -125,6 +125,27 @@ completed parent reopens, the scheduler creates a new controller lifecycle even
 when its child-edge generation did not change. A bound parent conversation also
 fixes the harness choice for that lifecycle; a configured harness switch fails
 before the replacement session starts.
+An integration defect creates an immutable repair attempt for one canonical
+repository. The controller copies the verified target, instruction provenance,
+and central review policy into that attempt, then records a durable intent and
+receipt for each provider operation. Branch, push, pull-request, review, and
+merge writes are preceded by provider reconciliation, so restart recovery finds
+an existing result before repeating a side effect. Requested changes stay on
+the same attempt and pull request. Provider outages, failed checks, review
+rejection, external closure, force-push, and merge conflicts remain precise,
+resumable states. GitHub is the first provider adapter and remains authoritative
+for PR, review, check, and merge facts. Each scheduler tick checks a fresh full
+tracker snapshot before advancing repair-provider writes, so any parent absent
+from the current active set fences review, push, and merge operations in the
+same observation.
+After merge, the controller records the provider merge-result commit and the
+workspace manager fetches the configured target through the central credential
+path. The refreshed checkout is accepted only when that merge result and every
+retained child merge result are reachable from the new target. Squash and
+rebase results therefore do not depend on the replaced repair commit remaining
+an ancestor. Both copies of the
+generation-bound checkout map and its instruction hash are updated before final
+verification can resume.
 Final evidence is accepted only from the run-bound
 `evidence/final-verification.json` receipt. The runtime reopens every checkout
 at its exact prepared commit and uses the file only to select an actual command
@@ -135,7 +156,11 @@ foreground-process ownership, and
 teardown from those runtime events before it can pass the attempt. Generic
 harness success or a prompt-authored claim without matching events is
 insufficient. Each accepted command or resource event is persisted with the
-controller before the worker reaches a terminal outcome. On timeout or cancellation, a reconciled harness stopped state
+controller before the worker reaches a terminal outcome. The adapter records
+stopped-turn evidence only after a terminal runtime state or acknowledged stop;
+a backward-compatible run-manifest flag carries that fact across restart, and a
+transport-level failed outcome cannot substitute for it. On timeout
+or cancellation, a reconciled harness stopped state
 releases the foreground-process receipt; any other named resource remains an
 explicit cleanup fence. The durable final record maps every canonical repository to the
 exact verified commit so a higher ancestor can consume the completed parent

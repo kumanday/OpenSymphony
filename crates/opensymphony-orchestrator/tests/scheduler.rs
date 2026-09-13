@@ -13,20 +13,32 @@ use crate::opensymphony_domain::{
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
     IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
-    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, RecoveredRun, RecoveryRecord,
-    ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry, RetryExhaustionRecord,
-    RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler, SchedulerConfig,
-    SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue, TrackerIssueBlocker,
-    TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary,
-    WorkerAbortReason, WorkerBackend, WorkerId, WorkerInterruptAcknowledgement, WorkerLaunch,
-    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
-    WorkspaceKey, WorkspaceRecord, decide_issue_route,
+    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, ParentRepairPolicy, RecoveredRun,
+    RecoveryRecord, ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry,
+    RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler,
+    SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
+    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
+    decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
 
 fn ts(value: u64) -> TimestampMs {
     TimestampMs::new(value)
+}
+
+fn test_repair_policy() -> ParentRepairPolicy {
+    ParentRepairPolicy {
+        review_profile: "required".to_owned(),
+        review_provider: "github".to_owned(),
+        review_policy_generation: "policy-1".to_owned(),
+        required_checks: true,
+        required_review: true,
+        merge_method: "squash".to_owned(),
+    }
 }
 
 fn dt(value: u64) -> chrono::DateTime<Utc> {
@@ -334,6 +346,7 @@ fn parent_verification_evidence(
             "cargo test-system-duckdb --test integration",
         ),
         root: "parent_root".to_owned(),
+        repair_repository_id: None,
     }
 }
 
@@ -389,6 +402,14 @@ struct FakeTracker {
     parent_evidence: Option<ParentEligibilityEvidence>,
     parent_evidence_errors: VecDeque<FakeError>,
     parent_evidence_requests: usize,
+    repair_snapshots: VecDeque<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>,
+    repair_snapshot_errors: VecDeque<FakeError>,
+    repair_snapshot_requests: usize,
+    repair_pull_request: Option<(String, String)>,
+    repair_pull_request_creates: usize,
+    repair_review_requests: usize,
+    repair_review_budget_exhausted: bool,
+    repair_merge_requests: usize,
 }
 
 impl TrackerBackend for FakeTracker {
@@ -475,6 +496,51 @@ impl TrackerBackend for FakeTracker {
             }))
     }
 
+    async fn parent_repair_snapshot(
+        &mut self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        self.repair_snapshot_requests += 1;
+        if let Some(error) = self.repair_snapshot_errors.pop_front() {
+            return Err(error);
+        }
+        Ok(self.repair_snapshots.pop_front())
+    }
+
+    async fn ensure_parent_repair_pull_request(
+        &mut self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(String, String)>, Self::Error> {
+        self.repair_pull_request_creates += 1;
+        Ok(self.repair_pull_request.clone())
+    }
+
+    async fn request_parent_repair_review(
+        &mut self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        self.repair_review_requests += 1;
+        Ok(self.repair_snapshots.pop_front())
+    }
+
+    fn parent_repair_review_budget_exhausted(
+        &self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> bool {
+        self.repair_review_budget_exhausted
+    }
+
+    async fn merge_parent_repair(
+        &mut self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
+    {
+        self.repair_merge_requests += 1;
+        Ok(self.repair_snapshots.pop_front())
+    }
+
     fn error_category(error: &Self::Error) -> Option<TrackerErrorCategory> {
         error.category
     }
@@ -514,6 +580,20 @@ struct FakeWorkspace {
     persist_durable_state_results: VecDeque<Result<(), FakeError>>,
     recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
     parent_targets: Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>,
+    repair_branch_reconciliations: usize,
+    repair_branch_head: Option<String>,
+    repair_instruction_hash: Option<String>,
+    repair_branch_creates: usize,
+    repair_push_reconciliations: usize,
+    repair_remote_head: Option<String>,
+    repair_has_uncommitted_changes: bool,
+    repair_pushes: usize,
+    repair_publish_results: VecDeque<Result<Option<String>, FakeError>>,
+    repair_push_commit: Option<String>,
+    repair_refreshes: usize,
+    repair_refresh_commit: Option<String>,
+    repair_refresh_instruction_hash: Option<String>,
+    repair_refresh_instruction_path: Option<PathBuf>,
 }
 
 impl WorkspaceBackend for FakeWorkspace {
@@ -551,6 +631,94 @@ impl WorkspaceBackend for FakeWorkspace {
         _workspace: &WorkspaceRecord,
     ) -> Result<Vec<crate::opensymphony_orchestrator::ParentRepositoryTarget>, Self::Error> {
         Ok(self.parent_targets.clone())
+    }
+
+    async fn reconcile_parent_repair_branch(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &crate::opensymphony_orchestrator::ParentRepositoryTarget,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(Option<String>, String)>, Self::Error> {
+        self.repair_branch_reconciliations += 1;
+        Ok(self
+            .repair_instruction_hash
+            .clone()
+            .map(|hash| (self.repair_branch_head.clone(), hash)))
+    }
+
+    async fn prepare_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &crate::opensymphony_orchestrator::ParentRepositoryTarget,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        self.repair_branch_creates += 1;
+        self.repair_branch_head = Some(_repair.target_commit.clone());
+        Ok(self.repair_instruction_hash.clone())
+    }
+
+    async fn reconcile_parent_repair_push(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &crate::opensymphony_orchestrator::ParentRepositoryTarget,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(String, Option<String>, bool)>, Self::Error> {
+        self.repair_push_reconciliations += 1;
+        let local = if self.repair_has_uncommitted_changes {
+            self.repair_branch_head.clone()
+        } else {
+            self.repair_push_commit
+                .clone()
+                .or_else(|| self.repair_branch_head.clone())
+        };
+        Ok(local.map(|local| {
+            (
+                local,
+                self.repair_remote_head.clone(),
+                self.repair_has_uncommitted_changes,
+            )
+        }))
+    }
+
+    async fn publish_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &crate::opensymphony_orchestrator::ParentRepositoryTarget,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        self.repair_pushes += 1;
+        if let Some(result) = self.repair_publish_results.pop_front() {
+            return result;
+        }
+        self.repair_remote_head = self.repair_push_commit.clone();
+        self.repair_branch_head = self.repair_push_commit.clone();
+        self.repair_has_uncommitted_changes = false;
+        Ok(self.repair_push_commit.clone())
+    }
+
+    async fn refresh_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &crate::opensymphony_orchestrator::ParentRepositoryTarget,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> Result<Option<(String, PathBuf, String)>, Self::Error> {
+        self.repair_refreshes += 1;
+        Ok(self.repair_refresh_commit.clone().and_then(|commit| {
+            self.repair_refresh_instruction_hash.clone().map(|hash| {
+                (
+                    commit,
+                    self.repair_refresh_instruction_path
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("AGENTS.md")),
+                    hash,
+                )
+            })
+        }))
     }
 
     async fn recovered_run_started_at(
@@ -706,10 +874,18 @@ impl WorkerBackend for FakeWorker {
         self.launches.push(request.clone());
         match self.launch_results.pop_front() {
             Some(result) => result,
-            None => Ok(WorkerLaunch {
-                conversation: conversation(&request.run.worker_id),
-                started_at: None,
-            }),
+            None => {
+                let mut launched = conversation(&request.run.worker_id);
+                if let Some(expected) = request.expected_parent_conversation_id.as_deref() {
+                    launched.conversation_id = ConversationId::new(expected.to_owned())
+                        .expect("expected parent conversation id is valid");
+                    launched.fresh_conversation = false;
+                }
+                Ok(WorkerLaunch {
+                    conversation: launched,
+                    started_at: None,
+                })
+            }
         }
     }
 
@@ -871,7 +1047,11 @@ async fn launched_parent_scheduler_with_config(
                 repository_id,
                 checkout_handle: format!("checkout-{suffix}"),
                 relative_path: PathBuf::from(format!("repositories/{suffix}")),
+                target_branch: "develop".to_owned(),
                 target_commit: format!("commit-{suffix}"),
+                instruction_path: PathBuf::from("AGENTS.md"),
+                instruction_hash: format!("instruction-{suffix}"),
+                repair_policy: test_repair_policy(),
             }],
             ..Default::default()
         },
@@ -883,12 +1063,1408 @@ async fn launched_parent_scheduler_with_config(
     (scheduler, parent_id)
 }
 
+fn repair_provider_snapshot(
+    pull_request: bool,
+) -> crate::opensymphony_orchestrator::ParentRepairProviderSnapshot {
+    crate::opensymphony_orchestrator::ParentRepairProviderSnapshot {
+        pull_request_id: pull_request.then(|| "41".to_owned()),
+        pull_request_url: pull_request.then(|| "https://github.com/acme/repo/pull/41".to_owned()),
+        head_commit: pull_request.then(|| "repair-commit".to_owned()),
+        review_head_commit: pull_request.then(|| "repair-commit".to_owned()),
+        review_request_cursor: None,
+        open: pull_request,
+        checks_passed: false,
+        checks_failed: false,
+        review_approved: false,
+        review_rejected: false,
+        changes_requested: false,
+        review_feedback: Vec::new(),
+        mergeable: true,
+        merge_conflict: false,
+        merged: false,
+        merge_result_commit: None,
+        target_contains_merge_result: false,
+        provider_available: true,
+    }
+}
+
+fn mark_parent_terminal_for_state_lookup(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    parent_id: &IssueId,
+    suffix: &str,
+    updated_at: u64,
+) {
+    mark_parent_inactive_for_state_lookup(
+        scheduler,
+        parent_id,
+        suffix,
+        "Done",
+        "completed",
+        updated_at,
+    );
+}
+
+fn mark_parent_inactive_for_state_lookup(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    parent_id: &IssueId,
+    suffix: &str,
+    state: &str,
+    tracker_type: &str,
+    updated_at: u64,
+) {
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal.clear();
+    scheduler.tracker_mut().states.insert(
+        parent_id.to_string(),
+        tracker_state_snapshot(
+            parent_id.as_str(),
+            &format!("COE-PARENT-{suffix}"),
+            state,
+            tracker_type,
+            updated_at,
+        ),
+    );
+}
+
+#[tokio::test]
+async fn parent_repair_searches_before_each_side_effect_and_keeps_one_pr() {
+    let suffix = "REPAIR-IDEMPOTENT";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-1", ts(110))
+        .await
+        .expect("begin repair");
+    assert_eq!(scheduler.workspace().repair_branch_reconciliations, 1);
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+
+    assert_eq!(
+        scheduler
+            .begin_parent_repair(&parent_id, &repository_id, "defect-1", ts(111))
+            .await
+            .expect("replay begin"),
+        repair_id
+    );
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    let url = scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    assert_eq!(url, "https://github.com/acme/repo/pull/41");
+    assert_eq!(scheduler.workspace().repair_pushes, 1);
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+
+    scheduler.workspace_mut().repair_remote_head = Some("repair-commit".to_owned());
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(121))
+        .await
+        .expect("publish recovery");
+    assert_eq!(scheduler.workspace().repair_pushes, 1);
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+}
+
+#[tokio::test]
+async fn parent_repair_persists_intent_before_branch_creation() {
+    let suffix = "REPAIR-PERSIST-BRANCH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .push_back(Err(FakeError {
+            message: "persist repair intent failed".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    assert!(
+        scheduler
+            .begin_parent_repair(&parent_id, &repository_id, "defect-persist", ts(110))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.workspace().repair_branch_reconciliations, 0);
+    assert_eq!(scheduler.workspace().repair_branch_creates, 0);
+
+    scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-persist", ts(111))
+        .await
+        .expect("retry after persistence recovery");
+    assert_eq!(scheduler.workspace().repair_branch_reconciliations, 1);
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+}
+
+#[tokio::test]
+async fn parent_repair_recovers_a_created_branch_before_repeating_creation() {
+    let suffix = "REPAIR-BRANCH-CRASH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "crash after branch creation".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+    assert!(
+        scheduler
+            .begin_parent_repair(&parent_id, &repository_id, "defect-branch", ts(110))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+    scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-branch", ts(111))
+        .await
+        .expect("branch lookup recovers external result");
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let create = state.parent_integrations[&parent_id]
+        .repair_attempts
+        .first()
+        .expect("repair")
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind
+                == crate::opensymphony_orchestrator::ParentProviderOperationKind::CreateBranch
+        })
+        .expect("create branch operation");
+    assert_eq!(
+        create
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.status.as_str()),
+        Some("reconciled")
+    );
+}
+
+#[tokio::test]
+async fn parent_repair_recovers_a_pushed_commit_before_repeating_push() {
+    let suffix = "REPAIR-PUSH-CRASH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-push", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "crash after push".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+    assert!(
+        scheduler
+            .publish_parent_repair(&parent_id, &repair_id, ts(120))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.workspace().repair_pushes, 1);
+
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(121))
+        .await
+        .expect("push reconciliation");
+    assert_eq!(scheduler.workspace().repair_pushes, 1);
+}
+
+#[tokio::test]
+async fn parent_repair_recovers_a_created_pull_request_before_repeating_creation() {
+    let suffix = "REPAIR-PR-CRASH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-pr", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "crash after pull request creation".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+    assert!(
+        scheduler
+            .publish_parent_repair(&parent_id, &repair_id, ts(120))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(121))
+        .await
+        .expect("pull request reconciliation");
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+}
+
+#[tokio::test]
+async fn parent_repair_review_merge_and_refresh_follow_durable_policy() {
+    let suffix = "REPAIR-MERGE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-merge", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([repair_provider_snapshot(true), approved.clone()]);
+    assert_eq!(
+        scheduler
+            .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+            .await
+            .expect("review request"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::AwaitingMerge
+    );
+    assert_eq!(scheduler.tracker().repair_review_requests, 1);
+
+    let mut merged = approved.clone();
+    merged.open = false;
+    merged.merged = true;
+    merged.merge_result_commit = Some("target-after-squash".to_owned());
+    merged.target_contains_merge_result = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([approved, merged]);
+    assert_eq!(
+        scheduler
+            .merge_parent_repair(&parent_id, &repair_id, ts(140))
+            .await
+            .expect("merge repair"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::Refreshing
+    );
+    assert_eq!(scheduler.tracker().repair_merge_requests, 1);
+    scheduler.workspace_mut().repair_refresh_commit = Some("target-after-squash".to_owned());
+    scheduler.workspace_mut().repair_refresh_instruction_hash =
+        Some("instruction-after-squash".to_owned());
+    assert_eq!(
+        scheduler
+            .refresh_parent_repair(&parent_id, &repair_id, ts(150))
+            .await
+            .expect("refresh repair"),
+        "target-after-squash"
+    );
+    assert_eq!(scheduler.workspace().repair_refreshes, 1);
+    let durable: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        durable.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_back_to_verification()
+{
+    let suffix = "REPAIR-RUN-LOOP";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id.clone(), 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification should prepare and queue the repair implementation");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let repair_id = state.parent_integrations[&parent_id].repair_attempts[0]
+        .id
+        .clone();
+    assert_eq!(
+        state.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Implementing
+    );
+    assert_eq!(scheduler.workspace().repair_branch_creates, 1);
+    assert_eq!(scheduler.workspace().repair_pushes, 0);
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 0);
+
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("the due continuation should launch repair implementation");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1]
+            .parent_repair
+            .as_ref()
+            .map(|repair| repair.id.as_str()),
+        Some(repair_id.as_str())
+    );
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.workspace_mut().repair_has_uncommitted_changes = true;
+    scheduler
+        .workspace_mut()
+        .repair_publish_results
+        .push_back(Err(FakeError {
+            message: "transient repair push failure token=secret".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("one repair publication failure must not abort the scheduler tick");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let repair = state.parent_integrations[&parent_id]
+        .repair(&repair_id)
+        .expect("repair");
+    assert_eq!(
+        repair.status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Implementing
+    );
+    assert!(
+        repair
+            .last_advancement_failure
+            .as_ref()
+            .is_some_and(|failure| failure.detail.contains("token=[redacted]"))
+    );
+    scheduler
+        .tick(ts(3_600_201))
+        .await
+        .expect("the next scheduler tick should retry repair publication");
+    assert_eq!(scheduler.workspace().repair_pushes, 2);
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(approved.clone());
+    scheduler
+        .tick(ts(3_600_210))
+        .await
+        .expect("provider approval should make the repair mergeable");
+
+    let mut merged = approved.clone();
+    merged.open = false;
+    merged.merged = true;
+    merged.merge_result_commit = Some("target-after-squash".to_owned());
+    merged.target_contains_merge_result = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([approved, merged]);
+    scheduler
+        .tick(ts(3_600_220))
+        .await
+        .expect("eligible repair should merge through the scheduler loop");
+
+    scheduler.workspace_mut().repair_refresh_commit = Some("target-after-squash".to_owned());
+    scheduler.workspace_mut().repair_refresh_instruction_hash =
+        Some("instruction-after-squash".to_owned());
+    scheduler.workspace_mut().repair_refresh_instruction_path = Some(PathBuf::from("AGENTS.md"));
+    scheduler.workspace_mut().parent_targets[0].target_commit = "target-after-squash".to_owned();
+    scheduler.workspace_mut().parent_targets[0].instruction_hash =
+        "instruction-after-squash".to_owned();
+    scheduler
+        .tick(ts(3_600_230))
+        .await
+        .expect("post-merge refresh should queue final verification");
+    scheduler
+        .tick(ts(20_000_000))
+        .await
+        .expect("the due continuation should launch final verification");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Completed
+    );
+    assert_eq!(scheduler.workspace().repair_refreshes, 1);
+    assert_eq!(
+        scheduler.worker().launches.len(),
+        3,
+        "the scheduler must return to the real parent verification worker path"
+    );
+    assert_eq!(
+        scheduler.worker().launches[2]
+            .parent_repair
+            .as_ref()
+            .map(|repair| repair.id.as_str()),
+        None,
+        "the post-merge turn is final verification, not repair implementation"
+    );
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 20_000_050);
+    scheduler
+        .tick(ts(20_000_050))
+        .await
+        .expect("refreshed final verification should finish through worker updates");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.attempts.last().map(|attempt| attempt.status),
+        Some(crate::opensymphony_orchestrator::ParentAttemptStatus::Passed)
+    );
+    assert_eq!(controller.repair_attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controller() {
+    let suffix = "REPAIR-WAIT-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification queues repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation launches");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("repair publication reaches provider wait");
+
+    let before: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert!(matches!(
+        before.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::AwaitingFixReview { .. }
+    ));
+    assert!(
+        before.parent_integrations[&parent_id]
+            .current_attempt_id()
+            .is_none(),
+        "provider waits have no live harness turn"
+    );
+    assert!(before.parent_integrations[&parent_id].can_cancel_without_harness());
+    let review_requests_before_terminal = scheduler.tracker().repair_review_requests;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 7_300_300);
+    scheduler
+        .tick(ts(7_300_300))
+        .await
+        .expect("terminal reconciliation cancels the provider-waiting controller");
+
+    let persisted: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("restart should decode the canceled controller");
+    assert!(matches!(
+        persisted.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Canceled { .. }
+    ));
+    let cancellation = persisted.parent_integrations[&parent_id]
+        .transitions
+        .last()
+        .expect("terminal cancellation transition");
+    assert!(cancellation.side_effect_intent.is_none());
+    assert!(cancellation.result_receipt.is_none());
+    assert_eq!(
+        scheduler.execution(&parent_id).expect("parent").status(),
+        SchedulerStatus::Released
+    );
+    assert_eq!(
+        scheduler.tracker().repair_review_requests,
+        review_requests_before_terminal,
+        "fresh terminal state must fence review writes before repair advancement"
+    );
+}
+
+#[tokio::test]
+async fn inactive_parent_fences_a_pending_repair_review_before_reconciliation() {
+    let suffix = "REPAIR-INACTIVE-FENCE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-inactive", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+
+    mark_parent_inactive_for_state_lookup(
+        &mut scheduler,
+        &parent_id,
+        suffix,
+        "Human Review",
+        "started",
+        3_900_300,
+    );
+    scheduler
+        .tick(ts(3_900_300))
+        .await
+        .expect("inactive parent should be fenced before provider advancement");
+
+    assert_eq!(
+        scheduler.tracker().repair_review_requests,
+        0,
+        "absence from the fresh active set must fence review writes"
+    );
+}
+
+#[tokio::test]
+async fn terminal_parent_during_repair_implementation_cancels_before_publication() {
+    let suffix = "REPAIR-TURN-TERMINAL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification queues repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation launches");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 3_600_200);
+
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("terminal tracker refresh cancels the completed repair turn");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert!(matches!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Canceled { .. }
+    ));
+    let repair = controller.repair_attempts.first().expect("repair");
+    assert!(!repair.implementation_completed);
+    assert_eq!(scheduler.workspace().repair_pushes, 0);
+}
+
+#[tokio::test]
+async fn terminal_parent_fences_a_pending_repair_push() {
+    let suffix = "REPAIR-PUSH-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.workspace_mut().repair_has_uncommitted_changes = true;
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .workspace_mut()
+        .repair_publish_results
+        .push_back(Err(FakeError {
+            message: "transient repair push failure".to_owned(),
+            category: None,
+            retry_after: None,
+        }));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler.tick(ts(150)).await.expect("prepare repair");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("launch repair implementation");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("retain completed implementation after push failure");
+    let pushes_before_terminal = scheduler.workspace().repair_pushes;
+    assert_eq!(pushes_before_terminal, 1);
+
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 7_300_300);
+    scheduler
+        .tick(ts(7_300_300))
+        .await
+        .expect("terminal state fences the pending push");
+
+    assert_eq!(
+        scheduler.workspace().repair_pushes,
+        pushes_before_terminal,
+        "fresh terminal state must fence a repair push before repair advancement"
+    );
+}
+
+#[tokio::test]
+async fn terminal_parent_fences_a_pending_repair_merge() {
+    let suffix = "REPAIR-MERGE-CANCEL";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-merge-cancel", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([repair_provider_snapshot(true), approved.clone()]);
+    scheduler
+        .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+        .await
+        .expect("advance to merge");
+    let merges_before_terminal = scheduler.tracker().repair_merge_requests;
+    scheduler.tracker_mut().repair_snapshots.push_back(approved);
+
+    mark_parent_terminal_for_state_lookup(&mut scheduler, &parent_id, suffix, 3_900_300);
+    scheduler
+        .tick(ts(3_900_300))
+        .await
+        .expect("terminal state fences the pending merge");
+
+    assert_eq!(
+        scheduler.tracker().repair_merge_requests,
+        merges_before_terminal,
+        "fresh terminal state must fence a merge before repair advancement"
+    );
+}
+
+#[tokio::test]
+async fn parent_repair_without_a_commit_requeues_implementation() {
+    let suffix = "REPAIR-NO-COMMIT";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification should queue repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation should launch");
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("a no-commit repair should remain actionable");
+
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let repair = state.parent_integrations[&parent_id]
+        .repair_attempts
+        .first()
+        .expect("repair");
+    assert_eq!(
+        repair.status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::Implementing
+    );
+    assert!(!repair.implementation_completed);
+    assert_eq!(scheduler.workspace().repair_pushes, 0);
+
+    scheduler
+        .tick(ts(3_600_201))
+        .await
+        .expect("the actionable repair should queue another continuation");
+    assert_eq!(
+        scheduler.execution(&parent_id).expect("parent").status(),
+        SchedulerStatus::RetryQueued
+    );
+    scheduler
+        .tick(ts(7_200_201))
+        .await
+        .expect("the due repair continuation should relaunch");
+    assert_eq!(scheduler.worker().launches.len(), 3);
+    assert!(scheduler.worker().launches[2].parent_repair.is_some());
+}
+
+#[tokio::test]
+async fn unobserved_failed_command_cannot_authorize_parent_repair() {
+    let suffix = "REPAIR-UNOBSERVED-COMMAND";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let run = scheduler.worker().launches[0].run.clone();
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    let mut evidence = parent_verification_evidence(
+        run.worker_id.as_str(),
+        controller.hierarchy_generation,
+        repository_id.clone(),
+        &controller.targets[&repository_id].target_commit,
+    );
+    evidence.repair_repository_id = Some(repository_id);
+    let mut outcome = WorkerOutcomeRecord::from_run(
+        &run,
+        WorkerOutcomeKind::Failed,
+        ts(150),
+        Some("worker supplied an unobserved repair receipt".to_owned()),
+        Some("integration failed".to_owned()),
+    );
+    outcome.parent_verification = Some(evidence);
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id,
+            outcome,
+        });
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("invalid repair evidence should fall back to the normal retry path");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert!(
+        state.parent_integrations[&parent_id]
+            .repair_attempts
+            .is_empty()
+    );
+    assert_eq!(scheduler.workspace().repair_branch_creates, 0);
+}
+
+#[tokio::test]
+async fn parent_repair_implementation_honors_the_scheduler_retry_limit() {
+    let suffix = "REPAIR-RETRY-LIMIT";
+    let mut config = scheduler_config();
+    config.max_retry_attempts = Some(0);
+    let (mut scheduler, parent_id) = launched_parent_scheduler_with_config(suffix, config).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("repair retry exhaustion should be durable");
+    assert!(matches!(
+        scheduler.execution(&parent_id).expect("parent").state(),
+        crate::opensymphony_orchestrator::SchedulerState::Released {
+            reason: ReleaseReason::RetryExhausted,
+            ..
+        }
+    ));
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("an exhausted repair must remain parked");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+}
+
+#[tokio::test]
+async fn hierarchy_supersession_fences_pending_parent_repair_provider_writes() {
+    let suffix = "REPAIR-HIERARCHY-FENCE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-fenced", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+
+    scheduler.tracker_mut().active[0]
+        .sub_issues
+        .push(TrackerIssueRef {
+            id: "replacement-repair-fence".to_owned(),
+            identifier: "COE-REPLACEMENT-REPAIR-FENCE".to_owned(),
+            title: Some("Replacement child".to_owned()),
+            url: None,
+            state: "Done".to_owned(),
+            state_kind: TrackerIssueStateKind::Completed,
+        });
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("hierarchy supersession should fence repair writes");
+
+    assert_eq!(scheduler.tracker().repair_review_requests, 0);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.hierarchy[&parent_id].blocked_reason,
+        Some(crate::opensymphony_orchestrator::HierarchyBlockedReason::HierarchyChanged)
+    );
+    assert!(state.parent_integrations[&parent_id].state.terminal());
+}
+
+#[tokio::test]
+async fn parent_repair_provider_rate_limit_honors_retry_after() {
+    let suffix = "REPAIR-PROVIDER-COOLDOWN";
+    let (mut scheduler, _parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    enqueue_failed_parent_repair_request(&mut scheduler, repository_id, 150);
+    scheduler
+        .tick(ts(150))
+        .await
+        .expect("failed verification should queue repair implementation");
+    scheduler
+        .tick(ts(3_600_150))
+        .await
+        .expect("repair implementation should launch");
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.workspace_mut().repair_has_uncommitted_changes = true;
+    enqueue_successful_parent_completion(&mut scheduler, suffix, 3_600_200);
+    scheduler
+        .tick(ts(3_600_200))
+        .await
+        .expect("successful repair implementation should publish");
+    let prior_requests = scheduler.tracker().repair_snapshot_requests;
+    scheduler
+        .tracker_mut()
+        .repair_snapshot_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(60)));
+
+    scheduler
+        .tick(ts(3_600_201))
+        .await
+        .expect("provider rate limit should preserve the repair for retry");
+    assert_eq!(
+        scheduler.tracker().repair_snapshot_requests,
+        prior_requests + 1
+    );
+    scheduler
+        .tick(ts(3_600_300))
+        .await
+        .expect("cooldown tick should not repeat provider lookup");
+    assert_eq!(
+        scheduler.tracker().repair_snapshot_requests,
+        prior_requests + 1
+    );
+}
+
+#[tokio::test]
+async fn parent_repair_revalidates_provider_policy_immediately_before_merge() {
+    let suffix = "REPAIR-PREMERGE";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-premerge", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([repair_provider_snapshot(true), approved]);
+    scheduler
+        .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+        .await
+        .expect("review approval");
+
+    let mut approval_dismissed = repair_provider_snapshot(true);
+    approval_dismissed.checks_passed = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(approval_dismissed);
+    assert_eq!(
+        scheduler
+            .merge_parent_repair(&parent_id, &repair_id, ts(140))
+            .await
+            .expect("fresh policy snapshot"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::AwaitingReview
+    );
+    assert_eq!(scheduler.tracker().repair_merge_requests, 0);
+}
+
+#[tokio::test]
+async fn exhausted_parent_review_budget_blocks_without_recording_a_noop_request() {
+    let suffix = "REPAIR-REVIEW-BUDGET";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-budget", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    scheduler.tracker_mut().repair_review_budget_exhausted = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+
+    assert_eq!(
+        scheduler
+            .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+            .await
+            .expect("review ceiling should become durable operator state"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
+    assert_eq!(scheduler.tracker().repair_review_requests, 0);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.repair(&repair_id).expect("repair").status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
+    assert!(matches!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Blocked { ref reason }
+            if reason.contains("exact-commit local review")
+    ));
+    assert!(
+        !controller
+            .repair(&repair_id)
+            .expect("repair")
+            .operations
+            .iter()
+            .any(|operation| {
+                operation.kind
+                    == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
+            })
+    );
+
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .reconcile_parent_repair(&parent_id, &repair_id, ts(131))
+        .await
+        .expect("provider reconciliation should preserve the explicit review ceiling");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
+}
+
+#[tokio::test]
+async fn requested_change_publication_pushes_the_new_local_head_to_the_same_pull_request() {
+    let suffix = "REPAIR-REQUESTED-CHANGE-PUSH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit-1".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-review", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("first publication");
+
+    let mut changes = repair_provider_snapshot(true);
+    changes.head_commit = Some("repair-commit-1".to_owned());
+    changes.review_head_commit = Some("repair-commit-1".to_owned());
+    changes.changes_requested = true;
+    scheduler.tracker_mut().repair_snapshots.push_back(changes);
+    scheduler
+        .reconcile_parent_repair(&parent_id, &repair_id, ts(130))
+        .await
+        .expect("requested changes");
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit-2".to_owned());
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(140))
+        .await
+        .expect("updated publication");
+
+    assert_eq!(scheduler.workspace().repair_pushes, 2);
+    assert_eq!(scheduler.tracker().repair_pull_request_creates, 1);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .pushed_commit
+            .as_deref(),
+        Some("repair-commit-2")
+    );
+}
+
+#[tokio::test]
+async fn parent_repair_recovers_review_and_merge_results_without_duplicate_writes() {
+    let suffix = "REPAIR-REVIEW-MERGE-CRASH";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-crash", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+
+    let mut approved = repair_provider_snapshot(true);
+    approved.checks_passed = true;
+    approved.review_approved = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([repair_provider_snapshot(true), approved.clone()]);
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "crash after review request".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+    assert!(
+        scheduler
+            .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.tracker().repair_review_requests, 1);
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(approved.clone());
+    assert_eq!(
+        scheduler
+            .request_parent_repair_review(&parent_id, &repair_id, ts(131))
+            .await
+            .expect("review reconciliation"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::AwaitingMerge
+    );
+    assert_eq!(scheduler.tracker().repair_review_requests, 1);
+
+    let mut merged = approved.clone();
+    merged.open = false;
+    merged.merged = true;
+    merged.merge_result_commit = Some("target-after-rebase".to_owned());
+    merged.target_contains_merge_result = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .extend([approved, merged.clone()]);
+    scheduler
+        .workspace_mut()
+        .persist_durable_state_results
+        .extend([
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err(FakeError {
+                message: "crash after merge".to_owned(),
+                category: None,
+                retry_after: None,
+            }),
+        ]);
+    assert!(
+        scheduler
+            .merge_parent_repair(&parent_id, &repair_id, ts(140))
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.tracker().repair_merge_requests, 1);
+    scheduler.tracker_mut().repair_snapshots.push_back(merged);
+    assert_eq!(
+        scheduler
+            .merge_parent_repair(&parent_id, &repair_id, ts(141))
+            .await
+            .expect("merge reconciliation"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::Refreshing
+    );
+    assert_eq!(scheduler.tracker().repair_merge_requests, 1);
+}
+
 fn enqueue_successful_parent_completion(
     scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
     suffix: &str,
     finished_at: u64,
 ) {
-    let run = scheduler.worker().launches[0].run.clone();
+    let run = scheduler
+        .worker()
+        .launches
+        .last()
+        .expect("parent launch")
+        .run
+        .clone();
     let command = "cargo test-system-duckdb --test integration";
     scheduler
         .worker_mut()
@@ -932,7 +2508,8 @@ fn enqueue_successful_parent_completion(
         ts(finished_at),
         Some("parent integration verified".to_owned()),
         None,
-    );
+    )
+    .with_harness_stopped();
     let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("durable state");
@@ -941,12 +2518,92 @@ fn enqueue_successful_parent_completion(
         .get(&run.issue_id)
         .expect("parent controller")
         .hierarchy_generation;
+    let repository_id =
+        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id");
+    let target_commit = state.parent_integrations[&run.issue_id].targets[&repository_id]
+        .target_commit
+        .clone();
     outcome.parent_verification = Some(parent_verification_evidence(
         run.worker_id.as_str(),
         hierarchy_generation,
-        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id"),
-        &format!("commit-{suffix}"),
+        repository_id,
+        &target_commit,
     ));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: run.worker_id,
+            outcome,
+        });
+}
+
+fn enqueue_failed_parent_repair_request(
+    scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
+    repository_id: CanonicalRepositoryId,
+    finished_at: u64,
+) {
+    let run = scheduler.worker().launches[0].run.clone();
+    let command = "cargo test-system-duckdb --test integration";
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: run.worker_id.clone(),
+            observed_at: ts(finished_at - 20),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/started".to_owned()),
+            summary: Some("final verification started".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {"item": {
+                    "id": "command-final",
+                    "type": "commandExecution",
+                    "command": command
+                }}
+            })),
+        });
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::RuntimeEvent {
+            worker_id: run.worker_id.clone(),
+            observed_at: ts(finished_at - 10),
+            event_id: Some("command-final".to_owned()),
+            event_kind: Some("codex.item/completed".to_owned()),
+            summary: Some("final verification failed".to_owned()),
+            payload: Some(serde_json::json!({
+                "params": {"item": {
+                    "id": "command-final",
+                    "type": "commandExecution",
+                    "command": command,
+                    "exitCode": 1,
+                    "aggregatedOutput": "integration failed"
+                }}
+            })),
+        });
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let hierarchy_generation = state.parent_integrations[&run.issue_id].hierarchy_generation;
+    let target_commit = state.parent_integrations[&run.issue_id].targets[&repository_id]
+        .target_commit
+        .clone();
+    let mut evidence = parent_verification_evidence(
+        run.worker_id.as_str(),
+        hierarchy_generation,
+        repository_id.clone(),
+        &target_commit,
+    );
+    evidence.repair_repository_id = Some(repository_id);
+    let mut outcome = WorkerOutcomeRecord::from_run(
+        &run,
+        WorkerOutcomeKind::Failed,
+        ts(finished_at),
+        Some("parent integration failed and isolated one repair".to_owned()),
+        Some("integration failed".to_owned()),
+    )
+    .with_harness_stopped();
+    outcome.parent_verification = Some(evidence);
     scheduler
         .worker_mut()
         .updates
@@ -1817,7 +3474,11 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
             repository_id: resource.repository_id.clone(),
             checkout_handle: "checkout-repo".to_owned(),
             relative_path: PathBuf::from("repositories/repo"),
+            target_branch: "develop".to_owned(),
             target_commit: "merge-commit".to_owned(),
+            instruction_path: PathBuf::from("AGENTS.md"),
+            instruction_hash: "instruction-repo".to_owned(),
+            repair_policy: test_repair_policy(),
         }],
         ..Default::default()
     };
@@ -1899,7 +3560,8 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
         ts(150),
         Some("worker claimed success despite failed verification".to_owned()),
         None,
-    );
+    )
+    .with_harness_stopped();
     failed_outcome.parent_verification = Some(parent_verification_evidence(
         parent_run.worker_id.as_str(),
         snapshot.generation,
@@ -2035,14 +3697,9 @@ async fn eligible_parent_dispatches_once_from_durable_claim_after_restart() {
 }
 
 #[tokio::test]
-async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
+async fn failed_parent_turn_without_terminal_status_retains_conversation() {
     let (mut scheduler, parent_id) = launched_parent_scheduler("FAILED-NO-COMMAND").await;
     let first_run = scheduler.worker().launches[0].run.clone();
-    let conversation = scheduler
-        .execution(&parent_id)
-        .and_then(|execution| execution.conversation())
-        .cloned()
-        .expect("parent conversation");
     scheduler
         .worker_mut()
         .updates
@@ -2071,33 +3728,93 @@ async fn failed_parent_turn_without_commands_cleans_up_before_retry() {
             .cleanup
             .as_ref()
             .map(|cleanup| cleanup.status),
-        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Succeeded)
+        Some(crate::opensymphony_orchestrator::ParentCleanupStatus::Pending)
     );
+    assert!(controller.attempts[0].harness_stopped_at.is_none());
+    assert!(!controller.can_cancel_without_harness());
     assert_eq!(
         controller.state,
         crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
     );
 
+    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().terminal = vec![tracker_issue(
+        parent_id.as_str(),
+        "COE-PARENT-FAILED-NO-COMMAND",
+        "Done",
+        0,
+    )];
     let retry_dispatch_at = retry_due_at.max(ts(3_600_100));
-    scheduler
-        .worker_mut()
-        .launch_results
-        .push_back(Ok(WorkerLaunch {
-            conversation: conversation.clone(),
-            started_at: Some(retry_dispatch_at),
-        }));
     scheduler
         .tick(retry_dispatch_at)
         .await
-        .expect("retry after stopped failed turn");
-    assert_eq!(scheduler.worker().launches.len(), 2);
+        .expect("terminal reconciliation retains an unacknowledged remote turn");
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert!(scheduler.execution(&parent_id).is_some());
     let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("decode state");
     assert_eq!(
-        state.parent_integrations[&parent_id].current_attempt_id(),
-        Some("parent-attempt-2")
+        state.parent_integrations[&parent_id].state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
     );
+}
+
+#[tokio::test]
+async fn parent_outcomes_without_terminal_evidence_retain_ownership_without_rerunning() {
+    for outcome_kind in [
+        WorkerOutcomeKind::Failed,
+        WorkerOutcomeKind::TimedOut,
+        WorkerOutcomeKind::Stalled,
+        WorkerOutcomeKind::Detached,
+        WorkerOutcomeKind::CancelFailed,
+    ] {
+        let suffix = format!("INDETERMINATE-{outcome_kind:?}");
+        let mut config = scheduler_config();
+        config.max_retry_attempts = Some(0);
+        let (mut scheduler, parent_id) =
+            launched_parent_scheduler_with_config(&suffix, config).await;
+        let first_run = scheduler.worker().launches[0].run.clone();
+        scheduler
+            .worker_mut()
+            .updates
+            .push_back(WorkerUpdate::Finished {
+                worker_id: first_run.worker_id.clone(),
+                outcome: WorkerOutcomeRecord::from_run(
+                    &first_run,
+                    outcome_kind,
+                    ts(150),
+                    Some("transport ended without terminal runtime evidence".to_owned()),
+                    None,
+                ),
+            });
+
+        scheduler.tick(ts(150)).await.expect("record outcome");
+        let retry_due_at = scheduler.executions()[&parent_id]
+            .retry()
+            .expect("retained reconciliation retry")
+            .due_at;
+        let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+            serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+                .expect("decode state");
+        let controller = &state.parent_integrations[&parent_id];
+        assert!(controller.has_unreconciled_harness());
+        assert_eq!(
+            controller.state,
+            crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories
+        );
+
+        scheduler
+            .tick(retry_due_at.max(ts(3_600_100)))
+            .await
+            .expect("unreconciled harness should remain fenced");
+        assert_eq!(
+            scheduler.worker().launches.len(),
+            1,
+            "an indeterminate conversation must not be duplicated"
+        );
+        assert!(scheduler.execution(&parent_id).is_some());
+    }
 }
 
 #[tokio::test]
@@ -2120,7 +3837,8 @@ async fn active_parent_cancellation_is_retryable_on_the_same_conversation() {
                 ts(150),
                 Some("runtime cancelled the active turn".to_owned()),
                 None,
-            ),
+            )
+            .with_harness_stopped(),
         });
     scheduler.tick(ts(150)).await.expect("record cancellation");
 
@@ -2529,7 +4247,11 @@ async fn terminal_recovery_does_not_trust_success_before_parent_controller_final
                 repository_id: repository_id.clone(),
                 checkout_handle: "checkout-parent".to_owned(),
                 relative_path: PathBuf::from("repositories/parent"),
+                target_branch: "develop".to_owned(),
                 target_commit: "target-parent".to_owned(),
+                instruction_path: PathBuf::from("AGENTS.md"),
+                instruction_hash: "instruction-parent".to_owned(),
+                repair_policy: test_repair_policy(),
             }],
             "targets:1",
             ts(2),

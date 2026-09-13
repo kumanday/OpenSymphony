@@ -730,6 +730,70 @@ incomplete root, a hook-created root-level Git repository also fails and rolls
 back, and reuse requires the hook completion receipt. Parent paths include a
 stable issue-identity digest after the sanitized identifier.
 
+For a blocked parent repair, inspect the repair attempt's provider-operation
+ledger before intervening. A pending operation is an intent whose provider
+result must be reconciled first; do not create another branch or PR manually.
+`provider_unavailable`, `failed_checks`, `review_rejected`,
+`externally_closed`, `force_pushed`, and `merge_conflict` preserve the attempt
+for retry or operator repair. Requested changes return the same attempt to its
+recorded branch and PR. A stage-specific failure is stored as a bounded,
+redacted repair diagnostic and retried without stopping the rest of the
+scheduler tick. For a Codex review profile, the PR-open scan is the
+initial request and later requested-change heads use an exact `@codex review`
+comment; only completion and findings associated with the current pushed head
+affect automated-review eligibility. Crash recovery accepts a trigger comment
+only from the identity behind the configured review credential. Review findings
+come from unresolved provider threads. Every unresolved non-Codex human thread,
+including a `COMMENTED` review or a thread retained from an earlier head, blocks
+merge until it is resolved; its bounded body and location are persisted for the
+credential-scrubbed repair continuation. Resolving a thread after accepted
+pushback removes it from the current finding set without requiring a no-op
+commit. When the central profile requires review,
+a clean Codex scan and a current human approval are both required, and a current
+human change request remains authoritative. The same child merge-evidence gate
+rejects every unresolved human review thread before parent integration. At most
+seven later triggers are posted, so the initial scan plus retriggers cannot
+exceed eight; remediation
+after that ceiling records a durable `review_budget_exhausted` operator state
+and uses the documented exact-commit local review path. Before
+posting a later trigger, the scheduler persists the highest observed provider
+comment ID so crash recovery can find the exact write despite GitHub's
+second-precision timestamps. Recovery
+keeps the cursor captured before the pending trigger instead of replacing it
+with a later reconciliation snapshot. The
+scheduler applies a fresh provider snapshot immediately before merge and returns
+to review if approval, checks, or mergeability are no longer current. A merged
+provider snapshot advances only when the pushed head and policy evidence remain
+current and the durable ledger contains the orchestrator's pending merge intent
+for that exact head. A replacement repair push supersedes older pending merge
+intents; an external merge that bypasses those facts is blocked for operator
+recovery. Repair
+provider writes remain pending whenever a fresh tracker snapshot does not list
+the parent in its active set, the controller is terminal, or the current
+hierarchy generation is fenced. A
+terminal or canceled tracker transition also persists controller cancellation
+while the repair is between harness turns in pull-request, review, merge, or
+refresh processing; no harness interrupt is emitted when no turn is running. A
+repair implementation interrupted by restart remains in `fixing` for cleanup and
+retry instead of entering the final-verification refresh path. A failed parent
+verification selects the repository but does not publish immediately: the
+scheduler creates the repair branch, resumes the same parent conversation for an
+observed implementation-and-check turn, and only then commits and pushes through
+the workspace owner. If that turn leaves no commit beyond the recorded target,
+the scheduler clears its completion marker and queues another implementation
+continuation. A repair request is accepted only when its receipt selects
+a completed command observed by the harness before the attempt deadline. Repair
+implementation retries stop at the configured scheduler limit, and provider
+rate-limit responses defer all repair lookups until their retry delay expires.
+After a provider merge, refresh fetches the configured target, proves the
+recorded merge-result commit and every retained child merge result are
+reachable, and refreshes complete instruction provenance before final
+verification runs again. The configured repair merge
+call selects merge, squash, or rebase centrally. Historical child merge evidence
+can prove a merge commit from its multi-parent topology; GitHub does not expose
+enough evidence to distinguish squash from rebase by a single-parent commit
+alone, so an ambiguous result remains ineligible.
+
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
 creating a replacement conversation. If that envelope differs from the

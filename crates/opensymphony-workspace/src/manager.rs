@@ -537,6 +537,12 @@ impl WorkspaceManager {
                 retained_checkouts,
                 required_merge_commits: required_merge_commits.into_iter().collect(),
                 instruction,
+                review_profile: repository.review_profile.clone(),
+                review_provider: repository.review_provider.clone(),
+                review_policy_generation: repository.review_policy_generation.clone(),
+                required_checks: repository.required_checks,
+                required_review: repository.required_review,
+                merge_method: repository.merge_method.clone(),
             };
             checkout_operation_with_timeout(
                 checkout_time_remaining(integration_deadline),
@@ -657,13 +663,13 @@ impl WorkspaceManager {
             .ok_or_else(|| {
                 checkout_verification(handle.workspace_path(), "parent manifest is missing")
             })?;
-        let child_checkout_map = self
+        let mut child_checkout_map = self
             .load_manifest::<ParentChildCheckoutMap>(&handle, &handle.child_checkouts_path())
             .await?
             .ok_or_else(|| {
                 checkout_verification(handle.workspace_path(), "child checkout map is missing")
             })?;
-        let pinned_child_checkout_map = self
+        let mut pinned_child_checkout_map = self
             .load_parent_child_checkout_pin(handle.workspace_key(), hierarchy_generation)
             .await?
             .ok_or_else(|| {
@@ -672,6 +678,43 @@ impl WorkspaceManager {
                     "orchestrator-owned parent checkout pin is missing",
                 )
             })?;
+        if let Some(pending_refresh) = self
+            .load_parent_child_checkout_refresh(handle.workspace_key(), hierarchy_generation)
+            .await?
+        {
+            let pin_path = self
+                .parent_child_checkout_pin_path(handle.workspace_key(), hierarchy_generation)
+                .await?;
+            self.write_parent_child_checkout_pin(&pin_path, &pending_refresh)
+                .await?;
+            self.write_manifest_atomically(
+                &handle,
+                &handle.child_checkouts_path(),
+                &pending_refresh,
+            )
+            .await?;
+            self.remove_parent_child_checkout_refresh(handle.workspace_key(), hierarchy_generation)
+                .await;
+            child_checkout_map = pending_refresh.clone();
+            pinned_child_checkout_map = pending_refresh;
+        }
+        let child_policy_migrated =
+            self.migrate_parent_checkout_review_policy(&mut child_checkout_map)?;
+        let pin_policy_migrated =
+            self.migrate_parent_checkout_review_policy(&mut pinned_child_checkout_map)?;
+        if child_policy_migrated || pin_policy_migrated {
+            let pin_path = self
+                .parent_child_checkout_pin_path(handle.workspace_key(), hierarchy_generation)
+                .await?;
+            self.write_parent_child_checkout_pin(&pin_path, &pinned_child_checkout_map)
+                .await?;
+            self.write_manifest_atomically(
+                &handle,
+                &handle.child_checkouts_path(),
+                &child_checkout_map,
+            )
+            .await?;
+        }
         if manifest.schema_version != 1
             || manifest.parent_issue_id != issue.issue_id
             || manifest.parent_identifier != issue.identifier
@@ -726,6 +769,48 @@ impl WorkspaceManager {
         })
     }
 
+    fn migrate_parent_checkout_review_policy(
+        &self,
+        map: &mut ParentChildCheckoutMap,
+    ) -> Result<bool, WorkspaceError> {
+        let mut migrated = false;
+        for record in map.repositories.values_mut() {
+            if let Some(method) = record.merge_method.as_mut() {
+                let canonical = method.trim().to_ascii_lowercase();
+                if *method != canonical {
+                    *method = canonical;
+                    migrated = true;
+                }
+            }
+            if !record.review_profile.is_empty()
+                || !record.review_provider.is_empty()
+                || !record.review_policy_generation.is_empty()
+                || record.required_checks
+                || record.required_review
+                || record.merge_method.is_some()
+            {
+                continue;
+            }
+            let repository = self
+                .checkout_repositories
+                .get(&record.repository_id)
+                .ok_or_else(|| {
+                    checkout_verification(
+                        &self.config.root,
+                        "legacy parent checkout review policy repository is unavailable",
+                    )
+                })?;
+            record.review_profile = repository.review_profile.clone();
+            record.review_provider = repository.review_provider.clone();
+            record.review_policy_generation = repository.review_policy_generation.clone();
+            record.required_checks = repository.required_checks;
+            record.required_review = repository.required_review;
+            record.merge_method = repository.merge_method.clone();
+            migrated = true;
+        }
+        Ok(migrated)
+    }
+
     pub async fn open_parent_execution_root_at(
         &self,
         issue: &IssueDescriptor,
@@ -773,6 +858,51 @@ impl WorkspaceManager {
             true,
         )
         .await
+    }
+
+    pub async fn open_parent_execution_root_at_for_repair(
+        &self,
+        issue: &IssueDescriptor,
+        root: &Path,
+        checkout_handle: &str,
+        repository_id: &str,
+        branch: &str,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, root)
+            .await?;
+        let target = parent
+            .child_checkout_map
+            .repositories
+            .get(repository_id)
+            .filter(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| checkout_verification(root, "repair checkout handle is stale"))?;
+        let target_path = parent.handle.workspace_path().join(&target.relative_path);
+        let current_branch = self
+            .git(&target_path, &["branch", "--show-current"])
+            .await?;
+        if current_branch != branch {
+            return Err(checkout_verification(
+                &target_path,
+                "repair checkout is not on its recorded branch",
+            ));
+        }
+        for record in parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .filter(|record| record.checkout_handle != checkout_handle)
+        {
+            let source = self.validate_parent_retained_checkouts(record).await?;
+            checkout_operation_with_timeout(
+                Some(RETAINED_CHECKOUT_VERIFICATION_TIMEOUT),
+                parent.handle.workspace_path(),
+                "verify non-target parent integration worktree",
+                self.verify_parent_integration_checkout(&parent.handle, record, &source, false),
+            )
+            .await?;
+        }
+        Ok(parent)
     }
 
     pub async fn resolve_parent_checkout(
@@ -907,6 +1037,372 @@ impl WorkspaceManager {
             );
         }
         Ok(instructions)
+    }
+
+    pub async fn reconcile_parent_repair_branch(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        branch: &str,
+        target_commit: &str,
+    ) -> Result<(Option<String>, String), WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let record = parent
+            .child_checkout_map
+            .repositories
+            .values()
+            .find(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| checkout_verification(parent_root, "repair checkout handle is stale"))?;
+        if record.target_commit != target_commit {
+            return Err(checkout_verification(
+                parent_root,
+                "repair target no longer matches the pinned integration target",
+            ));
+        }
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        let repository = self
+            .checkout_repositories
+            .get(&record.repository_id)
+            .ok_or_else(|| {
+                checkout_verification(&checkout, "repair repository policy is unavailable")
+            })?;
+        let instruction = self
+            .load_instruction_provenance(&checkout, repository, target_commit)
+            .await?;
+        let heads = self
+            .git(
+                &checkout,
+                &["branch", "--list", "--format=%(objectname)", branch],
+            )
+            .await?;
+        let head = heads
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::to_owned);
+        Ok((head, instruction.content_hash))
+    }
+
+    pub async fn create_parent_repair_branch(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        branch: &str,
+        target_commit: &str,
+    ) -> Result<String, WorkspaceError> {
+        let (existing, instruction_hash) = self
+            .reconcile_parent_repair_branch(
+                issue,
+                parent_root,
+                checkout_handle,
+                branch,
+                target_commit,
+            )
+            .await?;
+        if let Some(existing) = existing {
+            if existing == target_commit {
+                return Ok(instruction_hash);
+            }
+            return Err(checkout_verification(
+                parent_root,
+                "repair branch already exists at an unrecorded commit",
+            ));
+        }
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        self.git(&checkout, &["switch", "--create", branch, target_commit])
+            .await?;
+        Ok(instruction_hash)
+    }
+
+    pub async fn reconcile_parent_repair_push(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        repository_id: &str,
+        branch: &str,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        let repository = self
+            .checkout_repositories
+            .get(repository_id)
+            .ok_or_else(|| {
+                checkout_verification(&checkout, "repair repository policy is unavailable")
+            })?;
+        self.reject_checkout_controlled_transport_config(&checkout)
+            .await?;
+        let reference = format!("refs/heads/{branch}");
+        let output = self
+            .run_authenticated_git(
+                &checkout,
+                repository,
+                &["ls-remote", "--heads", &repository.remote, &reference],
+            )
+            .await?;
+        Ok(output
+            .split_whitespace()
+            .next()
+            .filter(|_| output.split_whitespace().nth(1) == Some(reference.as_str()))
+            .map(str::to_owned))
+    }
+
+    pub async fn parent_repair_has_uncommitted_changes(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        branch: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        let current_branch = self.git(&checkout, &["branch", "--show-current"]).await?;
+        if current_branch != branch {
+            return Err(checkout_verification(
+                &checkout,
+                "repair checkout is not on its recorded branch",
+            ));
+        }
+        Ok(!self
+            .git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .is_empty())
+    }
+
+    pub async fn publish_parent_repair(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        repository_id: &str,
+        branch: &str,
+    ) -> Result<String, WorkspaceError> {
+        let parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let record = parent
+            .child_checkout_map
+            .repositories
+            .get(repository_id)
+            .filter(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| checkout_verification(parent_root, "repair checkout handle is stale"))?;
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        let repository = self
+            .checkout_repositories
+            .get(repository_id)
+            .ok_or_else(|| {
+                checkout_verification(&checkout, "repair repository policy is unavailable")
+            })?;
+        let current_branch = self.git(&checkout, &["branch", "--show-current"]).await?;
+        if current_branch != branch {
+            return Err(checkout_verification(
+                &checkout,
+                "repair checkout is not on its recorded branch",
+            ));
+        }
+        let status = self
+            .git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?;
+        if !status.is_empty() {
+            self.git(&checkout, &["add", "--all"]).await?;
+            let message = format!("fix: repair parent integration ({branch})");
+            self.git(
+                &checkout,
+                &[
+                    "-c",
+                    "user.name=OpenSymphony",
+                    "-c",
+                    "user.email=opensymphony@localhost",
+                    "commit",
+                    "--no-verify",
+                    "--no-gpg-sign",
+                    "--message",
+                    &message,
+                ],
+            )
+            .await?;
+        }
+        let head = self.git(&checkout, &["rev-parse", "HEAD"]).await?;
+        if head == record.target_commit {
+            return Err(checkout_verification(
+                &checkout,
+                "repair branch has no commit beyond its recorded target",
+            ));
+        }
+        if !self
+            .git_is_ancestor(
+                &checkout,
+                &["merge-base", "--is-ancestor", &record.target_commit, &head],
+            )
+            .await?
+        {
+            return Err(checkout_verification(
+                &checkout,
+                "repair branch no longer descends from its recorded target",
+            ));
+        }
+        self.reject_checkout_controlled_transport_config(&checkout)
+            .await?;
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        self.run_authenticated_git(
+            &checkout,
+            repository,
+            &["push", &repository.remote, &refspec],
+        )
+        .await?;
+        Ok(head)
+    }
+
+    pub async fn refresh_parent_repair_target(
+        &self,
+        issue: &IssueDescriptor,
+        parent_root: &Path,
+        checkout_handle: &str,
+        repository_id: &str,
+        merge_result_commit: &str,
+    ) -> Result<(String, PathBuf, String), WorkspaceError> {
+        let mut parent = self
+            .open_parent_execution_root_at_for_retry(issue, parent_root)
+            .await?;
+        let existing = parent
+            .child_checkout_map
+            .repositories
+            .get(repository_id)
+            .cloned()
+            .filter(|record| record.checkout_handle == checkout_handle)
+            .ok_or_else(|| checkout_verification(parent_root, "repair checkout handle is stale"))?;
+        let source = self.validate_parent_retained_checkouts(&existing).await?;
+        let repository = self
+            .checkout_repositories
+            .get(repository_id)
+            .ok_or_else(|| {
+                checkout_verification(parent_root, "repair repository policy is unavailable")
+            })?;
+        self.fetch_parent_target(&source, repository).await?;
+        let target_ref = format!("refs/remotes/origin/{}", repository.target_branch);
+        let target_commit = self
+            .git(source.workspace_path(), &["rev-parse", &target_ref])
+            .await?;
+        if !self
+            .git_is_ancestor(
+                source.workspace_path(),
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    merge_result_commit,
+                    &target_commit,
+                ],
+            )
+            .await?
+        {
+            return Err(checkout_verification(
+                parent_root,
+                "provider merge result is not reachable from refreshed target",
+            ));
+        }
+        for required_merge_commit in &existing.required_merge_commits {
+            if !self
+                .git_is_ancestor(
+                    source.workspace_path(),
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        required_merge_commit,
+                        &target_commit,
+                    ],
+                )
+                .await?
+            {
+                return Err(checkout_verification(
+                    parent_root,
+                    &format!(
+                        "retained child merge result `{required_merge_commit}` is not reachable from refreshed target"
+                    ),
+                ));
+            }
+        }
+        let checkout = self
+            .resolve_parent_checkout(&parent, checkout_handle)
+            .await?;
+        if !self
+            .git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .is_empty()
+        {
+            return Err(checkout_verification(
+                &checkout,
+                "repair checkout is dirty during post-merge refresh",
+            ));
+        }
+        self.git(&checkout, &["switch", "--detach", &target_commit])
+            .await?;
+        let instruction = self
+            .load_instruction_provenance(&checkout, repository, &target_commit)
+            .await?;
+        let instruction_path = instruction.path.clone();
+        let instruction_hash = instruction.content_hash.clone();
+        let record = parent
+            .child_checkout_map
+            .repositories
+            .get_mut(repository_id)
+            .expect("record was checked");
+        record.target_commit = target_commit.clone();
+        record.instruction = instruction;
+        self.write_parent_child_checkout_refresh(
+            parent.handle.workspace_key(),
+            parent.manifest.hierarchy_generation,
+            &parent.child_checkout_map,
+        )
+        .await?;
+        let pin_path = self
+            .parent_child_checkout_pin_path(
+                parent.handle.workspace_key(),
+                parent.manifest.hierarchy_generation,
+            )
+            .await?;
+        self.write_parent_child_checkout_pin(&pin_path, &parent.child_checkout_map)
+            .await?;
+        self.write_manifest_atomically(
+            &parent.handle,
+            &parent.handle.child_checkouts_path(),
+            &parent.child_checkout_map,
+        )
+        .await?;
+        self.remove_parent_child_checkout_refresh(
+            parent.handle.workspace_key(),
+            parent.manifest.hierarchy_generation,
+        )
+        .await;
+        Ok((target_commit, instruction_path, instruction_hash))
     }
 
     pub async fn write_parent_runtime_envelope(
@@ -1069,6 +1565,7 @@ impl WorkspaceManager {
         args.extend([repository.remote.as_str(), refspec.as_str()]);
         self.run_authenticated_git(source.workspace_path(), repository, &args)
             .await
+            .map(|_| ())
     }
 
     async fn reject_checkout_controlled_transport_config(
@@ -1191,7 +1688,7 @@ impl WorkspaceManager {
         checkout: &Path,
         repository: &CheckoutRepository,
         args: &[&str],
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<String, WorkspaceError> {
         let environment_credential = repository.credential_kind == "environment";
         let ssh_agent_credential = repository.credential_kind == "ssh-agent";
         let environment_credential_value = environment_credential
@@ -1216,9 +1713,15 @@ impl WorkspaceManager {
         }
 
         let askpass_path = if environment_credential {
-            let path = checkout
-                .join(".opensymphony")
-                .join(format!("askpass-{}", Uuid::new_v4().simple()));
+            let metadata_directory = checkout.join(".opensymphony");
+            fs::create_dir_all(&metadata_directory)
+                .await
+                .map_err(|source| WorkspaceError::CheckoutOperation {
+                    operation: "prepare Git credential helper".to_owned(),
+                    path: metadata_directory.clone(),
+                    detail: source.to_string(),
+                })?;
+            let path = metadata_directory.join(format!("askpass-{}", Uuid::new_v4().simple()));
             fs::write(
                 &path,
                 b"#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_USERNAME\" ;;\n  *) printf '%s\\n' \"$OPENSYMPHONY_CHECKOUT_CREDENTIAL\" ;;\nesac\n",
@@ -1374,7 +1877,7 @@ impl WorkspaceManager {
         };
         #[cfg(unix)]
         process_group_guard.disarm();
-        let _stdout = join_child_pipe(stdout_task).await.map_err(|source| {
+        let stdout = join_child_pipe(stdout_task).await.map_err(|source| {
             WorkspaceError::CheckoutOperation {
                 operation: args.first().copied().unwrap_or("git").to_owned(),
                 path: checkout.to_path_buf(),
@@ -1392,7 +1895,7 @@ impl WorkspaceManager {
             let _ = fs::remove_file(path).await;
         }
         if status.success() {
-            return Ok(());
+            return Ok(String::from_utf8_lossy(&stdout).trim().to_owned());
         }
         let mut detail = redact_runtime_diagnostic(&String::from_utf8_lossy(&stderr));
         if let Some(value) = environment_credential_value.as_deref() {
@@ -1583,6 +2086,18 @@ impl WorkspaceManager {
                     &format!("origin {kind} remote is unavailable"),
                 ));
             }
+        }
+        if record.review_profile != repository.review_profile
+            || record.review_provider != repository.review_provider
+            || record.review_policy_generation != repository.review_policy_generation
+            || record.required_checks != repository.required_checks
+            || record.required_review != repository.required_review
+            || record.merge_method != repository.merge_method
+        {
+            return Err(checkout_verification(
+                &integration,
+                "repository review policy does not match the parent checkout map",
+            ));
         }
         if !allow_worker_changes {
             let instruction = self
@@ -4724,6 +5239,64 @@ impl WorkspaceManager {
             .await
     }
 
+    async fn parent_child_checkout_refresh_path(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        Ok(canonical_root
+            .join(".opensymphony-parent-pins")
+            .join(workspace_key)
+            .join(format!("{hierarchy_generation}.refresh.json")))
+    }
+
+    async fn write_parent_child_checkout_refresh(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+        map: &ParentChildCheckoutMap,
+    ) -> Result<(), WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root);
+        let path = self
+            .parent_child_checkout_refresh_path(workspace_key, hierarchy_generation)
+            .await?;
+        self.write_json_artifact_atomically(&handle, &path, map)
+            .await
+    }
+
+    async fn load_parent_child_checkout_refresh(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+    ) -> Result<Option<ParentChildCheckoutMap>, WorkspaceError> {
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let handle = self.orchestrator_state_handle(canonical_root);
+        let path = self
+            .parent_child_checkout_refresh_path(workspace_key, hierarchy_generation)
+            .await?;
+        self.load_manifest(&handle, &path).await
+    }
+
+    async fn remove_parent_child_checkout_refresh(
+        &self,
+        workspace_key: &str,
+        hierarchy_generation: u64,
+    ) {
+        let Ok(path) = self
+            .parent_child_checkout_refresh_path(workspace_key, hierarchy_generation)
+            .await
+        else {
+            return;
+        };
+        if let Err(error) = fs::remove_file(&path).await
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), %error, "failed to remove completed parent refresh transaction");
+        }
+    }
+
     async fn load_parent_child_checkout_pin(
         &self,
         workspace_key: &str,
@@ -5912,7 +6485,7 @@ pub fn compose_parent_prompt(
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nUse the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
+        "## Central Execution Procedure\n\n{central_procedure}\n\n## Parent Task Facts\n\n{task_facts}\n\n## Verified Child Checkout Map\n\nParent root: {}\nHierarchy generation: {}\n{}\n\n## Project-set Integration Instructions\n\n{}\n\n## Repository Instructions by Canonical ID\n\n{}\n\n## Final Verification Receipt\n\nRun the final integration check as one bounded foreground command from the parent root or one named checkout. Do not leave background processes running. After it exits, atomically write `evidence/final-verification.json` with this shape. `command` must be the exact shell command observed by the harness and `root` is `parent_root` or a verified checkout handle:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, replace `null` with its exact canonical repository ID without editing the checkout. OpenSymphony will create the verified repair branch and resume this conversation with repair instructions. This field is only a repair request; OpenSymphony owns every Git and provider receipt. Use the exact inspected commits and the real verification command. The file only selects harness-observed evidence: OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events. A successful harness turn or an unobserved command does not complete the parent.\n\n## Runtime Capabilities\n\nharness={} cwd={} requested_scope={} containment={}\n",
         envelope.workspace_path.display(),
         envelope.hierarchy_generation,
         checkout_map,
@@ -5945,7 +6518,7 @@ pub fn compose_parent_continuation_prompt(envelope: &ParentRuntimeEnvelope) -> S
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\"\n}}\n```\n\nThe file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
+        "## Current Parent Verification Attempt\n\nThis continuation is bound to run `{}` attempt {} and hierarchy generation {}. Run the final integration check as one bounded foreground command from the parent root or one named checkout. After it exits, atomically write `evidence/final-verification.json` with the exact observed command and verified root:\n\n```json\n{{\n  \"schema_version\": 1,\n  \"run_id\": \"{}\",\n  \"attempt\": {},\n  \"hierarchy_generation\": {},\n  \"repository_commits\": {{\n{}\n  }},\n  \"command\": \"cargo test\",\n  \"root\": \"parent_root\",\n  \"repair_repository_id\": null\n}}\n```\n\nIf the selected check fails because one repository needs a code repair, replace `null` with its exact canonical repository ID without editing the checkout. OpenSymphony will create the verified repair branch and resume this conversation with repair instructions. This field is only a repair request; OpenSymphony owns every Git and provider receipt. The file only selects harness-observed evidence. OpenSymphony takes timing, exit status, bounded output, process ownership, and teardown from runtime command events.\n",
         envelope.run_id,
         envelope.attempt,
         envelope.hierarchy_generation,

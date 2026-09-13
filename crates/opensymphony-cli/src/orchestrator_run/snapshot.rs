@@ -974,6 +974,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            harness_stopped: false,
             parent_verification: None,
         });
         let issue = map_single_issue(domain_issue);
@@ -1004,6 +1005,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: None,
+            harness_stopped: false,
             parent_verification: None,
         });
 
@@ -1044,6 +1046,7 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            harness_stopped: false,
             parent_verification: None,
         });
 

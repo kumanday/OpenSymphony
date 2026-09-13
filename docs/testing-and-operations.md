@@ -81,6 +81,16 @@ Why fakes matter:
   isolation, legacy missing-controller migration before same-conversation
   reattachment, terminal-success finalization gates, and retry after a failed
   durable outcome write
+- parent repair branch, push, pull-request, review, merge, and refresh
+  reconciliation with side-effect counters; persistence failure before branch
+  creation; bounded current-head feedback for credential-scrubbed workers;
+  resolved-thread pushback; controller cancellation between repair turns and
+  when tracker state changes before a completed implementation turn publishes;
+  retention after a conversation-bound transport failure without terminal proof;
+  requested changes on one PR; failed checks, rejection, outage,
+  external closure, force-push, and conflict states; squash/rebase merge-result
+  reachability; retained-child reachability after target refresh; inherited
+  commit-signing isolation; and separately auditable attempts across repositories
 
 ## 2.4 Live local tests
 

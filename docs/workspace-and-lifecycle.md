@@ -207,10 +207,17 @@ manager.
 Once that conversation is bound, a parent harness change is rejected before a
 replacement session starts. A runtime-terminal successful, failed, or canceled
 turn supplies stopped-turn evidence and releases its foreground-process receipt;
-timeout, stall, detach, and failed-cancel paths still require explicit stopped
-state reconciliation. An ordinary cancellation while the tracker parent remains
+an outcome created by transport loss or local persistence failure does not. A
+timeout, stall, detach, or failed-cancel path still requires explicit stopped
+state reconciliation. The run manifest persists this adapter observation as a
+separate backward-compatible flag; a legacy or current `failed` status alone is
+not terminal harness evidence during restart recovery. An ordinary cancellation while the tracker parent remains
 active returns through cleanup and baseline refresh. Operator and tracker
-terminal cancellation remains terminal.
+terminal cancellation remains terminal. When a tracker terminal state arrives
+between repair worker turns, cancellation records no harness-interrupt intent or
+acknowledgement only after every attempt has conclusive stopped and cleanup
+evidence. A conversation-bound indeterminate attempt remains retained for stop
+reconciliation or operator recovery.
 
 The final-verification receipt selects an exact harness-observed foreground
 command. The trusted loader computes its SHA-256 identity from the transient
@@ -283,6 +290,49 @@ the compact transition history, so retry history pruning cannot replay initial
 admission. Parents with no recorded checkout targets still require an observed
 successful final command and successful cleanup; their final repository commit
 map is empty by definition.
+
+A parent repair uses the affected repository's existing contained integration
+worktree. The workspace manager resolves it through the opaque checkout handle,
+reloads the pinned instruction provenance, and creates a fresh
+`fix/<parent>-g<hierarchy-generation>-repair-<attempt>` branch at the recorded
+target. The hierarchy generation keeps a reactivated or replanned parent from
+colliding with a retained branch from an earlier controller lifecycle. Managed
+Git operations isolate hooks and reject checkout-controlled transport settings.
+If crash recovery finds the deterministic branch after its create call, the
+workspace reconciliation completes the original branch intent before the repair
+advances. A successful repair turn that leaves the branch at its target commit
+returns to implementation instead of retrying publication forever.
+Pushes use the configured credential path and reconcile the exact remote branch
+and local intended head before mutation. Requested-change commits reuse that
+branch and pull request, while old-head review results cannot advance the new
+head. The provider adapter reads unresolved review threads, persists a bounded
+copy of current-head feedback, and includes that copy in the repair continuation
+so a private-repository worker does not need provider credentials. Resolved
+threads, including accepted same-thread pushback, stop counting as findings on
+the unchanged head. One repair does not open or modify another repository's
+checkout.
+
+The repair lease and completed parent root remain durable after refresh. Final
+verification resumes only after every affected checkout and both copies of its
+generation-bound map contain a reachable post-merge target and refreshed
+instruction path and hash. A failed harness-observed parent check may request
+one canonical repository repair; the scheduler verifies the repository and
+owns branch, pull-request, review, merge, and refresh receipts before it queues
+the next final-verification turn. The failed verification turn only selects the
+repository. The scheduler creates its repair branch and resumes the same parent
+conversation with that authorized checkout; publication waits for a successful,
+harness-observed repair turn. Ordinary final verification still requires exact
+clean targets, while the repair turn may verify descendant or dirty work on its
+recorded repair branch before the workspace owner commits and pushes it. Its
+successful receipt requires that exact branch, and every non-target checkout
+must remain pinned and clean. Restart recovery canonicalizes historical
+case-variant merge methods in both the runtime checkout map and its generation
+pin before comparing them with current central policy. An
+externally observed merge advances only with current pushed-head policy evidence
+and a pending scheduler-owned merge intent bound to that head. Publishing a
+replacement head supersedes any older pending merge intent. Capture
+acknowledgement and ordered release of evidence-protecting roots and leases
+remain part of the later cleanup lifecycle.
 
 The parent runtime artifact records the complete relative checkout map,
 requested `parent_multi_checkout` scope, harness/model selection, and truthful

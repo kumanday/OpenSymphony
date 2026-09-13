@@ -14907,6 +14907,7 @@ Public memory concept.
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Succeeded,
+            harness_stopped: true,
             created_at: now,
             started_at: Some(now),
             updated_at: now,
@@ -15042,6 +15043,7 @@ Public memory concept.
                     occurred_at: crate::opensymphony_domain::TimestampMs::new(2),
                     detail: None,
                 }),
+                harness_stopped_at: Some(crate::opensymphony_domain::TimestampMs::new(2)),
                 input_version: "targets:554".to_owned(),
                 verified_repository_commits: BTreeMap::from([
                     (

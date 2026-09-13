@@ -221,6 +221,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         repository_fixture(temp_dir.path(), "repository-b");
     let (source_c, binding_c, repository_c) = repository_fixture(temp_dir.path(), "repository-c");
     repository_a.provider_id = Some("repository-a-native-id".to_owned());
+    repository_a.merge_method = Some("squash".to_owned());
     binding_a.repository.safe_remote_fingerprint = SafeRemoteFingerprint::from_remote(
         &repository_a.provider,
         repository_a.provider_id.as_deref(),
@@ -529,6 +530,37 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert_eq!(prepared.child_checkout_map.repositories.len(), 3);
+    let pin_file = manager
+        .config()
+        .root
+        .join(".opensymphony-parent-pins")
+        .join(prepared.handle.workspace_key())
+        .join("5.json");
+    for path in [prepared.handle.child_checkouts_path(), pin_file] {
+        let mut persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).expect("parent checkout map should be readable"),
+        )
+        .expect("parent checkout map should decode");
+        persisted["repositories"][binding_a.repository_id().as_str()]["merge_method"] =
+            serde_json::Value::String(" Squash ".to_owned());
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&persisted).expect("parent checkout map should encode"),
+        )
+        .expect("legacy merge-method spelling should be persisted");
+    }
+    let recovered = manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("case-variant persisted merge methods should migrate on restart");
+    assert_eq!(
+        recovered
+            .child_checkout_map
+            .repositories
+            .get(binding_a.repository_id().as_str())
+            .and_then(|record| record.merge_method.as_deref()),
+        Some("squash")
+    );
     let repository_a = prepared
         .child_checkout_map
         .repositories
@@ -816,6 +848,185 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             .map(String::as_str),
         Some("repository workflow instructions\n")
     );
+
+    let repair_branch = "fix/coe-parent-repair-1";
+    let (existing_repair, instruction_hash) = manager
+        .reconcile_parent_repair_branch(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            repair_branch,
+            &repository_a.target_commit,
+        )
+        .await
+        .expect("repair branch lookup");
+    assert!(existing_repair.is_none());
+    assert_eq!(instruction_hash, repository_a.instruction.content_hash);
+    manager
+        .create_parent_repair_branch(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            repair_branch,
+            &repository_a.target_commit,
+        )
+        .await
+        .expect("repair branch creation");
+    std::fs::write(integration.join("parent-repair.txt"), "repair\n")
+        .expect("repair file should be written");
+    assert!(
+        manager
+            .open_parent_execution_root_at(&parent, prepared.handle.workspace_path())
+            .await
+            .is_err(),
+        "ordinary final verification must reject repair edits"
+    );
+    manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("authorized repair completion may verify dirty branch changes");
+    manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect("repair completion accepts changes only on its recorded branch");
+    git(&integration, &["checkout", "--detach"]);
+    let wrong_branch = manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect_err("detached repair work must not produce a successful receipt");
+    assert!(wrong_branch.to_string().contains("recorded branch"));
+    git(&integration, &["checkout", repair_branch]);
+    let integration_b = prepared.handle.workspace_path().join(
+        &prepared.child_checkout_map.repositories[binding_b.repository_id().as_str()].relative_path,
+    );
+    std::fs::write(integration_b.join("unrelated-repair.txt"), "unrelated\n")
+        .expect("non-target repair marker should be written");
+    let dirty_non_target = manager
+        .open_parent_execution_root_at_for_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect_err("repair completion must keep non-target checkouts clean");
+    assert!(dirty_non_target.to_string().contains("dirty"));
+    std::fs::remove_file(integration_b.join("unrelated-repair.txt"))
+        .expect("non-target repair marker should be removed");
+    git(&integration, &["config", "commit.gpgSign", "true"]);
+    git(&integration, &["config", "gpg.program", "false"]);
+    let repair_commit = manager
+        .publish_parent_repair(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            repair_branch,
+        )
+        .await
+        .expect("repair push");
+    assert_eq!(
+        manager
+            .reconcile_parent_repair_push(
+                &parent,
+                prepared.handle.workspace_path(),
+                &repository_a.checkout_handle,
+                binding_a.repository_id().as_str(),
+                repair_branch,
+            )
+            .await
+            .expect("repair push lookup")
+            .as_deref(),
+        Some(repair_commit.as_str())
+    );
+    let target_before_repair_merge = git(&source_a, &["rev-parse", "HEAD"]);
+    let target_tree = git(&source_a, &["write-tree"]);
+    let unrelated_target = git(
+        &source_a,
+        &["commit-tree", &target_tree, "-m", "unrelated target"],
+    );
+    let unrelated_refspec = format!("{unrelated_target}:main");
+    git(
+        &source_a,
+        &["push", "--force", "origin", &unrelated_refspec],
+    );
+    let discarded_children = manager
+        .refresh_parent_repair_target(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            &unrelated_target,
+        )
+        .await
+        .expect_err("refresh must retain every required child merge result");
+    assert!(
+        discarded_children
+            .to_string()
+            .contains("retained child merge result")
+    );
+    let restored_refspec = format!("{target_before_repair_merge}:main");
+    git(&source_a, &["push", "--force", "origin", &restored_refspec]);
+    git(&source_a, &["fetch", "origin", repair_branch]);
+    git(
+        &source_a,
+        &["merge", "--squash", &format!("origin/{repair_branch}")],
+    );
+    git(&source_a, &["commit", "-m", "squash parent repair"]);
+    git(&source_a, &["push", "origin", "main"]);
+    let merge_result = git(&source_a, &["rev-parse", "HEAD"]);
+    let (refreshed, refreshed_instruction_path, refreshed_instructions) = manager
+        .refresh_parent_repair_target(
+            &parent,
+            prepared.handle.workspace_path(),
+            &repository_a.checkout_handle,
+            binding_a.repository_id().as_str(),
+            &merge_result,
+        )
+        .await
+        .expect("repair target refresh");
+    assert_eq!(refreshed, merge_result);
+    assert_eq!(
+        refreshed_instructions,
+        repository_a.instruction.content_hash
+    );
+    assert_eq!(refreshed_instruction_path, repository_a.instruction.path);
+    assert_ne!(
+        repair_commit, refreshed,
+        "squash result replaces repair commit"
+    );
+    let pin_directory = manager
+        .config()
+        .root
+        .join(".opensymphony-parent-pins")
+        .join(prepared.handle.workspace_key());
+    let pin_bytes = std::fs::read(pin_directory.join("5.json")).expect("refresh pin");
+    std::fs::write(pin_directory.join("5.refresh.json"), &pin_bytes)
+        .expect("pending refresh transaction");
+    std::fs::write(
+        prepared.handle.child_checkouts_path(),
+        serde_json::to_vec_pretty(&prepared.child_checkout_map).expect("stale runtime map"),
+    )
+    .expect("simulate crash before runtime map promotion");
+    manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("pending refresh should finish atomically on recovery");
+    assert!(!pin_directory.join("5.refresh.json").exists());
+
     let openhands = manager.parent_runtime_envelope(
         &prepared,
         ParentRuntimeDescriptor {

@@ -1079,6 +1079,11 @@ pub struct ParentVerificationEvidence {
     pub command_hash: String,
     /// `parent_root` or one checkout handle from the verified parent envelope.
     pub root: String,
+    /// Optional canonical repository selected for a repair after a failed
+    /// integration command. This is a worker request; provider and Git
+    /// receipts remain orchestrator-owned and independently verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_repository_id: Option<CanonicalRepositoryId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1091,6 +1096,11 @@ pub struct WorkerOutcomeRecord {
     pub turn_count: u32,
     pub summary: Option<String>,
     pub error: Option<String>,
+    /// True only when the harness adapter observed a terminal runtime state or
+    /// an acknowledged stop before producing this outcome. Transport and
+    /// persistence failures must leave this false.
+    #[serde(default)]
+    pub harness_stopped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_verification: Option<ParentVerificationEvidence>,
 }
@@ -1112,8 +1122,14 @@ impl WorkerOutcomeRecord {
             turn_count: run.turn_count,
             summary,
             error,
+            harness_stopped: false,
             parent_verification: None,
         }
+    }
+
+    pub fn with_harness_stopped(mut self) -> Self {
+        self.harness_stopped = true;
+        self
     }
 }
 

@@ -155,6 +155,18 @@ pub struct ParentIntegrationCheckout {
     pub retained_checkouts: Vec<ParentRetainedCheckout>,
     pub required_merge_commits: Vec<String>,
     pub instruction: InstructionProvenance,
+    #[serde(default)]
+    pub review_profile: String,
+    #[serde(default)]
+    pub review_provider: String,
+    #[serde(default)]
+    pub review_policy_generation: String,
+    #[serde(default)]
+    pub required_checks: bool,
+    #[serde(default)]
+    pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1062,6 +1074,11 @@ pub struct RunManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
     pub status: RunStatus,
+    /// True only when the harness adapter observed a terminal runtime state or
+    /// a reconciled interrupt acknowledgement. A failed transport alone does
+    /// not prove the remote turn stopped.
+    #[serde(default)]
+    pub harness_stopped: bool,
     pub created_at: DateTime<Utc>,
     /// Durable boundary for fencing provider evidence after a run restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1094,6 +1111,7 @@ impl RunManifest {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Preparing,
+            harness_stopped: false,
             created_at: now,
             started_at: None,
             updated_at: now,
@@ -1390,7 +1408,35 @@ impl SessionContextArtifact {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_runtime_diagnostic;
+    use super::{ParentIntegrationCheckout, redact_runtime_diagnostic};
+
+    #[test]
+    fn schema_one_parent_checkout_without_review_fields_remains_readable() {
+        let checkout: ParentIntegrationCheckout = serde_json::from_value(serde_json::json!({
+            "checkout_handle": "checkout-a",
+            "repository_id": "github:repository:a",
+            "safe_remote_fingerprint": "github:repository:a",
+            "relative_path": "repositories/a",
+            "target_branch": "develop",
+            "target_commit": "abc123",
+            "storage_source_generation": "generation-a",
+            "retained_checkouts": [],
+            "required_merge_commits": [],
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:abc",
+                "source_commit": "abc123",
+                "source": "configured"
+            }
+        }))
+        .expect("schema-one checkout remains readable");
+
+        assert!(checkout.review_profile.is_empty());
+        assert!(checkout.review_provider.is_empty());
+        assert!(!checkout.required_checks);
+        assert!(!checkout.required_review);
+        assert_eq!(checkout.merge_method, None);
+    }
 
     #[test]
     fn runtime_diagnostics_redact_common_credentials_and_url_userinfo() {
