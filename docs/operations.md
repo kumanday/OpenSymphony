@@ -750,8 +750,10 @@ credential-scrubbed repair continuation. Resolving a thread after accepted
 pushback removes it from the current finding set without requiring a no-op
 commit. When the central profile requires review,
 a clean Codex scan and a current human approval are both required, and a current
-human change request remains authoritative. At most seven later triggers are
-posted, so the initial scan plus retriggers cannot exceed eight; remediation
+human change request remains authoritative. The same child merge-evidence gate
+rejects every unresolved human review thread before parent integration. At most
+seven later triggers are posted, so the initial scan plus retriggers cannot
+exceed eight; remediation
 after that ceiling records a durable `review_budget_exhausted` operator state
 and uses the documented exact-commit local review path. Before
 posting a later trigger, the scheduler persists the highest observed provider

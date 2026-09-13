@@ -2306,9 +2306,7 @@ impl RuntimeTrackerBackend {
                         repository,
                     )
                     .await?;
-                let (_, approved, rejected, changes_requested) =
-                    codex_review_state_for_head(Some(review_head), &comments, &review_threads);
-                if !approved || rejected || changes_requested {
+                if !codex_child_review_policy_satisfied(review_head, &comments, &review_threads) {
                     return Ok(false);
                 }
             }
@@ -3463,6 +3461,16 @@ fn unresolved_human_threads(review_threads: &[GitHubReviewThread]) -> bool {
                     .is_some_and(is_codex_connector_login)
             })
     })
+}
+
+fn codex_child_review_policy_satisfied(
+    head_commit: &str,
+    issue_comments: &[GitHubIssueComment],
+    review_threads: &[GitHubReviewThread],
+) -> bool {
+    let (_, approved, rejected, changes_requested) =
+        codex_review_state_for_head(Some(head_commit), issue_comments, review_threads);
+    approved && !rejected && !changes_requested && !unresolved_human_threads(review_threads)
 }
 
 fn codex_review_state_for_head(
@@ -14859,6 +14867,52 @@ Run the scheduler.
             (Some("abcdef123456".to_owned()), true, false, false),
             "a resolved thread, including accepted pushback, is not an outstanding finding"
         );
+    }
+
+    #[test]
+    fn codex_child_review_rejects_an_unresolved_human_thread() {
+        let comments = vec![GitHubIssueComment {
+            id: 1,
+            body: "<!-- codex-pull-request-review-summary -->\n| ✅ **Completed** | `abcdef1` |"
+                .to_owned(),
+            created_at: "2026-09-13T05:40:44Z".to_owned(),
+            user: Some(GitHubReviewUser {
+                login: Some("chatgpt-codex-connector[bot]".to_owned()),
+            }),
+        }];
+        let mut threads = vec![GitHubReviewThread {
+            id: "human-commented-thread".to_owned(),
+            is_resolved: false,
+            comments: GitHubReviewThreadComments {
+                nodes: vec![GitHubReviewThreadComment {
+                    body: "Resolve this human finding before integration.".to_owned(),
+                    path: Some("src/review.rs".to_owned()),
+                    line: Some(42),
+                    original_line: Some(42),
+                    commit: Some(GitHubGraphQlCommit {
+                        oid: "abcdef123456".to_owned(),
+                    }),
+                    original_commit: Some(GitHubGraphQlCommit {
+                        oid: "abcdef123456".to_owned(),
+                    }),
+                    author: Some(GitHubReviewUser {
+                        login: Some("reviewer".to_owned()),
+                    }),
+                }],
+            },
+        }];
+
+        assert!(!codex_child_review_policy_satisfied(
+            "abcdef123456",
+            &comments,
+            &threads
+        ));
+        threads[0].is_resolved = true;
+        assert!(codex_child_review_policy_satisfied(
+            "abcdef123456",
+            &comments,
+            &threads
+        ));
     }
 
     #[test]
