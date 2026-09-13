@@ -415,6 +415,9 @@ pub trait TrackerBackend {
     ) -> Result<Option<super::ParentRepairProviderSnapshot>, Self::Error> {
         Ok(None)
     }
+    fn parent_repair_review_budget_exhausted(&self, _repair: &ParentRepairAttempt) -> bool {
+        false
+    }
     fn error_category(_error: &Self::Error) -> Option<TrackerErrorCategory> {
         None
     }
@@ -1305,6 +1308,24 @@ where
         let snapshot = if already_reviewed {
             snapshot
         } else {
+            if self.tracker.parent_repair_review_budget_exhausted(&repair) {
+                let previous = self.hierarchy_state.clone();
+                let controller = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(parent_id)
+                    .expect("controller was checked");
+                controller.record_repair_review_budget_exhausted(
+                    repair_id,
+                    &review_input_version,
+                    observed_at,
+                )?;
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous;
+                    return Err(error);
+                }
+                return Ok(ParentRepairStatus::ReviewBudgetExhausted);
+            }
             self.persist_repair_intent(
                 parent_id,
                 repair_id,
@@ -1444,6 +1465,7 @@ where
                     }
                     ParentRepairStatus::FailedChecks
                     | ParentRepairStatus::ReviewRejected
+                    | ParentRepairStatus::ReviewBudgetExhausted
                     | ParentRepairStatus::ProviderUnavailable
                     | ParentRepairStatus::ExternallyClosed
                     | ParentRepairStatus::ForcePushed

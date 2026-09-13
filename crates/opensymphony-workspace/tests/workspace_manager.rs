@@ -221,6 +221,7 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
         repository_fixture(temp_dir.path(), "repository-b");
     let (source_c, binding_c, repository_c) = repository_fixture(temp_dir.path(), "repository-c");
     repository_a.provider_id = Some("repository-a-native-id".to_owned());
+    repository_a.merge_method = Some("squash".to_owned());
     binding_a.repository.safe_remote_fingerprint = SafeRemoteFingerprint::from_remote(
         &repository_a.provider,
         repository_a.provider_id.as_deref(),
@@ -529,6 +530,37 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
 
     assert!(!prepared.handle.workspace_path().join(".git").exists());
     assert_eq!(prepared.child_checkout_map.repositories.len(), 3);
+    let pin_file = manager
+        .config()
+        .root
+        .join(".opensymphony-parent-pins")
+        .join(prepared.handle.workspace_key())
+        .join("5.json");
+    for path in [prepared.handle.child_checkouts_path(), pin_file] {
+        let mut persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).expect("parent checkout map should be readable"),
+        )
+        .expect("parent checkout map should decode");
+        persisted["repositories"][binding_a.repository_id().as_str()]["merge_method"] =
+            serde_json::Value::String(" Squash ".to_owned());
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&persisted).expect("parent checkout map should encode"),
+        )
+        .expect("legacy merge-method spelling should be persisted");
+    }
+    let recovered = manager
+        .open_parent_execution_root_at_for_retry(&parent, prepared.handle.workspace_path())
+        .await
+        .expect("case-variant persisted merge methods should migrate on restart");
+    assert_eq!(
+        recovered
+            .child_checkout_map
+            .repositories
+            .get(binding_a.repository_id().as_str())
+            .and_then(|record| record.merge_method.as_deref()),
+        Some("squash")
+    );
     let repository_a = prepared
         .child_checkout_map
         .repositories

@@ -1341,45 +1341,67 @@ impl TrackerBackend for RuntimeTrackerBackend {
         repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
     ) -> Result<Option<crate::opensymphony_orchestrator::ParentRepairProviderSnapshot>, Self::Error>
     {
-        if codex_review_retrigger_allowed(repair.requested_change_count)
-            && repair.policy.review_provider.eq_ignore_ascii_case("codex")
-        {
-            let repository = self.repository_for_repair(repair)?;
-            let (api_root, owner, repository_name) = github_repository_api(repository)?;
-            let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
-                LinearError::InvalidResponse("repair pull request identity is missing".to_owned())
-            })?;
-            let (intended_at, review_comment_boundary) =
-                pending_codex_review_request_context(&repair.operations).ok_or_else(|| {
+        if repair.policy.review_provider.eq_ignore_ascii_case("codex") {
+            if codex_review_budget_exhausted(repair.requested_change_count) {
+                return Err(LinearError::InvalidResponse(
+                    "configured Codex review budget is exhausted; exact-commit local review and operator action are required"
+                        .to_owned(),
+                ));
+            }
+            if codex_review_retrigger_allowed(repair.requested_change_count) {
+                let repository = self.repository_for_repair(repair)?;
+                let (api_root, owner, repository_name) = github_repository_api(repository)?;
+                let pull_number = repair.pull_request_id.as_deref().ok_or_else(|| {
                     LinearError::InvalidResponse(
-                        "repair review request has no durable pending intent".to_owned(),
+                        "repair pull request identity is missing".to_owned(),
                     )
                 })?;
-            let comments = self
-                .github_issue_comments(&api_root, &owner, &repository_name, pull_number, repository)
-                .await?;
-            let already_requested = codex_review_request_already_posted(
-                &comments,
-                review_comment_boundary,
-                intended_at,
-            );
-            if !already_requested {
-                let endpoint = format!(
-                    "{api_root}/repos/{owner}/{repository_name}/issues/{pull_number}/comments"
+                let (intended_at, review_comment_boundary) =
+                    pending_codex_review_request_context(&repair.operations).ok_or_else(|| {
+                        LinearError::InvalidResponse(
+                            "repair review request has no durable pending intent".to_owned(),
+                        )
+                    })?;
+                let comments = self
+                    .github_issue_comments(
+                        &api_root,
+                        &owner,
+                        &repository_name,
+                        pull_number,
+                        repository,
+                    )
+                    .await?;
+                let already_requested = codex_review_request_already_posted(
+                    &comments,
+                    review_comment_boundary,
+                    intended_at,
                 );
-                let body = serde_json::json!({"body": "@codex review"});
-                self.github_send_json::<GitHubIssueComment>(
-                    reqwest::Method::POST,
-                    &endpoint,
-                    repository,
-                    Some(&body),
-                )
-                .await?;
+                if !already_requested {
+                    let endpoint = format!(
+                        "{api_root}/repos/{owner}/{repository_name}/issues/{pull_number}/comments"
+                    );
+                    let body = serde_json::json!({"body": "@codex review"});
+                    self.github_send_json::<GitHubIssueComment>(
+                        reqwest::Method::POST,
+                        &endpoint,
+                        repository,
+                        Some(&body),
+                    )
+                    .await?;
+                }
             }
         }
         // PR opening starts the initial configured review. Later Codex reviews
         // use the exact repository-supported trigger above.
         self.github_parent_repair_snapshot(repair).await.map(Some)
+    }
+
+    fn parent_repair_review_budget_exhausted(
+        &self,
+        repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> bool {
+        repair.policy.review_provider.eq_ignore_ascii_case("codex")
+            && codex_review_budget_exhausted(repair.requested_change_count)
     }
 
     async fn merge_parent_repair(
@@ -3201,6 +3223,10 @@ fn codex_review_request_already_posted(
 
 fn codex_review_retrigger_allowed(requested_change_count: u32) -> bool {
     (1..=MAX_CODEX_REVIEW_RETRIGGERS).contains(&requested_change_count)
+}
+
+fn codex_review_budget_exhausted(requested_change_count: u32) -> bool {
+    requested_change_count > MAX_CODEX_REVIEW_RETRIGGERS
 }
 
 fn github_backed_review_provider(provider: &str) -> bool {
@@ -14337,6 +14363,10 @@ Run the scheduler.
         assert!(codex_review_retrigger_allowed(7));
         assert!(!codex_review_retrigger_allowed(8));
         assert!(!codex_review_retrigger_allowed(u32::MAX));
+        assert!(!codex_review_budget_exhausted(0));
+        assert!(!codex_review_budget_exhausted(7));
+        assert!(codex_review_budget_exhausted(8));
+        assert!(codex_review_budget_exhausted(u32::MAX));
     }
 
     #[test]

@@ -408,6 +408,7 @@ struct FakeTracker {
     repair_pull_request: Option<(String, String)>,
     repair_pull_request_creates: usize,
     repair_review_requests: usize,
+    repair_review_budget_exhausted: bool,
     repair_merge_requests: usize,
 }
 
@@ -522,6 +523,13 @@ impl TrackerBackend for FakeTracker {
     {
         self.repair_review_requests += 1;
         Ok(self.repair_snapshots.pop_front())
+    }
+
+    fn parent_repair_review_budget_exhausted(
+        &self,
+        _repair: &crate::opensymphony_orchestrator::ParentRepairAttempt,
+    ) -> bool {
+        self.repair_review_budget_exhausted
     }
 
     async fn merge_parent_repair(
@@ -1881,6 +1889,90 @@ async fn parent_repair_revalidates_provider_policy_immediately_before_merge() {
         crate::opensymphony_orchestrator::ParentRepairStatus::AwaitingReview
     );
     assert_eq!(scheduler.tracker().repair_merge_requests, 0);
+}
+
+#[tokio::test]
+async fn exhausted_parent_review_budget_blocks_without_recording_a_noop_request() {
+    let suffix = "REPAIR-REVIEW-BUDGET";
+    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let repository_id = scheduler.workspace().parent_targets[0]
+        .repository_id
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    scheduler.workspace_mut().repair_push_commit = Some("repair-commit".to_owned());
+    scheduler.tracker_mut().repair_pull_request = Some((
+        "41".to_owned(),
+        "https://github.com/acme/repo/pull/41".to_owned(),
+    ));
+    let repair_id = scheduler
+        .begin_parent_repair(&parent_id, &repository_id, "defect-budget", ts(110))
+        .await
+        .expect("begin repair");
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(false));
+    scheduler
+        .publish_parent_repair(&parent_id, &repair_id, ts(120))
+        .await
+        .expect("publish repair");
+    scheduler.tracker_mut().repair_review_budget_exhausted = true;
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+
+    assert_eq!(
+        scheduler
+            .request_parent_repair_review(&parent_id, &repair_id, ts(130))
+            .await
+            .expect("review ceiling should become durable operator state"),
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
+    assert_eq!(scheduler.tracker().repair_review_requests, 0);
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &state.parent_integrations[&parent_id];
+    assert_eq!(
+        controller.repair(&repair_id).expect("repair").status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
+    assert!(matches!(
+        controller.state,
+        crate::opensymphony_orchestrator::ParentIntegrationState::Blocked { ref reason }
+            if reason.contains("exact-commit local review")
+    ));
+    assert!(
+        !controller
+            .repair(&repair_id)
+            .expect("repair")
+            .operations
+            .iter()
+            .any(|operation| {
+                operation.kind
+                    == crate::opensymphony_orchestrator::ParentProviderOperationKind::RequestReview
+            })
+    );
+
+    scheduler
+        .tracker_mut()
+        .repair_snapshots
+        .push_back(repair_provider_snapshot(true));
+    scheduler
+        .reconcile_parent_repair(&parent_id, &repair_id, ts(131))
+        .await
+        .expect("provider reconciliation should preserve the explicit review ceiling");
+    let state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    assert_eq!(
+        state.parent_integrations[&parent_id]
+            .repair(&repair_id)
+            .expect("repair")
+            .status,
+        crate::opensymphony_orchestrator::ParentRepairStatus::ReviewBudgetExhausted
+    );
 }
 
 #[tokio::test]

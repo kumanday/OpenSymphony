@@ -745,7 +745,8 @@ affect automated-review eligibility. When the central profile requires review,
 a clean Codex scan and a current human approval are both required, and a current
 human change request remains authoritative. At most seven later triggers are
 posted, so the initial scan plus retriggers cannot exceed eight; remediation
-after that ceiling uses the documented exact-commit local review path. Before
+after that ceiling records a durable `review_budget_exhausted` operator state
+and uses the documented exact-commit local review path. Before
 posting a later trigger, the scheduler persists the highest observed provider
 comment ID so crash recovery can find the exact write despite GitHub's
 second-precision timestamps. Recovery

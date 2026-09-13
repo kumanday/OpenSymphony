@@ -775,6 +775,13 @@ impl WorkspaceManager {
     ) -> Result<bool, WorkspaceError> {
         let mut migrated = false;
         for record in map.repositories.values_mut() {
+            if let Some(method) = record.merge_method.as_mut() {
+                let canonical = method.trim().to_ascii_lowercase();
+                if *method != canonical {
+                    *method = canonical;
+                    migrated = true;
+                }
+            }
             if !record.review_profile.is_empty()
                 || !record.review_provider.is_empty()
                 || !record.review_policy_generation.is_empty()

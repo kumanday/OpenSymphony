@@ -274,6 +274,7 @@ pub enum ParentRepairStatus {
     Completed,
     FailedChecks,
     ReviewRejected,
+    ReviewBudgetExhausted,
     ProviderUnavailable,
     ExternallyClosed,
     ForcePushed,
@@ -1582,6 +1583,21 @@ impl ParentIntegrationController {
         Ok(())
     }
 
+    pub fn record_repair_review_budget_exhausted(
+        &mut self,
+        repair_id: &str,
+        input_version: &str,
+        occurred_at: TimestampMs,
+    ) -> Result<(), ParentIntegrationError> {
+        self.repair_mut(repair_id)?.status = ParentRepairStatus::ReviewBudgetExhausted;
+        self.block_repair(
+            repair_id,
+            "configured automated review budget is exhausted; exact-commit local review and operator action are required",
+            input_version,
+            occurred_at,
+        )
+    }
+
     pub fn record_repair_push(
         &mut self,
         repair_id: &str,
@@ -1891,11 +1907,13 @@ impl ParentIntegrationController {
                 ParentRetryClassification::Retryable,
                 occurred_at,
             )?;
-        } else if matches!(
-            self.state,
-            ParentIntegrationState::Blocked { .. }
-                | ParentIntegrationState::AwaitingFixMerge { .. }
-        ) && snapshot.open
+        } else if current.status != ParentRepairStatus::ReviewBudgetExhausted
+            && matches!(
+                self.state,
+                ParentIntegrationState::Blocked { .. }
+                    | ParentIntegrationState::AwaitingFixMerge { .. }
+            )
+            && snapshot.open
         {
             let pull_request_id = current.pull_request_id.ok_or_else(|| {
                 ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
