@@ -1862,7 +1862,7 @@ impl ParentIntegrationController {
                 occurred_at,
             );
         }
-        if snapshot.checks_failed {
+        if current.policy.required_checks && snapshot.checks_failed {
             self.repair_mut(repair_id)?.status = ParentRepairStatus::FailedChecks;
             return self.block_repair(
                 repair_id,
@@ -1876,7 +1876,7 @@ impl ParentIntegrationController {
         if review_is_current {
             self.repair_mut(repair_id)?.review_feedback = snapshot.review_feedback.clone();
         }
-        if snapshot.changes_requested && review_is_current {
+        if current.policy.required_review && snapshot.changes_requested && review_is_current {
             if current.status == ParentRepairStatus::ChangesRequested {
                 return Ok(());
             }
@@ -1906,7 +1906,10 @@ impl ParentIntegrationController {
             )?;
             return Ok(());
         }
-        if current.status == ParentRepairStatus::ChangesRequested && review_is_current {
+        if current.policy.required_review
+            && current.status == ParentRepairStatus::ChangesRequested
+            && review_is_current
+        {
             let pull_request_id = current.pull_request_id.clone().ok_or_else(|| {
                 ParentIntegrationError::RepairTargetMismatch(repair_id.to_owned())
             })?;
@@ -1929,7 +1932,7 @@ impl ParentIntegrationController {
                 occurred_at,
             )?;
         }
-        if snapshot.review_rejected && review_is_current {
+        if current.policy.required_review && snapshot.review_rejected && review_is_current {
             self.repair_mut(repair_id)?.status = ParentRepairStatus::ReviewRejected;
             return self.block_repair(
                 repair_id,
@@ -3654,6 +3657,63 @@ mod tests {
             "target-after-squash-result"
         );
         assert_eq!(controller.state, ParentIntegrationState::Integrating);
+    }
+
+    #[test]
+    fn disabled_review_and_check_gates_ignore_optional_provider_failures() {
+        let mut controller = controller();
+        let repository_id = CanonicalRepositoryId::new("github:repository:a").expect("repository");
+        let target = controller
+            .targets
+            .get_mut(&repository_id)
+            .expect("repair target");
+        target.repair_policy.required_review = false;
+        target.repair_policy.required_checks = false;
+        let repair_id = begin_repair(&mut controller);
+        controller
+            .record_repair_push(
+                &repair_id,
+                "repair-commit-1",
+                "targets:1",
+                TimestampMs::new(11),
+            )
+            .expect("push");
+        controller
+            .record_repair_pull_request(
+                &repair_id,
+                "42",
+                "https://github.com/example/a/pull/42",
+                "targets:1",
+                TimestampMs::new(12),
+            )
+            .expect("pull request");
+
+        let mut optional_failures = review_snapshot();
+        optional_failures.checks_failed = true;
+        optional_failures.review_rejected = true;
+        optional_failures.changes_requested = true;
+        optional_failures.review_feedback = vec![ParentReviewFeedback {
+            thread_id: "optional-thread".to_owned(),
+            body: "Optional feedback".to_owned(),
+            path: None,
+            line: None,
+        }];
+        controller
+            .reconcile_repair_provider(
+                &repair_id,
+                optional_failures,
+                "targets:1",
+                TimestampMs::new(13),
+            )
+            .expect("optional gates must not block the repair");
+
+        let repair = controller.repair(&repair_id).expect("repair");
+        assert_eq!(repair.status, ParentRepairStatus::AwaitingMerge);
+        assert_eq!(repair.requested_change_count, 0);
+        assert!(matches!(
+            controller.state,
+            ParentIntegrationState::AwaitingFixMerge { .. }
+        ));
     }
 
     #[test]
