@@ -2387,7 +2387,7 @@ where
                     });
                 }
             };
-            let retained = outcome != CleanupTerminalOutcome::Succeeded
+            let retained = outcome == CleanupTerminalOutcome::Failed
                 && self.workspace.retain_failed_workspaces();
             let resources = self.hierarchy_state.descendant_resources_for(&parent_id);
             let mut descendants = Vec::with_capacity(resources.len());
@@ -2466,6 +2466,21 @@ where
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let retain_failed = self.workspace.retain_failed_workspaces();
+        let mut retention_changed = false;
+        for controller in self.hierarchy_state.parent_integrations.values_mut() {
+            if let Some(cleanup) = controller.subtree_cleanup.as_mut()
+                && cleanup.status == ParentSubtreeCleanupStatus::Retained
+                && (cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed)
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                cleanup.last_error = None;
+                retention_changed = true;
+            }
+        }
+        if retention_changed {
+            self.persist_orchestrator_state().await?;
+        }
         let parent_ids = self
             .hierarchy_state
             .parent_integrations

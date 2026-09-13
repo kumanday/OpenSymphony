@@ -1755,7 +1755,7 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
     scheduler
         .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(7_300_400))
         .await
-        .expect("canceled parent capture should preserve retained diagnostics");
+        .expect("canceled parent capture should use the cancellation policy");
     let retained: crate::opensymphony_orchestrator::DurableOrchestratorState =
         serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
             .expect("decode retained cleanup policy");
@@ -1765,9 +1765,53 @@ async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controlle
             .as_ref()
             .expect("capture acknowledgement")
             .status,
-        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Retained
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Completed
     );
-    assert!(scheduler.workspace().generation_cleanup_steps.is_empty());
+    assert_eq!(scheduler.workspace().generation_cleanup_steps.len(), 3);
+
+    let mut legacy_retained = retained;
+    let controller = legacy_retained
+        .parent_integrations
+        .get_mut(&parent_id)
+        .expect("parent controller");
+    controller.state = crate::opensymphony_orchestrator::ParentIntegrationState::Failed {
+        reason: "diagnostic failure".to_owned(),
+    };
+    let cleanup = controller.subtree_cleanup.as_mut().expect("cleanup intent");
+    cleanup.outcome = crate::opensymphony_workspace::CleanupTerminalOutcome::Failed;
+    cleanup.status = crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Retained;
+    cleanup.parent_root.cleanup.outcome =
+        crate::opensymphony_workspace::CleanupTerminalOutcome::Failed;
+    cleanup.parent_root.prepared_at = None;
+    cleanup.parent_root.cleaned_at = None;
+    for descendant in &mut cleanup.descendants {
+        descendant.cleaned_at = None;
+    }
+    let mut resumed = Scheduler::new(
+        FakeTracker::default(),
+        FakeWorkspace {
+            durable_state: Some(serde_json::to_value(&legacy_retained).expect("retained state")),
+            retain_failed: false,
+            ..Default::default()
+        },
+        FakeWorker::default(),
+        scheduler_config(),
+    );
+    resumed
+        .tick(ts(7_300_500))
+        .await
+        .expect("disabling failed retention must resume durable cleanup");
+    let resumed_state: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(resumed.workspace().durable_state.clone().expect("state"))
+            .expect("resumed state");
+    assert_eq!(
+        resumed_state.parent_integrations[&parent_id]
+            .subtree_cleanup
+            .as_ref()
+            .expect("cleanup")
+            .status,
+        crate::opensymphony_orchestrator::ParentSubtreeCleanupStatus::Completed
+    );
 }
 
 #[tokio::test]

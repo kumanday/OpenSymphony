@@ -548,13 +548,16 @@ integration worktrees, then removes unleased descendants bottom-up and the
 parent root last. Failure to persist the acknowledgement leaves the capture
 candidate eligible for retry.
 For a parent, the capture path also reads validated durable controller state
-and requires the matching lifecycle to be `completed`, its final attempt to be
-passed for the same run and input version, its final evidence to be bound to the
-same conversation, and its exact repository commit map to equal the runtime
-envelope. A terminal run manifest or harness success by itself cannot authorize
-parent capture. The durable binding explicitly marks a parent even when this
-verified commit map is empty, so repository-neutral capture cannot inherit a
-configured default leaf repository. That empty-target capture still records one
+and requires a matching terminal lifecycle. Successful completion additionally
+requires its final attempt to be passed for the same run and input version, its
+final evidence to be bound to the same conversation, and its exact repository
+commit map to equal the runtime envelope. A terminal run manifest or harness
+success by itself cannot authorize successful parent capture. Failed and
+canceled controllers receive a repository-neutral parent binding with no
+verified commit claims so their diagnostics can be captured before the explicit
+retention policy runs. The durable binding explicitly marks a parent even when
+its commit map is empty, so repository-neutral capture cannot inherit a
+configured default leaf repository. That capture still records one
 repository-neutral parent-runtime source reference with the durable run and
 attempt identifiers.
 Retained legacy run envelopes that lack usable run/attempt provenance are

@@ -4951,12 +4951,12 @@ impl WorkspaceManager {
             }
         }
 
-        let before_remove_succeeded = run_manifest
+        let before_remove_recorded = run_manifest
             .cleanup_intent
             .as_ref()
             .and_then(|intent| intent.before_remove.as_ref())
-            .is_some_and(|receipt| receipt.status == HookExecutionStatus::Succeeded);
-        if !before_remove_succeeded {
+            .is_some();
+        if !before_remove_recorded {
             match self.execute_hook(HookKind::BeforeRemove, workspace).await {
                 Ok(record) => {
                     if let Some(record) = record {
@@ -4984,7 +4984,6 @@ impl WorkspaceManager {
                     intent.retry_count = intent.retry_count.saturating_add(1);
                     intent.last_error = Some(failure.error.to_string());
                     self.write_run_manifest(workspace, &run_manifest).await?;
-                    return Err(failure.error);
                 }
             }
         }

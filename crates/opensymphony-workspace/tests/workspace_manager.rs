@@ -3976,7 +3976,7 @@ async fn terminal_cleanup_can_delete_workspace() {
 }
 
 #[tokio::test]
-async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_tombstone() {
+async fn terminal_cleanup_receipts_best_effort_hook_and_accepts_only_its_generation_tombstone() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let workspace_root = temp_dir.path().join("workspaces");
     let manager = WorkspaceManager::new(manager_config(
@@ -4003,15 +4003,24 @@ async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_to
         remove: true,
     };
 
-    let first = manager
-        .cleanup_with_request(
-            &ensured.handle,
-            IssueLifecycleState::Terminal,
-            request.clone(),
-        )
+    manager
+        .prepare_cleanup_target(&CleanupTarget {
+            issue_id: issue.issue_id.clone(),
+            identifier: issue.identifier.clone(),
+            workspace: WorkspaceRecord {
+                path: ensured.handle.workspace_path().to_path_buf(),
+                workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_owned())
+                    .expect("managed key"),
+                created_now: false,
+                created_at: None,
+                updated_at: None,
+                last_seen_tracker_refresh_at: None,
+            },
+            generation: request.generation.clone(),
+            outcome: request.outcome,
+        })
         .await
-        .expect_err("failed hook must keep the workspace for retry");
-    assert!(matches!(first, WorkspaceError::HookFailed { .. }));
+        .expect("a best-effort hook failure must not block cleanup preparation");
     assert!(ensured.handle.workspace_path().exists());
     let failed_manifest = manager
         .load_run_manifest(&ensured.handle)
@@ -4022,7 +4031,6 @@ async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_to
         failed_manifest.cleanup_intent.expect("intent").retry_count,
         1
     );
-
     let tombstone_directory = workspace_root.join(".opensymphony-cleanup-tombstones");
     std::fs::write(&tombstone_directory, "blocked")
         .expect("simulate a tombstone permission/path failure");
@@ -4093,8 +4101,8 @@ async fn terminal_cleanup_retries_failed_hook_and_accepts_only_its_generation_to
             .expect("hook count")
             .lines()
             .count(),
-        2,
-        "the successful hook receipt must not be rerun after deletion"
+        1,
+        "a best-effort hook receipt must not be rerun after deletion starts"
     );
 
     let recreated = manager

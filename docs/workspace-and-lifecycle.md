@@ -224,8 +224,11 @@ reconciliation or operator recovery.
 A completed parent stays materialized until automatic terminal capture reports
 that its workflow completed. The scheduler then persists the parent root and
 every leased descendant as one hierarchy-generation cleanup intent. Failed and
-canceled parents record the same acknowledgement but remain retained when the
-existing failed-workspace policy requests diagnostics retention.
+canceled parents record the same acknowledgement. Failed parents remain
+retained when the existing failed-workspace policy requests diagnostics
+retention; canceled parents follow the existing cancellation cleanup policy.
+Changing failed-workspace retention from enabled to disabled resumes a durable
+retained cleanup intent on the next reconciliation tick.
 
 Removal has two ordered phases. First, the runtime backend applies its normal
 conversation archival fence and the workspace manager receipts the parent
@@ -236,7 +239,9 @@ removes descendants deepest first when no other active owner remains. The
 parent root is removed last. Higher ancestors and bounded diagnostic holds
 therefore preserve their checkout generations.
 
-Run-manifest receipts make the hook and each worktree removal idempotent.
+Run-manifest receipts make the hook and each worktree removal idempotent. A
+failed `before_remove` receipt remains visible but does not block deletion or
+run the best-effort hook again.
 Generation tombstones outside the deleted workspace are written before root
 deletion and completed afterward; they also copy the successful hook receipt so
 a partially removed metadata directory cannot cause the hook to run twice. On
