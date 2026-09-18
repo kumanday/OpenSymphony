@@ -191,6 +191,8 @@ pub struct ControlPlaneOperatorSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_project_set: Vec<String>,
     pub linear_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_status: Option<String>,
     pub parent: Option<ControlPlaneParentSnapshot>,
     pub repository: Option<ControlPlaneRepositorySnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

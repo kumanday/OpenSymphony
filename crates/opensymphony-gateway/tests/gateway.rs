@@ -4607,6 +4607,7 @@ async fn gateway_serves_run_detail() {
             routing_mode: Some("project_set".to_owned()),
             active_project_set: vec!["project-a".to_owned()],
             linear_project: Some("project-a".to_owned()),
+            binding_status: Some("resolved".to_owned()),
             parent: None,
             repository: Some(
                 opensymphony::opensymphony_domain::ControlPlaneRepositorySnapshot {

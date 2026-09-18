@@ -744,6 +744,53 @@ impl TuiState {
                     Span::styled(format!("{}", issue.blocked), blocked_style),
                 ]));
 
+                if let Some(operator) = issue.operator.as_ref() {
+                    let repository = operator
+                        .repository
+                        .as_ref()
+                        .map(|repository| {
+                            format!(
+                                "{} @ {}",
+                                repository.display_alias,
+                                repository
+                                    .target_commit
+                                    .as_deref()
+                                    .unwrap_or("target unknown")
+                            )
+                        })
+                        .unwrap_or_else(|| "repository unknown".to_owned());
+                    lines.push(Line::from_spans(vec![
+                        Span::styled("operator: ", Style::new().dim()),
+                        Span::raw(repository),
+                        Span::raw(" | "),
+                        Span::raw(
+                            operator
+                                .containment
+                                .as_ref()
+                                .map(|containment| containment.effective_containment.as_str())
+                                .unwrap_or("containment unknown"),
+                        ),
+                    ]));
+                    if let Some(parent) = operator.parent.as_ref() {
+                        lines.push(Line::from_spans(vec![
+                            Span::styled("parent: ", Style::new().dim()),
+                            Span::raw(&parent.parent_id),
+                            Span::raw(" | "),
+                            Span::raw(parent.state.as_deref().unwrap_or("state unknown")),
+                            Span::raw(" | repos: "),
+                            Span::raw(parent.descendant_repositories.len().to_string()),
+                        ]));
+                    }
+                    if let Some(cleanup) = operator.cleanup.as_ref() {
+                        lines.push(Line::from_spans(vec![
+                            Span::styled("cleanup: ", Style::new().dim()),
+                            Span::raw(&cleanup.status),
+                            Span::raw(" | blockers: "),
+                            Span::raw(cleanup.blockers.len().to_string()),
+                        ]));
+                    }
+                }
+
                 if lines.len() < max_rows {
                     lines.push(Line::from(Span::styled(
                         "-".repeat(width.min(40)),

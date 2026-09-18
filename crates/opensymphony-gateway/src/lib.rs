@@ -109,9 +109,11 @@ pub use crate::opensymphony_gateway_schema::{
     },
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
-        RunAction, RunDetail, RunDiagnostics, RunEvent, RunEventPage, RunFilesPage,
-        RunLifecycleState, RunLivenessEnvelope, RunOperatorSnapshot, RunPhase, RunProgress,
-        RunStatus, RunStreamLiveness, SafeActions,
+        RunAction, RunCleanupSnapshot, RunContainmentSnapshot, RunDetail, RunDiagnostics, RunEvent,
+        RunEventPage, RunFilesPage, RunLeaseSnapshot, RunLifecycleState, RunLivenessEnvelope,
+        RunMemorySnapshot, RunOperatorSnapshot, RunParentSnapshot, RunPhase, RunProgress,
+        RunProviderSnapshot, RunRepairSnapshot, RunRepositorySnapshot, RunStatus,
+        RunStreamLiveness, RunVerificationSnapshot, SafeActions,
     },
     snapshot::{
         DashboardSnapshot, GatewayHealth, GatewayMetrics, ProjectDetail, ProjectIssueSummary,
@@ -4674,7 +4676,7 @@ async fn get_run_detail(
     let terminal_tracker_state = state
         .terminal_states
         .contains(&issue.tracker_state.trim().to_ascii_lowercase());
-    let (status, lifecycle_state) = match issue.runtime_state {
+    let (status, mut lifecycle_state) = match issue.runtime_state {
         ControlPlaneIssueRuntimeState::Idle if !dispatchable => {
             (RunStatus::Unclaimed, RunLifecycleState::Backlog)
         }
@@ -4698,6 +4700,17 @@ async fn get_run_detail(
         }
         ControlPlaneIssueRuntimeState::Failed => (RunStatus::Released, RunLifecycleState::Failed),
     };
+    if matches!(
+        issue
+            .operator
+            .as_ref()
+            .and_then(|operator| operator.cleanup.as_ref())
+            .map(|cleanup| cleanup.status.as_str()),
+        Some("pending" | "removing" | "retained")
+    ) && lifecycle_state == RunLifecycleState::Completed
+    {
+        lifecycle_state = RunLifecycleState::Releasing;
+    }
 
     // Runtime completion describes the worker execution, not the tracker
     // category. A successful worker can be released as TrackerInactive while
@@ -4819,13 +4832,99 @@ async fn get_run_detail(
             cancel_failed: issue.cancel_failed,
             cancel_timed_out: issue.cancel_timed_out,
             cancel_reason: issue.cancel_reason.clone(),
-            operator: issue.operator.as_ref().and_then(|operator| {
-                serde_json::to_value(operator)
-                    .ok()
-                    .and_then(|value| serde_json::from_value::<RunOperatorSnapshot>(value).ok())
-            }),
+            operator: issue.operator.as_ref().map(map_operator_snapshot),
         }),
     )
+}
+
+fn map_operator_snapshot(
+    operator: &crate::opensymphony_domain::ControlPlaneOperatorSnapshot,
+) -> RunOperatorSnapshot {
+    RunOperatorSnapshot {
+        routing_mode: operator.routing_mode.clone(),
+        active_project_set: operator.active_project_set.clone(),
+        linear_project: operator.linear_project.clone(),
+        binding_status: operator.binding_status.clone(),
+        parent: operator.parent.as_ref().map(|parent| RunParentSnapshot {
+            parent_id: parent.parent_id.clone(),
+            state: parent.state.clone(),
+            hierarchy_generation: parent.hierarchy_generation,
+            blocked_reason: parent.blocked_reason.clone(),
+            descendant_repositories: parent.descendant_repositories.clone(),
+            checkout_handles: parent.checkout_handles.clone(),
+        }),
+        repository: operator
+            .repository
+            .as_ref()
+            .map(|repository| RunRepositorySnapshot {
+                canonical_id: repository.canonical_id.clone(),
+                display_alias: repository.display_alias.clone(),
+                safe_remote_fingerprint: repository.safe_remote_fingerprint.clone(),
+                config_generation: repository.config_generation.clone(),
+                inventory_generation: repository.inventory_generation.clone(),
+                checkout_generation: repository.checkout_generation.clone(),
+                target_branch: repository.target_branch.clone(),
+                target_commit: repository.target_commit.clone(),
+                instruction_source: repository.instruction_source.clone(),
+                instruction_hash: repository.instruction_hash.clone(),
+            }),
+        leases: operator
+            .leases
+            .iter()
+            .map(|lease| RunLeaseSnapshot {
+                owner_id: lease.owner_id.clone(),
+                owner_kind: lease.owner_kind.clone(),
+                repository_id: lease.repository_id.clone(),
+                checkout_generation: lease.checkout_generation.clone(),
+            })
+            .collect(),
+        repairs: operator
+            .repairs
+            .iter()
+            .map(|repair| RunRepairSnapshot {
+                id: repair.id.clone(),
+                repository_id: repair.repository_id.clone(),
+                status: repair.status.clone(),
+                pull_request_url: repair.pull_request_url.clone(),
+                target_commit: repair.target_commit.clone(),
+                instruction_hash: repair.instruction_hash.clone(),
+            })
+            .collect(),
+        memory: operator.memory.as_ref().map(|memory| RunMemorySnapshot {
+            scope: memory.scope.clone(),
+            source_freshness: memory.source_freshness.clone(),
+            degraded: memory.degraded,
+            overlay_provenance: memory.overlay_provenance.clone(),
+        }),
+        containment: operator
+            .containment
+            .as_ref()
+            .map(|containment| RunContainmentSnapshot {
+                requested_scope: containment.requested_scope.clone(),
+                effective_containment: containment.effective_containment.clone(),
+            }),
+        provider: operator
+            .provider
+            .as_ref()
+            .map(|provider| RunProviderSnapshot {
+                provider: provider.provider.clone(),
+                step: provider.step.clone(),
+                status: provider.status.clone(),
+            }),
+        verification: operator
+            .verification
+            .as_ref()
+            .map(|verification| RunVerificationSnapshot {
+                attempts: verification.attempts,
+                status: verification.status.clone(),
+                final_evidence: verification.final_evidence.clone(),
+            }),
+        cleanup: operator.cleanup.as_ref().map(|cleanup| RunCleanupSnapshot {
+            status: cleanup.status.clone(),
+            blockers: cleanup.blockers.clone(),
+            retry_count: cleanup.retry_count,
+        }),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

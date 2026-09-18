@@ -3687,17 +3687,28 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : "",
       run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : "",
     ].filter(Boolean).join("");
+    const operator = run.operator;
+    const leases = operator?.leases ?? [];
+    const repairs = operator?.repairs ?? [];
+    const cleanupBlockers = operator?.cleanup?.blockers ?? [];
+    const descendantRepositories = operator?.parent?.descendant_repositories ?? [];
+    const checkoutHandles = operator?.parent?.checkout_handles ?? [];
     const runMeta = [
+      operator?.routing_mode ? `<div class="os-run-meta-row" data-testid="run-routing"><span>Routing</span><strong>${escapeHtml(operator.routing_mode)}</strong>${operator.active_project_set?.length ? `<small>${escapeHtml(operator.active_project_set.join(", "))}</small>` : ""}</div>` : "",
+      operator?.linear_project ? `<div class="os-run-meta-row" data-testid="run-project"><span>Linear project</span><code>${escapeHtml(operator.linear_project)}</code></div>` : "",
       run.branch_name ? `<div class="os-run-meta-row" data-testid="run-branch"><span>Branch</span><code>${escapeHtml(run.branch_name)}</code></div>` : "",
       (run.branch_name || run.pr_url) ? `<div class="os-run-meta-row" data-testid="run-pr"><span>Pull Request</span>${run.pr_url ? `<a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatPrLinkLabel(run.pr_url))}</a>` : `<em>Not found</em>`}</div>` : "",
       run.operator?.repository ? `<div class="os-run-meta-row" data-testid="run-repository"><span>Repository</span><code>${escapeHtml(run.operator.repository.display_alias)}</code><small>${escapeHtml(run.operator.repository.canonical_id)}</small></div>` : "",
       run.operator?.repository?.target_commit ? `<div class="os-run-meta-row" data-testid="run-target-commit"><span>Target commit</span><code>${escapeHtml(run.operator.repository.target_commit)}</code></div>` : "",
       run.operator?.repository?.instruction_hash ? `<div class="os-run-meta-row" data-testid="run-instruction-hash"><span>Instructions</span><code>${escapeHtml(run.operator.repository.instruction_hash)}</code></div>` : "",
       run.operator?.containment ? `<div class="os-run-meta-row" data-testid="run-containment"><span>Containment</span><strong>${escapeHtml(run.operator.containment.effective_containment)}</strong></div>` : "",
-      run.operator?.parent ? `<div class="os-run-meta-row" data-testid="run-parent"><span>Parent</span><code>${escapeHtml(run.operator.parent.parent_id)}</code>${run.operator.parent.blocked_reason ? `<em>${escapeHtml(run.operator.parent.blocked_reason)}</em>` : ""}</div>` : "",
-      run.operator?.leases.length ? `<div class="os-run-meta-row" data-testid="run-leases"><span>Cleanup leases</span><strong>${run.operator.leases.length}</strong></div>` : "",
-      run.operator?.repairs.length ? `<div class="os-run-meta-row" data-testid="run-repairs"><span>Repairs</span><strong>${run.operator.repairs.map((repair) => escapeHtml(repair.status)).join(", ")}</strong></div>` : "",
-      run.operator?.cleanup ? `<div class="os-run-meta-row" data-testid="run-cleanup"><span>Cleanup</span><strong>${escapeHtml(run.operator.cleanup.status)}</strong>${run.operator.cleanup.blockers.length ? `<em>${escapeHtml(run.operator.cleanup.blockers.join(", "))}</em>` : ""}</div>` : "",
+      operator?.parent ? `<div class="os-run-meta-row" data-testid="run-parent"><span>Parent</span><code>${escapeHtml(operator.parent.parent_id)}</code>${operator.parent.state ? `<strong>${escapeHtml(operator.parent.state)}</strong>` : ""}${operator.parent.blocked_reason ? `<em>${escapeHtml(operator.parent.blocked_reason)}</em>` : ""}${descendantRepositories.length ? `<small>repos: ${escapeHtml(descendantRepositories.join(", "))}</small>` : ""}${checkoutHandles.length ? `<small>checkouts: ${escapeHtml(checkoutHandles.join(", "))}</small>` : ""}</div>` : "",
+      leases.length ? `<div class="os-run-meta-row" data-testid="run-leases"><span>Cleanup leases</span><strong>${leases.map((lease) => escapeHtml(`${lease.owner_id} (${lease.repository_id})`)).join(", ")}</strong></div>` : "",
+      repairs.length ? `<div class="os-run-meta-row" data-testid="run-repairs"><span>Repairs</span><strong>${repairs.map((repair) => escapeHtml(`${repair.id}: ${repair.status}`)).join(", ")}</strong>${repairs.map((repair) => repair.pull_request_url ? `<a href="${escapeAttr(repair.pull_request_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatPrLinkLabel(repair.pull_request_url))}</a>` : "").join("")}</div>` : "",
+      operator?.memory ? `<div class="os-run-meta-row" data-testid="run-memory"><span>Memory</span><strong>${escapeHtml(operator.memory.scope)}</strong>${operator.memory.degraded ? `<em>degraded</em>` : ""}${operator.memory.source_freshness ? `<small>${escapeHtml(operator.memory.source_freshness)}</small>` : ""}</div>` : "",
+      operator?.provider ? `<div class="os-run-meta-row" data-testid="run-provider"><span>Provider</span><strong>${escapeHtml(`${operator.provider.provider}: ${operator.provider.step}`)}</strong><small>${escapeHtml(operator.provider.status)}</small></div>` : "",
+      operator?.verification ? `<div class="os-run-meta-row" data-testid="run-verification"><span>Verification</span><strong>${escapeHtml(operator.verification.status)}</strong><small>${operator.verification.attempts} attempt(s)</small>${operator.verification.final_evidence ? `<em>${escapeHtml(operator.verification.final_evidence)}</em>` : ""}</div>` : "",
+      operator?.cleanup ? `<div class="os-run-meta-row" data-testid="run-cleanup"><span>Cleanup</span><strong>${escapeHtml(operator.cleanup.status)}</strong>${cleanupBlockers.length ? `<em>${escapeHtml(cleanupBlockers.join(", "))}</em>` : ""}</div>` : "",
     ].filter(Boolean).join("");
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)

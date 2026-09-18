@@ -191,6 +191,7 @@ export interface RunOperatorSnapshot {
   routing_mode?: string | null;
   active_project_set: string[];
   linear_project?: string | null;
+  binding_status?: string | null;
   parent?: RunParentSnapshot | null;
   repository?: RunRepositorySnapshot | null;
   leases: RunLeaseSnapshot[];

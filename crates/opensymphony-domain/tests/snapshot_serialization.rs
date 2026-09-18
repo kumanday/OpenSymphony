@@ -175,6 +175,7 @@ fn operator_projection_round_trips_without_secret_or_path_fields() {
         routing_mode: Some("project_set".to_owned()),
         active_project_set: vec!["project-a".to_owned()],
         linear_project: Some("project-a".to_owned()),
+        binding_status: Some("resolved".to_owned()),
         parent: None,
         repository: Some(ControlPlaneRepositorySnapshot {
             canonical_id: "github:repository:123".to_owned(),

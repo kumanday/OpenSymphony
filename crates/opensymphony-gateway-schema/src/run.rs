@@ -119,6 +119,8 @@ pub struct RunOperatorSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_project_set: Vec<String>,
     pub linear_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_status: Option<String>,
     pub parent: Option<RunParentSnapshot>,
     pub repository: Option<RunRepositorySnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

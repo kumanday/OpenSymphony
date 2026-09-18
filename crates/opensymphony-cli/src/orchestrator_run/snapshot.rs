@@ -190,6 +190,15 @@ fn map_issue(
             .project_slug
             .clone()
             .or_else(|| issue.issue.project_id.clone()),
+        binding_status: repository_binding.as_ref().map(|binding| match binding {
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_) => "resolved",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MissingBinding => "missing_binding",
+            crate::opensymphony_domain::RepositoryBindingOutcome::UnknownAlias(_) => "unknown_alias",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MultipleBindings(_) => "multiple_bindings",
+            crate::opensymphony_domain::RepositoryBindingOutcome::RepositoryNotAllowedForProject(_, _) => "repository_not_allowed_for_project",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ParentBindingNotAllowed => "parent_binding_not_allowed",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ProjectOutsideActiveSet(_) => "project_outside_active_set",
+        }.to_owned()),
         parent: hierarchy.map(
             |state| crate::opensymphony_domain::ControlPlaneParentSnapshot {
                 parent_id: issue.issue.identifier.to_string(),
