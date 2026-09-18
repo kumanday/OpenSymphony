@@ -759,6 +759,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
             detached: false,
         }],
         recent_events: vec![RecentEvent {
@@ -854,6 +855,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             },
             // Completed issue with events and modified files
@@ -953,6 +955,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             },
             // Failed issue, first attempt (no retries exhausted)
@@ -1001,6 +1004,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
@@ -1049,6 +1053,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
@@ -1097,6 +1102,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             },
         ],
@@ -4595,7 +4601,37 @@ async fn gateway_task_graph_empty_project_without_linear_returns_empty_ok() {
 
 #[tokio::test]
 async fn gateway_serves_run_detail() {
-    let store = SnapshotStore::new(fixture_snapshot(0));
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].operator = Some(
+        opensymphony::opensymphony_domain::ControlPlaneOperatorSnapshot {
+            routing_mode: Some("project_set".to_owned()),
+            active_project_set: vec!["project-a".to_owned()],
+            linear_project: Some("project-a".to_owned()),
+            parent: None,
+            repository: Some(
+                opensymphony::opensymphony_domain::ControlPlaneRepositorySnapshot {
+                    canonical_id: "github:repository:255".to_owned(),
+                    display_alias: "backend".to_owned(),
+                    safe_remote_fingerprint: Some("sha256:fingerprint".to_owned()),
+                    config_generation: Some("config-1".to_owned()),
+                    inventory_generation: Some("inventory-1".to_owned()),
+                    checkout_generation: None,
+                    target_branch: Some("develop".to_owned()),
+                    target_commit: Some("abc123".to_owned()),
+                    instruction_source: Some("AGENTS.md".to_owned()),
+                    instruction_hash: Some("sha256:instructions".to_owned()),
+                },
+            ),
+            leases: Vec::new(),
+            repairs: Vec::new(),
+            memory: None,
+            containment: None,
+            provider: None,
+            verification: None,
+            cleanup: None,
+        },
+    );
+    let store = SnapshotStore::new(snapshot);
     let server = GatewayServer::new(store.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -4644,6 +4680,16 @@ async fn gateway_serves_run_detail() {
     // An OpenHands run reports the OpenHands harness and no Codex thread id.
     assert_eq!(response.harness_type.as_deref(), Some("openhands"));
     assert_eq!(response.codex_thread_id, None);
+    let repository = response
+        .operator
+        .as_ref()
+        .and_then(|operator| operator.repository.as_ref())
+        .expect("operator repository projection");
+    assert_eq!(repository.display_alias, "backend");
+    assert_eq!(repository.target_commit.as_deref(), Some("abc123"));
+    let encoded = serde_json::to_value(&response).expect("serialize run detail");
+    assert!(encoded.get("remote_url").is_none());
+    assert!(encoded.to_string().contains("sha256:fingerprint"));
 
     server_task.abort();
 }

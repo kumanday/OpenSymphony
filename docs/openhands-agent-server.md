@@ -33,6 +33,10 @@ OpenHands provides the execution-layer primitives Symphony needs:
 OpenSymphony keeps all scheduling rules in Rust and uses OpenHands only as the
 runtime substrate.
 
+Operator snapshots label the requested execution scope separately from the
+harness's effective containment. Trusted-host execution is reported honestly
+and is not presented as workspace confinement.
+
 ## 3. Runtime modes
 
 ### Local supervised mode

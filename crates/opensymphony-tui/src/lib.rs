@@ -1096,6 +1096,34 @@ impl TuiState {
                     Span::styled(format!("{}", issue.blocked), blocked_style),
                 ]));
 
+                if let Some(operator) = issue.operator.as_ref() {
+                    let repository = operator
+                        .repository
+                        .as_ref()
+                        .map(|repository| {
+                            format!(
+                                "{} @ {}",
+                                repository.display_alias,
+                                repository
+                                    .target_commit
+                                    .as_deref()
+                                    .unwrap_or("target unknown")
+                            )
+                        })
+                        .unwrap_or_else(|| "repository unknown".to_owned());
+                    let containment = operator
+                        .containment
+                        .as_ref()
+                        .map(|containment| containment.effective_containment.as_str())
+                        .unwrap_or("containment unknown");
+                    lines.push(Line::from_spans(vec![
+                        Span::styled("operator: ", Style::new().dim()),
+                        Span::raw(repository),
+                        Span::raw(" | "),
+                        Span::raw(containment),
+                    ]));
+                }
+
                 // Token usage for this issue (always show, even when 0)
                 let cache_suffix = if issue.cache_read_tokens > 0 {
                     format!(" ({} cache)", format_metric(issue.cache_read_tokens))
@@ -4396,6 +4424,7 @@ mod tests {
                         cancel_failed: false,
                         cancel_timed_out: false,
                         cancel_reason: None,
+                        operator: None,
                         detached: false,
                     })
                     .collect(),

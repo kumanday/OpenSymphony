@@ -117,6 +117,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
             detached: false,
         }],
         recent_events: vec![RecentEvent {

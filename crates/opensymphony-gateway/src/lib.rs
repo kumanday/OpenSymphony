@@ -110,8 +110,8 @@ pub use crate::opensymphony_gateway_schema::{
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
         RunAction, RunDetail, RunDiagnostics, RunEvent, RunEventPage, RunFilesPage,
-        RunLifecycleState, RunLivenessEnvelope, RunPhase, RunProgress, RunStatus,
-        RunStreamLiveness, SafeActions,
+        RunLifecycleState, RunLivenessEnvelope, RunOperatorSnapshot, RunPhase, RunProgress,
+        RunStatus, RunStreamLiveness, SafeActions,
     },
     snapshot::{
         DashboardSnapshot, GatewayHealth, GatewayMetrics, ProjectDetail, ProjectIssueSummary,
@@ -4652,6 +4652,7 @@ async fn get_run_detail(
                     cancel_failed: false,
                     cancel_timed_out: false,
                     cancel_reason: None,
+                    operator: None,
                 }),
             );
         }
@@ -4818,6 +4819,11 @@ async fn get_run_detail(
             cancel_failed: issue.cancel_failed,
             cancel_timed_out: issue.cancel_timed_out,
             cancel_reason: issue.cancel_reason.clone(),
+            operator: issue.operator.as_ref().and_then(|operator| {
+                serde_json::to_value(operator)
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<RunOperatorSnapshot>(value).ok())
+            }),
         }),
     )
 }
@@ -6435,6 +6441,7 @@ exit 2
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
         }
     }
 

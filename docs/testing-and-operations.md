@@ -15,6 +15,10 @@ OpenSymphony sits at the intersection of:
 
 The project needs more than unit tests. It needs layered validation with deterministic fakes and opt-in live tests.
 
+Projection tests must cover round trips, blocked-state rendering, local versus
+remote path boundaries, and secret-canary absence across Rust, TypeScript, TUI,
+web, and desktop surfaces.
+
 ## 2. Test layers
 
 ## 2.1 Unit tests

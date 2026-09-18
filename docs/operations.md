@@ -2,6 +2,11 @@
 
 This document covers the current local operator workflow for OpenSymphony.
 
+Run detail and TUI projections expose sanitized repository, target commit,
+instruction hash, lease, repair, verification, and cleanup facts when those
+facts are authoritative. Blocked and cleaning states remain distinct from
+completed, and remote views do not expose unrestricted local paths.
+
 Packaging note: crates.io publishes one package, `opensymphony`. The internal
 `crates/opensymphony-*` directories are module trees inside that package, not
 separately published dependencies.

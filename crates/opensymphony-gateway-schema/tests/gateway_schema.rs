@@ -585,6 +585,7 @@ fn run_detail_roundtrips() {
         cancel_failed: false,
         cancel_timed_out: false,
         cancel_reason: None,
+        operator: None,
     };
     let json = must_serialize(&run);
     let back: RunDetail = must_deserialize(&json);

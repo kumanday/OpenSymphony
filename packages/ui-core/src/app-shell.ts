@@ -3690,6 +3690,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const runMeta = [
       run.branch_name ? `<div class="os-run-meta-row" data-testid="run-branch"><span>Branch</span><code>${escapeHtml(run.branch_name)}</code></div>` : "",
       (run.branch_name || run.pr_url) ? `<div class="os-run-meta-row" data-testid="run-pr"><span>Pull Request</span>${run.pr_url ? `<a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatPrLinkLabel(run.pr_url))}</a>` : `<em>Not found</em>`}</div>` : "",
+      run.operator?.repository ? `<div class="os-run-meta-row" data-testid="run-repository"><span>Repository</span><code>${escapeHtml(run.operator.repository.display_alias)}</code><small>${escapeHtml(run.operator.repository.canonical_id)}</small></div>` : "",
+      run.operator?.repository?.target_commit ? `<div class="os-run-meta-row" data-testid="run-target-commit"><span>Target commit</span><code>${escapeHtml(run.operator.repository.target_commit)}</code></div>` : "",
+      run.operator?.repository?.instruction_hash ? `<div class="os-run-meta-row" data-testid="run-instruction-hash"><span>Instructions</span><code>${escapeHtml(run.operator.repository.instruction_hash)}</code></div>` : "",
+      run.operator?.containment ? `<div class="os-run-meta-row" data-testid="run-containment"><span>Containment</span><strong>${escapeHtml(run.operator.containment.effective_containment)}</strong></div>` : "",
+      run.operator?.parent ? `<div class="os-run-meta-row" data-testid="run-parent"><span>Parent</span><code>${escapeHtml(run.operator.parent.parent_id)}</code>${run.operator.parent.blocked_reason ? `<em>${escapeHtml(run.operator.parent.blocked_reason)}</em>` : ""}</div>` : "",
+      run.operator?.leases.length ? `<div class="os-run-meta-row" data-testid="run-leases"><span>Cleanup leases</span><strong>${run.operator.leases.length}</strong></div>` : "",
+      run.operator?.repairs.length ? `<div class="os-run-meta-row" data-testid="run-repairs"><span>Repairs</span><strong>${run.operator.repairs.map((repair) => escapeHtml(repair.status)).join(", ")}</strong></div>` : "",
+      run.operator?.cleanup ? `<div class="os-run-meta-row" data-testid="run-cleanup"><span>Cleanup</span><strong>${escapeHtml(run.operator.cleanup.status)}</strong>${run.operator.cleanup.blockers.length ? `<em>${escapeHtml(run.operator.cleanup.blockers.join(", "))}</em>` : ""}</div>` : "",
     ].filter(Boolean).join("");
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)

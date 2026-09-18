@@ -183,6 +183,91 @@ export interface RunDetail {
   cancel_timed_out?: boolean;
   /** Machine-readable cancel reason supplied by the orchestrator. */
   cancel_reason?: string | null;
+  /** Sanitized multi-repository and parent lifecycle facts. */
+  operator?: RunOperatorSnapshot | null;
+}
+
+export interface RunOperatorSnapshot {
+  routing_mode?: string | null;
+  active_project_set: string[];
+  linear_project?: string | null;
+  parent?: RunParentSnapshot | null;
+  repository?: RunRepositorySnapshot | null;
+  leases: RunLeaseSnapshot[];
+  repairs: RunRepairSnapshot[];
+  memory?: RunMemorySnapshot | null;
+  containment?: RunContainmentSnapshot | null;
+  provider?: RunProviderSnapshot | null;
+  verification?: RunVerificationSnapshot | null;
+  cleanup?: RunCleanupSnapshot | null;
+}
+
+export interface RunRepositorySnapshot {
+  canonical_id: string;
+  display_alias: string;
+  safe_remote_fingerprint?: string | null;
+  config_generation?: string | null;
+  inventory_generation?: string | null;
+  checkout_generation?: string | null;
+  target_branch?: string | null;
+  target_commit?: string | null;
+  instruction_source?: string | null;
+  instruction_hash?: string | null;
+}
+
+export interface RunParentSnapshot {
+  parent_id: string;
+  state?: string | null;
+  hierarchy_generation?: number | null;
+  blocked_reason?: string | null;
+  descendant_repositories: string[];
+  checkout_handles: string[];
+}
+
+export interface RunLeaseSnapshot {
+  owner_id: string;
+  owner_kind: string;
+  repository_id: string;
+  checkout_generation: string;
+}
+
+export interface RunRepairSnapshot {
+  id: string;
+  repository_id?: string | null;
+  status: string;
+  pull_request_url?: string | null;
+  target_commit?: string | null;
+  instruction_hash?: string | null;
+}
+
+export interface RunMemorySnapshot {
+  scope: string;
+  source_freshness?: string | null;
+  degraded: boolean;
+  overlay_provenance?: string | null;
+}
+
+export interface RunContainmentSnapshot {
+  requested_scope?: string | null;
+  effective_containment: string;
+}
+
+export interface RunProviderSnapshot {
+  provider: string;
+  step: string;
+  status: string;
+}
+
+export interface RunVerificationSnapshot {
+  attempts: number;
+  status: string;
+  final_evidence?: string | null;
+}
+
+export interface RunCleanupSnapshot {
+  status: string;
+  blockers: string[];
+  retry_count: number;
 }
 
 /** Paged run events. */

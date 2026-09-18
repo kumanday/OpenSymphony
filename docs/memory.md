@@ -8,6 +8,10 @@ descriptions, reviews, checks, and source refs. It writes private issue capsules
 under `.opensymphony/memory/`, updates a DuckDB index, evolves
 `.opensymphony/memory/memory.yaml`, and syncs stable topics into public docs.
 
+The operator projection reports memory scope, source freshness, degradation,
+and overlay provenance without exposing memory grants or tokens. Memory
+availability does not grant filesystem access.
+
 Related specifications:
 
 - [OKF Memory System Specification](specs/okf-memory-spec.md) describes how the
