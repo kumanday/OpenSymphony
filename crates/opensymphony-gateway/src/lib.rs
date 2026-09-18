@@ -4788,9 +4788,11 @@ async fn get_run_detail(
                 .then(|| format!("conv-{}", issue.conversation_id_suffix)),
             workspace_id: (!issue.workspace_path_suffix.is_empty())
                 .then(|| issue.workspace_path_suffix.clone()),
-            workspace_path: workspace_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            // The gateway has no per-request trusted-local authorization
+            // boundary, so exact host paths never cross this remote DTO.
+            // Local actions resolve the contained path server-side from the
+            // sanitized workspace suffix.
+            workspace_path: None,
             branch_name: issue.branch_name.clone(),
             pr_url,
             // A Codex run carries a Codex thread id; report the harness so the

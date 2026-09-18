@@ -4659,6 +4659,7 @@ async fn gateway_serves_run_detail() {
     assert_eq!(response.issue_identifier, "COE-255");
     assert_eq!(response.turn_count, 3);
     assert_eq!(response.max_turns, 8);
+    assert!(response.workspace_path.is_none());
     assert_eq!(response.runtime_seconds, 75);
     assert_eq!(
         response.branch_name.as_deref(),
@@ -4672,12 +4673,9 @@ async fn gateway_serves_run_detail() {
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
     );
-    // The desktop "Workspace" / "Debug" actions need the on-disk path: the
-    // workspace root joined with the run's suffix.
-    assert_eq!(
-        response.workspace_path.as_deref(),
-        Some("/tmp/opensymphony/COE-255")
-    );
+    // Exact host paths stay on trusted local diagnostic surfaces, not in the
+    // gateway's remote run-detail DTO.
+    assert!(response.workspace_path.is_none());
     // An OpenHands run reports the OpenHands harness and no Codex thread id.
     assert_eq!(response.harness_type.as_deref(), Some("openhands"));
     assert_eq!(response.codex_thread_id, None);
