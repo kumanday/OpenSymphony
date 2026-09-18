@@ -14,5 +14,24 @@
   "cache_read_tokens": 256,
   "runtime_seconds": 120,
   "conversation_id": "conv-1",
-  "workspace_path": "/tmp/workspaces/COE-390"
+  "workspace_path": "/tmp/workspaces/COE-390",
+  "operator": {
+    "routing_mode": "project_set",
+    "active_project_set": ["project-a"],
+    "linear_project": "project-a",
+    "repository": {
+      "canonical_id": "github:repository:390",
+      "display_alias": "backend",
+      "safe_remote_fingerprint": "sha256:fingerprint",
+      "target_branch": "develop",
+      "target_commit": "abc123",
+      "instruction_hash": "sha256:instructions"
+    },
+    "leases": [],
+    "repairs": [],
+    "containment": {
+      "requested_scope": "trusted_host",
+      "effective_containment": "trusted_host"
+    }
+  }
 }

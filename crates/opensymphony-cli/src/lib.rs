@@ -2105,6 +2105,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -2152,6 +2153,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -2207,6 +2209,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
         },
     ];
     let running_issues = issues

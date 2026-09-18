@@ -101,6 +101,7 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     cancel_failed: false,
                     cancel_timed_out: false,
                     cancel_reason: None,
+                    operator: None,
                     detached: false,
                 })
                 .collect(),
@@ -164,6 +165,7 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
             detached: false,
         })
         .collect();

@@ -482,6 +482,7 @@ mod tests {
                 cancel_failed: false,
                 cancel_timed_out: false,
                 cancel_reason: None,
+                operator: None,
                 detached: false,
             }],
             recent_events: vec![RecentEvent {

@@ -15,11 +15,15 @@ mod tracker;
 pub const CRATE_NAME: &str = "opensymphony-domain";
 
 pub use control_plane::{
-    ControlPlaneAgentServerStatus, ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot,
-    ControlPlaneDaemonState, ControlPlaneDaemonStatus, ControlPlaneFileChange,
-    ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
-    ControlPlaneMemoryServerStatus, ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent,
-    ControlPlaneRecentEventKind, ControlPlaneWorkerOutcome, SnapshotEnvelope,
+    ControlPlaneAgentServerStatus, ControlPlaneCleanupSnapshot, ControlPlaneContainmentSnapshot,
+    ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot, ControlPlaneDaemonState,
+    ControlPlaneDaemonStatus, ControlPlaneFileChange, ControlPlaneFileChangeKind,
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot, ControlPlaneLeaseSnapshot,
+    ControlPlaneMemoryServerStatus, ControlPlaneMemorySnapshot, ControlPlaneMetricsSnapshot,
+    ControlPlaneOperatorSnapshot, ControlPlaneParentSnapshot, ControlPlaneProviderSnapshot,
+    ControlPlaneRecentEvent, ControlPlaneRecentEventKind, ControlPlaneRepairSnapshot,
+    ControlPlaneRepositorySnapshot, ControlPlaneVerificationSnapshot, ControlPlaneWorkerOutcome,
+    SnapshotEnvelope,
 };
 pub use harness::HarnessAdapter;
 pub use identifiers::{

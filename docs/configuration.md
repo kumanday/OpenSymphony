@@ -3,6 +3,10 @@
 This document covers target-repo bootstrap, generated files, and the runtime
 configuration that `opensymphony run` expects.
 
+Operator projections expose project and repository identity through safe
+aliases, canonical IDs, and safe remote fingerprints. Credential-bearing
+remote URLs and raw credential values are excluded.
+
 ## Central configuration
 
 `opensymphony run` selects configuration before it reads any repository
