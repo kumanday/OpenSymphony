@@ -938,8 +938,11 @@ submission/outcome state. Native manifests remain readable and cannot be silentl
 replaced by ACP. Every command checks the owning connection generation.
 
 The manifest is atomically replaced and synced, including its parent directory,
-before a prompt can reach the transport. `submitted` without a known terminal
-outcome becomes `uncertain` and prevents automatic recovery or prompt replay.
+before a prompt can reach the transport. Cancellation after the synced
+`submitted` marker is rechecked before transport submission; when no prompt was
+sent, a `cancelled_before_prompt` outcome closes that marker. `submitted`
+without a known terminal outcome becomes `uncertain` and prevents automatic
+recovery or prompt replay.
 Local EOF, process reaping and protocol cancellation acknowledgement are separate
 evidence. Workspace cleanup remains fenced after an uncertain remote outcome.
 
@@ -959,10 +962,13 @@ host execution provides filesystem/process access; it is not a sandbox.
 
 Filesystem callbacks require absolute paths in the bound workspace and reject
 parent traversal, escaping or dangling symlinks and non-regular file targets.
-On Unix, descriptor-relative opens reject every symlink component, including
-in-workspace links, and use no-follow opens for new files. Terminal launch pins
-the directory through descriptor-relative no-follow traversal; the child enters
-that directory using `fchdir` before executing the command. Windows pins every
+On Unix, the service actor pins the verified workspace directory before the
+agent starts, and the agent child enters that same directory inode with
+`fchdir`. Descriptor-relative callback opens stay anchored to that root even
+if its original pathname is replaced, reject every symlink component,
+including in-workspace links, and use no-follow opens for new files. Terminal
+launch traverses from the same pinned root; its child enters the selected
+directory using `fchdir` before executing the command. Windows pins every
 ancestor without write/delete sharing, rejects reparse points through opened
 handles, and holds those guards through file I/O or terminal spawn. Writes create missing
 parent directories only after containment validation. File writes stage in the
@@ -986,7 +992,7 @@ A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh
 cancellation token before the durable submission marker. Initial idle readiness
 has no active callback epoch; callbacks after session binding remain denied until
-`begin_turn` installs the first epoch. A prompt response closes its callback epoch
+`begin_turn` installs the first epoch. Both one-turn and retained prompt responses close their callback epochs
 inside ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
 finishes before the owner publishes `Finished` or returns the turn report. The
 owner keeps handling

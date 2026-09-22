@@ -826,6 +826,16 @@ impl SessionDriver {
                         let _ = pending.reply.send(Err(HostError::Persistence));
                         return Err(ClientError::Setup("submission checkpoint failed".into()));
                     }
+                    if pending.cancellation.is_cancelled() || pending.forced.is_cancelled() {
+                        pending.callback_epoch.cancel();
+                        if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                            let _ = pending.reply.send(Err(HostError::Persistence));
+                            return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                        }
+                        let error = ClientError::CancelledBeforePrompt;
+                        let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                        return Err(error);
+                    }
                     active = Some(ActivePrompt {
                         result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
                         reply: pending.reply, cancellation: pending.forced,
@@ -836,6 +846,15 @@ impl SessionDriver {
                     let pending = active.take().expect("active prompt");
                     let report = match result {
                         Ok(report) => report,
+                        Err(ClientError::CancelledBeforePrompt) => {
+                            if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                                let _ = pending.reply.send(Err(HostError::Persistence));
+                                return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                            }
+                            let error = ClientError::CancelledBeforePrompt;
+                            let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                            return Err(error);
+                        }
                         Err(error) => { let _ = self.durable.uncertain().await; let _ = pending.reply.send(Err(HostError::Client(error.to_string()))); return Err(error); }
                     };
                     if self.durable.finished(report.stop_reason.clone()).await.is_err() {
@@ -950,6 +969,13 @@ async fn prompt_rpc(
     callback_epoch: CancellationToken,
     services: super::services::CallbackSender,
 ) -> Result<TurnReport, ClientError> {
+    // The submitted marker may finish persisting after cancellation. This
+    // check runs again when the active future is first polled, immediately
+    // before transport submission.
+    if cancellation.is_cancelled() || forced.is_cancelled() {
+        callback_epoch.cancel();
+        return Err(ClientError::CancelledBeforePrompt);
+    }
     let request = UntypedMessage::new(
         "session/prompt",
         PromptRequest::new(

@@ -654,19 +654,26 @@ adjacent response/update pair is dispatched, and saturate callback output while
 a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
-Native Unix tests swap a pinned terminal directory for an external symlink before
-spawning the command and verify it reads from the original directory. A narrow
+Native Unix tests replace the bound workspace root after service creation and
+verify file reads, atomic writes, and new terminal cwd remain on the original
+directory inode. They also swap a pinned terminal directory for an external
+symlink before spawn and verify it reads from the original directory. A narrow
 `unsafe_code` allowance wraps child-only `pre_exec` registration for `fchdir`;
 the repository lint is `deny`, and the closure performs no allocation, locking,
 logging or host cwd mutation. Callback tests cancel a file operation queued behind
 a blocked filesystem worker and verify no write occurs. Executable peers exercise
 partial staged-write cancellation and atomic replacement on native platforms,
 ordinary MCP environment values beside secret grants, JSON-escaped file/terminal
-responses against smaller response budgets, deferred
+responses against smaller response budgets, generic credential-bearing MCP
+header arguments with exact wire delivery and masked evidence, a one-turn
+prompt response immediately followed by a denied file write, deferred
 model-to-mode selection, and rejection of credentials embedded in MCP URLs.
 Retained-owner fixtures reject abandoned-session callbacks adjacent to a missing
 restoration response, reapply changed model/mode/options before the next prompt,
 and keep cancellation/deadline failures ahead of durable submission.
+The retained host also blocks the filesystem worker during the durable submission
+checkpoint, cancels the accepted prompt, and verifies that no prompt reaches the
+peer and the persisted marker closes as `cancelled_before_prompt`.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,

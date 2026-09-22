@@ -44,7 +44,8 @@ def config():
 def new_session(message):
     assert message['params']['cwd'] == os.getcwd()
     if services_enabled and persistence in ('load', 'resume'):
-        assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant']
+        assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant',
+                                                             '--custom', 'opaque-generic-arg']
     result = {'sessionId': session}
     if services_enabled:
         result['configOptions'] = config()
@@ -104,7 +105,8 @@ for line in sys.stdin:
             update("old history")
         result = {}
         if services_enabled:
-            assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant']
+            assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant',
+                                                                 '--custom', 'opaque-generic-arg']
             result['configOptions'] = config()
         send({"id": message["id"], "result": result})
         update("live adjacent to restore response")

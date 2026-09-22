@@ -79,10 +79,12 @@ while True:
                 assert response.read() == b'COE-610'
         if mode == 'mcp_argv':
             server = message['params']['mcpServers'][0]
-            assert server['args'] == ['--token', 'standalone-oauth-value', '--api-key=inline-api-value']
+            assert server['args'] == ['--token', 'standalone-oauth-value', '--api-key=inline-api-value',
+                                      '--header', 'Authorization: Bearer generic-header-value',
+                                      '--custom', 'opaque-generic-arg']
             # Echoing a granted argument in a nonsensitive field or stderr must
             # not persist the original value in source evidence.
-            print('standalone-oauth-value inline-api-value', file=sys.stderr, flush=True)
+            print('standalone-oauth-value inline-api-value generic-header-value', file=sys.stderr, flush=True)
         result = {'sessionId': session}
         if mode.startswith('config') or mode == 'unsupported_config':
             result['configOptions'] = config()
@@ -123,7 +125,33 @@ while True:
         if mode == 'config_dependent':
             assert model_choice == 'second' and reasoning == 'high'
         if mode == 'mcp_argv':
-            send({'method': 'session/update', 'params': {'sessionId': session, 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'standalone-oauth-value inline-api-value'}}}})
+            send({'method': 'session/update', 'params': {'sessionId': session, 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'standalone-oauth-value inline-api-value generic-header-value'}}}})
+        elif mode == 'late_after_prompt':
+            frames = [
+                {'jsonrpc': '2.0', 'id': prompt_id, 'result': {'stopReason': 'end_turn'}},
+                {'jsonrpc': '2.0', 'id': 'late-write', 'method': 'fs/write_text_file',
+                 'params': {'sessionId': session, 'path': os.path.join(os.getcwd(), 'late-written'), 'content': 'escaped'}},
+            ]
+            sys.stdout.write(''.join(json.dumps(frame) + '\n' for frame in frames))
+            sys.stdout.flush()
+            try:
+                response = receive()
+                assert response['id'] == 'late-write' and 'error' in response, response
+            except RuntimeError:
+                pass  # The one-turn host may close after revoking the callback.
+            continue
+        elif mode == 'pending_at_response':
+            send({'id': 'pending-write', 'method': 'fs/write_text_file',
+                  'params': {'sessionId': session, 'path': os.path.join(os.getcwd(), 'late-written'),
+                             'content': 'escaped'}})
+            respond(message, {'stopReason': 'end_turn'})
+            open('response-sent', 'w').close()
+            try:
+                response = receive()
+                assert response['id'] == 'pending-write' and 'error' in response, response
+            except RuntimeError:
+                pass
+            continue
         elif mode in ('config', 'legacy_mode'):
             update = {'sessionUpdate': 'config_option_update', 'configOptions': config('first')} if mode == 'config' else {'sessionUpdate': 'current_mode_update', 'currentModeId': 'ask'}
             send({'method': 'session/update', 'params': {'sessionId': session, 'update': update}})

@@ -1325,6 +1325,10 @@ async fn acp_mcp_credential_arguments_are_redacted_from_requests_echoes_and_stde
             "--token".into(),
             "standalone-oauth-value".into(),
             "--api-key=inline-api-value".into(),
+            "--header".into(),
+            "Authorization: Bearer generic-header-value".into(),
+            "--custom".into(),
+            "opaque-generic-arg".into(),
         ]),
     ));
     let run = run_turn(
@@ -1343,11 +1347,92 @@ async fn acp_mcp_credential_arguments_are_redacted_from_requests_echoes_and_stde
         run.stderr
     );
     let evidence = serde_json::to_string(&run.evidence).expect("evidence");
-    for secret in ["standalone-oauth-value", "inline-api-value"] {
+    for secret in [
+        "standalone-oauth-value",
+        "inline-api-value",
+        "generic-header-value",
+    ] {
         assert!(!evidence.contains(secret));
         assert!(!run.stderr.contains(secret));
     }
+    assert!(!evidence.contains("opaque-generic-arg"));
     assert!(evidence.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn acp_one_turn_rejects_write_adjacent_to_prompt_response() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    let marker = context.issue_workspace.join("late-written");
+    let run = run_turn(
+        &services_profile("late_after_prompt"),
+        context,
+        "finish".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome.expect("completed").succeeded(),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "post-response callback wrote into workspace"
+    );
+}
+
+#[test]
+fn acp_one_turn_cancels_callback_pending_when_prompt_response_arrives() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let root = tempfile::tempdir().expect("root");
+        let context = services_context(root.path());
+        let marker = context.issue_workspace.join("late-written");
+        let response_sent = context.issue_workspace.join("response-sent");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx.recv().expect("release filesystem worker");
+        });
+        started_rx.await.expect("filesystem worker occupied");
+        let run = tokio::spawn(async move {
+            run_turn(
+                &services_profile("pending_at_response"),
+                context,
+                "finish".into(),
+                CancellationToken::new(),
+                None,
+                services_limits(),
+            )
+            .await
+        });
+        let sent = tokio::time::timeout(Duration::from_secs(3), async {
+            while !response_sent.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocking worker");
+        sent.expect("peer sent adjacent response");
+        let run = run.await.expect("run task").expect("launch");
+        assert!(
+            run.outcome.expect("completed").succeeded(),
+            "{}",
+            run.stderr
+        );
+        assert!(!marker.exists(), "callback committed after prompt response");
+    });
 }
 
 #[tokio::test]

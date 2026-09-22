@@ -130,6 +130,8 @@ impl CallbackSender {
 
 pub(super) struct Services {
     root: PathBuf,
+    #[cfg(unix)]
+    root_directory: std::os::fd::OwnedFd,
     environment: BTreeMap<String, String>,
     policy: HostServices,
     limits: ClientLimits,
@@ -145,6 +147,11 @@ pub(super) struct Services {
     shutdown: CancellationToken,
 }
 impl Services {
+    #[cfg(unix)]
+    pub fn pin_child_cwd(&self, command: &mut Command) -> std::io::Result<()> {
+        pin_terminal_cwd(command, &self.root, &self.root_directory, &self.root)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         root: PathBuf,
@@ -156,17 +163,28 @@ impl Services {
         fatal: CancellationToken,
         cancellation: CancellationToken,
         shutdown: CancellationToken,
-    ) -> (CallbackSender, Self) {
+    ) -> Result<(CallbackSender, Self), std::io::Error> {
+        #[cfg(unix)]
+        let root_directory = rustix::fs::open(
+            &root,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
         let (tx, rx) = mpsc::channel(limits.pending_callbacks);
         let sender = CallbackSender {
             tx,
             permits: Arc::new(Semaphore::new(limits.pending_callbacks)),
             bytes: Arc::new(Semaphore::new(limits.queued_bytes)),
         };
-        (
+        Ok((
             sender,
             Self {
                 root,
+                #[cfg(unix)]
+                root_directory,
                 environment,
                 policy,
                 limits,
@@ -181,7 +199,7 @@ impl Services {
                 cancellation,
                 shutdown,
             },
-        )
+        ))
     }
 
     pub async fn run(mut self) -> bool {
@@ -362,9 +380,15 @@ impl Services {
                 let path = self.path(&request.path, true).await?;
                 // Check the complete path before creating parents; nonexistent leaves are
                 // validated against the nearest existing ancestor, including dangling links.
-                let mut stage = super::atomic_file::AtomicFile::new(&self.root, &path)
-                    .await
-                    .map_err(io_error)?;
+                #[cfg(unix)]
+                let stage = super::atomic_file::AtomicFile::new_pinned(
+                    &self.root,
+                    &path,
+                    &self.root_directory,
+                );
+                #[cfg(not(unix))]
+                let stage = super::atomic_file::AtomicFile::new(&self.root, &path);
+                let mut stage = stage.await.map_err(io_error)?;
                 stage
                     .file
                     .write_all(request.content.as_bytes())
@@ -432,7 +456,8 @@ impl Services {
                 #[cfg(not(unix))]
                 command.current_dir(&cwd);
                 #[cfg(unix)]
-                pin_terminal_cwd(&mut command, &self.root, &cwd).map_err(io_error)?;
+                pin_terminal_cwd(&mut command, &self.root, &self.root_directory, &cwd)
+                    .map_err(io_error)?;
                 #[cfg(not(windows))]
                 configure_process_group(&mut command);
                 #[cfg(not(windows))]
@@ -498,9 +523,10 @@ impl Services {
     async fn open_file(&self, path: &Path, write: bool) -> Result<tokio::fs::File, Error> {
         #[cfg(unix)]
         {
-            use rustix::fs::{FileType, Mode, OFlags, fstat, mkdirat, open, openat};
-            let mut directory = open(
-                &self.root,
+            use rustix::fs::{FileType, Mode, OFlags, fstat, mkdirat, openat};
+            let mut directory = openat(
+                &self.root_directory,
+                ".",
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
@@ -604,10 +630,15 @@ impl Services {
 }
 
 #[cfg(unix)]
-fn pin_terminal_cwd(command: &mut Command, root: &Path, cwd: &Path) -> std::io::Result<()> {
-    use rustix::fs::{Mode, OFlags, open, openat};
+fn pin_terminal_cwd(
+    command: &mut Command,
+    root: &Path,
+    root_directory: &std::os::fd::OwnedFd,
+    cwd: &Path,
+) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags, openat};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut directory = open(root, flags, Mode::empty())?;
+    let mut directory = openat(root_directory, ".", flags, Mode::empty())?;
     let relative = cwd
         .strip_prefix(root)
         .map_err(|_| std::io::ErrorKind::InvalidInput)?;
@@ -879,6 +910,79 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     #[tokio::test]
+    async fn callbacks_keep_original_workspace_after_root_path_replacement() {
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("COE-610");
+        let moved = parent.path().join("moved");
+        std::fs::create_dir(&root).expect("workspace");
+        std::fs::write(root.join("marker"), "original").expect("original marker");
+        let (_, mut service) = Services::new(
+            root.clone(),
+            BTreeMap::from([("PATH".into(), std::env::var("PATH").expect("PATH"))]),
+            HostServices {
+                read_files: true,
+                write_files: true,
+                terminals: true,
+                ..Default::default()
+            },
+            ClientLimits::default(),
+            Arc::new(Mutex::new(CallbackOutput::default())),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            CancellationToken::new(),
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
+        .expect("pinned workspace");
+        std::fs::rename(&root, &moved).expect("move original root");
+        std::fs::create_dir(&root).expect("replacement root");
+        std::fs::write(root.join("marker"), "replacement").expect("replacement marker");
+
+        let Reply::Ready(read) = service
+            .handle("fs/read_text_file", json!({"path":root.join("marker")}))
+            .await
+            .expect("read from pinned root")
+        else {
+            panic!("read reply");
+        };
+        assert_eq!(read["content"], "original");
+        service
+            .handle(
+                "fs/write_text_file",
+                json!({"path":root.join("written"),"content":"pinned"}),
+            )
+            .await
+            .expect("write to pinned root");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("written")).expect("write"),
+            "pinned"
+        );
+        assert!(!root.join("written").exists());
+
+        let Reply::Ready(created) = service
+            .handle(
+                "terminal/create",
+                json!({"command":"/bin/cat","args":["marker"]}),
+            )
+            .await
+            .expect("terminal in pinned root")
+        else {
+            panic!("terminal reply");
+        };
+        let id = created["terminalId"].as_str().expect("terminal id");
+        let mut state = service.terminals.get(id).expect("terminal").state.clone();
+        state
+            .wait_for(|state| state.exit.is_some())
+            .await
+            .expect("terminal exit");
+        assert_eq!(state.borrow().output, "original");
+        assert_eq!(
+            std::fs::read_to_string(root.join("marker")).expect("replacement"),
+            "replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn terminal_cwd_uses_pinned_directory_after_rename_and_symlink_swap() {
         let root = tempfile::tempdir().expect("root");
         let root = root.path().canonicalize().expect("canonical");
@@ -889,13 +993,23 @@ mod tests {
         std::fs::write(outside.path().join("marker"), "outside").expect("outside marker");
         let mut command = Command::new("/bin/cat");
         command.arg("marker");
-        pin_terminal_cwd(&mut command, &root, &cwd).expect("pin");
+        let root_directory = rustix::fs::open(
+            &root,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("root pin");
+        pin_terminal_cwd(&mut command, &root, &root_directory, &cwd).expect("pin");
         std::fs::rename(&cwd, root.join("moved")).expect("rename");
         std::os::unix::fs::symlink(outside.path(), &cwd).expect("swap");
         let output = command.output().await.expect("spawn");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"original");
-        assert!(pin_terminal_cwd(&mut Command::new("/bin/cat"), &root, &cwd).is_err());
+        assert!(
+            pin_terminal_cwd(&mut Command::new("/bin/cat"), &root, &root_directory, &cwd).is_err()
+        );
     }
 
     #[test]
@@ -956,7 +1070,8 @@ mod tests {
                 CancellationToken::new(),
                 cancellation.clone(),
                 CancellationToken::new(),
-            );
+            )
+            .expect("service root pinned");
             let (started, ready) = oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
             let blocking = tokio::task::spawn_blocking(move || {
@@ -1006,7 +1121,8 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
             shutdown.clone(),
-        );
+        )
+        .expect("service root pinned");
         service
             .handle(
                 "terminal/create",

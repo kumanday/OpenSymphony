@@ -171,6 +171,84 @@ async fn concurrent_sessions_busy_prompt_fence_and_cancellation_keep_other_comma
     retire(&b).await;
 }
 
+#[test]
+fn cancellation_while_submission_sync_is_blocked_never_sends_prompt() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let request = launch(root.path(), "SUBMIT", "none").await;
+        let workspace = request.workspace.workspace_path().to_path_buf();
+        let handle = host.open(request).await.expect("open");
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx
+                .recv()
+                .expect("release blocking filesystem worker");
+        });
+        started_rx.await.expect("filesystem worker occupied");
+
+        let cancellation = CancellationToken::new();
+        let pending = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                handle
+                    .prompt(
+                        "barrier-run".into(),
+                        1,
+                        "must-not-send".into(),
+                        cancellation,
+                    )
+                    .await
+            }
+        });
+        let barrier = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // Preparation remains command-responsive. A stalled inspect
+                // identifies the actor awaiting the durable filesystem write.
+                if tokio::time::timeout(Duration::from_millis(20), handle.inspect())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        cancellation.cancel();
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocking worker");
+        barrier.expect("submission reached filesystem barrier");
+        let error = pending.await.expect("prompt task").expect_err("cancelled");
+        assert!(
+            error
+                .to_string()
+                .contains("cancelled before prompt submission")
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join(".opensymphony/conversation.json")).expect("manifest"),
+        )
+        .expect("manifest JSON");
+        assert_eq!(manifest["acp"]["status"], "finished");
+        assert_eq!(manifest["acp"]["stop_reason"], "cancelled_before_prompt");
+        assert!(
+            !std::fs::read_to_string(workspace.join("methods"))
+                .expect("peer method log")
+                .contains("session/prompt"),
+            "cancelled prompt crossed the transport barrier"
+        );
+    });
+}
+
 #[tokio::test]
 async fn retention_leases_expire_and_resource_limits_refuse_active_owners() {
     let root = tempfile::tempdir().expect("temp");
@@ -682,8 +760,12 @@ async fn missing_restoration_revokes_old_callbacks_before_fresh_session_response
             let mut request = launch(root.path(), "RESET", mode).await;
             request.context.services.write_files = true;
             request.context.services.mcp_servers.push(McpServer::Stdio(
-                McpServerStdio::new("memory", "memory-server")
-                    .args(vec!["--token".into(), "retained-scope-grant".into()]),
+                McpServerStdio::new("memory", "memory-server").args(vec![
+                    "--token".into(),
+                    "retained-scope-grant".into(),
+                    "--custom".into(),
+                    "opaque-generic-arg".into(),
+                ]),
             ));
             let handle = host.open(request).await.expect("open or reset");
             assert!(
@@ -952,10 +1034,34 @@ async fn restored_sessions_receive_scoped_mcp_and_apply_returned_configuration()
             let mut launch = launch(root.path(), "RESTORE", mode).await;
             launch.profile.session.model = Some("second".into());
             launch.context.services.mcp_servers.push(McpServer::Stdio(
-                McpServerStdio::new("memory", "memory-server")
-                    .args(vec!["--token".into(), "retained-scope-grant".into()]),
+                McpServerStdio::new("memory", "memory-server").args(vec![
+                    "--token".into(),
+                    "retained-scope-grant".into(),
+                    "--custom".into(),
+                    "opaque-generic-arg".into(),
+                ]),
             ));
             let handle = host.open(launch).await.expect("open or restore");
+            let history = handle.source_history();
+            let mut scoped_requests = 0;
+            for event in &history.events {
+                if let SessionEvent::Source { frame, .. } = event
+                    && matches!(
+                        frame.payload["method"].as_str(),
+                        Some("session/new" | "session/load" | "session/resume")
+                    )
+                {
+                    scoped_requests += 1;
+                    let captured = frame.payload.to_string();
+                    assert!(!captured.contains("opaque-generic-arg"));
+                    assert!(!captured.contains("retained-scope-grant"));
+                    assert_eq!(
+                        frame.payload["params"]["mcpServers"][0]["args"],
+                        serde_json::json!(["[redacted]", "[redacted]", "[redacted]", "[redacted]"])
+                    );
+                }
+            }
+            assert!(scoped_requests > 0, "source history includes MCP setup");
             let report = prompt(&handle, &format!("attempt-{attempt}"), "hello").await;
             assert_eq!(report.configuration.options[0]["currentValue"], "second");
             if let Some(id) = &session_id {

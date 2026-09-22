@@ -21,73 +21,17 @@ pub(super) struct AtomicFile {
     _guards: Vec<File>,
 }
 impl AtomicFile {
+    #[cfg(any(not(unix), test))]
     pub async fn new(root: &Path, path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use rustix::fs::{FileType, Mode, OFlags, fchmod, fstat, mkdirat, open, openat};
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| io::ErrorKind::InvalidInput)?;
-            let destination = relative
-                .file_name()
-                .ok_or(io::ErrorKind::InvalidInput)?
-                .to_owned();
-            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let mut directory = open(root, flags, Mode::empty())?;
-            for component in relative
-                .parent()
-                .ok_or(io::ErrorKind::InvalidInput)?
-                .components()
-            {
-                if !matches!(component, std::path::Component::Normal(_)) {
-                    return Err(io::ErrorKind::InvalidInput.into());
-                }
-                match mkdirat(
-                    &directory,
-                    component.as_os_str(),
-                    Mode::from_raw_mode(0o700),
-                ) {
-                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(error) => return Err(error.into()),
-                }
-                directory = openat(&directory, component.as_os_str(), flags, Mode::empty())?;
-            }
-            // Preserve the original file's write authorization and permissions,
-            // without truncating it or following a substituted leaf symlink.
-            let permissions = match openat(
-                &directory,
-                &destination,
-                OFlags::WRONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            use rustix::fs::{Mode, OFlags, open};
+            let root_directory = open(
+                root,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
-            ) {
-                Ok(file) => {
-                    let metadata = fstat(&file)?;
-                    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
-                        return Err(io::ErrorKind::InvalidInput.into());
-                    }
-                    Some(Mode::from_raw_mode(metadata.st_mode))
-                }
-                Err(rustix::io::Errno::NOENT) => None,
-                Err(error) => return Err(error.into()),
-            };
-            let temporary =
-                std::ffi::OsString::from(format!(".opensymphony-write-{}", uuid::Uuid::new_v4()));
-            let file = openat(
-                &directory,
-                &temporary,
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
             )?;
-            let result = Self {
-                file: File::from_std(std::fs::File::from(file)),
-                directory,
-                temporary,
-                destination,
-            };
-            if let Some(permissions) = permissions {
-                fchmod(&result.file, permissions)?;
-            }
-            Ok(result)
+            Self::new_pinned(root, path, &root_directory).await
         }
         #[cfg(not(unix))]
         {
@@ -134,6 +78,78 @@ impl AtomicFile {
                 _guards: guards,
             })
         }
+    }
+
+    #[cfg(unix)]
+    pub async fn new_pinned(
+        root: &Path,
+        path: &Path,
+        root_directory: &std::os::fd::OwnedFd,
+    ) -> io::Result<Self> {
+        use rustix::fs::{FileType, Mode, OFlags, fchmod, fstat, mkdirat, openat};
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| io::ErrorKind::InvalidInput)?;
+        let destination = relative
+            .file_name()
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .to_owned();
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut directory = openat(root_directory, ".", flags, Mode::empty())?;
+        for component in relative
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .components()
+        {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            match mkdirat(
+                &directory,
+                component.as_os_str(),
+                Mode::from_raw_mode(0o700),
+            ) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
+            directory = openat(&directory, component.as_os_str(), flags, Mode::empty())?;
+        }
+        // Preserve the original file's write authorization and permissions,
+        // without truncating it or following a substituted leaf symlink.
+        let permissions = match openat(
+            &directory,
+            &destination,
+            OFlags::WRONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => {
+                let metadata = fstat(&file)?;
+                if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+                    return Err(io::ErrorKind::InvalidInput.into());
+                }
+                Some(Mode::from_raw_mode(metadata.st_mode))
+            }
+            Err(rustix::io::Errno::NOENT) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let temporary =
+            std::ffi::OsString::from(format!(".opensymphony-write-{}", uuid::Uuid::new_v4()));
+        let file = openat(
+            &directory,
+            &temporary,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )?;
+        let result = Self {
+            file: File::from_std(std::fs::File::from(file)),
+            directory,
+            temporary,
+            destination,
+        };
+        if let Some(permissions) = permissions {
+            fchmod(&result.file, permissions)?;
+        }
+        Ok(result)
     }
 
     // No await between the caller's last cancellation check and atomic replace.

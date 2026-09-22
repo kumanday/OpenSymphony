@@ -1018,9 +1018,11 @@ attachments: stdio is baseline support, while HTTP and SSE require the peer's
 advertisement. Every supplied server is required; unsupported transports fail
 before session creation. Existing memory grants can be passed as an HTTP server
 named `opensymphony-memory` with the issued Authorization header. Resolved values
-stay out of the profile. Scoped MCP credential option values in separate and
-equals-form arguments are redacted from captured requests, echoed events and
-stderr. Operator responses and extensions remain separate slices.
+stay out of the profile. Every stdio MCP argument value is structurally masked
+in captured requests; credential option values in separate and equals forms,
+including generic header values, are also redacted from echoed events and
+stderr. The peer receives the exact host-supplied attachment. Operator
+responses and extensions remain separate slices.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,

@@ -421,6 +421,14 @@ impl Capture {
             .and_then(Value::as_array_mut)
         {
             for server in servers {
+                // Stdio argv can carry opaque credentials through generic flags
+                // such as --header. Capture only the attachment shape, never its
+                // argument values; the wire request remains unchanged.
+                if let Some(args) = server.get_mut("args").and_then(Value::as_array_mut) {
+                    for arg in args {
+                        *arg = json!("[redacted]");
+                    }
+                }
                 for field in ["env", "headers"] {
                     if let Some(entries) = server.get_mut(field).and_then(Value::as_array_mut) {
                         for entry in entries {
@@ -696,19 +704,32 @@ fn validate_launch(
                 }
                 // Argument values are separate JSON strings, so generic text
                 // redaction cannot associate a token with the preceding flag.
+                let header_argument =
+                    |flag: &str| flag == "-H" || flag.eq_ignore_ascii_case("--header");
                 let sensitive_argument = |flag: &str| {
-                    runtime_field_is_sensitive(flag) || flag.eq_ignore_ascii_case("--oauth2-bearer")
+                    runtime_field_is_sensitive(flag)
+                        || flag.eq_ignore_ascii_case("--oauth2-bearer")
+                        || header_argument(flag)
                 };
                 for (index, argument) in server.args.iter().enumerate() {
-                    let secret = match argument.split_once('=') {
-                        Some((flag, value)) if sensitive_argument(flag) => Some(value),
-                        _ if index > 0 && sensitive_argument(&server.args[index - 1]) => {
-                            Some(argument.as_str())
+                    let (secret, header) = match argument.split_once('=') {
+                        Some((flag, value)) if sensitive_argument(flag) => {
+                            (Some(value), header_argument(flag))
                         }
-                        _ => None,
+                        _ if index > 0 && sensitive_argument(&server.args[index - 1]) => (
+                            Some(argument.as_str()),
+                            header_argument(&server.args[index - 1]),
+                        ),
+                        _ => (None, false),
                     };
                     if let Some(value) = secret.filter(|value| !value.is_empty()) {
                         secrets.push(value.to_owned());
+                        if header && let Some((_, header_value)) = value.split_once(':') {
+                            let header_value = header_value.trim();
+                            if !header_value.is_empty() {
+                                secrets.push(header_value.to_owned());
+                            }
+                        }
                     }
                 }
                 secrets.extend(
@@ -821,30 +842,14 @@ async fn run_connection(
     let mut command = Command::new(&profile.command);
     command
         .args(&profile.args)
-        .current_dir(&cwd)
         .env_clear()
         .envs(&environment)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(not(windows))]
-    configure_process_group(&mut command);
-    #[cfg(not(windows))]
-    let mut child = command.spawn().map_err(|e| ClientError::Launch(e.kind()))?;
-    #[cfg(windows)]
-    let mut child =
-        windows_process::WindowsChild::spawn(command).map_err(|e| ClientError::Launch(e.kind()))?;
-    #[cfg(not(windows))]
-    let process_id = child.id();
-    #[cfg(unix)]
-    let mut group_guard = crate::opensymphony_workspace::ProcessGroupGuard::new(process_id);
-    if let Some(driver) = driver.as_deref_mut() {
-        driver.launched(child.id()).await?;
-    }
-    let stdin = child.stdin.take().ok_or(ClientError::Teardown)?;
-    let stdout = child.stdout.take().ok_or(ClientError::Teardown)?;
-    let stderr = child.stderr.take().ok_or(ClientError::Teardown)?;
+    #[cfg(not(unix))]
+    command.current_dir(&cwd);
     let queued = Arc::new(Mutex::new(QueuedInput::default()));
     let callback_output = Arc::new(Mutex::new(CallbackOutput::default()));
     let resource_failure = Arc::new(AtomicBool::new(false));
@@ -864,7 +869,29 @@ async fn run_connection(
         fatal.clone(),
         initial_callback_epoch,
         service_shutdown.clone(),
-    );
+    )
+    .map_err(|_| ClientError::InvalidWorkspace)?;
+    #[cfg(unix)]
+    service_actor
+        .pin_child_cwd(&mut command)
+        .map_err(|_| ClientError::InvalidWorkspace)?;
+    #[cfg(not(windows))]
+    configure_process_group(&mut command);
+    #[cfg(not(windows))]
+    let mut child = command.spawn().map_err(|e| ClientError::Launch(e.kind()))?;
+    #[cfg(windows)]
+    let mut child =
+        windows_process::WindowsChild::spawn(command).map_err(|e| ClientError::Launch(e.kind()))?;
+    #[cfg(not(windows))]
+    let process_id = child.id();
+    #[cfg(unix)]
+    let mut group_guard = crate::opensymphony_workspace::ProcessGroupGuard::new(process_id);
+    if let Some(driver) = driver.as_deref_mut() {
+        driver.launched(child.id()).await?;
+    }
+    let stdin = child.stdin.take().ok_or(ClientError::Teardown)?;
+    let stdout = child.stdout.take().ok_or(ClientError::Teardown)?;
+    let stderr = child.stderr.take().ok_or(ClientError::Teardown)?;
     let service_run = service_actor.run();
     tokio::pin!(service_run);
     let configuration = Arc::new(Mutex::new(SessionConfiguration::default()));
@@ -1072,6 +1099,7 @@ async fn run_connection(
     let mut phase_error = None;
     let run = client
         .connect_with(Lines::new(outgoing, incoming), async |connection| {
+            let one_turn_epoch = cancellation.child_token();
             let setup = async {
                 let initialization = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(context.services.capabilities()))
@@ -1202,7 +1230,7 @@ async fn run_connection(
                     return Err(agent_client_protocol::Error::internal_error());
                 }
                 if driver.is_none()
-                    && let Err(error) = service_sender.begin_turn(cancellation.clone(), limits.setup_timeout).await {
+                    && let Err(error) = service_sender.begin_turn(one_turn_epoch.clone(), limits.setup_timeout).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
@@ -1244,7 +1272,17 @@ async fn run_connection(
             );
             // Raw SDK response decoding preserves future stop reasons; request serialization stays typed.
             let request = UntypedMessage::new("session/prompt", request)?;
-            let response = connection.send_request(request).block_task();
+            let (response_tx, response_rx) = oneshot::channel();
+            connection.send_request(request).on_receiving_result(async move |result| {
+                // Match retained prompts: revoke callbacks before the next
+                // inbound frame is dispatched, including adjacent late writes.
+                one_turn_epoch.cancel();
+                let _ = response_tx.send(result);
+                Ok(())
+            })?;
+            let response = async {
+                response_rx.await.map_err(|_| agent_client_protocol::Error::internal_error())?
+            };
             tokio::pin!(response);
             let mut cancellation_requested = false;
             let result = tokio::select! {
@@ -1269,6 +1307,10 @@ async fn run_connection(
             })?;
             let stop_reason = result.get("stopReason").and_then(Value::as_str)
                 .ok_or_else(agent_client_protocol::Error::invalid_params)?.to_owned();
+            if let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
+                phase_error = Some(error);
+                return Err(agent_client_protocol::Error::internal_error());
+            }
             Ok(TurnReport {
                 cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",
                 cancellation_requested, stop_reason, session_id: session_id.0.to_string(), initialization,
