@@ -997,7 +997,7 @@ pub async fn run_turn(
                     .inspect_err(|error| {
                         phase_error = rpc_failure("session/new", error, &capture_state, false);
                     })?;
-                if let Err(error) = session_config::apply(&connection, profile, session.session_id.0.as_ref(), &configuration).await {
+                if let Err(error) = session_config::apply(&connection, profile, session.session_id.0.as_ref(), &configuration, &capture_state).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }

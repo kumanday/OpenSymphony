@@ -298,6 +298,11 @@ impl Services {
                 let request: ReadFile =
                     serde_json::from_value(params).map_err(|_| Error::invalid_params())?;
                 let path = self.path(&request.path, false).await?;
+                #[cfg(windows)]
+                let (mut file, _path_guards) = super::windows_path::open_file(&path, false)
+                    .await
+                    .map_err(io_error)?;
+                #[cfg(not(windows))]
                 let mut file = self.open_file(&path, false).await?;
                 if !file.metadata().await.map_err(io_error)?.is_file() {
                     return Err(Error::invalid_params());
@@ -331,6 +336,11 @@ impl Services {
                 let path = self.path(&request.path, true).await?;
                 // Check the complete path before creating parents; nonexistent leaves are
                 // validated against the nearest existing ancestor, including dangling links.
+                #[cfg(windows)]
+                let (mut file, _path_guards) = super::windows_path::open_file(&path, true)
+                    .await
+                    .map_err(io_error)?;
+                #[cfg(not(windows))]
                 let mut file = self.open_file(&path, true).await?;
                 file.set_len(0).await.map_err(io_error)?;
                 file.write_all(request.content.as_bytes())
@@ -378,6 +388,10 @@ impl Services {
                 if output_limit > self.limits.terminal_output_bytes as u64 {
                     return Err(Error::invalid_params());
                 }
+                #[cfg(windows)]
+                let _cwd_guards = super::windows_path::pin_directory(&cwd, false)
+                    .await
+                    .map_err(io_error)?;
                 let mut command = Command::new(request.command);
                 command
                     .args(request.args)
@@ -449,6 +463,7 @@ impl Services {
         }
     }
 
+    #[cfg(not(windows))]
     async fn open_file(&self, path: &Path, write: bool) -> Result<tokio::fs::File, Error> {
         #[cfg(unix)]
         {
@@ -538,10 +553,6 @@ impl Services {
         let relative = path
             .strip_prefix(&self.root)
             .map_err(|_| Error::invalid_params())?;
-        #[cfg(windows)]
-        super::windows_path::validate_components(&self.root, relative, missing)
-            .await
-            .map_err(io_error)?;
         let mut current = self.root.clone();
         for part in relative.components() {
             current.push(part);

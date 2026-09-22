@@ -1451,3 +1451,89 @@ fn acp_explicit_session_profile_selections_are_bounded_and_round_trip() {
         .collect();
     assert!(profile.validate().is_err());
 }
+
+#[tokio::test]
+async fn acp_configuration_applies_model_before_dependent_options() {
+    let root = tempfile::tempdir().expect("root");
+    let mut profile = services_profile("config_dependent");
+    profile.session.model = Some("second".into());
+    profile
+        .session
+        .options
+        .insert("a-reasoning".into(), "high".into());
+    let run = run_turn(
+        &profile,
+        context(root.path()),
+        "configured".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    let report = run.outcome.expect("dependent selection applied");
+    assert!(report.succeeded(), "{}", run.stderr);
+    assert!(
+        report
+            .configuration
+            .options
+            .iter()
+            .any(|option| option["id"] == "a-reasoning" && option["currentValue"] == "high")
+    );
+}
+
+#[tokio::test]
+async fn acp_configuration_rpc_errors_preserve_classification_and_redact_context() {
+    for mode in ["config_auth_error", "config_rpc_error", "legacy_rpc_error"] {
+        let root = tempfile::tempdir().expect("root");
+        let mut profile = services_profile(mode);
+        let mut context = context(root.path());
+        context
+            .environment
+            .insert("TEST_TOKEN".into(), "rpc-secret-610".into());
+        if mode.starts_with("legacy") {
+            profile.session.mode = Some("code".into());
+        } else {
+            profile.session.model = Some("second".into());
+        }
+        let run = run_turn(
+            &profile,
+            context,
+            "unsubmitted".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect("launch");
+        let error = run.outcome.expect_err("configuration RPC failed");
+        if mode == "config_auth_error" {
+            assert_eq!(
+                error,
+                ClientError::AuthenticationRequired { submitted: false }
+            );
+        } else {
+            let ClientError::Rpc {
+                method,
+                code,
+                message,
+                submitted,
+            } = error
+            else {
+                panic!("expected contextual RPC error: {error:?}");
+            };
+            assert_eq!(
+                method,
+                if mode.starts_with("legacy") {
+                    "session/set_mode"
+                } else {
+                    "session/set_config_option"
+                }
+            );
+            assert_eq!(code, -32603);
+            assert!(!submitted);
+            assert!(message.contains("unavailable"));
+            assert!(!message.contains("rpc-secret-610"));
+        }
+    }
+}

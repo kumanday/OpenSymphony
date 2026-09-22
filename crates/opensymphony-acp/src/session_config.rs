@@ -1,5 +1,5 @@
 //! Negotiated session selections; options remain private operational metadata.
-use super::{AcpProfile, ClientError};
+use super::{AcpProfile, ClientError, SharedCapture, rpc_failure};
 use agent_client_protocol::{
     Agent, ConnectionTo, UntypedMessage,
     schema::v1::{AgentCapabilities, McpServer},
@@ -141,24 +141,43 @@ pub(super) async fn apply(
     profile: &AcpProfile,
     session: &str,
     state: &std::sync::Arc<std::sync::Mutex<SessionConfiguration>>,
+    capture: &SharedCapture,
 ) -> Result<(), ClientError> {
     let selections = state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .selections(profile)?;
-    for (id, value) in &selections {
-        if !state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .accepts(id, value)
-        {
-            return Err(unsupported("config option"));
-        }
+    let mut pending = selections.clone();
+    while !pending.is_empty() {
+        let (id, value) = {
+            let state = state.lock().unwrap_or_else(|e| e.into_inner());
+            pending
+                .iter()
+                .filter(|(id, value)| state.accepts(id, value))
+                .min_by_key(|(id, _)| {
+                    match state
+                        .options
+                        .iter()
+                        .find(|option| {
+                            option.get("id").and_then(Value::as_str) == Some(id.as_str())
+                        })
+                        .and_then(|option| option.get("category"))
+                        .and_then(Value::as_str)
+                    {
+                        Some("model") => 0,
+                        Some("mode") => 1,
+                        _ => 2,
+                    }
+                })
+                .map(|(id, value)| (id.clone(), value.clone()))
+                .ok_or_else(|| unsupported("config option"))?
+        };
+        pending.remove(&id);
         let request = UntypedMessage::new(
             "session/set_config_option",
             json!({"sessionId":session,"configId":id,"value":value}),
         )
-        .map_err(|_| unsupported("config option"))?;
+        .map_err(|error| configuration_rpc_error("session/set_config_option", &error, capture))?;
         let state = state.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         // Commit response metadata inside ordered dispatch, before adjacent updates.
@@ -176,10 +195,14 @@ pub(super) async fn apply(
                 let _ = tx.send(result);
                 Ok(())
             })
-            .map_err(|_| unsupported("config option"))?;
+            .map_err(|error| {
+                configuration_rpc_error("session/set_config_option", &error, capture)
+            })?;
         rx.await
-            .map_err(|_| unsupported("config option"))?
-            .map_err(|_| unsupported("config option"))?;
+            .map_err(|_| ClientError::Disconnected { submitted: false })?
+            .map_err(|error| {
+                configuration_rpc_error("session/set_config_option", &error, capture)
+            })?;
     }
     let legacy_mode = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -203,7 +226,7 @@ pub(super) async fn apply(
             "session/set_mode",
             json!({"sessionId":session,"modeId":mode}),
         )
-        .map_err(|_| unsupported("mode"))?;
+        .map_err(|error| configuration_rpc_error("session/set_mode", &error, capture))?;
         let state = state.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         connection
@@ -215,10 +238,10 @@ pub(super) async fn apply(
                 let _ = tx.send(result);
                 Ok(())
             })
-            .map_err(|_| unsupported("mode"))?;
+            .map_err(|error| configuration_rpc_error("session/set_mode", &error, capture))?;
         rx.await
-            .map_err(|_| unsupported("mode"))?
-            .map_err(|_| unsupported("mode"))?;
+            .map_err(|_| ClientError::Disconnected { submitted: false })?
+            .map_err(|error| configuration_rpc_error("session/set_mode", &error, capture))?;
     }
     let state = state.lock().unwrap_or_else(|e| e.into_inner());
     if state.options.is_empty()
@@ -239,4 +262,19 @@ pub(super) async fn apply(
         }
     }
     Ok(())
+}
+
+fn configuration_rpc_error(
+    method: &'static str,
+    error: &agent_client_protocol::Error,
+    capture: &SharedCapture,
+) -> ClientError {
+    if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired {
+        ClientError::AuthenticationRequired { submitted: false }
+    } else if agent_client_protocol::is_incoming_transport_closed(error) {
+        ClientError::Disconnected { submitted: false }
+    } else {
+        rpc_failure(method, error, capture, false)
+            .unwrap_or(ClientError::Protocol { submitted: false })
+    }
 }

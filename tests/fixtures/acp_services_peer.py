@@ -7,6 +7,8 @@ import time
 mode = sys.argv[1]
 session = 'services-session'
 serial = 100
+model_choice = "first"
+reasoning = "low"
 
 
 def send(value):
@@ -38,9 +40,13 @@ def request(method, params, expected_error=False):
 
 
 def config(value='first'):
-    return [{'id': 'pick', 'name': 'Model', 'category': 'model', 'type': 'select',
+    result = [{'id': 'pick', 'name': 'Model', 'category': 'model', 'type': 'select',
              'currentValue': value, 'options': [{'group': 'models', 'name': 'Models', 'options': [
                  {'value': 'first', 'name': 'First'}, {'value': 'second', 'name': 'Second'}]}]}]
+    if mode == 'config_dependent':
+        result.append({'id': 'a-reasoning', 'name': 'Reasoning', 'type': 'select', 'currentValue': reasoning,
+                       'options': [{'value': v, 'name': v} for v in (['low', 'high'] if value == 'second' else ['low'])]})
+    return result
 
 
 while True:
@@ -48,7 +54,7 @@ while True:
     method = message.get('method')
     if method == 'initialize':
         caps = message['params']['clientCapabilities']
-        enabled = mode not in ('disabled', 'config', 'unsupported_config', 'legacy_mode', 'missing_mcp', 'mcp', 'mcp_argv')
+        enabled = not mode.startswith(('config', 'legacy')) and mode not in ('disabled', 'config', 'unsupported_config', 'legacy_mode', 'missing_mcp', 'mcp', 'mcp_argv')
         assert caps.get('terminal', False) == enabled, caps
         assert caps.get('fs', {}).get('readTextFile', False) == enabled, caps
         assert caps.get('fs', {}).get('writeTextFile', False) == enabled, caps
@@ -75,20 +81,39 @@ while True:
             # not persist the original value in source evidence.
             print('standalone-oauth-value inline-api-value', file=sys.stderr, flush=True)
         result = {'sessionId': session}
-        if mode in ('config', 'unsupported_config'):
+        if mode.startswith('config') or mode == 'unsupported_config':
             result['configOptions'] = config()
-        if mode == 'legacy_mode':
+        if mode.startswith('legacy'):
             result['modes'] = {'currentModeId': 'ask', 'availableModes': [{'id': 'ask', 'name': 'Ask'}, {'id': 'code', 'name': 'Code'}]}
         respond(message, result)
     elif method == 'session/set_config_option':
-        assert mode == 'config'
-        assert message['params'] == {'sessionId': session, 'configId': 'pick', 'value': 'second'}
-        respond(message, {'configOptions': config('second')})
+        if mode in ('config_auth_error', 'config_rpc_error'):
+            send({'id': message['id'], 'error': {'code': -32000 if mode == 'config_auth_error' else -32603,
+                 'message': 'configuration unavailable rpc-secret-610'}})
+            continue
+        if mode == 'config_dependent':
+            if model_choice == 'first':
+                assert message['params'] == {'sessionId': session, 'configId': 'pick', 'value': 'second'}
+                model_choice = 'second'
+            else:
+                assert message['params'] == {'sessionId': session, 'configId': 'a-reasoning', 'value': 'high'}
+                reasoning = 'high'
+            respond(message, {'configOptions': config(model_choice)})
+        else:
+            assert mode == 'config'
+            assert message['params'] == {'sessionId': session, 'configId': 'pick', 'value': 'second'}
+            respond(message, {'configOptions': config('second')})
     elif method == 'session/set_mode':
         assert message['params'] == {'sessionId': session, 'modeId': 'code'}
-        respond(message, {})
+        if mode == 'legacy_rpc_error':
+            send({'id': message['id'], 'error': {'code': -32603, 'message': 'mode unavailable rpc-secret-610'}})
+        else:
+            respond(message, {})
     elif method == 'session/prompt':
         prompt_id = message['id']
+        assert not mode.endswith('_error')
+        if mode == 'config_dependent':
+            assert model_choice == 'second' and reasoning == 'high'
         if mode == 'mcp_argv':
             send({'method': 'session/update', 'params': {'sessionId': session, 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'standalone-oauth-value inline-api-value'}}}})
         elif mode in ('config', 'legacy_mode'):
