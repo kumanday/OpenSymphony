@@ -655,7 +655,7 @@ a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
 Native Unix tests swap a pinned terminal directory for an external symlink before
-spawning the command and verify it reads from the original directory. The sole
+spawning the command and verify it reads from the original directory. A narrow
 `unsafe_code` allowance wraps child-only `pre_exec` registration for `fchdir`;
 the repository lint is `deny`, and the closure performs no allocation, locking,
 logging or host cwd mutation. Callback tests cancel a file operation queued behind
@@ -671,8 +671,14 @@ wait deadline, and dropped futures. It also executes the shared environment
 replacement helper against a real child to verify case-insensitive alias
 precedence. The shared Windows callback path validator rejects real junctions
 for existing reads, nonexistent writes and terminal directories; pinned-handle
-tests attempt directory and leaf swaps during I/O and terminal spawn. Dependencies
-are read from the root manifest. On another host,
+tests attempt directory and leaf swaps during I/O and terminal spawn. Windows SDK
+bindings support same-directory stage promotion and deletion by
+handle. Two small audited unsafe wrappers use synchronous owned handles and
+bounded SDK-layout buffers; native tests verify successful atomic replacement,
+original preservation on cancellation and promotion errors, stage/parent rename
+exclusion, and deletion after an outstanding write handle closes. The temporary
+validation harness uses the same deny-by-default unsafe lint as the root crate.
+Dependencies are read from the root manifest. On another host,
 `--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
 installed; cross-compilation alone does not prove Windows process behavior.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also

@@ -73,6 +73,7 @@ rustix = { workspace = true, features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "=10.0.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

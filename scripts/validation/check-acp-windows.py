@@ -24,6 +24,7 @@ root = Path(__file__).resolve().parents[2]
 config = tomllib.loads((root / "Cargo.toml").read_text())
 deps = {
     "process-wrap": config["target"]["cfg(windows)"]["dependencies"]["process-wrap"],
+    "windows-sys": config["target"]["cfg(windows)"]["dependencies"]["windows-sys"],
     "tokio": config["workspace"]["dependencies"]["tokio"],
     "tempfile": config["workspace"]["dependencies"]["tempfile"],
 }
@@ -37,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="acp-windows-") as temp:
     harness = Path(temp)
     (harness / "Cargo.toml").write_text(
         '[package]\nname = "acp-windows-validation"\nversion = "0.0.0"\nedition = "2024"\n'
-        '[lib]\npath = "lib.rs"\n[lints.rust]\nunsafe_code = "forbid"\n[dependencies]\n'
+        '[lib]\npath = "lib.rs"\n[lints.rust]\nunsafe_code = "deny"\n[dependencies]\n'
         + "\n".join(f"{key} = {toml(value)}" for key, value in deps.items()) + "\n"
     )
     (harness / "lib.rs").write_text(

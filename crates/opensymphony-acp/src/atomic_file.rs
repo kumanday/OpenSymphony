@@ -1,6 +1,9 @@
 //! Cancel-safe callback writes: only a completed stage may replace the destination.
 use std::{io, path::Path};
 use tokio::fs::File;
+#[cfg(windows)]
+#[path = "windows_atomic.rs"]
+mod windows_atomic;
 
 pub(super) struct AtomicFile {
     pub file: File,
@@ -111,9 +114,14 @@ impl AtomicFile {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error),
             };
+            #[cfg(not(windows))]
             let temporary = tempfile::Builder::new()
                 .prefix(".opensymphony-write-")
                 .tempfile_in(parent)?;
+            #[cfg(windows)]
+            let temporary = tempfile::Builder::new()
+                .prefix(".opensymphony-write-")
+                .make_in(parent, windows_atomic::create_stage)?;
             if let Some(permissions) = permissions {
                 temporary.as_file().set_permissions(permissions)?;
             }
@@ -140,10 +148,23 @@ impl AtomicFile {
             )?;
             self.temporary.clear();
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Close staging data handles before Windows promotion. Parent
-            // guards remain owned by self until the atomic rename finishes.
+            let temporary = self.temporary.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
+            windows_atomic::replace_in_same_directory(
+                temporary.as_file(),
+                self.destination
+                    .file_name()
+                    .ok_or(io::ErrorKind::InvalidInput)?,
+            )?;
+            // The original name no longer refers to our stage. Do not attempt
+            // path cleanup, which could remove another file created there.
+            temporary.disable_cleanup(true);
+            self.temporary.take();
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            // Other platforms use the tempfile crate's atomic promotion.
             drop(self.file);
             self.temporary
                 .take()
@@ -153,6 +174,18 @@ impl AtomicFile {
                 .map_err(|error| error.error)?;
         }
         Ok(())
+    }
+}
+#[cfg(windows)]
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        if let Some(temporary) = self.temporary.as_mut() {
+            // Cancellation may leave a Tokio blocking write holding a cloned
+            // handle. Deletion by handle completes when its last handle closes.
+            if windows_atomic::delete_on_close(temporary.as_file()).is_ok() {
+                temporary.disable_cleanup(true);
+            }
+        }
     }
 }
 #[cfg(unix)]
@@ -224,6 +257,61 @@ mod tests {
         );
         drop(stage);
         assert_eq!(std::fs::read(&path).expect("unchanged"), b"original");
+        assert_eq!(std::fs::read_dir(&root).expect("entries").count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_promotion_pins_stage_and_parent_and_preserves_original_on_error() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical");
+        let inside = root.join("inside");
+        std::fs::create_dir(&inside).expect("directory");
+        let path = inside.join("file");
+        std::fs::write(&path, "original").expect("original");
+        let mut stage = AtomicFile::new(&root, &path).await.expect("stage");
+        let temporary = stage.temporary.as_ref().expect("stage").path();
+        assert!(std::fs::rename(temporary, root.join("escaped-stage")).is_err());
+        assert!(std::fs::rename(&inside, root.join("moved")).is_err());
+        stage.file.write_all(b"complete").await.expect("write");
+        stage.file.flush().await.expect("flush");
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions.clone()).expect("readonly");
+        assert!(stage.commit().is_err(), "readonly destination must survive");
+        assert_eq!(std::fs::read(&path).expect("original"), b"original");
+        assert_eq!(std::fs::read_dir(&inside).expect("entries").count(), 1);
+        assert!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .readonly()
+        );
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).expect("restore for cleanup");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_cancel_defers_stage_deletion_until_outstanding_write_handle_closes() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical");
+        let path = root.join("file");
+        std::fs::write(&path, "original").expect("original");
+        let stage = AtomicFile::new(&root, &path).await.expect("stage");
+        // Tokio's blocking write owns a clone of this file object after its
+        // future is cancelled. Keep the same ownership alive deterministically.
+        let mut inflight = stage
+            .temporary
+            .as_ref()
+            .expect("stage")
+            .as_file()
+            .try_clone()
+            .expect("in-flight handle");
+        drop(stage);
+        std::io::Write::write_all(&mut inflight, b"late staged output").expect("late write");
+        drop(inflight);
+        assert_eq!(std::fs::read(&path).expect("original"), b"original");
         assert_eq!(std::fs::read_dir(&root).expect("entries").count(), 1);
     }
 

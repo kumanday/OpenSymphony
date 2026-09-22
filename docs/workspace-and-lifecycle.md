@@ -968,8 +968,11 @@ handles, and holds those guards through file I/O or terminal spawn. Writes creat
 parent directories only after containment validation. File writes stage in the
 same directory and atomically replace the destination after a complete flush;
 cancellation or I/O failure removes the stage and preserves the original file.
-Unix replacement remains relative to the pinned parent descriptor; Windows keeps
-parent handles pinned through replacement. Terminal cwd defaults to
+Unix replacement remains relative to the pinned parent descriptor. Windows uses
+a same-directory NT rename on the owned stage handle, with parent and stage
+handles denying write/delete sharing through promotion. Cancellation marks the
+stage for deletion by handle, including when a blocking write still owns a
+clone. Terminal cwd defaults to
 the same workspace; alternate directories must remain inside it. Terminal env
 entries may only repeat existing host-owned values, protecting executable lookup
 and scoped grants from callback overrides.
