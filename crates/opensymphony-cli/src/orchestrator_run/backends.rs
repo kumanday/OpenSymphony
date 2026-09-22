@@ -5865,6 +5865,7 @@ impl RuntimeWorkerBackend {
                             target_commit: checkout.target_commit.clone(),
                             instruction: checkout.instruction.clone(),
                             harness: route.harness_kind.clone(),
+                            acp_session: None,
                             model_profile: route
                                 .model_profile
                                 .clone()

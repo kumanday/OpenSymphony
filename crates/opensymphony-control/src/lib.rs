@@ -1,3 +1,5 @@
+mod acp;
+
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use crate::opensymphony_domain::SnapshotEnvelope;
@@ -91,11 +93,25 @@ impl SnapshotStore {
 #[derive(Debug, Clone)]
 pub struct ControlPlaneServer {
     store: SnapshotStore,
+    acp_router: Option<Router>,
 }
 
 impl ControlPlaneServer {
     pub fn new(store: SnapshotStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            acp_router: None,
+        }
+    }
+
+    /// Add private ACP observation commands/events. The host supplies a separate bearer.
+    pub fn with_acp_host(
+        mut self,
+        host: crate::opensymphony_acp::SessionHost,
+        bearer: String,
+    ) -> Result<Self, &'static str> {
+        self.acp_router = Some(acp::router(host, bearer)?);
+        Ok(self)
     }
 
     pub fn router(&self) -> Router {
@@ -105,6 +121,7 @@ impl ControlPlaneServer {
             .route("/api/v1/control/events", get(events))
             .route("/api/v1/events", get(events))
             .with_state(self.store.clone())
+            .merge(self.acp_router.clone().unwrap_or_default())
     }
 
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {

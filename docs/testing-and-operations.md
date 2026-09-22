@@ -657,6 +657,16 @@ Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes als
 require bundled-mode validation. Vendor interoperability evidence belongs to the
 later live-qualification task and must not be inferred from fake-peer tests.
 
+`cargo test-system-duckdb --test acp_session_host` exercises the retained owner
+with executable subprocesses: repeated attempts, concurrent issues, live leases,
+idle expiry, cancellation/busy fencing, negotiated load/replay and resume, fresh
+nonpersistent reset, durable uncertain-submission refusal and stale generations.
+The peer verifies that the submitted marker is already on disk when a prompt
+arrives. `cargo test-system-duckdb --lib opensymphony_acp::durable::tests` covers
+owner locks, process-group loss, the launch checkpoint gap, compatibility bounds,
+identity mismatches and legacy manifests. Workspace and control-plane regression
+targets remain required for changes to persistence or the host observation seam.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

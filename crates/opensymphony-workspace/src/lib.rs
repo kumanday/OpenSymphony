@@ -15,6 +15,7 @@ pub use manager::{
     compose_terminal_prompt,
 };
 pub use models::{
+    AcpProcessState, AcpRecovery, AcpSessionIdentity, AcpSessionState, AcpSessionStatus,
     CheckoutManifest, CheckoutRepository, CleanupConfig, CleanupDecision, CleanupIntent,
     CleanupOutcome, CleanupRequest, CleanupTarget, CleanupTerminalOutcome, CleanupTombstone,
     ConversationManifest, EnsureWorkspaceResult, HookConfig, HookDefinition, HookExecutionRecord,
