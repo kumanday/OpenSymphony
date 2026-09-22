@@ -128,7 +128,12 @@ claim agent authentication or session negotiation succeeded. Run details expose
 `harness_capability` only after negotiation, including the selected profile,
 load/resume and history replay support. These DTOs are shared by Rust and
 TypeScript. They contain no commands, arguments, resolved credentials or source
-protocol payloads. Missing usage stays absent and load replay is not charged.
+protocol payloads. Runtime activity carries context occupancy and optional usage
+reported with prompt responses separately, with summaries for structural updates
+such as plans. Response observations retain reported counters without inferring
+delta accumulation into native aggregate totals. Missing counters stay absent
+and duplicate or load-replayed observations are suppressed. Numeric usage counters retain their meaning through source redaction;
+credential fields remain redacted.
 
 Operator responses, writer transfer and IDE presentation follow the
 [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission

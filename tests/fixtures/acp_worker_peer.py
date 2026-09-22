@@ -27,6 +27,8 @@ for line in sys.stdin:
         with open("acp-worker.json", "w") as output:
             json.dump({"cwd": os.getcwd(), "profile": profile, "prompt": message["params"]["prompt"][0]["text"], "memory_project": os.environ.get("OPENSYMPHONY_MEMORY_PROJECT"), "memory_repo": os.environ.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO"), "checkout_secret_present": "OPENSYMPHONY_CHECKOUT_TEST_ONLY" in os.environ, "memory_token_present": bool(os.environ.get("OPENSYMPHONY_MEMORY_TOKEN"))}, output)
         send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ACP fixture completed"}}}})
+        send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "plan", "entries": []}}})
+        send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "usage_update", "used": 42, "size": 100}}})
         with open("acp-prompts.jsonl", "a") as output:
             output.write(json.dumps({"profile": profile, "prompt": message["params"]["prompt"][0]["text"]}) + "\n")
         if profile == "corrupt":
@@ -42,7 +44,7 @@ for line in sys.stdin:
         if profile == "hang":
             pending = message["id"]
             continue
-        send({"id": message["id"], "result": {"stopReason": "end_turn"}})
+        send({"id": message["id"], "result": {"stopReason": "end_turn", "usage": {"inputTokens": 4, "outputTokens": 2, "totalTokens": 6}}})
     elif method is None and message.get("id") == "permission":
         assert message["result"]["outcome"]["outcome"] == "cancelled"
         send({"id": pending, "result": {"stopReason": "cancelled"}})

@@ -36,6 +36,7 @@ pub(super) fn conversation_view(raw: &str) -> Result<IssueConversationManifest, 
             value["last_attached_at"] = created;
         }
         value["transport_target"] = serde_json::json!(KIND);
+        value["server_base_url"] = serde_json::Value::Null;
         value["last_execution_status"] = value["acp"]["status"].clone();
         value["workflow_prompt_seeded"] = serde_json::json!(
             value

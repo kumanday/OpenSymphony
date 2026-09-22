@@ -669,10 +669,12 @@ targets remain required for changes to persistence or the host observation seam.
 
 `cargo test-system-duckdb --test run run_dispatches_acp` exercises the actual CLI
 against a fake tracker and ACP executable with an unreachable OpenHands endpoint.
-It verifies exact cwd, workspace hooks, persisted profile routing and public
-capabilities. `cargo test-system-duckdb --lib acp_worker_` covers continuation,
-profile switching, persisted recovery, permission waiting, safe setup retry,
-interrupt/abort and uncertain crash cleanup. Use `tests/fixtures/acp_worker_peer.py`
+It verifies exact cwd, workspace hooks, scoped memory, persisted profile routing,
+public capabilities and distinct plan/context/turn usage activity with absent
+counters preserved. `cargo test-system-duckdb --lib acp` covers continuation,
+profile switching and dry runs, persisted recovery, permission waiting, safe
+setup retry, ten concurrent workers, interrupt/abort, unreadable submission
+evidence and known-finished versus uncertain owner-loss cleanup. Use `tests/fixtures/acp_worker_peer.py`
 for production worker fixtures. Gateway/schema tests include a shared Rust and
 TypeScript capability fixture; native OpenHands and Codex regression suites remain
 required. Unset ambient `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` for fake

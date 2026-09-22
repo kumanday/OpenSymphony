@@ -47,6 +47,8 @@ async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .is_some_and(|run| run["status"] == "succeeded")
+            && std::fs::read_to_string(workspace.join("hooks"))
+                .is_ok_and(|hooks| hooks.contains("after_run\n"))
         {
             break;
         }
@@ -93,13 +95,43 @@ async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
     )
     .expect("json");
     assert_eq!(route["harness_profile"], "first");
-    let snapshot: Value = reqwest::get(format!("http://{bind}/api/v1/snapshot"))
-        .await
-        .expect("snapshot")
-        .json()
-        .await
-        .expect("json");
+    let snapshot = loop {
+        let snapshot: Value = reqwest::get(format!("http://{bind}/api/v1/snapshot"))
+            .await
+            .expect("snapshot")
+            .json()
+            .await
+            .expect("json");
+        if snapshot["snapshot"]["issues"][0]["recent_events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["kind"] == "acp.turn_usage"))
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ACP usage did not reach public snapshot: {snapshot}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    };
+    let events = snapshot["snapshot"]["issues"][0]["recent_events"]
+        .as_array()
+        .expect("events");
+    let usage = events
+        .iter()
+        .find(|event| event["kind"] == "acp.turn_usage")
+        .expect("turn usage");
+    assert_eq!(usage["payload"]["inputTokens"], 4);
+    assert!(usage["payload"].get("cachedReadTokens").is_none());
+    assert!(events.iter().any(|event| event["kind"] == "acp.plan"));
+    let context_usage = events
+        .iter()
+        .find(|event| event["kind"] == "acp.usage_update")
+        .expect("context usage");
+    assert_eq!(context_usage["payload"]["used"], 42);
+    assert!(context_usage["payload"].get("inputTokens").is_none());
     assert!(snapshot.to_string().contains("acp"));
+    assert!(snapshot["snapshot"]["issues"][0]["server_base_url"].is_null());
     assert_eq!(
         snapshot["snapshot"]["agent_server"]["status_line"],
         "not_selected"

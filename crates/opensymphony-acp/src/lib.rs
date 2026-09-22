@@ -375,11 +375,32 @@ impl Capture {
             _ => {}
         }
     }
+    fn redact_frame(&self, payload: &mut Value, diagnostic: bool) {
+        // These numeric counters are protocol usage, not credential tokens.
+        // The exception is limited to a recognized prompt response shape;
+        // arbitrary token-named fields and configuration still use full redaction.
+        let usage = projection::reported_turn_usage(payload);
+        self.redact(payload, diagnostic);
+        if let Some(usage) = usage
+            && let Some(target) = payload
+                .pointer_mut("/result/usage")
+                .and_then(Value::as_object_mut)
+        {
+            for (name, value) in usage {
+                if !self.secrets.contains_secret(&name)
+                    && !self.secrets.contains_secret(&value.to_string())
+                {
+                    target.insert(name, value);
+                }
+            }
+        }
+    }
+
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
         if let Some(publisher) = &self.publisher {
             let mut source = payload.clone();
-            self.redact(&mut source, false);
+            self.redact_frame(&mut source, false);
             publisher.publish(SourceFrame {
                 sequence: self.sequence,
                 direction: direction.into(),
@@ -391,7 +412,7 @@ impl Capture {
             self.truncated = true;
             return;
         }
-        self.redact(&mut payload, true);
+        self.redact_frame(&mut payload, true);
         self.retain_frame(SourceFrame {
             sequence: self.sequence,
             direction: direction.into(),
@@ -1216,6 +1237,35 @@ mod tests {
                 ..limits
             }
         ));
+    }
+
+    #[test]
+    fn usage_counters_survive_frame_redaction_without_exempting_credentials() {
+        let capture = Capture {
+            frames: Vec::new(),
+            sequence: 0,
+            truncated: false,
+            max: 10,
+            bytes: 0,
+            max_bytes: 1024,
+            publisher: None,
+            secrets: SecretRedactor::new(vec!["987654".into()]).expect("matcher"),
+        };
+        for diagnostic in [false, true] {
+            let mut response = json!({"id": 1, "result": {"stopReason": "end_turn", "usage": {
+                "inputTokens": 4, "outputTokens": 2, "thoughtTokens": 987654,
+                "cachedReadTokens": "credential", "apiToken": "secret"
+            }}});
+            capture.redact_frame(&mut response, diagnostic);
+            assert_eq!(response["result"]["usage"]["inputTokens"], 4);
+            assert_eq!(response["result"]["usage"]["outputTokens"], 2);
+            for key in ["thoughtTokens", "cachedReadTokens", "apiToken"] {
+                assert_eq!(response["result"]["usage"][key], "[redacted]");
+            }
+            let mut unrelated = json!({"method": "_vendor/private", "params": {"inputTokens": 4}});
+            capture.redact_frame(&mut unrelated, diagnostic);
+            assert_eq!(unrelated["params"]["inputTokens"], "[redacted]");
+        }
     }
 
     #[test]

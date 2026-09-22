@@ -15,6 +15,34 @@ pub struct RuntimeUpdate {
     pub payload: Value,
 }
 
+pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<String, Value>> {
+    if payload.get("method").is_some()
+        || !matches!(
+            payload.pointer("/result/stopReason")?.as_str()?,
+            "end_turn" | "max_tokens" | "max_turn_requests" | "cancelled" | "refusal"
+        )
+    {
+        return None;
+    }
+    let usage = payload.pointer("/result/usage")?.as_object()?;
+    let reported = usage
+        .iter()
+        .filter(|(name, value)| {
+            matches!(
+                name.as_str(),
+                "totalTokens"
+                    | "inputTokens"
+                    | "outputTokens"
+                    | "thoughtTokens"
+                    | "cachedReadTokens"
+                    | "cachedWriteTokens"
+            ) && value.is_u64()
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    (!reported.is_empty()).then_some(reported)
+}
+
 #[derive(Default)]
 pub struct RuntimeProjection {
     last: Option<(u64, u64)>,
@@ -58,33 +86,16 @@ impl RuntimeProjection {
                 .is_some_and(|id| frame.payload.get("id") == Some(id))
         {
             self.prompt_request = None;
-            // Optional end-turn usage is an SDK extension. Preserve only reported
-            // counters, separately from context occupancy and session totals.
-            let usage = frame.payload.pointer("/result/usage")?.as_object()?;
-            let payload = usage
-                .iter()
-                .filter(|(name, value)| {
-                    matches!(
-                        name.as_str(),
-                        "totalTokens"
-                            | "inputTokens"
-                            | "outputTokens"
-                            | "thoughtTokens"
-                            | "cachedReadTokens"
-                            | "cachedWriteTokens"
-                    ) && value.is_u64()
-                })
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect::<serde_json::Map<_, _>>();
-            if payload.is_empty() {
-                return None;
-            }
+            // Optional end-turn usage is an SDK extension. Preserve reported
+            // response counters separately from context occupancy; do not infer
+            // delta accumulation from the peer's response observation.
+            let payload = reported_turn_usage(&frame.payload)?;
             return Some(RuntimeUpdate {
                 sequence: frame.sequence,
                 generation: *generation,
                 observed_at: frame.observed_at,
                 kind: "turn_usage".into(),
-                summary: None,
+                summary: Some("ACP turn usage reported".into()),
                 payload: Value::Object(payload),
             });
         }
@@ -151,6 +162,25 @@ impl RuntimeProjection {
             | "config_option_update" => None,
             _ => return None,
         };
+        // Activity storage requires a summary; structural updates must remain
+        // visible even when the peer sends no text or title.
+        let summary = summary.or_else(|| {
+            Some(
+                match kind.as_str() {
+                    "agent_message_chunk" => "ACP agent message",
+                    "agent_thought_chunk" => "ACP agent reasoning",
+                    "user_message_chunk" => "ACP user message",
+                    "tool_call" | "tool_call_update" => "ACP tool updated",
+                    "plan" => "ACP plan updated",
+                    "usage_update" => "ACP context usage updated",
+                    "available_commands_update" => "ACP commands updated",
+                    "current_mode_update" => "ACP mode updated",
+                    "config_option_update" => "ACP configuration updated",
+                    _ => unreachable!("known projection kind"),
+                }
+                .into(),
+            )
+        });
         // usage_update describes context occupancy/cost, not input/output token deltas.
         // Keep its optional fields intact instead of charging invented token counters.
         Some(RuntimeUpdate {
