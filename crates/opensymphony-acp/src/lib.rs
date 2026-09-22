@@ -15,7 +15,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Client, Dispatch, Lines, UntypedMessage,
+    Client, Dispatch, Lines, RawJsonRpcMessage, UntypedMessage,
     schema::{
         ProtocolVersion,
         v1::{
@@ -33,7 +33,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, BufReader},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tokio_util::{
     codec::{FramedRead, FramedWrite, LinesCodec},
@@ -72,6 +72,10 @@ pub struct ClientLimits {
     pub queued_frames: usize,
     /// Cumulative wire bytes awaiting SDK dispatch, independently of frame count.
     pub queued_bytes: usize,
+    /// Callback responses awaiting completed stdin writes, including SDK-internal queues.
+    pub callback_frames: usize,
+    /// Cumulative encoded callback response bytes, including LF delimiters.
+    pub callback_bytes: usize,
     pub evidence_frames: usize,
     /// Cumulative serialized bytes of retained, redacted SourceFrame values.
     pub evidence_bytes: usize,
@@ -88,6 +92,8 @@ impl Default for ClientLimits {
             frame_bytes: 1024 * 1024,
             queued_frames: 128,
             queued_bytes: 4 * 1024 * 1024,
+            callback_frames: 128,
+            callback_bytes: 4 * 1024 * 1024,
             evidence_frames: 256,
             evidence_bytes: 1024 * 1024,
             stderr_bytes: 16 * 1024,
@@ -203,6 +209,41 @@ pub struct RunResult {
     pub process_reaped: bool,
     /// Signalling a departed process group can fail independently of reaping its child.
     pub process_tree_signal_error: Option<io::ErrorKind>,
+}
+
+/// Reservations precede SDK enqueue and survive every internal queue until stdin flush.
+/// Retaining the SDK's exact encoding also rejects unreserved SDK-generated responses.
+#[derive(Default)]
+struct CallbackOutput {
+    frames: VecDeque<String>,
+    bytes: usize,
+}
+
+impl CallbackOutput {
+    fn admit(&mut self, frame: String, limits: &ClientLimits) -> bool {
+        let bytes = frame.len() + 1; // LinesCodec adds LF.
+        if frame.len() > limits.frame_bytes
+            || self.frames.len() >= limits.callback_frames
+            || bytes > limits.callback_bytes.saturating_sub(self.bytes)
+        {
+            return false;
+        }
+        self.bytes += bytes;
+        self.frames.push_back(frame);
+        true
+    }
+
+    fn matches_front(&self, frame: &str) -> bool {
+        self.frames
+            .front()
+            .is_some_and(|expected| expected == frame)
+    }
+
+    fn flushed(&mut self) {
+        if let Some(frame) = self.frames.pop_front() {
+            self.bytes -= frame.len() + 1;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -407,6 +448,8 @@ fn validate_launch(
     if !(256..=16 * 1024 * 1024).contains(&limits.frame_bytes)
         || !(1..=4096).contains(&limits.queued_frames)
         || !(256..=64 * 1024 * 1024).contains(&limits.queued_bytes)
+        || !(1..=4096).contains(&limits.callback_frames)
+        || !(256..=64 * 1024 * 1024).contains(&limits.callback_bytes)
         || limits.evidence_frames > 4096
         || limits.evidence_bytes > 16 * 1024 * 1024
         || limits.stderr_bytes > 1024 * 1024
@@ -579,6 +622,7 @@ pub async fn run_turn(
     let stdout = child.stdout.take().ok_or(ClientError::Teardown)?;
     let stderr = child.stderr.take().ok_or(ClientError::Teardown)?;
     let queued = Arc::new(Mutex::new(QueuedInput::default()));
+    let callback_output = Arc::new(Mutex::new(CallbackOutput::default()));
     let resource_failure = Arc::new(AtomicBool::new(false));
     let submitted = Arc::new(AtomicBool::new(false));
     let fatal = CancellationToken::new();
@@ -610,34 +654,56 @@ pub async fn run_turn(
         }
     });
     let output = FramedWrite::new(stdin, LinesCodec::new_with_max_length(limits.frame_bytes));
-    let outgoing = <_ as SinkExt<String>>::sink_map_err(output, |_| io_failure()).with({
+    // The SDK awaits SinkExt::send for each frame. Keep the reservation until that
+    // send flushes the framed writer; preprocessing or start_send is too early.
+    let outgoing = futures_util::sink::unfold(output, {
+        let callback_output = callback_output.clone();
         let capture_state = capture_state.clone();
         let resource_failure = resource_failure.clone();
         let submitted = submitted.clone();
-        move |line: String| {
-            let result = if line.len() > limits.frame_bytes {
-                resource_failure.store(true, Ordering::Release);
-                Err(io_failure())
-            } else {
-                serde_json::from_str::<Value>(&line)
-                    .map(|value| {
-                        // The complete serialized envelope passed the local size gate.
-                        // Any subsequent transport failure can leave remote execution uncertain.
-                        if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
-                            submitted.store(true, Ordering::Release);
-                        }
-                        capture(&capture_state, "outgoing", value);
-                        line
-                    })
-                    .map_err(|_| io_failure())
-            };
-            std::future::ready(result)
+        move |mut output, line: String| {
+            let callback_output = callback_output.clone();
+            let capture_state = capture_state.clone();
+            let resource_failure = resource_failure.clone();
+            let submitted = submitted.clone();
+            async move {
+                if line.len() > limits.frame_bytes {
+                    resource_failure.store(true, Ordering::Release);
+                    return Err(io_failure());
+                }
+                let value: Value = serde_json::from_str(&line).map_err(|_| io_failure())?;
+                let is_response = value.get("method").is_none();
+                if is_response
+                    && !callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .matches_front(&line)
+                {
+                    // Invalid incoming RPC envelopes can provoke SDK-generated errors.
+                    // They must not bypass callback admission or release another charge.
+                    return Err(io_failure());
+                }
+                if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
+                    submitted.store(true, Ordering::Release);
+                }
+                capture(&capture_state, "outgoing", value);
+                output.send(line).await.map_err(|_| io_failure())?;
+                if is_response {
+                    callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .flushed();
+                }
+                Ok(output)
+            }
         }
     });
     let active_session = Arc::new(Mutex::new(None::<String>));
     let client = Client.builder().on_receive_dispatch(
         {
             let active_session = active_session.clone();
+            let callback_output = callback_output.clone();
+            let limits = limits.clone();
             let resource_failure = resource_failure.clone();
             let fatal = fatal.clone();
             let redactor = capture_state.clone();
@@ -648,29 +714,43 @@ pub async fn run_turn(
                     .dispatched();
                 match message {
                     Dispatch::Request(request, responder) => {
-                        if request.method == "session/request_permission" {
-                            let request: RequestPermissionRequest =
-                                serde_json::from_value(request.params)
-                                    .map_err(|_| agent_client_protocol::Error::invalid_params())?;
-                            if active_session
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .as_deref()
-                                != Some(request.session_id.0.as_ref())
+                        let response = if request.method == "session/request_permission" {
+                            match serde_json::from_value::<RequestPermissionRequest>(request.params)
                             {
-                                return responder.respond_with_error(
-                                    agent_client_protocol::Error::invalid_params(),
-                                );
+                                Ok(request)
+                                    if active_session
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .as_deref()
+                                        == Some(request.session_id.0.as_ref()) =>
+                                {
+                                    // No operator policy is advertised in this slice.
+                                    serde_json::to_value(RequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Cancelled,
+                                    ))
+                                    .map_err(agent_client_protocol::Error::from)
+                                }
+                                _ => Err(agent_client_protocol::Error::invalid_params()),
                             }
-                            // No operator policy is advertised in this slice. Cancel promptly and never grant access.
-                            responder.respond(serde_json::to_value(
-                                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-                            )?)
                         } else {
-                            responder.respond_with_error(
-                                    agent_client_protocol::Error::method_not_found(),
-                                )
+                            Err(agent_client_protocol::Error::method_not_found())
+                        };
+                        let frame = serde_json::to_string(&RawJsonRpcMessage::response(
+                            responder.id().clone(),
+                            response.clone(),
+                        ))?;
+                        if !callback_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .admit(frame, &limits)
+                        {
+                            resource_failure.store(true, Ordering::Release);
+                            fatal.cancel();
+                            // Individual-request responders send nothing on drop. Batches
+                            // are rejected at ingress, so saturation cannot enqueue a reply.
+                            return Err(agent_client_protocol::Error::internal_error());
                         }
+                        responder.respond_with_result(response)
                     }
                     Dispatch::Notification(notification) => {
                         if notification.method == "session/update" {
@@ -761,10 +841,24 @@ pub async fn run_turn(
                         phase_error = rpc_failure("authenticate", error, &capture_state, false);
                     })?;
                 }
-                let session = connection.send_request(NewSessionRequest::new(cwd)).block_task().await.inspect_err(|error| {
+                let (session_tx, session_rx) = oneshot::channel();
+                let active_session = active_session.clone();
+                // Register before yielding. The ordered callback binds ownership before
+                // the SDK releases any adjacent session/update or permission request.
+                connection.send_request(NewSessionRequest::new(cwd))
+                    .on_receiving_result(async move |result| {
+                        if let Ok(session) = &result {
+                            *active_session.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(session.session_id.0.to_string());
+                        }
+                        let _ = session_tx.send(result);
+                        Ok(())
+                    })?;
+                let session = session_rx.await
+                    .map_err(|_| agent_client_protocol::Error::internal_error())?
+                    .inspect_err(|error| {
                         phase_error = rpc_failure("session/new", error, &capture_state, false);
                     })?;
-                *active_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.session_id.0.to_string());
                 Ok((initialization, session.session_id))
             };
             let setup_result = tokio::select! {
@@ -976,6 +1070,53 @@ mod tests {
         assert!(!queue.admit(9, 4, 8));
         assert!(queue.admit(1, 1, 8));
         assert!(!queue.admit(1, 1, 8));
+    }
+
+    #[test]
+    fn callback_output_budget_counts_encoded_frames_until_flush() {
+        let frame = serde_json::to_string(&RawJsonRpcMessage::response(
+            serde_json::from_value(json!("\"\\".repeat(128))).expect("id"),
+            Err(agent_client_protocol::Error::method_not_found()),
+        ))
+        .expect("response frame");
+        for budget in [
+            frame.len(),
+            frame.len() + 1,
+            2 * (frame.len() + 1) - 1,
+            2 * (frame.len() + 1),
+        ] {
+            let limits = ClientLimits {
+                callback_bytes: budget,
+                ..ClientLimits::default()
+            };
+            let mut output = CallbackOutput::default();
+            let expected = budget / (frame.len() + 1);
+            assert_eq!(output.admit(frame.clone(), &limits), expected >= 1);
+            assert_eq!(output.admit(frame.clone(), &limits), expected >= 2);
+            assert_eq!(output.bytes, expected * (frame.len() + 1));
+            assert!(!output.matches_front("unreserved response"));
+            if expected > 0 {
+                assert!(output.matches_front(&frame));
+                output.flushed();
+                assert!(output.admit(frame.clone(), &limits));
+            }
+        }
+        let mut output = CallbackOutput::default();
+        let limits = ClientLimits {
+            callback_frames: 1,
+            ..ClientLimits::default()
+        };
+        assert!(output.admit(frame.clone(), &limits));
+        assert!(!output.admit(frame.clone(), &limits));
+        output.flushed();
+        assert_eq!(output.bytes, 0);
+        assert!(!output.admit(
+            frame.clone(),
+            &ClientLimits {
+                frame_bytes: frame.len() - 1,
+                ..limits
+            }
+        ));
     }
 
     #[test]

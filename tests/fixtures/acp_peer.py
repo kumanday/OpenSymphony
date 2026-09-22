@@ -56,10 +56,35 @@ for line in sys.stdin:
             assert os.environ["AUTH_SOURCE"] == os.environ["TEST_AUTH"]
         else:
             assert "AUTH_SOURCE" not in os.environ
-        respond(message, {"sessionId": session})
+        if mode == "adjacent_session_update":
+            frames = [
+                {"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": session}},
+                {"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": session, "update": {"sessionUpdate": "current_mode_update", "currentModeId": "code"}}},
+            ]
+            sys.stdout.write("".join(json.dumps(frame) + "\n" for frame in frames))
+            sys.stdout.flush()
+        else:
+            respond(message, {"sessionId": session})
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
         prompt_id = message["id"]
+        if mode == "adjacent_session_update":
+            respond(message, {"stopReason": "end_turn"})
+            continue
+        if mode.startswith("blocked_callbacks_"):
+            # Stop reading stdin while sending legal, paced requests. Each ID is
+            # much larger on the wire than in memory because it requires escaping.
+            for index in range(1000):
+                payload = {"id": str(index) + '\"\\' * 8192, "method": "_unknown/request", "params": {}}
+                if mode.endswith("permission"):
+                    payload["method"] = "session/request_permission"
+                    payload["params"] = {"sessionId": session, "toolCall": {"toolCallId": "tool"}, "options": []}
+                if mode.endswith("invalid"):
+                    payload["method"] = "session/request_permission"
+                send(payload)
+                time.sleep(0.001)
+            time.sleep(60)
         if mode == "prompt_auth_required":
             update("started")
             send({"id": prompt_id, "error": {"code": -32000, "message": "Token expired"}})

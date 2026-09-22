@@ -894,7 +894,8 @@ issue checkout inside a temporary workspace root. These subprocess tests establi
 the client contract; real vendor qualification remains OSYM-906.
 
 The default limits are 1 MiB per frame, 128 queued incoming frames with a
-cumulative 4 MiB wire-byte budget, 256 retained source frames with a cumulative
+cumulative 4 MiB wire-byte budget, 128 outstanding callback responses with an
+independent 4 MiB encoded-byte budget, 256 retained source frames with a cumulative
 1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, 300 seconds
 for a prompt, 10 seconds for cancellation acknowledgement, and one 5-second
 deadline for process termination and reaping. Windows launches enter a kill-on-close Job Object before
@@ -904,7 +905,13 @@ may pass validated `ClientLimits`. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Incoming queue
 charges are released when each frame reaches SDK dispatch. Its byte budget is
 independent of frame count, ranges from 256 bytes to 64 MiB, and rejects a single
-frame that exceeds it even when the per-frame limit is larger. Evidence capture
+frame that exceeds it even when the per-frame limit is larger. Callback output
+reserves count and encoded bytes (including LF) before SDK enqueue and releases
+these only after stdin writes flush. Its count ranges from 1 to 4,096 and its byte
+budget from 256 bytes to 64 MiB. Saturation fails promptly with ResourceLimit and
+reaps the child, including when the peer stops reading stdin. Session creation
+binds the new session ID in an ordered SDK response callback before subsequent
+updates or permission requests are dispatched. Evidence capture
 marks truncation when either the frame count or byte budget is exhausted. The byte
 budget includes redacted payloads and source metadata, can be configured up to
 16 MiB, and can be zero to disable retention. Frames that exceed the remaining

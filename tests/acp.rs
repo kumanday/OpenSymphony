@@ -107,6 +107,95 @@ async fn acp_process_completes_ordered_callbacks_and_redacts_evidence() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acp_binds_new_session_before_adjacent_update_dispatch() {
+    for _ in 0..12 {
+        let root = tempfile::tempdir().expect("temp");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let run = run_turn(
+            &profile("adjacent_session_update"),
+            context(root.path()),
+            "hello".into(),
+            CancellationToken::new(),
+            Some(tx),
+            limits(),
+        )
+        .await
+        .expect("launch");
+        assert!(run.outcome.expect("ordered session binding").succeeded());
+        assert!(run.process_reaped);
+        let update = rx.recv().await.expect("adjacent update delivered");
+        assert_eq!(update.session_id, "opaque/session:zero");
+        assert_eq!(update.update["sessionUpdate"], "current_mode_update");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_bounds_callback_output_before_sdk_enqueue_when_stdin_is_blocked() {
+    for mode in [
+        "blocked_callbacks_unknown",
+        "blocked_callbacks_permission",
+        "blocked_callbacks_invalid",
+    ] {
+        for (callback_frames, callback_bytes) in [(3, 1024 * 1024), (4096, 64 * 1024)] {
+            let root = tempfile::tempdir().expect("temp");
+            let run = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_turn(
+                    &profile(mode),
+                    context(root.path()),
+                    "hello".into(),
+                    CancellationToken::new(),
+                    None,
+                    ClientLimits {
+                        callback_frames,
+                        callback_bytes,
+                        // The entire fixture fits ingress; only callback egress can saturate.
+                        queued_frames: 4096,
+                        queued_bytes: 64 * 1024 * 1024,
+                        evidence_frames: 0,
+                        ..limits()
+                    },
+                ),
+            )
+            .await
+            .expect("saturation never blocks dispatch")
+            .expect("launch");
+            assert_eq!(
+                run.outcome.expect_err("output must saturate"),
+                ClientError::ResourceLimit { submitted: true },
+                "{mode}: {callback_frames}/{callback_bytes}"
+            );
+            assert!(run.process_reaped);
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_releases_callback_budget_after_transport_flush() {
+    let root = tempfile::tempdir().expect("temp");
+    let run = run_turn(
+        &profile("paced_queue"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            callback_frames: 1,
+            callback_bytes: 256,
+            ..limits()
+        },
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome
+            .expect("sixteen callbacks reuse one reservation")
+            .succeeded()
+    );
+    assert!(run.process_reaped);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_cancel_waits_for_prompt_response_and_keeps_tokio_responsive() {
     for (mode, acknowledged) in [("cancel", true), ("ignore_cancel", false)] {
         let root = tempfile::tempdir().expect("temp");
@@ -255,7 +344,7 @@ async fn acp_bounds_update_delivery_stderr_and_evidence() {
 #[tokio::test]
 async fn acp_invalid_launch_inputs_fail_before_execution() {
     let root = tempfile::tempdir().expect("temp");
-    for case in 0..7 {
+    for case in 0..11 {
         let mut config = profile("complete");
         let mut launch = context(root.path());
         let mut bound = limits();
@@ -282,7 +371,11 @@ async fn acp_invalid_launch_inputs_fail_before_execution() {
             }
             4 => config.args.push("--token=secret".into()),
             5 => bound.evidence_bytes = 16 * 1024 * 1024 + 1,
-            _ => bound.queued_bytes = 64 * 1024 * 1024 + 1,
+            6 => bound.queued_bytes = 64 * 1024 * 1024 + 1,
+            7 => bound.callback_frames = 0,
+            8 => bound.callback_frames = 4097,
+            9 => bound.callback_bytes = 255,
+            _ => bound.callback_bytes = 64 * 1024 * 1024 + 1,
         }
         assert!(
             run_turn(

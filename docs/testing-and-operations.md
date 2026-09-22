@@ -640,7 +640,11 @@ process tree. Regressions cover cancellation in every setup phase, pre-cancelled
 launches, JSON-escaped prompt overflow, missing update payloads, preservation of
 whitespace and long code chunks, ACP profile migration, environment alias
 scoping, post-submission authentication errors, and opaque-ID debug redaction. Current-thread Tokio
-tests check callback/cancellation responsiveness.
+tests check callback/cancellation responsiveness, bind a new session before an
+adjacent response/update pair is dispatched, and saturate callback output while
+a peer stops reading stdin. Count and encoded-byte budgets cover successful,
+unknown and invalid permission callbacks; sequential round trips verify that
+completed transport writes release reservations.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,
