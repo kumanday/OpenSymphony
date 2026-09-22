@@ -132,6 +132,20 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'file-privacy':
+            content = callback('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
+            assert content == 'opaque_workspace_payload_610'
+            callback('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'private-copy'), 'content': content})
+        if text == 'late-callbacks':
+            import time
+            terminal = callback('terminal/create', {'command': sys.executable, 'args': ['-c', "import os,time; open('normal-child.pid','w').write(str(os.getpid())); time.sleep(60)"]})['terminalId']
+            while not os.path.exists('normal-child.pid'):
+                time.sleep(0.01)
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            callback('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'late-write'), 'content': 'idle mutation'}, error=True)
+            callback('terminal/create', {'command': sys.executable, 'args': ['-c', "open('late-process','w').write('idle process')"]}, error=True)
+            open('late-rejected', 'w').close()
+            continue
         if text.startswith('config-'):
             assert (model, session_mode, verbosity) == ('second', 'execute', 'loud')
             if text != 'config-assert':

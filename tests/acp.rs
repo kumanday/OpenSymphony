@@ -1575,6 +1575,12 @@ async fn acp_mcp_urls_reject_embedded_credentials_before_launch() {
         "https://user:password@example.com/mcp",
         "https://example.com/mcp?access_token=url-secret",
         "https://example.com/mcp?api%5fkey=url-secret",
+        "https://example.com/mcp?oauth=url-secret",
+        "https://example.com/mcp?bearer=url-secret",
+        "https://example.com/mcp?key=url-secret",
+        "https://example.com/mcp?signature=url-secret",
+        "https://example.com/mcp?ordinary=query-value",
+        "https://example.com/mcp?",
         "https://example.com/mcp#url-secret",
     ] {
         for sse in [false, true] {
@@ -1598,6 +1604,86 @@ async fn acp_mcp_urls_reject_embedded_credentials_before_launch() {
             assert!(matches!(error, ClientError::InvalidConfiguration(_)));
             assert!(!error.to_string().contains("url-secret"));
         }
+    }
+}
+
+#[tokio::test]
+async fn acp_filesystem_payloads_stay_on_wire_and_out_of_evidence() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    std::fs::write(
+        context.issue_workspace.join("private-file"),
+        "opaque_workspace_payload_610",
+    )
+    .expect("private file");
+    let run = run_turn(
+        &services_profile("file_privacy"),
+        context,
+        "files".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome
+            .expect("peer received original content")
+            .succeeded()
+    );
+    let evidence = serde_json::to_string(&run.evidence).expect("evidence");
+    assert!(!evidence.contains("opaque_workspace_payload_610"));
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["result"]["content"] == "[redacted]")
+    );
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["method"] == "fs/write_text_file"
+                && frame.payload["params"]["content"] == "[redacted]")
+    );
+}
+
+#[tokio::test]
+async fn acp_mcp_aliases_cannot_forward_resolved_excluded_checkout_values() {
+    use agent_client_protocol::schema::v1::{
+        EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    };
+    for server in [
+        McpServer::Stdio(McpServerStdio::new("memory", "memory-server").env(vec![
+            EnvVariable::new("ACCESS_TOKEN", "checkout-secret-value"),
+        ])),
+        McpServer::Stdio(
+            McpServerStdio::new("memory", "memory-server")
+                .args(vec!["--token=checkout-secret-value".into()]),
+        ),
+        McpServer::Http(
+            McpServerHttp::new("memory", "https://example.test/mcp").headers(vec![
+                HttpHeader::new("Authorization", "Bearer checkout-secret-value"),
+            ]),
+        ),
+        McpServer::Sse(
+            McpServerSse::new("memory", "https://example.test/mcp")
+                .headers(vec![HttpHeader::new("X-Grant", "checkout-secret-value")]),
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("root");
+        let mut context = context(root.path());
+        context.services.mcp_servers.push(server);
+        let error = run_turn(
+            &services_profile("mcp"),
+            context,
+            "unused".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect_err("excluded value rejected before launch");
+        assert!(matches!(error, ClientError::InvalidConfiguration(_)));
+        assert!(!error.to_string().contains("checkout-secret-value"));
     }
 }
 

@@ -1032,9 +1032,12 @@ ACP callback text is bounded by both its facility limit and the complete encoded
 response budget, including JSON escaping and the request ID. A file response that
 does not fit returns a callback parameter error; terminal output retains a UTF-8
 tail and reports truncation. Scoped HTTP/SSE MCP endpoints must use HTTP or HTTPS
-without URL userinfo, fragments or credential query fields; pass resolved grants
-in headers. Model and mode categories are resolved from each refreshed option
-list so prerequisite selections can reveal dependent options.
+without URL userinfo, fragments or query strings; pass resolved grants in headers.
+MCP attachments cannot include resolved excluded checkout credentials, including
+values aliased under another environment name, header or argument. Filesystem
+callback contents remain intact on the wire and are structurally redacted from
+source history and evidence. Model and mode categories are resolved from each
+refreshed option list so prerequisite selections can reveal dependent options.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

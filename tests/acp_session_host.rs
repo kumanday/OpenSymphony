@@ -749,6 +749,33 @@ async fn retained_preparation_reapplies_explicit_choices_and_rejects_removed_cho
     {
         assert_eq!(option["currentValue"], expected);
     }
+    let history = handle.source_history();
+    let configured_ids = history
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::Source { run_id, frame, .. }
+                if frame.payload["method"] == "session/set_config_option"
+                    && run_id == "configured" =>
+            {
+                Some(frame.payload["id"].to_string())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        configured_ids.len(),
+        3,
+        "model/mode/option preparation belongs to pending run"
+    );
+    for event in &history.events {
+        if let SessionEvent::Source { run_id, frame, .. } = event
+            && frame.direction == "incoming"
+            && configured_ids.contains(&frame.payload["id"].to_string())
+        {
+            assert_eq!(run_id, "configured", "configuration response attribution");
+        }
+    }
     prompt(&handle, "remove", "config-remove").await;
     assert!(
         handle
@@ -807,6 +834,7 @@ async fn retained_configuration_preparation_remains_cancellable_and_deadline_bou
                 .expect("preparation started");
                 let state = handle.inspect().await.expect("owner stays responsive");
                 assert_eq!(state.state.status, AcpSessionStatus::Finished);
+                assert!(handle.source_history().events.iter().any(|event| matches!(event, SessionEvent::Source {run_id, frame, ..} if run_id == "must-not-submit" && frame.payload["method"] == "session/set_config_option")), "preparation attribution does not depend on later submission");
                 if cancel {
                     cancellation.cancel();
                 }
@@ -1013,5 +1041,82 @@ async fn ordinary_mcp_environment_does_not_poison_launch_or_retained_source_valu
             .expect("source")
             .contains("retained-env-secret")
     );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn retained_source_redacts_file_payloads_without_changing_callback_wire_content() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "PRIVATE", "services").await;
+    request.context.services.read_files = true;
+    request.context.services.write_files = true;
+    std::fs::write(
+        request.workspace.workspace_path().join("private-file"),
+        "opaque_workspace_payload_610",
+    )
+    .expect("private file");
+    let handle = host.open(request).await.expect("open");
+    assert!(prompt(&handle, "private", "file-privacy").await.succeeded());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("PRIVATE/private-copy"))
+            .expect("peer received and wrote original"),
+        "opaque_workspace_payload_610"
+    );
+    let history = handle.source_history();
+    assert!(
+        !serde_json::to_string(&history.events)
+            .expect("history")
+            .contains("opaque_workspace_payload_610")
+    );
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["result"]["content"] == "[redacted]")));
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["method"] == "fs/write_text_file" && frame.payload["params"]["content"] == "[redacted]")));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn normal_retained_completion_reaps_callbacks_and_rejects_adjacent_idle_work() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "LATE", "services").await;
+    request.context.services = HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..Default::default()
+    };
+    let handle = host.open(request).await.expect("open");
+    let report = prompt(&handle, "normal", "late-callbacks").await;
+    assert!(report.succeeded());
+    assert!(
+        !report.cancellation_requested,
+        "callback closure is separate from prompt cancellation"
+    );
+    #[cfg(unix)]
+    {
+        let pid: i32 = std::fs::read_to_string(root.path().join("LATE/normal-child.pid"))
+            .expect("child")
+            .parse()
+            .expect("PID");
+        assert_eq!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).expect("PID")),
+            Err(rustix::io::Errno::SRCH),
+            "child must be reaped before completion reply"
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("LATE/late-rejected").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("adjacent idle callbacks rejected");
+    assert!(!root.path().join("LATE/late-write").exists());
+    assert!(!root.path().join("LATE/late-process").exists());
+    assert_eq!(
+        handle.inspect().await.expect("idle owner").state.status,
+        AcpSessionStatus::Finished
+    );
+    assert!(prompt(&handle, "next", "services-next").await.succeeded());
     retire(&handle).await;
 }

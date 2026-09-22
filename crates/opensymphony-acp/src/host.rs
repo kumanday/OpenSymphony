@@ -663,6 +663,7 @@ struct PreparingPrompt {
     prompt: String,
     cancellation: CancellationToken,
     forced: CancellationToken,
+    callback_epoch: CancellationToken,
     reply: oneshot::Sender<Result<TurnReport, HostError>>,
 }
 
@@ -825,9 +826,8 @@ impl SessionDriver {
                         let _ = pending.reply.send(Err(HostError::Persistence));
                         return Err(ClientError::Setup("submission checkpoint failed".into()));
                     }
-                    self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = pending.run_id;
                     active = Some(ActivePrompt {
-                        result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone())),
+                        result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
                         reply: pending.reply, cancellation: pending.forced,
                     });
                     self.publish(true);
@@ -860,14 +860,18 @@ impl SessionDriver {
                             if prompt.len() > limits.frame_bytes / 6 || run_id.is_empty() || run_id.len() > 1024 { let _ = reply.send(Err(HostError::ResourceLimit)); continue; }
                             if cancellation.is_cancelled() { let _ = reply.send(Err(HostError::Client(ClientError::CancelledBeforePrompt.to_string()))); continue; }
                             let forced = cancellation.child_token();
+                            let callback_epoch = forced.child_token();
                             let sender = services.clone();
-                            let epoch = forced.clone();
+                            let epoch = callback_epoch.clone();
                             let timeout = limits.setup_timeout;
                             let connection = connection.clone();
                             let profile = profile.clone();
                             let session_id = session_id.clone();
                             let configuration = configuration.clone();
                             let capture = capture.clone();
+                            // Preparation frames belong to this accepted run even if setup
+                            // fails before any durable prompt submission occurs.
+                            self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = run_id.clone();
                             preparing = Some(PreparingPrompt {
                                 result: Box::pin(async move {
                                     tokio::select! {
@@ -879,7 +883,7 @@ impl SessionDriver {
                                         }) => result.map_err(|_| ClientError::SetupTimeout)?,
                                     }
                                 }),
-                                run_id, attempt, prompt, cancellation, forced, reply,
+                                run_id, attempt, prompt, cancellation, forced, callback_epoch, reply,
                             });
                             self.publish(true);
                         }
@@ -943,6 +947,8 @@ async fn prompt_rpc(
     capture: SharedCapture,
     limits: ClientLimits,
     configuration: Arc<Mutex<super::SessionConfiguration>>,
+    callback_epoch: CancellationToken,
+    services: super::services::CallbackSender,
 ) -> Result<TurnReport, ClientError> {
     let request = UntypedMessage::new(
         "session/prompt",
@@ -952,7 +958,22 @@ async fn prompt_rpc(
         ),
     )
     .map_err(|_| ClientError::Protocol { submitted: false })?;
-    let response = connection.send_request(request).block_task();
+    let (response_tx, response_rx) = oneshot::channel();
+    connection
+        .send_request(request)
+        .on_receiving_result(async move |result| {
+            // Revoke callback authority in ordered response dispatch, before an
+            // adjacent late callback can run. This does not cancel the prompt token.
+            callback_epoch.cancel();
+            let _ = response_tx.send(result);
+            Ok(())
+        })
+        .map_err(|_| ClientError::Protocol { submitted: true })?;
+    let response = async {
+        response_rx
+            .await
+            .map_err(|_| agent_client_protocol::Error::internal_error())?
+    };
     tokio::pin!(response);
     let mut cancellation_requested = false;
     let result = tokio::select! {
@@ -983,6 +1004,7 @@ async fn prompt_rpc(
     {
         return Err(ClientError::Protocol { submitted: true });
     }
+    services.end_turn(limits.setup_timeout).await?;
     Ok(TurnReport {
         cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",
         cancellation_requested,

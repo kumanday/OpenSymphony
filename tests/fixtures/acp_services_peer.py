@@ -130,6 +130,10 @@ while True:
         elif mode == 'disabled':
             assert request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'file')}, True)['code'] == -32601
             assert request('terminal/create', {'command': sys.executable}, True)['code'] == -32601
+        elif mode == 'file_privacy':
+            content = request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
+            assert content == 'opaque_workspace_payload_610'
+            request('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'private-copy'), 'content': content})
         elif mode == 'response_budget':
             request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'escaped')}, True)
             assert request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'small')})['content'] == 'ok'

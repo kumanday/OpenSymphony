@@ -984,11 +984,17 @@ owned terminal trees and interrupts in-flight callback waits; connection teardow
 cleanup. SDK dispatch continues while terminal wait requests are pending.
 A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh
-cancellation token before the durable submission marker. The owner keeps handling
+cancellation token before the durable submission marker. Initial idle readiness
+has no active callback epoch. A prompt response closes its callback epoch inside
+ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
+finishes before the owner publishes `Finished` or returns the turn report. The
+owner keeps handling
 observation and shutdown commands while preparation waits; cancellation, timeout
 or cleanup failure ends the connection before the new prompt. The same bounded,
 cancellable preparation reapplies explicit model, mode and option choices after
-agent configuration updates, before recording durable submission. Missing-context
+agent configuration updates, before recording durable submission. Preparation
+frames carry the accepted run identity, including when preparation fails before
+submission. Missing-context
 restoration clears the callback binding inside ordered response dispatch and
 retires accepted restoration work before creating a fresh session.
 `HostServices` is captured at connection creation and has no attachment mutation

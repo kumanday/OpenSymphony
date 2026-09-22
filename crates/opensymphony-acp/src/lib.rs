@@ -238,12 +238,21 @@ pub struct RunResult {
 /// Retaining the SDK's exact encoding also rejects unreserved SDK-generated responses.
 #[derive(Default)]
 struct CallbackOutput {
-    frames: VecDeque<String>,
+    frames: VecDeque<(String, bool)>,
     bytes: usize,
 }
 
 impl CallbackOutput {
     fn admit(&mut self, frame: String, limits: &ClientLimits) -> bool {
+        self.admit_with_file_payload(frame, limits, false)
+    }
+
+    fn admit_with_file_payload(
+        &mut self,
+        frame: String,
+        limits: &ClientLimits,
+        file_payload: bool,
+    ) -> bool {
         let bytes = frame.len() + 1; // LinesCodec adds LF.
         if frame.len() > limits.frame_bytes
             || self.frames.len() >= limits.callback_frames
@@ -252,18 +261,18 @@ impl CallbackOutput {
             return false;
         }
         self.bytes += bytes;
-        self.frames.push_back(frame);
+        self.frames.push_back((frame, file_payload));
         true
     }
 
     fn matches_front(&self, frame: &str) -> bool {
         self.frames
             .front()
-            .is_some_and(|expected| expected == frame)
+            .is_some_and(|(expected, _)| expected == frame)
     }
 
     fn flushed(&mut self) {
-        if let Some(frame) = self.frames.pop_front() {
+        if let Some((frame, _)) = self.frames.pop_front() {
             self.bytes -= frame.len() + 1;
         }
     }
@@ -326,6 +335,17 @@ impl SecretRedactor {
 
     fn contains_secret(&self, text: &str) -> bool {
         self.matcher.is_match(text)
+    }
+
+    fn contains_in_json(&self, value: &Value) -> bool {
+        match value {
+            Value::String(value) => self.contains_secret(value),
+            Value::Array(values) => values.iter().any(|value| self.contains_in_json(value)),
+            Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| self.contains_secret(key) || self.contains_in_json(value)),
+            _ => false,
+        }
     }
 
     fn redact(&self, text: &str) -> String {
@@ -391,6 +411,11 @@ impl Capture {
     }
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
+        if payload.get("method").and_then(Value::as_str) == Some("fs/write_text_file")
+            && let Some(content) = payload.pointer_mut("/params/content")
+        {
+            *content = json!("[redacted]");
+        }
         if let Some(servers) = payload
             .pointer_mut("/params/mcpServers")
             .and_then(Value::as_array_mut)
@@ -616,8 +641,24 @@ fn validate_launch(
             "scoped MCP configuration exceeds limits".into(),
         ));
     }
+    let excluded_values = SecretRedactor::new(
+        context
+            .environment
+            .iter()
+            .filter(|(name, value)| excluded(name) && !value.is_empty())
+            .map(|(_, value)| value.clone())
+            .collect(),
+    )?;
     for server in &context.services.mcp_servers {
         use agent_client_protocol::schema::v1::McpServer;
+        if excluded_values.contains_in_json(
+            &serde_json::to_value(server)
+                .map_err(|_| ClientError::InvalidConfiguration("invalid MCP attachment".into()))?,
+        ) {
+            return Err(ClientError::InvalidConfiguration(
+                "MCP attachments cannot expose excluded checkout credentials".into(),
+            ));
+        }
         match server {
             McpServer::Http(server) => {
                 validate_mcp_url(&server.url)?;
@@ -719,9 +760,7 @@ fn validate_mcp_url(value: &str) -> Result<(), ClientError> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || url
-            .query_pairs()
-            .any(|(key, _)| runtime_field_is_sensitive(&key))
+        || url.query().is_some()
     {
         return Err(invalid());
     }
@@ -872,17 +911,22 @@ async fn run_connection(
                     resource_failure.store(true, Ordering::Release);
                     return Err(io_failure());
                 }
-                let value: Value = serde_json::from_str(&line).map_err(|_| io_failure())?;
+                let mut value: Value = serde_json::from_str(&line).map_err(|_| io_failure())?;
                 let is_response = value.get("method").is_none();
-                if is_response
-                    && !callback_output
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .matches_front(&line)
-                {
-                    // Invalid incoming RPC envelopes can provoke SDK-generated errors.
-                    // They must not bypass callback admission or release another charge.
-                    return Err(io_failure());
+                if is_response {
+                    let output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                    if !output.matches_front(&line) {
+                        // Unreserved SDK errors cannot bypass callback admission.
+                        return Err(io_failure());
+                    }
+                    if output
+                        .frames
+                        .front()
+                        .is_some_and(|(_, file_payload)| *file_payload)
+                        && let Some(content) = value.pointer_mut("/result/content")
+                    {
+                        *content = json!("[redacted]");
+                    }
                 }
                 if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
                     submitted.store(true, Ordering::Release);
@@ -1158,6 +1202,11 @@ async fn run_connection(
                 }
                 if driver.is_none()
                     && let Err(error) = service_sender.begin_turn(cancellation.clone(), limits.setup_timeout).await {
+                    phase_error = Some(error);
+                    return Err(agent_client_protocol::Error::internal_error());
+                }
+                if driver.is_some()
+                    && let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }

@@ -694,7 +694,12 @@ idle expiry, cancellation/busy fencing, negotiated load/replay and resume, fresh
 nonpersistent reset, durable uncertain-submission refusal and stale generations.
 Callback integration covers cancellation followed by a fresh turn on the same
 process, stale terminal rejection, live configuration and secret-safe host-policy/
-MCP grant compatibility checks.
+MCP grant compatibility checks. Normal-completion tests send adjacent late file
+and terminal callbacks, verify rejection while idle and process reaping before
+completion, then start a fresh callback epoch. File-payload tests verify exact
+wire contents with structural redaction in both retained history and evidence.
+Configuration tests check preparation-frame attribution on success, cancellation
+and timeout; MCP tests reject query strings and aliased excluded credentials.
 The peer verifies that the submitted marker is already on disk when a prompt
 arrives. `cargo test-system-duckdb --lib opensymphony_acp::durable::tests` covers
 owner locks, process-group loss, the launch checkpoint gap, compatibility bounds,

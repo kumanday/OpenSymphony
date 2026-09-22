@@ -54,6 +54,7 @@ pub(super) struct Callback {
 enum ServiceCommand {
     Callback(Box<Callback>),
     BeginTurn(CancellationToken, oneshot::Sender<Result<(), Error>>),
+    EndTurn(oneshot::Sender<Result<(), Error>>),
 }
 #[derive(Clone)]
 pub(super) struct CallbackSender {
@@ -62,6 +63,18 @@ pub(super) struct CallbackSender {
     bytes: Arc<Semaphore>,
 }
 impl CallbackSender {
+    /// Quiesce callbacks without installing another active epoch.
+    pub async fn end_turn(&self, timeout: Duration) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .try_send(ServiceCommand::EndTurn(tx))
+            .map_err(|_| ClientError::Teardown)?;
+        tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| ClientError::Teardown)?
+            .map_err(|_| ClientError::Teardown)?
+            .map_err(|_| ClientError::Teardown)
+    }
     /// Retire the previous callback epoch before a retained owner submits another prompt.
     pub async fn begin_turn(
         &self,
@@ -188,6 +201,12 @@ impl Services {
                             let _ = reply.send(result);
                             continue;
                         }
+                        Some(ServiceCommand::EndTurn(reply)) => {
+                            let result = self.retire_turn().await;
+                            if result.is_err() { self.fatal.cancel(); }
+                            let _ = reply.send(result);
+                            continue;
+                        }
                     };
                     let shutdown = self.shutdown.clone();
                     let result = tokio::select! {
@@ -221,7 +240,7 @@ impl Services {
                         // Reservation and SDK enqueue are one critical section: asynchronous
                         // waits may finish together, but the writer must see matching FIFO order.
                         let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
-                        if frame.is_ok_and(|frame| output.admit(frame, &limits)) {
+                        if frame.is_ok_and(|frame| output.admit_with_file_payload(frame, &limits, request.method == "fs/read_text_file")) {
                             if request.responder.respond_with_result(result).is_err() { fatal.cancel(); }
                         } else {
                             resource_failure.store(true, std::sync::atomic::Ordering::Release);
