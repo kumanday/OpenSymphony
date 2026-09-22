@@ -298,8 +298,18 @@ pub(super) async fn run_issue(
             && let Ok(view) = conversation_view(&raw)
         {
             if let Some(sender) = launch.take() {
+                let mut metadata = conversation_metadata_from_manifest(&view);
+                if let Ok(manifest) = serde_json::from_str::<
+                    crate::opensymphony_workspace::ConversationManifest,
+                >(&raw)
+                    && let Some(state) = manifest.acp
+                    && state.initialization["protocolVersion"].as_u64() == Some(1)
+                {
+                    metadata.harness_capability =
+                        Some(Box::new(crate::opensymphony_acp::run_capability(&state)));
+                }
                 let _ = sender.send(LaunchReport::Conversation {
-                    conversation: Box::new(conversation_metadata_from_manifest(&view)),
+                    conversation: Box::new(metadata),
                     started_at: manifest.started_at.map(datetime_to_timestamp_ms),
                 });
             }

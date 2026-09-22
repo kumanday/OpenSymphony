@@ -157,7 +157,7 @@ impl AcpConfig {
         &self,
         harness: &str,
         profile: Option<&str>,
-        model_override: bool,
+        openhands_model_profile: bool,
     ) -> Result<(), WorkflowConfigError> {
         self.validate_profiles()?;
         match (harness, profile) {
@@ -174,9 +174,9 @@ impl AcpConfig {
             }
             _ => {}
         }
-        if harness == "acp" && model_override {
+        if harness == "acp" && openhands_model_profile {
             return Err(invalid(
-                "ACP model overrides require session configuration support, which is not implemented",
+                "routing.model_profile is not supported for ACP; select an ACP session model with routing.model",
             ));
         }
         Ok(())
@@ -188,7 +188,7 @@ impl AcpConfig {
         self.validate_selection(
             &routing.harness,
             routing.harness_profile.as_deref(),
-            routing.model.is_some() || routing.model_profile.is_some(),
+            routing.model_profile.is_some(),
         )
     }
 }

@@ -129,7 +129,9 @@ because no issue cwd is available during preflight. It does not
 claim agent authentication or session negotiation succeeded. Run details expose
 `harness_capability` only after negotiation, including the selected profile,
 load/resume and history replay support. These DTOs are shared by Rust and
-TypeScript. They contain no commands, arguments, resolved credentials or source
+TypeScript. Recovery projects the persisted negotiation without launching a peer
+or replaying a completed prompt. They contain no commands, arguments, resolved
+credentials or source
 protocol payloads. Runtime activity carries context occupancy and optional usage
 reported with prompt responses separately, with summaries for structural updates
 such as plans. Response observations retain reported counters without inferring

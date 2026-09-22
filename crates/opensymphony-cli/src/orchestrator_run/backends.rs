@@ -17253,10 +17253,16 @@ exit 64
             .write_run_manifest(&handle, &prior)
             .await
             .expect("persist");
-        backend
+        let recovered = backend
             .recover_worker(acp_test_request(&root, "first", 3))
             .await
             .expect("recovery");
+        let capability = recovered
+            .conversation
+            .harness_capability
+            .expect("durable capability");
+        assert_eq!(capability.profile_id, "second");
+        assert!(capability.session_restore);
         assert_eq!(
             acp_test_finished(&mut backend).await.outcome,
             WorkerOutcomeKind::Succeeded

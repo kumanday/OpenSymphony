@@ -994,8 +994,10 @@ references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-The current prompt API sends text. ACP model overrides are rejected until the
-session configuration implementation is available. Filesystem, terminal, MCP,
+The current prompt API sends text. `routing.model` and its configured environment
+override resolve as ACP model IDs, validated against the agent's advertised
+session configuration before prompting. OpenHands `routing.model_profile` values
+are rejected for ACP. Filesystem, terminal, MCP,
 extension, and operator permission policies are follow-on slices.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,

@@ -428,6 +428,30 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         resolved.config.routing.harness_profile.as_deref(),
         Some("fake")
     );
+    let selected_model = WorkflowDefinition::parse(&source.replace(
+        "harness_profile: fake",
+        "harness_profile: fake\n  model: workflow-model",
+    ))
+    .expect("model selection");
+    assert_eq!(
+        selected_model
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow model")
+            .config
+            .routing
+            .model
+            .as_deref(),
+        Some("workflow-model")
+    );
+    let mut model_environment = env.clone();
+    model_environment.insert("OPENSYMPHONY_MODEL".into(), "environment-model".into());
+    let model = selected_model
+        .resolve(Path::new("/repo"), &model_environment)
+        .expect("environment model")
+        .config
+        .routing;
+    assert_eq!(model.model.as_deref(), Some("environment-model"));
+    assert!(model.model_from_env);
     for harness in ["acp", "openhands_agent_server", "codex_app_server"] {
         let mut overrides = env.clone();
         overrides.insert("OPENSYMPHONY_HARNESS".into(), harness.into());
@@ -460,7 +484,7 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         ("harness: acp", "harness: openhands_agent_server"),
         (
             "harness_profile: fake",
-            "harness_profile: fake\n  model: some-model",
+            "harness_profile: fake\n  model_profile: openhands-profile",
         ),
     ] {
         let workflow =
