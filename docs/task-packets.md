@@ -39,6 +39,7 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-565: Implement isolated workspace materialization
+- COE-608: ACP Profiles And Executable Protocol Client
 
 ## Source refs
 
@@ -48,5 +49,6 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 - COE-556
 - COE-563
 - COE-565
+- COE-608
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

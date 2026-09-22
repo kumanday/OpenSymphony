@@ -12,6 +12,7 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 ## Current model
 
 - COE-556 contributed: PR #239: COE-556: Add bottom-up subtree cleanup and recovery (merge `bc471f8`)
+- COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
 
 ## Important invariants
 
@@ -29,9 +30,11 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 ## Recent changes
 
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
+- COE-608: ACP Profiles And Executable Protocol Client
 
 ## Source refs
 
 - COE-556
+- COE-608
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
