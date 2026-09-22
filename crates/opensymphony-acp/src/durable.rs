@@ -54,13 +54,54 @@ pub(super) struct Durability {
     _owner_lock: File,
 }
 
+impl Drop for Durability {
+    fn drop(&mut self) {
+        // Release explicitly: a concurrent fork can temporarily inherit an open
+        // descriptor before exec closes it, delaying close-only flock release.
+        let _ = self._owner_lock.unlock();
+    }
+}
+
 impl Durability {
+    pub(super) fn process_is_absent(&self) -> bool {
+        #[cfg(unix)]
+        {
+            verify_prior_process(self.state().process).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows owner-death recovery relies on closing the JobObject;
+            // that assumption does not prove a live owner's failed stop.
+            self.state().process == AcpProcessState::Stopped
+        }
+    }
+
     /// Zero generation is the trusted host's request to claim the latest record.
     /// A nonzero generation requires an exact match before reserving its successor.
     pub(super) async fn open(
         manager: WorkspaceManager,
         workspace: WorkspaceHandle,
         identity: AcpSessionIdentity,
+    ) -> Result<Self, DurabilityError> {
+        Self::claim(manager, workspace, identity, true).await
+    }
+
+    pub(super) async fn retire_persisted(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+    ) -> Result<(), DurabilityError> {
+        // The claim verifies both the exclusive owner lock and process absence;
+        // reserve no launch, so a cleanup crash cannot leave LaunchPending behind.
+        let _guard = Self::claim(manager, workspace, identity, false).await?;
+        Ok(())
+    }
+
+    async fn claim(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+        reserve_launch: bool,
     ) -> Result<Self, DurabilityError> {
         validate_identity(&identity)?;
         let issue = manager
@@ -141,9 +182,15 @@ impl Durability {
         {
             return Err(DurabilityError::Binding("issue"));
         }
-        if let Some(run) = manager.load_run_manifest(&workspace).await? {
+        if reserve_launch && let Some(run) = manager.load_run_manifest(&workspace).await? {
             if run.run_id != identity.run_id || run.attempt != identity.attempt {
                 return Err(DurabilityError::Binding("run identity"));
+            }
+            if let Some(envelope) = run.parent_runtime_envelope {
+                if envelope.harness != "acp" || envelope.workspace_path != identity.workspace_path {
+                    return Err(DurabilityError::Binding("parent runtime envelope"));
+                }
+                manifest.parent_runtime_envelope = Some(envelope);
             }
             if let Some(envelope) = run.runtime_envelope {
                 if envelope.harness != "acp"
@@ -177,15 +224,19 @@ impl Durability {
         if identity.generation != 0 && identity.generation != state.identity.generation {
             return Err(DurabilityError::Binding("connection generation"));
         }
-        state.identity.generation = state
-            .identity
-            .generation
-            .checked_add(1)
-            .ok_or(DurabilityError::Binding("connection generation exhausted"))?;
-        state.identity.run_id = identity.run_id;
-        state.identity.attempt = identity.attempt;
-        state.owner_id = uuid::Uuid::new_v4().to_string();
-        state.process = AcpProcessState::LaunchPending;
+        if reserve_launch {
+            state.identity.generation = state
+                .identity
+                .generation
+                .checked_add(1)
+                .ok_or(DurabilityError::Binding("connection generation exhausted"))?;
+            state.identity.run_id = identity.run_id;
+            state.identity.attempt = identity.attempt;
+            state.owner_id = uuid::Uuid::new_v4().to_string();
+            state.process = AcpProcessState::LaunchPending;
+        } else {
+            state.process = AcpProcessState::Stopped;
+        }
         let durable = Self {
             manager,
             workspace,
@@ -229,6 +280,11 @@ impl Durability {
         let mut manifest = self.manifest.clone();
         if let Some(envelope) = &mut manifest.runtime_envelope {
             envelope.acp_session = Some(self.state().identity.clone());
+            envelope.conversation_binding = self.state().session_id.clone();
+            envelope.run_id.clone_from(&self.state().identity.run_id);
+            envelope.attempt = self.state().identity.attempt;
+        }
+        if let Some(envelope) = &mut manifest.parent_runtime_envelope {
             envelope.conversation_binding = self.state().session_id.clone();
             envelope.run_id.clone_from(&self.state().identity.run_id);
             envelope.attempt = self.state().identity.attempt;
@@ -516,10 +572,16 @@ mod tests {
         drop(second);
         let mut stale = input;
         stale.generation = 1;
-        assert!(matches!(
-            Durability::open(manager(root.path()), workspace, stale).await,
-            Err(DurabilityError::Binding("connection generation"))
-        ));
+        let stale_result = Durability::open(manager(root.path()), workspace, stale)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(
+                stale_result,
+                Err(DurabilityError::Binding("connection generation"))
+            ),
+            "{stale_result:?}"
+        );
     }
 
     #[test]
@@ -548,10 +610,13 @@ mod tests {
             .expect("owner");
         assert_eq!(owner.state().process, AcpProcessState::LaunchPending);
         drop(owner);
-        assert!(matches!(
-            Durability::open(manager(root.path()), workspace, input).await,
-            Err(DurabilityError::ProcessUncertain)
-        ));
+        let result = Durability::open(manager(root.path()), workspace, input)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(result, Err(DurabilityError::ProcessUncertain)),
+            "{result:?}"
+        );
     }
 
     #[cfg(unix)]

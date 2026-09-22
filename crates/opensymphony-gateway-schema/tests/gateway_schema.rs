@@ -539,6 +539,7 @@ fn task_graph_node_roundtrips() {
 #[test]
 fn run_detail_roundtrips() {
     let run = RunDetail {
+        harness_capability: None,
         schema_version: SchemaVersion::v1(),
         run_id: "run-1".into(),
         issue_id: "issue-1".into(),
@@ -764,6 +765,7 @@ fn planning_session_summary_roundtrips() {
 #[test]
 fn gateway_capabilities_roundtrips() {
     let caps = GatewayCapabilities {
+        harness_profiles: Vec::new(),
         schema_version: SchemaVersion::v1(),
         gateway_version: "1.6.0".into(),
         supported_api_versions: vec!["1.0.0".into()],
@@ -794,17 +796,21 @@ fn gateway_capabilities_roundtrips() {
 }
 
 #[test]
-fn harness_capability_roundtrips_future_adapters() {
+fn harness_capability_roundtrips_available_and_future_adapters() {
     let caps = vec![
         HarnessCapability::openhands_agent_server(),
         HarnessCapability::codex_app_server_local(),
         HarnessCapability::rust_native_future(),
+        HarnessCapability::acp(),
     ];
 
     let json = must_serialize(&caps);
     let back: Vec<HarnessCapability> = must_deserialize(&json);
 
-    assert_eq!(back.len(), 3);
+    assert_eq!(back.len(), 4);
+    assert_eq!(back[3].kind, "acp");
+    assert!(back[3].available && back[3].actions.start_run);
+    assert!(!back[3].approvals.human_decision);
     assert!(back[0].available);
     assert_eq!(back[1].kind, "codex_app_server");
     assert_eq!(back[1].transport.protocol, "json_rpc_2_0");
@@ -1681,4 +1687,29 @@ fn harness_scheduler_disagreement_roundtrips() {
     let back: HarnessSchedulerDisagreement = must_deserialize(&json);
     assert_eq!(diag.scheduler_status, back.scheduler_status);
     assert_eq!(diag.harness_status, back.harness_status);
+}
+
+#[test]
+fn acp_profile_and_run_capabilities_share_typescript_fixture() {
+    use opensymphony::opensymphony_gateway_schema::capability::{
+        HarnessProfileCapability, HarnessRunCapability,
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/gateway-schema/__tests__/fixtures/acp-capability.json"
+    ))
+    .expect("fixture");
+    let profile: HarnessProfileCapability =
+        serde_json::from_value(fixture["profile"].clone()).expect("profile DTO");
+    let run: HarnessRunCapability =
+        serde_json::from_value(fixture["run"].clone()).expect("run DTO");
+    assert!(!profile.preflight_ready);
+    assert!(run.session_restore);
+    assert_eq!(
+        serde_json::to_value(profile).expect("profile round trip"),
+        fixture["profile"]
+    );
+    assert_eq!(
+        serde_json::to_value(run).expect("run round trip"),
+        fixture["run"]
+    );
 }

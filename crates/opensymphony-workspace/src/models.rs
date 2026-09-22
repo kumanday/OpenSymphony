@@ -1268,6 +1268,8 @@ pub struct ConversationManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpSessionState>,
 }
 
@@ -1291,6 +1293,7 @@ impl ConversationManifest {
             reset_reason: None,
             runtime_contract_version: runtime_contract_version.into(),
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             acp: None,
         }
     }

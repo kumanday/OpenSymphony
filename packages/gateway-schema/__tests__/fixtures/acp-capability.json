@@ -1,0 +1,23 @@
+{
+  "profile": {
+    "harness": "acp",
+    "profile_id": "local",
+    "preflight_ready": false,
+    "unavailable_reason": "credential_reference_unavailable"
+  },
+  "run": {
+    "harness": "acp",
+    "profile_id": "local",
+    "protocol": "acp",
+    "protocol_version": 1,
+    "rpc": "json_rpc_2_0",
+    "encoding": "utf-8",
+    "framing": "lf",
+    "carrier": "stdio",
+    "session_restore": true,
+    "history_replay": false,
+    "model_selection": false,
+    "cancellation": true,
+    "operator_responses": false
+  }
+}

@@ -43,6 +43,23 @@ impl Default for RetentionPolicy {
     }
 }
 
+/// Retire a durable, known-quiescent session after its original host is gone.
+/// The owner lock and prior process check must both succeed; this never launches
+/// a peer or resolves an ambiguous prompt by assuming its process exited.
+pub async fn retire_persisted_session(
+    manager: WorkspaceManager,
+    workspace: WorkspaceHandle,
+) -> Result<(), HostError> {
+    let state = manager
+        .load_conversation_manifest(&workspace)
+        .await
+        .map_err(|_| HostError::Persistence)?
+        .and_then(|manifest| manifest.acp)
+        .ok_or(HostError::NativeManifest)?;
+    Durability::retire_persisted(manager, workspace, state.identity).await?;
+    Ok(())
+}
+
 /// Host callers supply the scheduler's verified workspace and current credential/grant revision.
 pub struct SessionLaunch {
     pub manager: WorkspaceManager,
@@ -434,10 +451,19 @@ impl SessionHost {
                             continue;
                         };
                         launch.identity.profile_fingerprint = fingerprint;
-                        if super::validate_launch(&launch.profile, &launch.context, &launch.limits)
-                            .is_err()
-                            || launch.context.issue_workspace != launch.identity.workspace_path
-                            || launch.context.workspace_key != launch.workspace.workspace_key()
+                        if let Err(error) =
+                            super::validate_launch(&launch.profile, &launch.context, &launch.limits)
+                        {
+                            let _ = reply.send(Err(HostError::Client(error.to_string())));
+                            continue;
+                        }
+                        if launch.context.issue_workspace != launch.identity.workspace_path
+                            || Some(launch.context.workspace_key.as_str())
+                                != launch
+                                    .workspace
+                                    .workspace_path()
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
                         {
                             let _ = reply.send(Err(HostError::IdentityMismatch));
                             continue;
@@ -513,7 +539,12 @@ async fn start(
     super::validate_launch(&launch.profile, &launch.context, &launch.limits)
         .map_err(|e| HostError::Client(e.to_string()))?;
     if launch.context.issue_workspace != launch.workspace.workspace_path()
-        || launch.context.workspace_key != launch.workspace.workspace_key()
+        || Some(launch.context.workspace_key.as_str())
+            != launch
+                .workspace
+                .workspace_path()
+                .file_name()
+                .and_then(|name| name.to_str())
         || launch.identity.workspace_path != launch.workspace.workspace_path()
     {
         return Err(HostError::IdentityMismatch);
@@ -584,16 +615,16 @@ async fn start(
         };
         // A failed connection cannot establish remote quiescence. A submitted marker
         // survives even if the outcome checkpoint fails, and prevents another prompt.
-        let checkpointed = if result
-            .as_ref()
-            .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none())
-            || matches!(
-                result,
-                Err(ClientError::InvalidConfiguration(_)
-                    | ClientError::InvalidWorkspace
-                    | ClientError::Launch(_)
-                    | ClientError::CancelledBeforePrompt)
-            ) {
+        let checkpointed = if result.as_ref().is_ok_and(|r| {
+            r.process_reaped
+                && (r.process_tree_signal_error.is_none() || driver.durable.process_is_absent())
+        }) || matches!(
+            result,
+            Err(ClientError::InvalidConfiguration(_)
+                | ClientError::InvalidWorkspace
+                | ClientError::Launch(_)
+                | ClientError::CancelledBeforePrompt)
+        ) {
             driver.durable.stopped().await.is_ok()
         } else {
             false
@@ -613,10 +644,7 @@ async fn start(
             && matches!(
                 driver.durable.state().status,
                 AcpSessionStatus::Ready | AcpSessionStatus::Finished
-            )
-            && result
-                .as_ref()
-                .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none());
+            );
         let mut ended_snapshot = driver.snapshot(false);
         ended_snapshot.live = false;
         ended_snapshot.retirement_eligible = false;

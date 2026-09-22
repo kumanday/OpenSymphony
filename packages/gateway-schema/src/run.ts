@@ -1,3 +1,4 @@
+import type { HarnessRunCapability } from "./capability.js";
 import type { PageCursor } from "./cursor.js";
 import type { SchemaVersion } from "./version.js";
 
@@ -118,6 +119,7 @@ export type RunAction =
 
 /** Run detail exposed by the gateway. */
 export interface RunDetail {
+  harness_capability?: HarnessRunCapability;
   schema_version: SchemaVersion;
   run_id: string;
   issue_id: string;

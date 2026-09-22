@@ -953,6 +953,16 @@ Job Object. Retirement waits for active work and leases to clear, then terminate
 and reaps owned process resources before acknowledging cleanup. Trusted local
 host execution provides filesystem/process access; it is not a sandbox.
 
+The production worker persists `harness-route.json` before ACP owner reservation,
+including profile and model identity. The owner also persists verified terminal
+or parent runtime envelopes; worker finish copies the owner-updated conversation
+binding back into the run record. Profile changes and harness switches retire the
+old owner before archiving its manifest. Interrupted or failed launches execute
+`after_run` only when the harness is known stopped. Uncertain work retains its
+workspace, memory grant and cleanup fence. A known-finished session whose host
+is gone can retire through the same exclusive lock and process-absence check
+without launching another peer.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

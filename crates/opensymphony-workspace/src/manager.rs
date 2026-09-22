@@ -52,6 +52,7 @@ use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
 const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_INSTRUCTION_BYTES: u64 = 4 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct WorkspaceManager {
     config: WorkspaceManagerConfig,
     legacy_repository: Option<crate::opensymphony_domain::CanonicalRepositoryId>,

@@ -33,12 +33,11 @@ use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_gateway_schema::event_journal::{EventActor, EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_memory::MemoryVisibility;
-use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
+use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
     IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
     TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
-use crate::opensymphony_workflow::ProcessEnvironment;
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -138,6 +137,8 @@ pub(crate) enum RunCommandError {
     Tracker(#[from] LinearError),
     #[error("failed to create workspace manager: {0}")]
     WorkspaceManager(#[from] WorkspaceError),
+    #[error("failed to prepare ACP session host: {0}")]
+    AcpHost(#[from] crate::opensymphony_acp::HostError),
     #[error("failed to prepare OpenHands transport: {0}")]
     Transport(#[from] OpenHandsError),
     #[error("failed to prepare OpenHands conversation store: {0}")]
@@ -1025,14 +1026,21 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .root
             .join(".opensymphony-retry-state")
     });
+    let acp_host =
+        crate::opensymphony_acp::SessionHost::new(crate::opensymphony_acp::RetentionPolicy {
+            max_sessions: 128,
+            ..crate::opensymphony_acp::RetentionPolicy::default()
+        })?;
     let mut workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
         workspace_manager.clone(),
         &runtime.workflow,
         runtime.retain_failed,
         retry_state_root,
     )
+    .with_acp_host(acp_host.clone())
     .with_openhands_conversation_store(runtime.openhands_conversation_store.clone());
-    let selected_openhands = selected_openhands_harness(&runtime);
+    let selected_openhands = selected_openhands_harness(&runtime)
+        || backends::requires_openhands_recovery(workspace_manager.as_ref()).await?;
     let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
             .await?
@@ -1112,25 +1120,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
     }
 
-    let (transport, mut supervisor) = if selected_openhands {
-        build_runtime_transport(
+    let (client, mut supervisor) = if selected_openhands {
+        let (transport, supervisor) = build_runtime_transport(
             &runtime,
             managed_local_preparation.tooling,
             &linear_worker_env,
         )
-        .await?
-    } else {
-        (
-            TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?,
-            None,
-        )
-    };
-    let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
-    if selected_openhands {
+        .await?;
+        let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
         client.openapi_probe().await?;
-    }
+        (Some(client), supervisor)
+    } else {
+        (None, None)
+    };
+    let agent_server_base_url = client
+        .as_ref()
+        .map(|client| client.base_url())
+        .unwrap_or("");
 
-    let worker = RuntimeWorkerBackend::new(
+    let worker = RuntimeWorkerBackend::new_with_client(
         client.clone(),
         Arc::new(runtime.workflow.clone()),
         workspace_manager,
@@ -1138,6 +1146,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         linear_worker_env,
     )
     .with_openhands_conversation_store(runtime.openhands_conversation_store.clone())
+    .with_acp_host(acp_host)
     .with_integration_instructions(runtime.integration_instructions.clone())
     .with_checkout_credential_envs(
         runtime
@@ -1177,7 +1186,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         &scheduler.snapshot(now_timestamp()),
         runtime.workflow.config.workspace.root.as_path(),
         &terminal_state_set(&runtime.workflow),
-        current_agent_server_status(&mut supervisor, client.base_url()),
+        current_agent_server_status(&mut supervisor, agent_server_base_url),
         current_memory_server_status(memory_server.as_ref()),
         &recent_events,
     );
@@ -1202,6 +1211,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
             .with_memory_config(server_memory_config)
+            .with_harness_profiles(crate::opensymphony_acp::profile_capabilities(
+                &runtime.workflow.extensions.acp,
+            ))
             .with_active_states(
                 runtime
                     .workflow
@@ -1276,7 +1288,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             &bootstrap_snapshot,
             runtime.workflow.config.workspace.root.as_path(),
             &terminal_state_set(&runtime.workflow),
-            current_agent_server_status(&mut supervisor, client.base_url()),
+            current_agent_server_status(&mut supervisor, agent_server_base_url),
             current_memory_server_status(memory_server.as_ref()),
             &recent_events,
         ))
@@ -1343,7 +1355,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &snapshot,
                             runtime.workflow.config.workspace.root.as_path(),
                             &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, client.base_url()),
+                            current_agent_server_status(&mut supervisor, agent_server_base_url),
                             current_memory_server_status(memory_server.as_ref()),
                             &recent_events,
                         )).await;
@@ -1410,7 +1422,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 SnapshotPublishContext {
                                     runtime: &runtime,
                                     supervisor: &mut supervisor,
-                                    agent_server_base_url: client.base_url(),
+                                    agent_server_base_url,
                                     memory_server: memory_server.as_ref(),
                                     memory_config: gateway_memory_config.as_ref(),
                                     recent_events: &mut recent_events,
@@ -1433,7 +1445,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &snapshot,
                             runtime.workflow.config.workspace.root.as_path(),
                             &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, client.base_url()),
+                            current_agent_server_status(&mut supervisor, agent_server_base_url),
                             current_memory_server_status(memory_server.as_ref()),
                             &recent_events,
                         )).await;

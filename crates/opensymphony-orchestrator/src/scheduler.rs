@@ -245,10 +245,12 @@ pub struct WorkerStartRequest {
     pub parent_repair: Option<ParentRepairAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessRouteDecision {
     pub task_type: String,
     pub harness_kind: String,
+    #[serde(default)]
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub reason: String,
@@ -264,8 +266,13 @@ impl HarnessRouteDecision {
             .unwrap_or("<default model profile>");
         let model = self.model.as_deref().unwrap_or("<harness default model>");
         let mode = if self.dry_run { "dry-run " } else { "" };
+        let harness_profile = self
+            .harness_profile
+            .as_deref()
+            .map(|profile| format!(" profile `{profile}`"))
+            .unwrap_or_default();
         format!(
-            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
+            "{mode}selected harness `{}`{harness_profile} with model `{model}` and profile `{profile}`: {}",
             self.harness_kind, self.reason
         )
     }
@@ -8902,6 +8909,7 @@ pub fn decide_issue_route(
     Ok(HarnessRouteDecision {
         task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
         harness_kind: config.routing.harness.clone(),
+        harness_profile: config.routing.harness_profile.clone(),
         model: config.routing.model.clone(),
         model_profile: config.routing.model_profile.clone(),
         reason: routing_reason(&config.routing),

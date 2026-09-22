@@ -21,6 +21,118 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    let peer =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_worker_peer.py");
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: true\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: first\nacp:\n  profiles:\n    first:\n      command: python3\n      args: ['{}', first]\n    second:\n      command: python3\n      args: ['{}', second]\npolling:\n  interval_ms: 50\nhooks:\n  after_create: 'echo after_create >> hooks'\n  before_run: 'echo before_run >> hooks'\n  after_run: 'echo after_run >> hooks'\n",
+            peer.display(),
+            peer.display()
+        ),
+    );
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|run| run["status"] == "succeeded")
+        {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("child status") {
+            use tokio::io::AsyncReadExt;
+            let mut error = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut error).await;
+            }
+            panic!("ACP CLI exited {status}: {error}");
+        }
+        if Instant::now() >= deadline {
+            terminate_child(&mut child).await;
+            panic!(
+                "ACP CLI did not finish: {:?}",
+                std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    let evidence: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join("acp-worker.json")).expect("peer evidence"),
+    )
+    .expect("json");
+    assert_eq!(
+        std::path::Path::new(evidence["cwd"].as_str().expect("cwd")),
+        std::fs::canonicalize(&workspace).expect("workspace")
+    );
+    assert_eq!(evidence["profile"], "first");
+    assert_eq!(evidence["memory_project"], "project-test");
+    assert_eq!(evidence["memory_token_present"], true);
+    assert!(
+        evidence["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("Run the scheduler")
+    );
+    let hooks = std::fs::read_to_string(workspace.join("hooks")).expect("hooks");
+    assert!(hooks.starts_with("after_create\nbefore_run\n"));
+    assert!(hooks.contains("after_run\n"));
+    let route: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join(".opensymphony/harness-route.json"))
+            .expect("route"),
+    )
+    .expect("json");
+    assert_eq!(route["harness_profile"], "first");
+    let snapshot: Value = reqwest::get(format!("http://{bind}/api/v1/snapshot"))
+        .await
+        .expect("snapshot")
+        .json()
+        .await
+        .expect("json");
+    assert!(snapshot.to_string().contains("acp"));
+    assert_eq!(
+        snapshot["snapshot"]["agent_server"]["status_line"],
+        "not_selected"
+    );
+    let capabilities: Value = reqwest::get(format!("http://{bind}/api/v1/capabilities"))
+        .await
+        .expect("capabilities")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        capabilities["harnesses"]
+            .as_array()
+            .expect("adapters")
+            .iter()
+            .any(|c| c["kind"] == "acp" && c["available"] == true)
+    );
+    assert_eq!(
+        capabilities["harness_profiles"]
+            .as_array()
+            .expect("profiles")
+            .len(),
+        2
+    );
+    assert!(
+        capabilities["harness_profiles"][0]["preflight_ready"]
+            .as_bool()
+            .expect("ready")
+    );
+    terminate_child(&mut child).await;
+}
+
+#[tokio::test]
 async fn run_auto_detects_config_and_workflow_from_project_directory() {
     let openhands = FakeOpenHandsServer::start()
         .await
@@ -312,6 +424,8 @@ Run the scheduler.
         .arg("run")
         .current_dir(project.path())
         .env("LINEAR_API_KEY", "test-linear-key")
+        .env_remove("LINEAR_CLIENT_ID")
+        .env_remove("LINEAR_CLIENT_SECRET")
         .env_remove("OPENSYMPHONY_HARNESS")
         .env_remove("OPENSYMPHONY_MODEL")
         .env_remove("OPENSYMPHONY_MODEL_PROFILE")

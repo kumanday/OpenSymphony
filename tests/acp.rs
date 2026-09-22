@@ -1065,3 +1065,18 @@ async fn acp_env_reference_sources_are_retained_only_when_explicitly_targeted() 
         );
     }
 }
+
+#[test]
+fn acp_adapter_exposes_execution_and_explicit_gaps() {
+    use opensymphony::opensymphony_domain::HarnessAdapter;
+    let adapter = opensymphony::opensymphony_acp::AcpAdapter;
+    assert_eq!(adapter.harness_kind(), "acp");
+    let capability = adapter.capabilities();
+    assert!(
+        capability.available
+            && capability.actions.start_run
+            && capability.cancellation.acknowledges_cancel
+    );
+    assert!(!capability.actions.approve && !capability.pause_resume.resume);
+    assert!(!capability.feature_gaps.is_empty());
+}

@@ -965,8 +965,13 @@ launch. These host API settings are independent of profile protocol capabilities
 `SessionLaunch::require_persistence` rejects peers without negotiated load/resume
 support. The caller supplies a non-secret credential/grant revision and the
 scheduler's exact workspace identity; changes prevent session reuse.
-Production `opensymphony run` routing is a separate implementation slice; an ACP
-route currently fails scheduler capability selection before worker dispatch.
+Production `opensymphony run` selects this profile through the scheduler and
+persists the effective route under the workspace metadata directory. Recovery
+uses that route even when the current default profile differs. ACP-only execution
+does not start an OpenHands server. Production retains at most 128 ACP sessions;
+the scheduler continues to enforce `agent.max_concurrent_agents`. Select a
+different profile only after the retained session can retire safely; uncertain
+submissions remain fenced.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated

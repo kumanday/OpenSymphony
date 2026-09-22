@@ -44,7 +44,9 @@ use tracing::instrument::WithSubscriber;
 
 mod durable;
 mod host;
+mod projection;
 pub use host::*;
+pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 
 #[cfg(windows)]
 mod windows_process;
@@ -62,7 +64,9 @@ pub const SDK_VERSION: &str = "2.2.0";
 pub const SCHEMA_VERSION: &str = "1.9.1";
 
 /// Host-owned launch inputs; neither cwd nor resolved secrets belong in a profile.
-/// `workspace_key` is the scheduler's sanitized checkout key (including repository suffixes).
+/// `workspace_key` is the sanitized final directory name; `workspace_root` is its
+/// immediate parent. The retained host also verifies the manager-owned handle,
+/// repository binding and generation for nested or generation-suffixed workspaces.
 pub struct LaunchContext {
     pub workspace_root: PathBuf,
     pub workspace_key: String,
@@ -1110,6 +1114,17 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, max: usize) -> String
         "[stderr capture limit exceeded]".into()
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// ACP protocol and execution remain behind this adapter boundary.
+pub struct AcpAdapter;
+impl crate::opensymphony_domain::HarnessAdapter for AcpAdapter {
+    fn harness_kind(&self) -> &'static str {
+        "acp"
+    }
+    fn capabilities(&self) -> crate::opensymphony_gateway_schema::capability::HarnessCapability {
+        crate::opensymphony_gateway_schema::capability::HarnessCapability::acp()
     }
 }
 

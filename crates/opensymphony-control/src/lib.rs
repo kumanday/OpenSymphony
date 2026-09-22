@@ -455,6 +455,7 @@ mod tests {
                 total_cost_micros: 120_000,
             },
             issues: vec![IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-255".to_owned(),
                 title: "Observability and FrankenTUI".to_owned(),
                 tracker_state: "In Progress".to_owned(),

@@ -956,8 +956,23 @@ SSE state/source events and explicit history-gap events when a bounded buffer or
 subscriber loses data. Tokens belong in the Authorization header. Source frames
 preserve redacted content and unknown payloads, with connection generation,
 arrival sequence, run binding and replay origin. Recorded history is bounded by
-the client's queue count and byte budgets. Production CLI routing and IDE writer
-handoff are separate integration slices.
+the client's queue count and byte budgets. IDE writer handoff is a separate
+integration slice.
+
+### Production ACP routing
+
+Configure `routing.harness: acp`, a named `routing.harness_profile`, and its
+`acp.profiles` entry, then use `opensymphony run`. The gateway publishes profile
+preflight readiness separately from negotiated run support. An unavailable
+executable or missing credential reference is reported without exposing its value.
+Retained profile identity survives a default-profile change on restart. A known
+terminal prompt is reconciled without sending it again; a possibly submitted
+prompt remains uncertain and blocks automatic retry and workspace removal.
+Cleanup after a known-finished owner loss acquires the durable owner lock and
+verifies the prior process is absent before recording its stop. Setup failures
+before submission permit scheduler retry. Cancellation is accepted
+only after the owner observes a stopped prompt; losing the local peer alone does
+not establish that delegated execution stopped.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

@@ -667,6 +667,17 @@ owner locks, process-group loss, the launch checkpoint gap, compatibility bounds
 identity mismatches and legacy manifests. Workspace and control-plane regression
 targets remain required for changes to persistence or the host observation seam.
 
+`cargo test-system-duckdb --test run run_dispatches_acp` exercises the actual CLI
+against a fake tracker and ACP executable with an unreachable OpenHands endpoint.
+It verifies exact cwd, workspace hooks, persisted profile routing and public
+capabilities. `cargo test-system-duckdb --lib acp_worker_` covers continuation,
+profile switching, persisted recovery, permission waiting, safe setup retry,
+interrupt/abort and uncertain crash cleanup. Use `tests/fixtures/acp_worker_peer.py`
+for production worker fixtures. Gateway/schema tests include a shared Rust and
+TypeScript capability fixture; native OpenHands and Codex regression suites remain
+required. Unset ambient `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` for fake
+tracker suites so local OAuth configuration does not override fixture credentials.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

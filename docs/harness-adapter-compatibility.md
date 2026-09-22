@@ -114,11 +114,25 @@ Known gaps:
 - Hosted execution would need an isolation model before remote support is
   advertised.
 
-## ACP stdio client foundation
+## ACP stdio runtime
 
-`opensymphony_acp::run_turn` implements an SDK-backed ACP v1 stdio session through
-setup, one text prompt, ordered updates, cancellation, and supervised teardown.
-Only the executable client and typed launch profiles are available in this slice.
-ACP is not yet advertised as a runnable scheduler harness; production routing,
-retained sessions, negotiated public capabilities, complete callbacks and operator
-responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+`acp` is an available local stdio adapter. `opensymphony run` selects a configured
+`routing.harness_profile` and executes through the retained `SessionHost` with
+ACP v1 JSON-RPC 2.0, UTF-8 and LF framing. Start, continuation, cancellation,
+recovery and terminal cleanup use the shared worker and scheduler boundaries.
+
+`/api/v1/capabilities` separates generic adapter support (`harnesses`) from
+configured profile preflight readiness (`harness_profiles`). Preflight checks
+profile shape, executable availability and environment references; it does not
+claim agent authentication or session negotiation succeeded. Run details expose
+`harness_capability` only after negotiation, including the selected profile,
+load/resume and history replay support. These DTOs are shared by Rust and
+TypeScript. They contain no commands, arguments, resolved credentials or source
+protocol payloads. Missing usage stays absent and load replay is not charged.
+
+Operator responses, writer transfer and IDE presentation follow the
+[ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission
+requests produce a scheduler-visible waiting event and receive the protocol
+cancellation response until operator handling is available. Unknown stop reasons
+and refusals stop automatic retry; uncertain submission or cancellation fences
+cleanup until execution risk is reconciled.

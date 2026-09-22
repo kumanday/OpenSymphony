@@ -123,6 +123,7 @@ mod tests {
             TimestampMs::new(11),
             DurationMs::new(300_000),
             Some(ConversationMetadata {
+                harness_capability: None,
                 conversation_id: must(ConversationId::new("conv_260")),
                 server_base_url: Some("http://127.0.0.1:3000".to_owned()),
                 transport_target: Some("loopback".to_owned()),

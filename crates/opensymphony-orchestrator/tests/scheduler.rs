@@ -241,6 +241,25 @@ fn selected_route_uses_configured_codex_harness_and_model() {
 }
 
 #[test]
+fn selected_acp_route_persists_profile_and_model_identity() {
+    let issue = normalized_issue("lin-acp", "COE-611", "In Progress");
+    let mut config = scheduler_config();
+    config.routing.harness = "acp".into();
+    config.routing.harness_profile = Some("second".into());
+    config.routing.model = Some("agent-model".into());
+    let route = decide_issue_route(&issue, &config).expect("ACP route");
+    assert_eq!(route.harness_kind, "acp");
+    assert_eq!(route.harness_profile.as_deref(), Some("second"));
+    assert_eq!(route.model.as_deref(), Some("agent-model"));
+    let persisted = serde_json::to_value(&route).expect("route JSON");
+    assert_eq!(
+        serde_json::from_value::<crate::opensymphony_orchestrator::HarnessRouteDecision>(persisted)
+            .expect("persisted route"),
+        route
+    );
+}
+
+#[test]
 fn selected_route_rejects_unavailable_harness() {
     let issue = normalized_issue("lin-430", "COE-430", "In Progress");
     let mut config = scheduler_config();
@@ -306,6 +325,7 @@ fn workspace_record(identifier: &str, path: &str) -> WorkspaceRecord {
 
 fn conversation(worker_id: &WorkerId) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(format!("conv-{}", worker_id.as_str()))
             .expect("conversation id should be valid"),
         server_base_url: Some("http://127.0.0.1:8000".to_string()),

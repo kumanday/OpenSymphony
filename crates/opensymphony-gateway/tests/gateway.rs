@@ -715,6 +715,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 120_000,
         },
         issues: vec![IssueSnapshot {
+            harness_capability: None,
             identifier: "COE-255".to_owned(),
             title: "Observability and FrankenTUI".to_owned(),
             tracker_state: "In Progress".to_owned(),
@@ -811,6 +812,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
         issues: vec![
             // Idle issue (eligible for execution)
             IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-300".to_owned(),
                 title: "Idle task".to_owned(),
                 tracker_state: "Todo".to_owned(),
@@ -860,6 +862,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Completed issue with events and modified files
             IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-301".to_owned(),
                 title: "Completed task".to_owned(),
                 tracker_state: "Done".to_owned(),
@@ -960,6 +963,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Failed issue, first attempt (no retries exhausted)
             IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-302".to_owned(),
                 title: "Failed task".to_owned(),
                 tracker_state: "In Progress".to_owned(),
@@ -1009,6 +1013,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
             IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-303".to_owned(),
                 title: "Retry queued task".to_owned(),
                 tracker_state: "In Progress".to_owned(),
@@ -1058,6 +1063,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
             IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-304".to_owned(),
                 title: "Blocked idle task".to_owned(),
                 tracker_state: "Todo".to_owned(),
@@ -1165,6 +1171,7 @@ fn control_plane_to_dashboard_snapshot_handles_empty_issues() {
 #[test]
 fn gateway_capabilities_json_fixture_roundtrips() {
     let caps = GatewayCapabilities {
+        harness_profiles: Vec::new(),
         schema_version: opensymphony::opensymphony_gateway_schema::version::SchemaVersion::v1(),
         gateway_version: "1.6.0".into(),
         supported_api_versions: vec!["1.0.0".into()],
@@ -1365,6 +1372,15 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
                     == Some("codex-app-server-json-rpc-v2")
                 && harness.transport.modes == vec!["stdio"])
     );
+    assert!(
+        caps_response
+            .harnesses
+            .iter()
+            .any(|harness| harness.kind == "acp"
+                && harness.available
+                && harness.transport.modes == ["stdio"])
+    );
+    assert!(caps_response.harness_profiles.is_empty());
     assert!(
         caps_response
             .features

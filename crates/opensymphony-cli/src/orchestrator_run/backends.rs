@@ -1,5 +1,7 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
+mod acp;
+
 use futures_util::{StreamExt, stream};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -438,12 +440,13 @@ pub(super) struct RuntimeWorkspaceBackend {
     terminal_cleanup_paths: HashSet<PathBuf>,
     recovered_run_started_at: BTreeMap<IssueId, TimestampMs>,
     codex_bin: String,
+    acp_host: Option<crate::opensymphony_acp::SessionHost>,
     retain_failed: bool,
     retry_state_root: PathBuf,
 }
 
 pub(super) struct RuntimeWorkerBackend {
-    client: OpenHandsClient,
+    client: Option<OpenHandsClient>,
     workflow: Arc<ResolvedWorkflow>,
     workspace_manager: Arc<WorkspaceManager>,
     openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
@@ -456,6 +459,8 @@ pub(super) struct RuntimeWorkerBackend {
     codex_bin: String,
     codex_schema_validators: CodexSchemaValidatorCache,
     codex_interrupts: CodexInterruptRegistry,
+    acp_host: Option<crate::opensymphony_acp::SessionHost>,
+    acp_active: acp::ActiveSessions,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
@@ -729,7 +734,7 @@ async fn migrate_legacy_workspace_conversations(
             report.skipped_without_manifest += 1;
             continue;
         };
-        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+        let manifest = match acp::conversation_view(&raw_manifest) {
             Ok(manifest) => manifest,
             Err(error) => {
                 report.skipped_invalid_manifest += 1;
@@ -742,7 +747,7 @@ async fn migrate_legacy_workspace_conversations(
                 continue;
             }
         };
-        if conversation_manifest_is_codex(&manifest) {
+        if recovered_harness_kind_from_manifest(&manifest) != OPENHANDS_AGENT_SERVER_KIND {
             continue;
         }
         if workspace.checkout_generation().is_some()
@@ -819,7 +824,7 @@ async fn prepare_active_conversation_store_for_issues(
             report.skipped_without_manifest += 1;
             continue;
         };
-        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+        let manifest = match acp::conversation_view(&raw_manifest) {
             Ok(manifest) => manifest,
             Err(error) => {
                 report.skipped_invalid_manifest += 1;
@@ -832,7 +837,7 @@ async fn prepare_active_conversation_store_for_issues(
                 continue;
             }
         };
-        if conversation_manifest_is_codex(&manifest) {
+        if recovered_harness_kind_from_manifest(&manifest) != OPENHANDS_AGENT_SERVER_KIND {
             continue;
         }
         if workspace.checkout_generation().is_some()
@@ -1103,6 +1108,37 @@ pub(super) fn build_workspace_manager_config_with_retention(
     }
 }
 
+/// A changed default must not strand an already submitted native OpenHands run.
+/// ACP-only workspaces never need the native server or its credential configuration.
+pub(super) async fn requires_openhands_recovery(
+    manager: &WorkspaceManager,
+) -> Result<bool, RunCommandError> {
+    for (workspace, _) in manager.list_all_workspaces().await? {
+        let Some(run) = manager.load_run_manifest(&workspace).await? else {
+            continue;
+        };
+        let Some(raw) = manager
+            .read_text_artifact(&workspace, &workspace.conversation_manifest_path())
+            .await?
+        else {
+            continue;
+        };
+        let Ok(conversation) = acp::conversation_view(&raw) else {
+            continue;
+        };
+        if recovered_harness_kind_from_manifest(&conversation) == "openhands_agent_server"
+            && recoverable_run_manifest(
+                &run,
+                Some(&conversation),
+                workspace.checkout_generation().is_some(),
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
     prepared_tooling: Option<LocalServerTooling>,
@@ -1203,7 +1239,9 @@ fn strict_openhands_cleanup_requires_conversation_store(
     manifest: &IssueConversationManifest,
     store: Option<&OpenHandsConversationStorePaths>,
 ) -> bool {
-    generation_bound && !conversation_manifest_is_codex(manifest) && store.is_none()
+    generation_bound
+        && recovered_harness_kind_from_manifest(manifest) == OPENHANDS_AGENT_SERVER_KIND
+        && store.is_none()
 }
 
 fn run_manifest_proves_no_harness_conversation(run: Option<&RunManifest>) -> bool {
@@ -3948,9 +3986,15 @@ impl RuntimeWorkspaceBackend {
             terminal_cleanup_paths: HashSet::new(),
             recovered_run_started_at: BTreeMap::new(),
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            acp_host: None,
             retain_failed,
             retry_state_root,
         }
+    }
+
+    pub(super) fn with_acp_host(mut self, host: crate::opensymphony_acp::SessionHost) -> Self {
+        self.acp_host = Some(host);
+        self
     }
 
     pub(super) fn with_openhands_conversation_store(
@@ -4008,6 +4052,20 @@ impl RuntimeWorkspaceBackend {
                 }
                 return Ok(());
             };
+            // ACP process/lease and uncertain-submission fences precede both grant revocation
+            // and filesystem cleanup. A failed stop keeps the execution environment intact.
+            if let Some(raw) = self
+                .manager
+                .read_text_artifact(&handle, &handle.conversation_manifest_path())
+                .await?
+                && serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .is_some_and(|value| value.get("acp").is_some_and(|v| !v.is_null()))
+            {
+                acp::retire(&self.manager, &handle, self.acp_host.as_ref())
+                    .await
+                    .map_err(CliWorkspaceError::ConversationLifecycle)?;
+            }
             if let Some(scope_grants) = &self.scope_grants {
                 if let Some(target) = cleanup_target {
                     scope_grants.revoke_issue_generation(&target.identifier, &target.generation);
@@ -4043,7 +4101,14 @@ impl RuntimeWorkspaceBackend {
                 .read_text_artifact(&handle, &manifest_path)
                 .await?;
             if let Some(raw_manifest) = raw_conversation_manifest {
-                match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+                match acp::conversation_view(&raw_manifest) {
+                    Ok(manifest)
+                        if recovered_harness_kind_from_manifest(&manifest) == acp::KIND =>
+                    {
+                        acp::retire(&self.manager, &handle, self.acp_host.as_ref())
+                            .await
+                            .map_err(CliWorkspaceError::ConversationLifecycle)?;
+                    }
                     Ok(mut manifest) if conversation_manifest_is_codex(&manifest) => {
                         let envelope_compatible = if handle.checkout_generation().is_some() {
                             self.manager
@@ -4314,7 +4379,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     datetime_to_timestamp_ms(run.started_at.unwrap_or(run.created_at)),
                 );
             }
-            let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
+            let mut had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
                 matches!(
                     run.status,
                     RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
@@ -4323,6 +4388,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             let conversation_manifest =
                 recovered_conversation_manifest(&self.manager, &handle, run_manifest.as_mut())
                     .await?;
+            had_in_flight_run |= conversation_manifest.as_ref().is_some_and(|m| {
+                m.transport_target.as_deref() == Some(acp::KIND)
+                    && matches!(
+                        m.last_execution_status.as_deref(),
+                        Some("submitted" | "uncertain")
+                    )
+            });
             let harness_kind = conversation_manifest
                 .as_ref()
                 .map(recovered_harness_kind_from_manifest);
@@ -5126,7 +5198,7 @@ async fn recovered_conversation_manifest(
 ) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
     let manifest_path = handle.conversation_manifest_path();
     if let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? {
-        match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+        match acp::conversation_view(&raw_manifest) {
             Ok(manifest) => {
                 if let Some(run_manifest) = run_manifest {
                     let pending_path = pending_conversation_manifest_path(handle);
@@ -5331,6 +5403,17 @@ fn recoverable_run_manifest(
     conversation_manifest: Option<&IssueConversationManifest>,
     strict_checkout: bool,
 ) -> bool {
+    if conversation_manifest.is_some_and(|m| recovered_harness_kind_from_manifest(m) == acp::KIND) {
+        return matches!(
+            run_manifest.status,
+            RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
+        ) || conversation_manifest.is_some_and(|m| {
+            matches!(
+                m.last_execution_status.as_deref(),
+                Some("submitted" | "uncertain")
+            )
+        });
+    }
     let envelope_compatible = match run_manifest.runtime_envelope.as_ref() {
         Some(expected) => conversation_manifest
             .and_then(|manifest| manifest.runtime_envelope.as_ref())
@@ -5427,6 +5510,7 @@ fn conversation_metadata_from_manifest(
     manifest: &IssueConversationManifest,
 ) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: manifest.conversation_id.clone(),
         server_base_url: manifest.server_base_url.clone(),
         transport_target: manifest.transport_target.clone(),
@@ -5454,8 +5538,25 @@ fn conversation_metadata_from_manifest(
 }
 
 impl RuntimeWorkerBackend {
+    #[cfg(test)]
     pub(super) fn new(
         client: OpenHandsClient,
+        workflow: Arc<ResolvedWorkflow>,
+        workspace_manager: Arc<WorkspaceManager>,
+        memory_env: Option<RuntimeMemoryEnv>,
+        worker_env: BTreeMap<String, String>,
+    ) -> Self {
+        Self::new_with_client(
+            Some(client),
+            workflow,
+            workspace_manager,
+            memory_env,
+            worker_env,
+        )
+    }
+
+    pub(super) fn new_with_client(
+        client: Option<OpenHandsClient>,
         workflow: Arc<ResolvedWorkflow>,
         workspace_manager: Arc<WorkspaceManager>,
         memory_env: Option<RuntimeMemoryEnv>,
@@ -5493,6 +5594,8 @@ impl RuntimeWorkerBackend {
             codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             codex_interrupts: Arc::new(Mutex::new(HashMap::new())),
+            acp_host: None,
+            acp_active: Arc::new(Mutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -5511,6 +5614,11 @@ impl RuntimeWorkerBackend {
         instructions: Option<ResolvedIntegrationInstructions>,
     ) -> Self {
         self.integration_instructions = instructions;
+        self
+    }
+
+    pub(super) fn with_acp_host(mut self, host: crate::opensymphony_acp::SessionHost) -> Self {
+        self.acp_host = Some(host);
         self
     }
 
@@ -5603,12 +5711,14 @@ impl RuntimeWorkerBackend {
         let recovered = recovered
             && matches!(
                 route.harness_kind.as_str(),
-                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND
+                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND | acp::KIND
             );
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
         let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let codex_interrupts = Arc::clone(&self.codex_interrupts);
+        let acp_host = self.acp_host.get_or_insert_with(acp::new_host).clone();
+        let acp_active = self.acp_active.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
             let mut launch_tx = Some(launch_tx);
@@ -5780,9 +5890,61 @@ impl RuntimeWorkerBackend {
                 report_launch_failure(&mut launch_tx, error);
                 return;
             }
-            let target_is_codex = route.harness_kind == CODEX_APP_SERVER_KIND;
+            let prior_acp = if recovered_conversation
+                .as_ref()
+                .is_some_and(|m| recovered_harness_kind_from_manifest(m) == acp::KIND)
+            {
+                match workspace_manager
+                    .load_conversation_manifest(&ensured.handle)
+                    .await
+                {
+                    Ok(manifest) => manifest.and_then(|m| m.acp),
+                    Err(error) => {
+                        report_launch_failure(&mut launch_tx, error.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let acp_model_changed = if prior_acp.is_some() {
+                match workspace_manager
+                    .read_text_artifact(
+                        &ensured.handle,
+                        &ensured.handle.metadata_dir().join("harness-route.json"),
+                    )
+                    .await
+                {
+                    Ok(Some(raw)) => match serde_json::from_str::<
+                        crate::opensymphony_orchestrator::HarnessRouteDecision,
+                    >(&raw)
+                    {
+                        Ok(prior) => {
+                            prior.model != route.model || prior.model_profile != route.model_profile
+                        }
+                        Err(error) => {
+                            report_launch_failure(
+                                &mut launch_tx,
+                                format!("invalid persisted ACP route: {error}"),
+                            );
+                            return;
+                        }
+                    },
+                    Ok(None) => false,
+                    Err(error) => {
+                        report_launch_failure(&mut launch_tx, error.to_string());
+                        return;
+                    }
+                }
+            } else {
+                false
+            };
             let switching_harness = recovered_conversation.as_ref().is_some_and(|manifest| {
-                conversation_manifest_is_codex(manifest) != target_is_codex
+                recovered_harness_kind_from_manifest(manifest) != route.harness_kind
+                    || acp_model_changed
+                    || prior_acp.as_ref().is_some_and(|state| {
+                        Some(&state.identity.profile_id) != route.harness_profile.as_ref()
+                    })
             });
             if let Some(error) =
                 parent_harness_switch_error(parent_execution.is_some(), switching_harness)
@@ -5790,7 +5952,7 @@ impl RuntimeWorkerBackend {
                 report_launch_failure(&mut launch_tx, error);
                 return;
             }
-            let superseded_harness_manifest = switching_harness.then(|| {
+            let mut superseded_harness_manifest = switching_harness.then(|| {
                 recovered_conversation
                     .as_ref()
                     .expect("switching harness requires a prior conversation manifest")
@@ -5962,7 +6124,7 @@ impl RuntimeWorkerBackend {
                     .filter(|_| !switching_harness)
                 {
                     Some(manifest) => match recover_parent_memory_bearer(
-                        &client,
+                        client.as_ref().expect("OpenHands route has a client"),
                         manifest,
                         memory_env
                             .as_ref()
@@ -6032,126 +6194,152 @@ impl RuntimeWorkerBackend {
             };
             let mut memory_grant_requires_fresh_conversation = false;
             let mut memory_grant_error = None;
-            let worker_memory_env = memory_env.as_ref().map(|memory| {
-                let mut scoped = memory.clone();
-                scoped.project = worker_memory_project(&issue, &memory.project);
-                scoped.parent_scope = parent_runtime_envelope.is_some();
-                scoped.execution_repo = if scoped.parent_scope {
-                    String::new()
-                } else {
-                    runtime_envelope
-                        .as_ref()
-                        .map(|envelope| envelope.repository_binding.repository.id.to_string())
-                        .unwrap_or_else(|| memory.execution_repo.clone())
-                };
-                scoped.run_id = runtime_envelope
+            // Reconciliation of a persisted outcome must not rotate grants or retire
+            // its conversation before reading the durable prompt result.
+            let reconcile_acp_outcome = recovered
+                && prior_acp.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.status,
+                        crate::opensymphony_workspace::AcpSessionStatus::Submitted
+                            | crate::opensymphony_workspace::AcpSessionStatus::Uncertain
+                            | crate::opensymphony_workspace::AcpSessionStatus::Finished
+                    )
+                });
+            let worker_memory_env =
+                memory_env
                     .as_ref()
-                    .map(|envelope| envelope.run_id.clone())
-                    .or_else(|| {
-                        parent_runtime_envelope
+                    .filter(|_| !reconcile_acp_outcome)
+                    .map(|memory| {
+                        let mut scoped = memory.clone();
+                        scoped.project = worker_memory_project(&issue, &memory.project);
+                        scoped.parent_scope = parent_runtime_envelope.is_some();
+                        scoped.execution_repo = if scoped.parent_scope {
+                            String::new()
+                        } else {
+                            runtime_envelope
+                                .as_ref()
+                                .map(|envelope| {
+                                    envelope.repository_binding.repository.id.to_string()
+                                })
+                                .unwrap_or_else(|| memory.execution_repo.clone())
+                        };
+                        scoped.run_id = runtime_envelope
                             .as_ref()
                             .map(|envelope| envelope.run_id.clone())
-                    });
-                scoped.attempt = runtime_envelope
-                    .as_ref()
-                    .map(|envelope| envelope.attempt)
-                    .or_else(|| {
-                        parent_runtime_envelope
+                            .or_else(|| {
+                                parent_runtime_envelope
+                                    .as_ref()
+                                    .map(|envelope| envelope.run_id.clone())
+                            });
+                        scoped.attempt = runtime_envelope
                             .as_ref()
                             .map(|envelope| envelope.attempt)
-                    });
-                scoped.target_commit = runtime_envelope
-                    .as_ref()
-                    .map(|envelope| envelope.target_commit.clone());
-                scoped.checkout_head = initially_verified_checkout
-                    .as_ref()
-                    .map(|checkout| checkout.head.clone());
-                let authorized_repositories = parent_runtime_envelope
-                    .as_ref()
-                    .map(parent_authorized_repositories)
-                    .unwrap_or_else(|| {
-                        scoped
-                            .authorized_repositories_by_project
-                            .get(&scoped.project)
-                            .cloned()
                             .or_else(|| {
+                                parent_runtime_envelope
+                                    .as_ref()
+                                    .map(|envelope| envelope.attempt)
+                            });
+                        scoped.target_commit = runtime_envelope
+                            .as_ref()
+                            .map(|envelope| envelope.target_commit.clone());
+                        scoped.checkout_head = initially_verified_checkout
+                            .as_ref()
+                            .map(|checkout| checkout.head.clone());
+                        let authorized_repositories = parent_runtime_envelope
+                            .as_ref()
+                            .map(parent_authorized_repositories)
+                            .unwrap_or_else(|| {
                                 scoped
                                     .authorized_repositories_by_project
-                                    .iter()
-                                    .find(|(project, _)| {
-                                        project.eq_ignore_ascii_case(&scoped.project)
+                                    .get(&scoped.project)
+                                    .cloned()
+                                    .or_else(|| {
+                                        scoped
+                                            .authorized_repositories_by_project
+                                            .iter()
+                                            .find(|(project, _)| {
+                                                project.eq_ignore_ascii_case(&scoped.project)
+                                            })
+                                            .map(|(_, repositories)| repositories.clone())
                                     })
-                                    .map(|(_, repositories)| repositories.clone())
-                            })
-                            .filter(|repositories| !repositories.is_empty())
-                            .unwrap_or_else(|| BTreeSet::from([scoped.execution_repo.clone()]))
-                    });
-                scoped.authorized_repositories = authorized_repositories.clone();
-                if let Some(grants) = &scoped.scope_grants {
-                    let mut authorized_work_items = parent_authorized_work_items.clone();
-                    authorized_work_items.extend(
-                        parent_execution
-                            .as_ref()
-                            .into_iter()
-                            .flat_map(|parent| parent.child_checkout_map.repositories.values())
-                            .flat_map(|checkout| checkout.retained_checkouts.iter())
-                            .flat_map(|checkout| {
-                                [checkout.issue_id.clone(), checkout.identifier.clone()]
-                            }),
-                    );
-                    let live_overlays = parent_runtime_envelope
-                        .as_ref()
-                        .map(parent_live_overlays)
-                        .unwrap_or_default();
-                    let grant = MemoryScopeGrant {
-                        project: scoped.project.clone(),
-                        project_set: scoped.project_set.clone(),
-                        execution_repo: scoped.execution_repo.clone(),
-                        authorized_repositories,
-                        authorized_work_items,
-                        live_overlays,
-                        issue: issue.identifier.to_string(),
-                        run_id: scoped.run_id.clone(),
-                        attempt: scoped.attempt,
-                        checkout_generation: runtime_envelope
-                            .as_ref()
-                            .map(|envelope| envelope.checkout_generation.clone())
-                            .or_else(|| {
-                                parent_execution.as_ref().map(|parent| {
-                                    format!("parent:{}", parent.manifest.hierarchy_generation)
-                                })
-                            }),
-                        target_commit: scoped.target_commit.clone(),
-                        checkout_head: scoped.checkout_head.clone(),
-                        visibility: scoped.visibility,
-                        capabilities: BTreeSet::new(),
-                    };
-                    let token = if scoped.parent_scope {
-                        if let Some(bearer) = recovered_parent_memory_bearer.as_deref() {
-                            match grants.restore_parent_claims(bearer, grant) {
-                                Ok(token) => token,
-                                Err(error) => {
-                                    memory_grant_error = Some(error);
-                                    String::new()
+                                    .filter(|repositories| !repositories.is_empty())
+                                    .unwrap_or_else(|| {
+                                        BTreeSet::from([scoped.execution_repo.clone()])
+                                    })
+                            });
+                        scoped.authorized_repositories = authorized_repositories.clone();
+                        if let Some(grants) = &scoped.scope_grants {
+                            let mut authorized_work_items = parent_authorized_work_items.clone();
+                            authorized_work_items.extend(
+                                parent_execution
+                                    .as_ref()
+                                    .into_iter()
+                                    .flat_map(|parent| {
+                                        parent.child_checkout_map.repositories.values()
+                                    })
+                                    .flat_map(|checkout| checkout.retained_checkouts.iter())
+                                    .flat_map(|checkout| {
+                                        [checkout.issue_id.clone(), checkout.identifier.clone()]
+                                    }),
+                            );
+                            let live_overlays = parent_runtime_envelope
+                                .as_ref()
+                                .map(parent_live_overlays)
+                                .unwrap_or_default();
+                            let grant = MemoryScopeGrant {
+                                project: scoped.project.clone(),
+                                project_set: scoped.project_set.clone(),
+                                execution_repo: scoped.execution_repo.clone(),
+                                authorized_repositories,
+                                authorized_work_items,
+                                live_overlays,
+                                issue: issue.identifier.to_string(),
+                                run_id: scoped.run_id.clone(),
+                                attempt: scoped.attempt,
+                                checkout_generation: runtime_envelope
+                                    .as_ref()
+                                    .map(|envelope| envelope.checkout_generation.clone())
+                                    .or_else(|| {
+                                        parent_execution.as_ref().map(|parent| {
+                                            format!(
+                                                "parent:{}",
+                                                parent.manifest.hierarchy_generation
+                                            )
+                                        })
+                                    }),
+                                target_commit: scoped.target_commit.clone(),
+                                checkout_head: scoped.checkout_head.clone(),
+                                visibility: scoped.visibility,
+                                capabilities: BTreeSet::new(),
+                            };
+                            let token = if scoped.parent_scope {
+                                if let Some(bearer) = recovered_parent_memory_bearer.as_deref() {
+                                    match grants.restore_parent_claims(bearer, grant) {
+                                        Ok(token) => token,
+                                        Err(error) => {
+                                            memory_grant_error = Some(error);
+                                            String::new()
+                                        }
+                                    }
+                                } else {
+                                    let (token, requires_fresh_conversation) =
+                                        grants.issue_or_refresh_parent_claims(grant);
+                                    memory_grant_requires_fresh_conversation =
+                                        requires_fresh_conversation;
+                                    token
                                 }
-                            }
-                        } else {
-                            let (token, requires_fresh_conversation) =
-                                grants.issue_or_refresh_parent_claims(grant);
-                            memory_grant_requires_fresh_conversation = requires_fresh_conversation;
-                            token
+                            } else {
+                                let (token, requires_fresh_conversation) =
+                                    grants.issue_or_refresh_with_claims(grant);
+                                memory_grant_requires_fresh_conversation =
+                                    requires_fresh_conversation;
+                                token
+                            };
+                            scoped.token = Some(token.clone());
                         }
-                    } else {
-                        let (token, requires_fresh_conversation) =
-                            grants.issue_or_refresh_with_claims(grant);
-                        memory_grant_requires_fresh_conversation = requires_fresh_conversation;
-                        token
-                    };
-                    scoped.token = Some(token.clone());
-                }
-                scoped.authorized_repositories_by_project.clear();
-                scoped
-            });
+                        scoped.authorized_repositories_by_project.clear();
+                        scoped
+                    });
             if let Some(error) = memory_grant_error {
                 report_launch_failure(
                     &mut launch_tx,
@@ -6164,30 +6352,80 @@ impl RuntimeWorkerBackend {
                     && worker_memory_env.as_ref().is_some_and(|memory| {
                         memory.scope_grants.is_some() && !memory.parent_scope
                     }));
+            if !route.dry_run
+                && prior_acp.is_some()
+                && (switching_harness || memory_grant_requires_fresh_conversation)
+            {
+                if let Err(error) =
+                    acp::retire_and_archive(&workspace_manager, &ensured.handle, &acp_host).await
+                {
+                    report_launch_failure(&mut launch_tx, error);
+                    return;
+                }
+                superseded_harness_manifest = None;
+            }
+            if !route.dry_run
+                && route.harness_kind == acp::KIND
+                && let Some(previous) = superseded_harness_manifest.as_ref()
+            {
+                let result = async {
+                    persist_superseded_harness_manifest(
+                        &workspace_manager,
+                        &ensured.handle,
+                        previous,
+                    )
+                    .await?;
+                    retire_superseded_harness_session(
+                        &ensured.handle,
+                        previous,
+                        &route.harness_kind,
+                        openhands_conversation_store.as_ref(),
+                        &codex_bin,
+                        &checkout_credential_envs,
+                    )
+                    .await?;
+                    let path = workspace_manager
+                        .validate_workspace_owned_path(
+                            &ensured.handle,
+                            &ensured.handle.conversation_manifest_path(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    fs::remove_file(path).await.map_err(|e| e.to_string())
+                }
+                .await;
+                if let Err(error) = result {
+                    report_launch_failure(&mut launch_tx, error);
+                    return;
+                }
+                superseded_harness_manifest = None;
+            }
             let mut worker_environment = worker_env.clone();
             if let Some(memory) = &worker_memory_env {
                 inject_memory_env(&mut worker_environment, memory);
             }
-            let mut runner = IssueSessionRunner::with_environment(
-                client.clone(),
-                runner_config
-                    .clone()
-                    .with_memory(worker_memory_env.as_ref().map(|memory| {
-                        memory_access_from_runtime(
-                            memory,
-                            (recovered
-                                || memory_grant_registry_recovered
-                                || memory_grant_requires_fresh_conversation)
-                                && memory.scope_grants.is_some(),
-                        )
-                    })),
-                OverlayEnvironment {
-                    overrides: worker_environment.clone(),
-                    blocked: checkout_credential_envs.clone(),
-                },
-            );
+            let mut runner = client.clone().map(|client| {
+                IssueSessionRunner::with_environment(
+                    client,
+                    runner_config
+                        .clone()
+                        .with_memory(worker_memory_env.as_ref().map(|memory| {
+                            memory_access_from_runtime(
+                                memory,
+                                (recovered
+                                    || memory_grant_registry_recovered
+                                    || memory_grant_requires_fresh_conversation)
+                                    && memory.scope_grants.is_some(),
+                            )
+                        })),
+                    OverlayEnvironment {
+                        overrides: worker_environment.clone(),
+                        blocked: checkout_credential_envs.clone(),
+                    },
+                )
+            });
             if let Some(source) = workpad_comment_source.clone() {
-                runner = runner.with_workpad_comment_source(source);
+                runner = runner.map(|runner| runner.with_workpad_comment_source(source));
             }
             let repository_instructions = if ensured.handle.checkout_generation().is_some() {
                 let result = if let Some(checkout) = initially_verified_checkout.as_ref() {
@@ -6205,7 +6443,9 @@ impl RuntimeWorkerBackend {
                 };
                 match result {
                     Ok(instructions) => {
-                        runner = runner.with_repository_instructions(instructions.clone());
+                        runner = runner.map(|runner| {
+                            runner.with_repository_instructions(instructions.clone())
+                        });
                         instructions
                     }
                     Err(error) => {
@@ -6296,7 +6536,8 @@ impl RuntimeWorkerBackend {
                         let conversation_manifest = if matches!(
                             run_manifest.status,
                             RunStatus::Prepared | RunStatus::Running
-                        ) {
+                        ) || route.harness_kind == acp::KIND
+                        {
                             if route.harness_kind == CODEX_APP_SERVER_KIND {
                                 match load_codex_conversation_manifest(
                                     &workspace_manager,
@@ -6336,14 +6577,14 @@ impl RuntimeWorkerBackend {
                         };
                         initialize_fresh_conversation =
                             conversation_manifest.as_ref().is_some_and(|manifest| {
-                                route.harness_kind != CODEX_APP_SERVER_KIND
+                                route.harness_kind == OPENHANDS_AGENT_SERVER_KIND
                                     && fresh_conversation_initialization_pending(
                                         &run_manifest,
                                         manifest,
                                     )
                             });
                         initialize_fresh_conversation |= route.harness_kind
-                            != CODEX_APP_SERVER_KIND
+                            == OPENHANDS_AGENT_SERVER_KIND
                             && memory_grant_requires_fresh_conversation;
                         if recoverable_run_manifest(
                             &run_manifest,
@@ -6394,6 +6635,7 @@ impl RuntimeWorkerBackend {
             };
 
             if recovered
+                && route.harness_kind != acp::KIND
                 && runtime_envelope.as_ref().is_some_and(|expected| {
                     run_manifest.runtime_envelope.as_ref() != Some(expected)
                 })
@@ -6579,8 +6821,9 @@ impl RuntimeWorkerBackend {
                         .as_ref()
                         .map(compose_parent_continuation_prompt)
                 });
-            runner = runner.with_terminal_prompt(terminal_prompt.clone());
-            runner = runner.with_continuation_prompt(continuation_prompt.clone());
+            runner = runner.map(|runner| runner.with_terminal_prompt(terminal_prompt.clone()));
+            runner =
+                runner.map(|runner| runner.with_continuation_prompt(continuation_prompt.clone()));
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
@@ -6633,6 +6876,48 @@ impl RuntimeWorkerBackend {
                 return;
             }
 
+            if route.harness_kind == acp::KIND {
+                let mut outcome = acp::run_issue(
+                    &route,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &issue,
+                    &run,
+                    &workflow,
+                    terminal_prompt.as_deref(),
+                    continuation_prompt.as_deref(),
+                    &acp_host,
+                    &acp_active,
+                    &updates_tx,
+                    &mut launch_tx,
+                    worker_environment,
+                    checkout_credential_envs,
+                    recovered,
+                )
+                .await;
+                attach_parent_verification_receipt(
+                    &mut outcome,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &issue,
+                    parent_runtime_envelope.as_ref(),
+                    parent_repair.as_ref(),
+                )
+                .await;
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
+            if !matches!(
+                route.harness_kind.as_str(),
+                OPENHANDS_AGENT_SERVER_KIND | CODEX_APP_SERVER_KIND
+            ) {
+                report_launch_failure(&mut launch_tx, "unsupported execution adapter");
+                return;
+            }
             if route.harness_kind == "codex_app_server" {
                 let fresh_conversation_grants = worker_memory_env
                     .as_ref()
@@ -6675,7 +6960,7 @@ impl RuntimeWorkerBackend {
                         &workspace_manager,
                         &ensured.handle,
                         previous,
-                        target_is_codex,
+                        &route.harness_kind,
                         runtime_envelope.as_ref(),
                         openhands_conversation_store.as_ref(),
                         &codex_bin,
@@ -6692,6 +6977,10 @@ impl RuntimeWorkerBackend {
                 return;
             }
 
+            let Some(runner) = runner else {
+                report_launch_failure(&mut launch_tx, "OpenHands execution client unavailable");
+                return;
+            };
             let mut observer = SchedulerObserver {
                 worker_id: observer_worker_id.to_string(),
                 launch_tx,
@@ -6764,7 +7053,7 @@ impl RuntimeWorkerBackend {
                     &workspace_manager,
                     &ensured.handle,
                     previous,
-                    target_is_codex,
+                    &route.harness_kind,
                     runtime_envelope.as_ref(),
                     openhands_conversation_store.as_ref(),
                     &codex_bin,
@@ -6994,6 +7283,7 @@ fn route_decision_payload(
     serde_json::json!({
         "task_type": &route.task_type,
         "harness_kind": &route.harness_kind,
+        "harness_profile": &route.harness_profile,
         "model": &route.model,
         "model_profile": &route.model_profile,
         "reason": &route.reason,
@@ -7012,6 +7302,7 @@ fn dry_run_conversation_metadata(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
 ) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(format!(
             "{ROUTE_PREVIEW_CONVERSATION_PREFIX}{}",
             run.worker_id
@@ -9368,12 +9659,12 @@ async fn load_codex_conversation_manifest(
 async fn retire_superseded_harness_session(
     workspace: &WorkspaceHandle,
     manifest: &IssueConversationManifest,
-    target_is_codex: bool,
+    target_harness: &str,
     openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
     codex_bin: &str,
     checkout_credential_envs: &BTreeSet<String>,
 ) -> Result<(), String> {
-    if target_is_codex {
+    if recovered_harness_kind_from_manifest(manifest) == OPENHANDS_AGENT_SERVER_KIND {
         let store = openhands_conversation_store.ok_or_else(|| {
             "OpenHands conversation store is unavailable while switching to Codex".to_owned()
         })?;
@@ -9391,9 +9682,13 @@ async fn retire_superseded_harness_session(
                 manifest.conversation_id
             )),
         }
-    } else {
+    } else if conversation_manifest_is_codex(manifest) {
         archive_superseded_codex_thread(workspace, manifest, codex_bin, checkout_credential_envs)
             .await
+    } else {
+        Err(format!(
+            "cannot retire this adapter while switching to {target_harness}"
+        ))
     }
 }
 
@@ -9402,7 +9697,7 @@ async fn retire_replaced_harness_session_if_durable(
     workspace_manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     previous: &IssueConversationManifest,
-    target_is_codex: bool,
+    target_harness: &str,
     expected_envelope: Option<&TerminalRuntimeEnvelope>,
     openhands_conversation_store: Option<&OpenHandsConversationStorePaths>,
     codex_bin: &str,
@@ -9424,7 +9719,7 @@ async fn retire_replaced_harness_session_if_durable(
     let Some(replacement_envelope) = replacement.runtime_envelope.as_ref() else {
         return Ok(());
     };
-    if conversation_manifest_is_codex(&replacement) != target_is_codex
+    if recovered_harness_kind_from_manifest(&replacement) != target_harness
         || !runtime_envelopes_match_except_binding(expected_envelope, replacement_envelope)
         || replacement_envelope.conversation_binding.as_deref()
             != Some(replacement.conversation_id.as_str())
@@ -9434,7 +9729,7 @@ async fn retire_replaced_harness_session_if_durable(
     retire_superseded_harness_session(
         workspace,
         previous,
-        target_is_codex,
+        target_harness,
         openhands_conversation_store,
         codex_bin,
         checkout_credential_envs,
@@ -9536,6 +9831,7 @@ fn codex_conversation_metadata(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
 ) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(conversation_id)
             .expect("Codex conversation id should not be empty"),
         server_base_url: None,
@@ -9724,8 +10020,60 @@ impl WorkerBackend for RuntimeWorkerBackend {
 
     async fn recover_worker(
         &mut self,
-        request: WorkerStartRequest,
+        mut request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error> {
+        if request.route.harness_kind == acp::KIND {
+            let recovery_path = fs::canonicalize(&request.workspace.path)
+                .await
+                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+            let handle = self
+                .workspace_manager
+                .list_all_workspaces()
+                .await
+                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
+                .into_iter()
+                .find(|(h, _)| h.workspace_path() == recovery_path)
+                .map(|(h, _)| h)
+                .ok_or_else(|| {
+                    CliWorkerError::LaunchFailed("ACP recovery workspace missing".into())
+                })?;
+            let raw = self
+                .workspace_manager
+                .read_text_artifact(&handle, &handle.metadata_dir().join("harness-route.json"))
+                .await
+                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+            if let Some(raw) = raw {
+                let persisted: crate::opensymphony_orchestrator::HarnessRouteDecision =
+                    serde_json::from_str(&raw)
+                        .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+                let recorded = self
+                    .workspace_manager
+                    .load_conversation_manifest(&handle)
+                    .await
+                    .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
+                    .and_then(|manifest| manifest.acp);
+                if persisted.harness_kind != acp::KIND
+                    || recorded.as_ref().is_none_or(|state| {
+                        persisted.harness_profile.as_ref() != Some(&state.identity.profile_id)
+                    })
+                {
+                    return Err(CliWorkerError::LaunchFailed(
+                        "ACP recovery route identity mismatch".into(),
+                    ));
+                }
+                request.route = persisted;
+            } else if let Some(state) = self
+                .workspace_manager
+                .load_conversation_manifest(&handle)
+                .await
+                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
+                .and_then(|m| m.acp)
+            {
+                request.route.harness_profile = Some(state.identity.profile_id);
+                request.route.model = None;
+                request.route.model_profile = None;
+            }
+        }
         let pending = self.spawn_worker_task(request, true);
         let worker_id = pending.worker_id.clone();
         let route = pending.route.clone();
@@ -9782,6 +10130,59 @@ impl WorkerBackend for RuntimeWorkerBackend {
         worker_id: &crate::opensymphony_domain::WorkerId,
         reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
+        let acp_session = self
+            .acp_active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(worker_id.as_str())
+            .cloned();
+        if let Some(acp::ActiveSession {
+            handle,
+            cancellation,
+            ..
+        }) = acp_session
+        {
+            cancellation.cancel();
+            timeout(Duration::from_secs(15), async {
+                loop {
+                    let snapshot = handle
+                        .inspect()
+                        .await
+                        .map_err(|e| CliWorkerError::InterruptFailed(e.to_string()))?;
+                    if matches!(
+                        snapshot.state.status,
+                        crate::opensymphony_workspace::AcpSessionStatus::Finished
+                            | crate::opensymphony_workspace::AcpSessionStatus::Ready
+                    ) {
+                        return Ok::<_, CliWorkerError>(());
+                    }
+                    if snapshot.state.status
+                        == crate::opensymphony_workspace::AcpSessionStatus::Uncertain
+                    {
+                        return Err(CliWorkerError::InterruptFailed(
+                            "ACP abort remains uncertain".into(),
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .map_err(|_| CliWorkerError::InterruptFailed("ACP abort deadline exceeded".into()))??;
+            // Let the worker persist the stopped run and execute after_run before
+            // revoking grants or releasing its workspace to scheduler cleanup.
+            if let Some(task) = self.tasks.get_mut(worker_id.as_str()) {
+                timeout(
+                    self.workspace_manager.config().hooks.timeout + Duration::from_secs(5),
+                    &mut task.handle,
+                )
+                .await
+                .map_err(|_| {
+                    CliWorkerError::InterruptFailed(
+                        "ACP workspace finalization deadline exceeded".into(),
+                    )
+                })??;
+            }
+        }
         let issue_identifier = self
             .worker_issue_ids
             .remove(worker_id.as_str())
@@ -9816,6 +10217,9 @@ impl WorkerBackend for RuntimeWorkerBackend {
         &mut self,
         command: crate::opensymphony_domain::HarnessInterruptCommand,
     ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
+        if command.harness_kind == acp::KIND {
+            return acp::interrupt(&self.acp_active, &command).await;
+        }
         if command.harness_kind == CODEX_APP_SERVER_KIND {
             return send_codex_stdio_interrupt(&self.codex_interrupts, &command).await;
         }
@@ -9827,7 +10231,9 @@ impl WorkerBackend for RuntimeWorkerBackend {
         }
 
         let mut runner = IssueSessionRunner::with_environment(
-            self.client.clone(),
+            self.client.clone().ok_or_else(|| {
+                CliWorkerError::InterruptFailed("OpenHands execution client unavailable".into())
+            })?,
             self.runner_config.clone(),
             OverlayEnvironment {
                 overrides: self.worker_env.clone(),
@@ -13967,6 +14373,7 @@ mod tests {
                 route: crate::opensymphony_orchestrator::HarnessRouteDecision {
                     task_type: "issue_execution".into(),
                     harness_kind: "openhands_agent_server".into(),
+                    harness_profile: None,
                     model: None,
                     model_profile: None,
                     reason: "test default route".into(),
@@ -14885,6 +15292,7 @@ Run the scheduler.
         let openhands_route = crate::opensymphony_orchestrator::HarnessRouteDecision {
             task_type: "issue_execution".into(),
             harness_kind: "openhands_agent_server".into(),
+            harness_profile: None,
             model: None,
             model_profile: None,
             reason: "test default route".into(),
@@ -15953,6 +16361,7 @@ Run the scheduler.
         crate::opensymphony_orchestrator::HarnessRouteDecision {
             task_type: "issue_execution".into(),
             harness_kind: "codex_app_server".into(),
+            harness_profile: None,
             model: None,
             model_profile: Some("codex-chatgpt-local-keychain".into()),
             reason: "test codex route".into(),
@@ -16584,6 +16993,686 @@ exit 64
             updated_at: None,
             last_seen_tracker_refresh_at: None,
         }
+    }
+
+    fn acp_test_request(root: &Path, profile: &str, ordinal: u32) -> WorkerStartRequest {
+        let issue = sample_issue();
+        let workspace = sample_workspace(root);
+        WorkerStartRequest {
+            run: RunAttempt::new(
+                WorkerId::new(format!("acp-worker-{ordinal}")).expect("worker"),
+                issue.id.clone(),
+                issue.identifier.clone(),
+                workspace.path.clone(),
+                TimestampMs::new(ordinal as u64),
+                None,
+                8,
+            ),
+            issue,
+            workspace,
+            route: crate::opensymphony_orchestrator::HarnessRouteDecision {
+                task_type: "issue_execution".into(),
+                harness_kind: "acp".into(),
+                harness_profile: Some(profile.into()),
+                model: None,
+                model_profile: None,
+                reason: "ACP integration test".into(),
+                dry_run: false,
+                user_override: false,
+            },
+            memory_grant_registry_recovered: false,
+            expected_parent_conversation_id: None,
+            parent_repair: None,
+        }
+    }
+
+    async fn acp_test_backend(temp: &Path) -> (RuntimeWorkerBackend, Arc<WorkspaceManager>) {
+        let root = temp.join("workspaces");
+        let mut workflow = sample_workflow(temp, &root);
+        for id in [
+            "first",
+            "second",
+            "hang",
+            "crash",
+            "setup_retry",
+            "permission",
+            "corrupt",
+        ] {
+            let profile = serde_json::from_value(serde_json::json!({
+                "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
+            })).expect("profile");
+            workflow.extensions.acp.profiles.insert(id.into(), profile);
+        }
+        workflow.config.routing.harness = "acp".into();
+        workflow.config.routing.harness_profile = Some("first".into());
+        let manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow)).expect("manager"),
+        );
+        let backend = RuntimeWorkerBackend::new_with_client(
+            None,
+            Arc::new(workflow),
+            manager.clone(),
+            None,
+            BTreeMap::from([
+                ("OPENSYMPHONY_MEMORY_PROJECT".into(), "project-scope".into()),
+                (
+                    "OPENSYMPHONY_MEMORY_EXECUTION_REPO".into(),
+                    "repo-scope".into(),
+                ),
+            ]),
+        );
+        (backend, manager)
+    }
+
+    async fn acp_test_finished(backend: &mut RuntimeWorkerBackend) -> WorkerOutcomeRecord {
+        for _ in 0..200 {
+            for update in backend.poll_updates().await.expect("updates") {
+                if let WorkerUpdate::Finished { outcome, .. } = update {
+                    return outcome;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("ACP worker did not finish")
+    }
+
+    #[tokio::test]
+    async fn acp_workers_cover_default_scheduler_concurrency_without_cross_routing() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let requests = (0..10)
+            .map(|ordinal| {
+                let mut request = acp_test_request(&root, "first", ordinal);
+                let identifier = format!("COE-ACP-{ordinal}");
+                request.issue.id = IssueId::new(format!("acp-issue-{ordinal}")).expect("issue");
+                request.issue.identifier =
+                    crate::opensymphony_domain::IssueIdentifier::new(&identifier)
+                        .expect("identifier");
+                request.workspace.path = root.join(&identifier);
+                request.workspace.workspace_key = WorkspaceKey::new(&identifier).expect("key");
+                request.run = RunAttempt::new(
+                    WorkerId::new(format!("acp-worker-{ordinal}")).expect("worker"),
+                    request.issue.id.clone(),
+                    request.issue.identifier.clone(),
+                    request.workspace.path.clone(),
+                    TimestampMs::new(ordinal as u64),
+                    None,
+                    8,
+                );
+                request
+            })
+            .collect();
+        let launches = backend.start_workers(requests).await;
+        assert!(launches.iter().all(Result::is_ok), "{launches:?}");
+        let mut finished = BTreeSet::new();
+        for _ in 0..300 {
+            for update in backend.poll_updates().await.expect("updates") {
+                if let WorkerUpdate::Finished { worker_id, outcome } = update {
+                    assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+                    finished.insert(worker_id.to_string());
+                }
+            }
+            if finished.len() == 10 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(finished.len(), 10);
+        let workspaces = manager.list_all_workspaces().await.expect("workspaces");
+        assert_eq!(workspaces.len(), 10);
+        for (handle, _) in workspaces {
+            let evidence: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(handle.workspace_path().join("acp-worker.json"))
+                    .expect("evidence"),
+            )
+            .expect("JSON");
+            assert_eq!(
+                evidence["cwd"],
+                handle.workspace_path().to_str().expect("path")
+            );
+            acp::retire(&manager, &handle, backend.acp_host.as_ref())
+                .await
+                .expect("retire");
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_worker_retains_continuation_switches_profiles_and_recovers_persisted_route() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let first = backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            first
+                .conversation
+                .harness_capability
+                .as_ref()
+                .expect("capability")
+                .profile_id,
+            "first"
+        );
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("state")
+            .owner_id;
+        backend
+            .start_worker(acp_test_request(&root, "first", 2))
+            .await
+            .expect("continuation");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let retained = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("state");
+        assert_eq!(retained.owner_id, owner);
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json")).expect("evidence"),
+        )
+        .expect("json");
+        assert!(
+            evidence["prompt"]
+                .as_str()
+                .expect("prompt")
+                .contains("Continue the current issue")
+        );
+        assert_eq!(evidence["memory_project"], "project-scope");
+        assert_eq!(evidence["memory_repo"], "repo-scope");
+        let mut dry_run = acp_test_request(&root, "second", 99);
+        dry_run.route.dry_run = true;
+        backend
+            .start_worker(dry_run)
+            .await
+            .expect("dry-run alternate profile");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        assert_eq!(
+            manager
+                .load_conversation_manifest(&handle)
+                .await
+                .expect("manifest")
+                .expect("manifest")
+                .acp
+                .expect("retained owner")
+                .owner_id,
+            owner,
+            "dry-run must not retire or replace the owner"
+        );
+
+        backend
+            .start_worker(acp_test_request(&root, "second", 3))
+            .await
+            .expect("profile switch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let switched = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("state");
+        assert_eq!(switched.identity.profile_id, "second");
+        assert_ne!(switched.owner_id, owner);
+        // A process restart between the durable terminal response and worker finish must
+        // recover the stored second profile even if the new default is first.
+        let mut prior = manager
+            .load_run_manifest(&handle)
+            .await
+            .expect("run")
+            .expect("run");
+        prior.status = RunStatus::Running;
+        manager
+            .write_run_manifest(&handle, &prior)
+            .await
+            .expect("persist");
+        backend
+            .recover_worker(acp_test_request(&root, "first", 3))
+            .await
+            .expect("recovery");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let prompts =
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts");
+        assert_eq!(
+            prompts.lines().count(),
+            3,
+            "recovery cannot replay a completed prompt"
+        );
+        assert!(
+            acp::retire(&manager, &handle, None).await.is_err(),
+            "a different host cannot retire a live owner, even after a finished turn"
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+        let mut exited = std::process::Command::new("true").spawn().expect("child");
+        let pid = exited.id();
+        exited.wait().expect("exited child");
+        let mut manifest = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest");
+        manifest.acp.as_mut().expect("ACP").process =
+            crate::opensymphony_workspace::AcpProcessState::Running { pid };
+        manager
+            .write_json_artifact_atomically(
+                &handle,
+                &handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("simulate owner death before stop checkpoint");
+        acp::retire(&manager, &handle, None)
+            .await
+            .expect("retire absent prior process without launch");
+        assert_eq!(
+            manager
+                .load_conversation_manifest(&handle)
+                .await
+                .expect("manifest")
+                .expect("manifest")
+                .acp
+                .expect("ACP")
+                .process,
+            crate::opensymphony_workspace::AcpProcessState::Stopped
+        );
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts"),
+            prompts
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_worker_interrupt_abort_and_uncertain_cleanup_are_owner_fenced() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let request = acp_test_request(&root, "hang", 1);
+        let launch = backend
+            .start_worker(request.clone())
+            .await
+            .expect("hang launch");
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        for _ in 0..100 {
+            if handle.workspace_path().join("acp-worker.json").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            acp::retire(&manager, &handle, backend.acp_host.as_ref())
+                .await
+                .is_err()
+        );
+        let acknowledgement = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: "run-acp-worker-1".into(),
+                issue_id: request.issue.id.clone(),
+                harness_kind: "acp".into(),
+                conversation_id: launch.conversation.conversation_id,
+                turn_id: None,
+                reason: HarnessInterruptReason::OperatorCancel,
+                expected_next_state: HarnessInterruptExpectedNextState::Paused,
+            })
+            .await
+            .expect("interrupt");
+        assert!(acknowledgement.accepted);
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Cancelled
+        );
+        backend
+            .start_worker(acp_test_request(&root, "hang", 2))
+            .await
+            .expect("next hang");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        backend
+            .abort_worker(
+                &WorkerId::new("acp-worker-2").expect("worker"),
+                WorkerAbortReason::TrackerTerminal,
+            )
+            .await
+            .expect("abort");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Cancelled
+        );
+        backend
+            .start_worker(acp_test_request(&root, "crash", 3))
+            .await
+            .expect("crash launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Detached
+        );
+        assert!(
+            acp::retire(&manager, &handle, backend.acp_host.as_ref())
+                .await
+                .is_err()
+        );
+        let prompts =
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts");
+        backend
+            .recover_worker(acp_test_request(&root, "first", 3))
+            .await
+            .expect("fenced recovery");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Detached
+        );
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts"),
+            prompts
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_worker_fences_unreadable_submission_evidence() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        backend
+            .start_worker(acp_test_request(&manager.config().root, "corrupt", 1))
+            .await
+            .expect("launch");
+        let outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Detached);
+        assert!(
+            !outcome.harness_stopped,
+            "unreadable durable evidence cannot prove stop"
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        assert!(manager.load_conversation_manifest(&handle).await.is_err());
+        assert!(
+            acp::retire(&manager, &handle, backend.acp_host.as_ref())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_worker_retries_pre_submission_failure_and_reports_permission_wait() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "setup_retry", 1))
+            .await
+            .expect("failure reported through worker");
+        let failed = acp_test_finished(&mut backend).await;
+        assert_eq!(failed.outcome, WorkerOutcomeKind::Failed);
+        let state = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let state = manager
+            .load_conversation_manifest(&state)
+            .await
+            .expect("state");
+        assert!(failed.harness_stopped, "{failed:?} {state:?}");
+        backend
+            .start_worker(acp_test_request(&root, "setup_retry", 2))
+            .await
+            .expect("safe retry");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        backend
+            .start_worker(acp_test_request(&root, "permission", 3))
+            .await
+            .expect("permission launch");
+        let mut waiting = false;
+        let mut finished = None;
+        for _ in 0..200 {
+            for update in backend.poll_updates().await.expect("updates") {
+                match update {
+                    WorkerUpdate::RuntimeEvent { event_kind, .. } => {
+                        waiting |= event_kind.as_deref() == Some("acp.waiting_for_input")
+                    }
+                    WorkerUpdate::Finished { outcome, .. } => finished = Some(outcome),
+                    _ => {}
+                }
+            }
+            if finished.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(waiting, "permission waiting state reaches the scheduler");
+        assert_eq!(
+            finished.expect("finished").outcome,
+            WorkerOutcomeKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_worker_preserves_verified_checkout_instructions_and_memory_grant() {
+        use crate::opensymphony_domain::{RepositoryIdentity, SafeRemoteFingerprint};
+        use crate::opensymphony_workspace::CheckoutRepository;
+        let temp = TempDir::new().expect("temp");
+        let source = temp.path().join("source");
+        let origin = temp.path().join("origin.git");
+        fs::create_dir_all(&source).expect("source");
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "user.email", "test@example.invalid"]);
+        git(&source, &["config", "user.name", "ACP test"]);
+        fs::write(
+            source.join("AGENTS.md"),
+            "Verified ACP repository instructions",
+        )
+        .expect("instructions");
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "fixture"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().expect("source path"),
+                origin.to_str().expect("origin path"),
+            ],
+        );
+        let remote = origin.to_str().expect("origin path");
+        let binding = crate::opensymphony_domain::RepositoryBinding {
+            alias: "source".into(),
+            repository: RepositoryIdentity {
+                id: CanonicalRepositoryId::from_remote("local", None, remote).expect("repo id"),
+                safe_remote_fingerprint: SafeRemoteFingerprint::from_remote("local", None, remote)
+                    .expect("remote fingerprint"),
+            },
+            config_generation: "config-1".into(),
+            inventory_generation: "inventory-1".into(),
+        };
+        let repository = CheckoutRepository {
+            provider: "local".into(),
+            provider_id: None,
+            remote_locator: remote.into(),
+            remote: remote.into(),
+            target_branch: "main".into(),
+            credential_kind: "environment".into(),
+            credential_reference: None,
+            credential_env: Some("HOME".into()),
+            review_credential_env: None,
+            instructions_path: "AGENTS.md".into(),
+            policy_generation: "policy-1".into(),
+            review_profile: "local".into(),
+            review_provider: "local".into(),
+            review_policy_generation: "review-1".into(),
+            required_checks: false,
+            required_review: false,
+            merge_method: None,
+        };
+        let (mut backend, initial_manager) = acp_test_backend(temp.path()).await;
+        let manager = Arc::new(
+            WorkspaceManager::new(initial_manager.config().clone())
+                .expect("manager")
+                .with_repository_checkouts(BTreeMap::from([(
+                    binding.repository.id.to_string(),
+                    repository,
+                )])),
+        );
+        backend.workspace_manager = manager.clone();
+        backend
+            .checkout_credential_envs
+            .insert("OPENSYMPHONY_CHECKOUT_TEST_ONLY".into());
+        backend.worker_env.insert(
+            "OPENSYMPHONY_CHECKOUT_TEST_ONLY".into(),
+            "must-not-reach-agent".into(),
+        );
+        backend.memory_env = Some(RuntimeMemoryEnv {
+            endpoint: "http://127.0.0.1:8765/mcp".into(),
+            token: None,
+            project: "project-scope".into(),
+            project_set: None,
+            visibility: crate::opensymphony_memory::MemoryVisibility::Private,
+            run_id: None,
+            attempt: None,
+            target_commit: None,
+            checkout_head: None,
+            execution_repo: binding.repository.id.to_string(),
+            parent_scope: false,
+            authorized_repositories: BTreeSet::from([binding.repository.id.to_string()]),
+            authorized_repositories_by_project: BTreeMap::new(),
+            scope_grants: Some(MemoryScopeGrantRegistry::default()),
+        });
+        let mut request = acp_test_request(&manager.config().root, "first", 1);
+        request.issue.repository_binding =
+            Some(RepositoryBindingOutcome::Resolved(binding.clone()));
+        request.run.repository_binding = Some(binding.clone());
+        let ensured = manager
+            .ensure_with_run_id(&issue_descriptor(&request.issue), Some("run-acp-worker-1"))
+            .await
+            .expect("verified checkout");
+        request.run.workspace_path = ensured.handle.workspace_path().to_path_buf();
+        request.workspace.path = request.run.workspace_path.clone();
+        request.workspace.workspace_key =
+            WorkspaceKey::new(ensured.handle.workspace_key()).expect("key");
+        let mut recovery_request = request.clone();
+        backend
+            .start_worker(request)
+            .await
+            .expect("strict ACP launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(ensured.handle.workspace_path().join("acp-worker.json"))
+                .expect("evidence"),
+        )
+        .expect("JSON");
+        assert!(
+            evidence["prompt"]
+                .as_str()
+                .expect("prompt")
+                .contains("Verified ACP repository instructions")
+        );
+        assert_eq!(evidence["memory_repo"], binding.repository.id.to_string());
+        assert_eq!(evidence["checkout_secret_present"], false);
+        assert_eq!(evidence["memory_token_present"], true);
+        let run = manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run")
+            .expect("run");
+        let envelope = run.runtime_envelope.expect("runtime envelope");
+        assert_eq!(envelope.repository_binding, binding);
+        assert_eq!(envelope.harness, "acp");
+        assert!(envelope.acp_session.is_some());
+        assert!(envelope.conversation_binding.is_some());
+        let conversation = manager
+            .load_conversation_manifest(&ensured.handle)
+            .await
+            .expect("conversation")
+            .expect("conversation");
+        assert_eq!(conversation.runtime_envelope.as_ref(), Some(&envelope));
+        let prompts = fs::read_to_string(ensured.handle.workspace_path().join("acp-prompts.jsonl"))
+            .expect("prompts");
+        let mut interrupted_finish = manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run")
+            .expect("run");
+        interrupted_finish.status = RunStatus::Running;
+        manager
+            .write_run_manifest(&ensured.handle, &interrupted_finish)
+            .await
+            .expect("crash window");
+        recovery_request.route.harness_profile = Some("second".into());
+        recovery_request.memory_grant_registry_recovered = true;
+        backend.memory_env.as_mut().expect("memory").scope_grants =
+            Some(MemoryScopeGrantRegistry::default());
+        backend
+            .recover_worker(recovery_request)
+            .await
+            .expect("completed ACP recovery with fresh grant registry");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        assert_eq!(
+            fs::read_to_string(ensured.handle.workspace_path().join("acp-prompts.jsonl"))
+                .expect("prompts"),
+            prompts
+        );
+        acp::retire(&manager, &ensured.handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     struct AbortNotifier(Option<oneshot::Sender<()>>);

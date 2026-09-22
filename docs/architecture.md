@@ -487,8 +487,20 @@ session actor accepts generation-fenced commands and allows one outstanding
 prompt. Worker handles borrow a process across attempts; dropping a handle or
 subscriber preserves the session. Idle expiry and explicit retirement use the
 same supervised process teardown. The `run_turn` compatibility API creates one
-session for one prompt. Neither API mutates scheduling state. Production worker
-routing is the separate OSYM-902 integration slice.
+session for one prompt. Neither API mutates scheduling state. The production
+`opensymphony run` worker selects ACP explicitly, borrows the retained owner, and
+reports normalized updates and outcomes through scheduler-owned worker messages.
+The same launch preparation verifies checkout bindings, instruction provenance,
+hooks, review context and scoped memory before adapter dispatch. ACP-only startup
+requires neither an OpenHands client nor an OpenHands server.
+
+The persisted route retains the ACP profile and model selection across daemon
+recovery. Profile switches retire a quiescent owner before archiving its manifest;
+active prompts, observation leases and uncertain submissions fence switching and
+cleanup. A submitted prompt is never replayed on restart. Tool patches merge by
+call identity with bounded state; replay frames do not contribute usage. Optional
+usage remains absent when the peer does not report it. Raw redacted source frames
+stay on the owner separately from the normalized scheduler event stream.
 
 Durable ACP identity and submission/outcome markers live in the existing
 conversation manifest, with additive ACP identity in its runtime envelope.

@@ -992,6 +992,7 @@ impl IssueConversationManifest {
 
     fn to_domain_metadata(&self, stream_state: RuntimeStreamState) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: self.conversation_id.clone(),
             server_base_url: self.server_base_url.clone(),
             transport_target: self.transport_target.clone(),
@@ -4339,6 +4340,7 @@ fn build_summary_metadata(
     server_base_url: &str,
 ) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(conversation.conversation_id.to_string())
             .expect("UUID-backed conversation ID should not be empty"),
         server_base_url: Some(server_base_url.to_string()),

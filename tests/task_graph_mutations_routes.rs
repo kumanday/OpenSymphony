@@ -73,6 +73,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 120_000,
         },
         issues: vec![IssueSnapshot {
+            harness_capability: None,
             identifier: "COE-405".to_owned(),
             title: "Linear Milestone, Issue, And Sub-Issue Mutations".to_owned(),
             tracker_state: "In Progress".to_owned(),
