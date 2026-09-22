@@ -343,17 +343,19 @@ impl Services {
                 let path = self.path(&request.path, true).await?;
                 // Check the complete path before creating parents; nonexistent leaves are
                 // validated against the nearest existing ancestor, including dangling links.
-                #[cfg(windows)]
-                let (mut file, _path_guards) = super::windows_path::open_file(&path, true)
+                let mut stage = super::atomic_file::AtomicFile::new(&self.root, &path)
                     .await
                     .map_err(io_error)?;
-                #[cfg(not(windows))]
-                let mut file = self.open_file(&path, true).await?;
-                file.set_len(0).await.map_err(io_error)?;
-                file.write_all(request.content.as_bytes())
+                stage
+                    .file
+                    .write_all(request.content.as_bytes())
                     .await
                     .map_err(io_error)?;
-                file.flush().await.map_err(io_error)?;
+                stage.file.flush().await.map_err(io_error)?;
+                if self.cancellation.is_cancelled() {
+                    return Err(Error::new(-32603, "session cancelled"));
+                }
+                stage.commit().map_err(io_error)?;
                 Ok(Reply::Ready(json!({})))
             }
             "terminal/create" if self.policy.terminals => {

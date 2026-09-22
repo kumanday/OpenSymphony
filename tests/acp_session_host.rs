@@ -819,3 +819,44 @@ async fn retained_identity_rejects_changed_callback_and_response_limits() {
     }
     retire(&handle).await;
 }
+
+#[tokio::test]
+async fn ordinary_mcp_environment_does_not_poison_launch_or_retained_source_values() {
+    use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "MCPENV", "none").await;
+    request.context.services.mcp_servers.push(McpServer::Stdio(
+        McpServerStdio::new("memory", "memory-server").env(vec![
+            EnvVariable::new("DEBUG", "3"),
+            EnvVariable::new("ACCESS_TOKEN", "retained-env-secret"),
+        ]),
+    ));
+    let handle = host
+        .open(request)
+        .await
+        .expect("DEBUG=3 must not reject python3");
+    prompt(&handle, "env", "debug 3 retained-env-secret").await;
+    let history = handle.source_history();
+    let request = history
+        .events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::Source { frame, .. } if frame.payload["method"] == "session/new" => {
+                Some(&frame.payload)
+            }
+            _ => None,
+        })
+        .expect("source request");
+    assert_eq!(
+        request["params"]["mcpServers"][0]["env"][0]["value"],
+        "[redacted]"
+    );
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source { frame, .. } if frame.payload["params"]["update"]["content"]["text"] == "debug 3 [redacted]")));
+    assert!(
+        !serde_json::to_string(&history.events)
+            .expect("source")
+            .contains("retained-env-secret")
+    );
+    retire(&handle).await;
+}

@@ -71,7 +71,7 @@ while True:
             assert len(servers) == 1
             assert servers[0]['type'] == 'http'
             assert servers[0]['name'] == 'opensymphony-memory'
-            assert servers[0]['headers'] == [{'name': 'Authorization', 'value': 'Bearer scoped-grant-610'}]
+            assert servers[0]['headers'] == [{'name': 'Authorization', 'value': 'Bearer scoped-grant-610'}, {'name': 'X-Debug', 'value': '3'}]
             # The peer consumes the immutable host attachment, including its scoped grant.
             import urllib.request
             req = urllib.request.Request(servers[0]['url'], headers={'Authorization': servers[0]['headers'][0]['value']})

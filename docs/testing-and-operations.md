@@ -660,7 +660,9 @@ spawning the command and verify it reads from the original directory. The sole
 the repository lint is `deny`, and the closure performs no allocation, locking,
 logging or host cwd mutation. Callback tests cancel a file operation queued behind
 a blocked filesystem worker and verify no write occurs. Executable peers exercise
-JSON-escaped file/terminal responses against smaller response budgets, deferred
+partial staged-write cancellation and atomic replacement on native platforms,
+ordinary MCP environment values beside secret grants, JSON-escaped file/terminal
+responses against smaller response budgets, deferred
 model-to-mode selection, and rejection of credentials embedded in MCP URLs.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process

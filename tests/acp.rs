@@ -1278,7 +1278,10 @@ async fn acp_scoped_mcp_attachment_requires_negotiated_transport_and_redacts_gra
         let mut context = context(root.path());
         context.services.mcp_servers.push(McpServer::Http(
             McpServerHttp::new("opensymphony-memory", format!("http://{address}/mcp")).headers(
-                vec![HttpHeader::new("Authorization", "Bearer scoped-grant-610")],
+                vec![
+                    HttpHeader::new("Authorization", "Bearer scoped-grant-610"),
+                    HttpHeader::new("X-Debug", "3"),
+                ],
             ),
         ));
         let run = run_turn(

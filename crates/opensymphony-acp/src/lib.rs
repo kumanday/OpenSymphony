@@ -42,6 +42,7 @@ use tokio_util::{
 };
 use tracing::instrument::WithSubscriber;
 
+mod atomic_file;
 mod durable;
 mod host;
 mod services;
@@ -390,6 +391,22 @@ impl Capture {
     }
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
+        if let Some(servers) = payload
+            .pointer_mut("/params/mcpServers")
+            .and_then(Value::as_array_mut)
+        {
+            for server in servers {
+                for field in ["env", "headers"] {
+                    if let Some(entries) = server.get_mut(field).and_then(Value::as_array_mut) {
+                        for entry in entries {
+                            if let Some(value) = entry.get_mut("value") {
+                                *value = json!("[redacted]");
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(publisher) = &self.publisher {
             let mut source = payload.clone();
             self.redact(&mut source, false);
@@ -608,6 +625,10 @@ fn validate_launch(
                     server
                         .headers
                         .iter()
+                        .filter(|h| {
+                            runtime_field_is_sensitive(&h.name)
+                                || h.name.eq_ignore_ascii_case("cookie")
+                        })
                         .map(|h| h.value.clone())
                         .filter(|v| !v.is_empty()),
                 );
@@ -618,6 +639,10 @@ fn validate_launch(
                     server
                         .headers
                         .iter()
+                        .filter(|h| {
+                            runtime_field_is_sensitive(&h.name)
+                                || h.name.eq_ignore_ascii_case("cookie")
+                        })
                         .map(|h| h.value.clone())
                         .filter(|v| !v.is_empty()),
                 );
@@ -649,6 +674,7 @@ fn validate_launch(
                     server
                         .env
                         .iter()
+                        .filter(|e| runtime_field_is_sensitive(&e.name))
                         .map(|e| e.value.clone())
                         .filter(|v| !v.is_empty()),
                 );
