@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile/test the production Windows ACP owner without unrelated CLI dependencies.
+"""Compile/test the production Windows ACP helpers without unrelated CLI dependencies.
 
 The temporary Cargo harness is not a workspace member or published package. Its
 runtime dependency definitions come directly from the root manifest.
@@ -45,7 +45,9 @@ with tempfile.TemporaryDirectory(prefix="acp-windows-") as temp:
         + json.dumps(str(root / "crates/opensymphony-acp/src/windows_process.rs"))
         + ']\nmod windows_process;\n#[path = '
         + json.dumps(str(root / "crates/opensymphony-workspace/src/environment.rs"))
-        + ']\nmod environment;\n'
+        + ']\nmod environment;\n#[path = '
+        + json.dumps(str(root / "crates/opensymphony-acp/src/windows_path.rs"))
+        + ']\nmod windows_path;\n'
     )
     shutil.copyfile(root / "Cargo.lock", harness / "Cargo.lock")
     command = ["cargo", "check", "--tests", "--target", args.check_target] if args.check_target else ["cargo", "test"]

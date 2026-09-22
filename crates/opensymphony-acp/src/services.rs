@@ -1,5 +1,5 @@
 //! Connection-owned client facilities. Callback containment is not a process sandbox.
-use super::{CallbackOutput, ClientLimits};
+use super::{CallbackOutput, ClientError, ClientLimits};
 #[cfg(not(windows))]
 use crate::opensymphony_workspace::{configure_process_group, terminate_process_tree};
 use crate::opensymphony_workspace::{
@@ -63,12 +63,24 @@ pub(super) struct CallbackSender {
 }
 impl CallbackSender {
     /// Retire the previous callback epoch before a retained owner submits another prompt.
-    pub async fn begin_turn(&self, cancellation: CancellationToken) -> Result<(), Error> {
+    pub async fn begin_turn(
+        &self,
+        cancellation: CancellationToken,
+        timeout: Duration,
+    ) -> Result<(), ClientError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .try_send(ServiceCommand::BeginTurn(cancellation, tx))
-            .map_err(|_| Error::internal_error())?;
-        rx.await.map_err(|_| Error::internal_error())?
+            .try_send(ServiceCommand::BeginTurn(cancellation.clone(), tx))
+            .map_err(|_| ClientError::Teardown)?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ClientError::CancelledBeforePrompt),
+            result = tokio::time::timeout(timeout, rx) => {
+                result.map_err(|_| ClientError::SetupTimeout)?
+                    .map_err(|_| ClientError::Teardown)?
+                    .map_err(|_| ClientError::Teardown)
+            }
+        }
     }
     pub fn enqueue(
         &self,
@@ -526,6 +538,10 @@ impl Services {
         let relative = path
             .strip_prefix(&self.root)
             .map_err(|_| Error::invalid_params())?;
+        #[cfg(windows)]
+        super::windows_path::validate_components(&self.root, relative, missing)
+            .await
+            .map_err(io_error)?;
         let mut current = self.root.clone();
         for part in relative.components() {
             current.push(part);
@@ -776,7 +792,7 @@ mod tests {
         let task = tokio::spawn(service.run());
         let first = CancellationToken::new();
         sender
-            .begin_turn(first.clone())
+            .begin_turn(first.clone(), Duration::from_secs(5))
             .await
             .expect("prior process quiescent");
         assert!(
@@ -790,11 +806,40 @@ mod tests {
                 .is_ok()
         );
         let second = CancellationToken::new();
-        sender.begin_turn(second.clone()).await.expect("new epoch");
+        sender
+            .begin_turn(second.clone(), Duration::from_secs(5))
+            .await
+            .expect("new epoch");
         assert!(!first.is_cancelled());
         assert!(!second.is_cancelled());
         shutdown.cancel();
         assert!(task.await.expect("actor"));
+    }
+
+    #[tokio::test]
+    async fn queued_epoch_handoff_obeys_cancellation_and_deadline() {
+        // Retain the receiver without draining it: the epoch is admitted behind
+        // outstanding work, but the service cannot acknowledge it yet.
+        let (tx, _rx) = mpsc::channel(2);
+        let sender = CallbackSender {
+            tx,
+            permits: Arc::new(Semaphore::new(2)),
+            bytes: Arc::new(Semaphore::new(1024)),
+        };
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let pending = sender.begin_turn(cancellation, Duration::from_secs(60));
+        let (result, ()) = tokio::join!(pending, async {
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        });
+        assert!(matches!(result, Err(ClientError::CancelledBeforePrompt)));
+        assert!(matches!(
+            sender
+                .begin_turn(CancellationToken::new(), Duration::from_millis(1))
+                .await,
+            Err(ClientError::SetupTimeout)
+        ));
     }
 
     #[test]

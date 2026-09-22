@@ -1313,6 +1313,41 @@ async fn acp_scoped_mcp_attachment_requires_negotiated_transport_and_redacts_gra
 }
 
 #[tokio::test]
+async fn acp_mcp_credential_arguments_are_redacted_from_requests_echoes_and_stderr() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    let root = tempfile::tempdir().expect("root");
+    let mut context = context(root.path());
+    context.services.mcp_servers.push(McpServer::Stdio(
+        McpServerStdio::new("memory", "memory-server").args(vec![
+            "--token".into(),
+            "standalone-oauth-value".into(),
+            "--api-key=inline-api-value".into(),
+        ]),
+    ));
+    let run = run_turn(
+        &services_profile("mcp_argv"),
+        context,
+        "memory".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome.expect("stdio attachment").succeeded(),
+        "{}",
+        run.stderr
+    );
+    let evidence = serde_json::to_string(&run.evidence).expect("evidence");
+    for secret in ["standalone-oauth-value", "inline-api-value"] {
+        assert!(!evidence.contains(secret));
+        assert!(!run.stderr.contains(secret));
+    }
+    assert!(evidence.contains("[redacted]"));
+}
+
+#[tokio::test]
 async fn acp_client_services_callback_admission_bounds_pending_waits() {
     let root = tempfile::tempdir().expect("root");
     let run = run_turn(

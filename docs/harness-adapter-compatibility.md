@@ -134,4 +134,8 @@ responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-packa
 | Permission | Cancelled response until operator routing is implemented. |
 | Interactive auth and elicitation | Not advertised. |
 
+Windows callback path validation rejects reparse points, including junctions,
+before file access or terminal launch. Callback epoch handoff shares the setup
+deadline and observes caller cancellation before prompt submission.
+
 Callback policies do not establish a sandbox for the local agent process.

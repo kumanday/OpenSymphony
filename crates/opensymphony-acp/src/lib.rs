@@ -46,6 +46,8 @@ mod session_config;
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
 #[cfg(windows)]
+mod windows_path;
+#[cfg(windows)]
 mod windows_process;
 
 pub use crate::opensymphony_workflow::AcpProfile;
@@ -605,6 +607,23 @@ fn validate_launch(
                         "MCP environment cannot expose excluded checkout credentials".into(),
                     ));
                 }
+                // Argument values are separate JSON strings, so generic text
+                // redaction cannot associate a token with the preceding flag.
+                let sensitive_argument = |flag: &str| {
+                    runtime_field_is_sensitive(flag) || flag.eq_ignore_ascii_case("--oauth2-bearer")
+                };
+                for (index, argument) in server.args.iter().enumerate() {
+                    let secret = match argument.split_once('=') {
+                        Some((flag, value)) if sensitive_argument(flag) => Some(value),
+                        _ if index > 0 && sensitive_argument(&server.args[index - 1]) => {
+                            Some(argument.as_str())
+                        }
+                        _ => None,
+                    };
+                    if let Some(value) = secret.filter(|value| !value.is_empty()) {
+                        secrets.push(value.to_owned());
+                    }
+                }
                 secrets.extend(
                     server
                         .env
@@ -982,6 +1001,10 @@ pub async fn run_turn(
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
+                if let Err(error) = service_sender.begin_turn(cancellation.clone(), limits.setup_timeout).await {
+                    phase_error = Some(error);
+                    return Err(agent_client_protocol::Error::internal_error());
+                }
                 Ok((initialization, session.session_id))
             };
             let setup_result = tokio::select! {
@@ -998,13 +1021,6 @@ pub async fn run_turn(
                     return Err(agent_client_protocol::Error::internal_error());
                 }
             };
-            if cancellation.is_cancelled() {
-                phase_error = Some(ClientError::CancelledBeforePrompt);
-                return Err(agent_client_protocol::Error::internal_error());
-            }
-            service_sender.begin_turn(cancellation.clone()).await.inspect_err(|_| {
-                phase_error = Some(ClientError::Teardown);
-            })?;
             if cancellation.is_cancelled() {
                 phase_error = Some(ClientError::CancelledBeforePrompt);
                 return Err(agent_client_protocol::Error::internal_error());

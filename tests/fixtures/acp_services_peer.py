@@ -48,7 +48,7 @@ while True:
     method = message.get('method')
     if method == 'initialize':
         caps = message['params']['clientCapabilities']
-        enabled = mode not in ('disabled', 'config', 'unsupported_config', 'legacy_mode', 'missing_mcp', 'mcp')
+        enabled = mode not in ('disabled', 'config', 'unsupported_config', 'legacy_mode', 'missing_mcp', 'mcp', 'mcp_argv')
         assert caps.get('terminal', False) == enabled, caps
         assert caps.get('fs', {}).get('readTextFile', False) == enabled, caps
         assert caps.get('fs', {}).get('writeTextFile', False) == enabled, caps
@@ -68,6 +68,12 @@ while True:
             req = urllib.request.Request(servers[0]['url'], headers={'Authorization': servers[0]['headers'][0]['value']})
             with urllib.request.urlopen(req) as response:
                 assert response.read() == b'COE-610'
+        if mode == 'mcp_argv':
+            server = message['params']['mcpServers'][0]
+            assert server['args'] == ['--token', 'standalone-oauth-value', '--api-key=inline-api-value']
+            # Echoing a granted argument in a nonsensitive field or stderr must
+            # not persist the original value in source evidence.
+            print('standalone-oauth-value inline-api-value', file=sys.stderr, flush=True)
         result = {'sessionId': session}
         if mode in ('config', 'unsupported_config'):
             result['configOptions'] = config()
@@ -83,7 +89,9 @@ while True:
         respond(message, {})
     elif method == 'session/prompt':
         prompt_id = message['id']
-        if mode in ('config', 'legacy_mode'):
+        if mode == 'mcp_argv':
+            send({'method': 'session/update', 'params': {'sessionId': session, 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'standalone-oauth-value inline-api-value'}}}})
+        elif mode in ('config', 'legacy_mode'):
             update = {'sessionUpdate': 'config_option_update', 'configOptions': config('first')} if mode == 'config' else {'sessionUpdate': 'current_mode_update', 'currentModeId': 'ask'}
             send({'method': 'session/update', 'params': {'sessionId': session, 'update': update}})
         elif mode == 'disabled':
