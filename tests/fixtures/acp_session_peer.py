@@ -11,7 +11,11 @@ session = str(uuid.uuid4())
 pending = None
 terminal = None
 model = "first"
+session_mode = "plan"
+verbosity = "quiet"
 serial = 100
+abandoned_request = None
+pending_new = None
 
 
 def send(payload):
@@ -24,8 +28,27 @@ def update(text):
 
 
 def config():
-    return [{'id': 'model', 'name': 'Model', 'category': 'model', 'type': 'select',
-             'currentValue': model, 'options': [{'value': v, 'name': v} for v in ('first', 'second')]}]
+    models = ('first',) if os.path.exists('remove-choice') else ('first', 'second')
+    options = [{'id': 'model', 'name': 'Model', 'category': 'model', 'type': 'select',
+                'currentValue': model, 'options': [{'value': v, 'name': v} for v in models]}]
+    if persistence == 'config':
+        options.extend([
+            {'id': 'mode', 'name': 'Mode', 'category': 'mode', 'type': 'select',
+             'currentValue': session_mode, 'options': [{'value': v, 'name': v} for v in ('plan', 'execute')]},
+            {'id': 'verbosity', 'name': 'Verbosity', 'type': 'select',
+             'currentValue': verbosity, 'options': [{'value': v, 'name': v} for v in ('quiet', 'loud')]},
+        ])
+    return options
+
+
+def new_session(message):
+    assert message['params']['cwd'] == os.getcwd()
+    if services_enabled and persistence in ('load', 'resume'):
+        assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant']
+    result = {'sessionId': session}
+    if services_enabled:
+        result['configOptions'] = config()
+    send({'id': message['id'], 'result': result})
 
 
 def callback(method, params, error=False):
@@ -43,6 +66,15 @@ with open("launches", "a") as log:
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if method is None and message.get('id') == abandoned_request:
+        assert 'error' in message, message
+        abandoned_request = None
+        with open('abandoned-callback-rejected', 'w') as log:
+            log.write('rejected')
+        if pending_new is not None:
+            new_session(pending_new)
+            pending_new = None
+        continue
     with open("methods", "a") as log:
         log.write(method + "\n")
     if method == "initialize":
@@ -51,17 +83,20 @@ for line in sys.stdin:
             caps["sessionCapabilities"] = {"resume": {}}
         send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": caps}})
     elif method == "session/new":
-        assert message["params"]["cwd"] == os.getcwd()
-        if services_enabled and persistence in ('load', 'resume'):
-            assert message['params']['mcpServers'][0]['args'] == ['--token', 'retained-scope-grant']
-        result = {"sessionId": session}
-        if services_enabled:
-            result['configOptions'] = config()
-        send({"id": message["id"], "result": result})
+        if abandoned_request is not None:
+            pending_new = message
+        else:
+            new_session(message)
     elif method in ("session/load", "session/resume"):
         assert method == "session/" + persistence
         if os.path.exists("forget-session"):
             send({"id": message["id"], "error": {"code": -32002, "message": "session missing"}})
+            if services_enabled:
+                serial += 1
+                abandoned_request = serial
+                send({'id': serial, 'method': 'fs/write_text_file', 'params': {
+                    'sessionId': message['params']['sessionId'],
+                    'path': os.path.join(os.getcwd(), 'abandoned-write'), 'content': 'must reject'}})
             continue
         assert message["params"]["cwd"] == os.getcwd()
         session = message["params"]["sessionId"]
@@ -75,8 +110,21 @@ for line in sys.stdin:
         update("live adjacent to restore response")
     elif method == 'session/set_config_option':
         assert services_enabled
-        assert message['params']['configId'] == 'model'
-        model = message['params']['value']
+        with open('.opensymphony/conversation.json') as file:
+            assert json.load(file)['acp']['status'] != 'submitted'
+        if os.path.exists('stall-config'):
+            with open('preparing-config', 'w') as file:
+                file.write('pending')
+            continue
+        config_id = message['params']['configId']
+        if config_id == 'model':
+            model = message['params']['value']
+        elif config_id == 'mode':
+            session_mode = message['params']['value']
+        elif config_id == 'verbosity':
+            verbosity = message['params']['value']
+        else:
+            raise AssertionError(config_id)
         send({'id': message['id'], 'result': {'configOptions': config()}})
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
@@ -84,6 +132,16 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text.startswith('config-'):
+            assert (model, session_mode, verbosity) == ('second', 'execute', 'loud')
+            if text != 'config-assert':
+                model, session_mode, verbosity = 'first', 'plan', 'quiet'
+                if text == 'config-remove':
+                    open('remove-choice', 'w').close()
+                if text == 'config-stall':
+                    open('stall-config', 'w').close()
+                send({'method': 'session/update', 'params': {'sessionId': session, 'update': {
+                    'sessionUpdate': 'config_option_update', 'configOptions': config()}}})
         if text == 'services-cancel':
             import time
             terminal = callback('terminal/create', {'command': sys.executable, 'args': ['-c', "import os,time; open('callback.pid','w').write(str(os.getpid())); time.sleep(60)"]})['terminalId']

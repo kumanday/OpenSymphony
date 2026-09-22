@@ -275,9 +275,10 @@ mod tests {
         assert!(std::fs::rename(&inside, root.join("moved")).is_err());
         stage.file.write_all(b"complete").await.expect("write");
         stage.file.flush().await.expect("flush");
-        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&path, permissions.clone()).expect("readonly");
+        let permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).expect("readonly");
         assert!(stage.commit().is_err(), "readonly destination must survive");
         assert_eq!(std::fs::read(&path).expect("original"), b"original");
         assert_eq!(std::fs::read_dir(&inside).expect("entries").count(), 1);
@@ -287,7 +288,6 @@ mod tests {
                 .permissions()
                 .readonly()
         );
-        permissions.set_readonly(false);
         std::fs::set_permissions(&path, permissions).expect("restore for cleanup");
     }
 

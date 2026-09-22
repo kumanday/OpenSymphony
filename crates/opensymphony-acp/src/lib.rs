@@ -1083,10 +1083,14 @@ async fn run_connection(
                         let (loaded_tx, loaded_rx) = oneshot::channel();
                         let publisher = driver.as_ref().map(|driver| driver.publisher.clone());
                         let session_configuration = configuration.clone();
+                        let restoration_binding = active_session.clone();
                         connection.send_request(LoadSessionRequest::new(session_id.clone(), cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
                             .on_receiving_result(async move |result| {
                                 if let Ok(session) = &result {
                                     session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                                } else {
+                                    // Revoke in ordered dispatch before an adjacent old-session callback.
+                                    *restoration_binding.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                 }
                                 if let Some(publisher) = publisher {
                                     publisher.end_replay();
@@ -1098,10 +1102,13 @@ async fn run_connection(
                     } else {
                         let (resumed_tx, resumed_rx) = oneshot::channel();
                         let session_configuration = configuration.clone();
+                        let restoration_binding = active_session.clone();
                         connection.send_request(ResumeSessionRequest::new(session_id.clone(), cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
                             .on_receiving_result(async move |result| {
                                 if let Ok(session) = &result {
                                     session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                                } else {
+                                    *restoration_binding.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                 }
                                 let _ = resumed_tx.send(result);
                                 Ok(())
@@ -1110,7 +1117,14 @@ async fn run_connection(
                     };
                     match restored {
                         Ok(()) => Some(session_id),
-                        Err(error) if driver.as_deref_mut().is_some_and(|driver| driver.reset_missing_session(&error)) => None,
+                        Err(error) if driver.as_deref_mut().is_some_and(|driver| driver.reset_missing_session(&error)) => {
+                            // Retire accepted restoration work and handles before binding a fresh session.
+                            if let Err(error) = service_sender.begin_turn(cancellation.child_token(), limits.setup_timeout).await {
+                                phase_error = Some(error);
+                                return Err(agent_client_protocol::Error::internal_error());
+                            }
+                            None
+                        },
                         Err(error) => {
                             phase_error = rpc_failure(if replay { "session/load" } else { "session/resume" }, &error, &capture_state, false);
                             return Err(error);
@@ -1165,7 +1179,7 @@ async fn run_connection(
                 }
             };
             if let Some(driver) = driver.as_deref_mut() {
-                return driver.drive(connection, initialization, session_id, &capture_state, &limits, &service_sender, &configuration).await
+                return driver.drive(connection, initialization, session_id, &capture_state, &limits, &service_sender, &configuration, profile).await
                     .map_err(|error| {
                         phase_error = Some(error);
                         agent_client_protocol::Error::internal_error()

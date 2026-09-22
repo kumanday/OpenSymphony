@@ -664,6 +664,9 @@ partial staged-write cancellation and atomic replacement on native platforms,
 ordinary MCP environment values beside secret grants, JSON-escaped file/terminal
 responses against smaller response budgets, deferred
 model-to-mode selection, and rejection of credentials embedded in MCP URLs.
+Retained-owner fixtures reject abandoned-session callbacks adjacent to a missing
+restoration response, reapply changed model/mode/options before the next prompt,
+and keep cancellation/deadline failures ahead of durable submission.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,

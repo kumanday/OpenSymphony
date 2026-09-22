@@ -986,7 +986,11 @@ A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh
 cancellation token before the durable submission marker. The owner keeps handling
 observation and shutdown commands while preparation waits; cancellation, timeout
-or cleanup failure ends the connection before the new prompt.
+or cleanup failure ends the connection before the new prompt. The same bounded,
+cancellable preparation reapplies explicit model, mode and option choices after
+agent configuration updates, before recording durable submission. Missing-context
+restoration clears the callback binding inside ordered response dispatch and
+retires accepted restoration work before creating a fresh session.
 `HostServices` is captured at connection creation and has no attachment mutation
 path, so editor-like extension requests cannot replace cwd, environment, callbacks
 or MCP grants.

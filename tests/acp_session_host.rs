@@ -673,6 +673,161 @@ async fn missing_persisted_context_resets_only_when_persistence_is_optional() {
 }
 
 #[tokio::test]
+async fn missing_restoration_revokes_old_callbacks_before_fresh_session_response() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    for mode in ["services_load", "services_resume"] {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        for attempt in 0..2 {
+            let mut request = launch(root.path(), "RESET", mode).await;
+            request.context.services.write_files = true;
+            request.context.services.mcp_servers.push(McpServer::Stdio(
+                McpServerStdio::new("memory", "memory-server")
+                    .args(vec!["--token".into(), "retained-scope-grant".into()]),
+            ));
+            let handle = host.open(request).await.expect("open or reset");
+            assert!(
+                prompt(&handle, &format!("attempt-{attempt}"), "hello")
+                    .await
+                    .succeeded()
+            );
+            retire(&handle).await;
+            std::fs::write(root.path().join("RESET/forget-session"), "").expect("forget");
+        }
+        assert!(
+            root.path()
+                .join("RESET/abandoned-callback-rejected")
+                .exists()
+        );
+        assert!(!root.path().join("RESET/abandoned-write").exists());
+    }
+}
+
+async fn configured_launch(root: &Path) -> SessionLaunch {
+    let mut request = launch(root, "CONFIG", "services_config").await;
+    request.profile.session.model = Some("second".into());
+    request.profile.session.mode = Some("execute".into());
+    request
+        .profile
+        .session
+        .options
+        .insert("verbosity".into(), "loud".into());
+    request
+}
+
+async fn ended(events: &mut tokio::sync::broadcast::Receiver<SessionEvent>) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(SessionEvent::Ended { .. }) => break,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("owner closed before terminal event: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("owner ended");
+}
+
+#[tokio::test]
+async fn retained_preparation_reapplies_explicit_choices_and_rejects_removed_choices() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(configured_launch(root.path()).await)
+        .await
+        .expect("open");
+    let mut events = handle.subscribe();
+    let drifted = prompt(&handle, "drift", "config-drift").await;
+    assert_eq!(drifted.configuration.options[0]["currentValue"], "first");
+    let configured = prompt(&handle, "configured", "config-assert").await;
+    for (option, expected) in configured
+        .configuration
+        .options
+        .iter()
+        .zip(["second", "execute", "loud"])
+    {
+        assert_eq!(option["currentValue"], expected);
+    }
+    prompt(&handle, "remove", "config-remove").await;
+    assert!(
+        handle
+            .prompt(
+                "must-not-submit".into(),
+                1,
+                "config-assert".into(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    ended(&mut events).await;
+    let manifest: ConversationManifest = serde_json::from_slice(
+        &std::fs::read(root.path().join("CONFIG/.opensymphony/conversation.json"))
+            .expect("manifest"),
+    )
+    .expect("JSON");
+    assert_eq!(manifest.acp.expect("ACP").identity.run_id, "remove");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("CONFIG/methods"))
+            .expect("methods")
+            .lines()
+            .filter(|method| *method == "session/prompt")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn retained_configuration_preparation_remains_cancellable_and_deadline_bounded() {
+    for cancel in [false, true] {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = configured_launch(root.path()).await;
+        request.limits.setup_timeout = Duration::from_secs(2);
+        let handle = host.open(request).await.expect("open");
+        let mut events = handle.subscribe();
+        prompt(&handle, "stall", "config-stall").await;
+        let cancellation = CancellationToken::new();
+        let marker = root.path().join("CONFIG/preparing-config");
+        let (result, ()) = tokio::join!(
+            handle.prompt(
+                "must-not-submit".into(),
+                1,
+                "config-assert".into(),
+                cancellation.clone()
+            ),
+            async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("preparation started");
+                let state = handle.inspect().await.expect("owner stays responsive");
+                assert_eq!(state.state.status, AcpSessionStatus::Finished);
+                if cancel {
+                    cancellation.cancel();
+                }
+            }
+        );
+        let error = result.expect_err("preparation must stop").to_string();
+        assert!(
+            error.contains(if cancel { "cancel" } else { "deadline" }),
+            "{error}"
+        );
+        ended(&mut events).await;
+        let manifest: ConversationManifest = serde_json::from_slice(
+            &std::fs::read(root.path().join("CONFIG/.opensymphony/conversation.json"))
+                .expect("manifest"),
+        )
+        .expect("JSON");
+        assert_eq!(manifest.acp.expect("ACP").identity.run_id, "stall");
+    }
+}
+
+#[tokio::test]
 async fn retained_callbacks_reset_after_cancellation_and_keep_live_configuration() {
     let root = tempfile::tempdir().expect("root");
     let mut launch = launch(root.path(), "SERVICES", "services").await;

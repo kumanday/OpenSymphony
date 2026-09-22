@@ -763,6 +763,7 @@ impl SessionDriver {
         limits: &ClientLimits,
         services: &super::services::CallbackSender,
         configuration: &Arc<Mutex<super::SessionConfiguration>>,
+        profile: &AcpProfile,
     ) -> Result<TurnReport, ClientError> {
         let mut metadata = serde_json::to_value(&initialization)
             .map_err(|_| ClientError::Setup("invalid negotiation metadata".into()))?;
@@ -860,15 +861,22 @@ impl SessionDriver {
                             if cancellation.is_cancelled() { let _ = reply.send(Err(HostError::Client(ClientError::CancelledBeforePrompt.to_string()))); continue; }
                             let forced = cancellation.child_token();
                             let sender = services.clone();
-                            let user_cancel = cancellation.clone();
                             let epoch = forced.clone();
                             let timeout = limits.setup_timeout;
+                            let connection = connection.clone();
+                            let profile = profile.clone();
+                            let session_id = session_id.clone();
+                            let configuration = configuration.clone();
+                            let capture = capture.clone();
                             preparing = Some(PreparingPrompt {
                                 result: Box::pin(async move {
                                     tokio::select! {
                                         biased;
-                                        _ = user_cancel.cancelled() => { epoch.cancel(); Err(ClientError::CancelledBeforePrompt) },
-                                        result = sender.begin_turn(epoch.clone(), timeout) => result,
+                                        _ = epoch.cancelled() => Err(ClientError::CancelledBeforePrompt),
+                                        result = tokio::time::timeout(timeout, async {
+                                            sender.begin_turn(epoch.clone(), timeout).await?;
+                                            super::session_config::apply(&connection, &profile, session_id.0.as_ref(), &configuration, &capture).await
+                                        }) => result.map_err(|_| ClientError::SetupTimeout)?,
                                     }
                                 }),
                                 run_id, attempt, prompt, cancellation, forced, reply,
