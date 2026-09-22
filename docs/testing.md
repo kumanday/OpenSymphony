@@ -129,6 +129,7 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 - PR-196: Desktop task and diff latency plus live-refresh UX fixes
 - PR-197: Graph visualization command center and shared fixtures
 
@@ -230,6 +231,7 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 - COE-566
 - COE-567
 - COE-608
+- COE-609
 - PR-196
 - PR-197
 

@@ -106,6 +106,7 @@ areas:
       - area:acp
       - area:configuration
       - area:runtime
+      - area:workspace
       linear_milestones:
       - 'M12.99: ACP Harness Runtime Adapter'
   ai-pr-review-human-setup:
@@ -150,6 +151,7 @@ areas:
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -1548,6 +1550,7 @@ areas:
       - area:runtime
       - area:scheduler
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -1816,6 +1819,7 @@ areas:
       - area:review
       - area:runtime
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -2970,6 +2974,7 @@ areas:
       - area:runtime
       - area:testing
       - area:verifiers
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3090,6 +3095,7 @@ areas:
       - area:runner
       - area:runtime
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3117,6 +3123,7 @@ areas:
       - area:runtime
       - area:task-packets
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3139,6 +3146,7 @@ areas:
       - area:recovery
       - area:review
       - area:runtime
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3270,6 +3278,7 @@ areas:
       - area:configuration
       - area:recovery
       - area:runtime
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3385,6 +3394,7 @@ areas:
       - area:recovery
       - area:review
       - area:runtime
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3486,6 +3496,7 @@ areas:
       - area:runner
       - area:runtime
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -3680,6 +3691,7 @@ areas:
       - area:runtime
       - area:scheduler
       - area:testing
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -4109,6 +4121,7 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.95: Multi-Repository Foundations'
       - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -4484,6 +4497,7 @@ areas:
       - area:runtime
       - area:testing
       - area:verifiers
+      - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
       - 'M12.96: Parent Integration Lifecycle'
@@ -4695,6 +4709,7 @@ areas:
       - docs/workspace-and-lifecycle.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M12.99: ACP Harness Runtime Adapter'
   workspace-lifecycle:
     title: Workspace Lifecycle
     docs_target: docs/workspace-lifecycle.md

@@ -366,6 +366,7 @@ write/delete sharing until file I/O or terminal spawn finishes.
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -448,5 +449,6 @@ write/delete sharing until file I/O or terminal spawn finishes.
 - COE-551
 - COE-563
 - COE-608
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
