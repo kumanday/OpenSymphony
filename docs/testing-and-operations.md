@@ -853,6 +853,7 @@ tracker suites so local OAuth configuration does not override fixture credential
 - COE-554: Restart-Safe Parent Integration Controller
 - COE-555: Parent Repair Review And Merge Lifecycle
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -1005,5 +1006,6 @@ tracker suites so local OAuth configuration does not override fixture credential
 - COE-554
 - COE-555
 - COE-556
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

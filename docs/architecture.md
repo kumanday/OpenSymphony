@@ -673,6 +673,7 @@ capabilities. No OpenHands server or client participates in this launch path.
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -809,5 +810,6 @@ capabilities. No OpenHands server or client participates in this launch path.
 - COE-550
 - COE-551
 - COE-556
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -1006,6 +1006,7 @@ without launching another peer.
 - COE-407: Browser Transport And Remote Stream Protocols
 - COE-419: Hosted Auth Placeholders And Web Parity
 - COE-473: Desktop task graph dependency and run detail parity
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -1026,5 +1027,6 @@ without launching another peer.
 - COE-407
 - COE-419
 - COE-473
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
