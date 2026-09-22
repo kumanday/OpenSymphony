@@ -638,7 +638,8 @@ unknown updates and stop reasons, cancellation acknowledgement/deadline, malform
 and oversized frames, EOF/crash, output floods, bounded stderr/evidence, and a hung
 process tree. Regressions cover cancellation in every setup phase, pre-cancelled
 launches, JSON-escaped prompt overflow, missing update payloads, preservation of
-whitespace and long code chunks, and ACP profile migration. Current-thread Tokio
+whitespace and long code chunks, ACP profile migration, environment alias
+scoping, post-submission authentication errors, and opaque-ID debug redaction. Current-thread Tokio
 tests check callback/cancellation responsiveness.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
 require bundled-mode validation. Vendor interoperability evidence belongs to the

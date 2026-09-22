@@ -907,7 +907,10 @@ this connection to prevent bypassing the redacted evidence surface.
 
 Cancellation before prompt submission interrupts setup and tears down the child;
 an already-cancelled token prevents launch. The complete serialized prompt frame
-must pass its size bound before submission becomes uncertain.
+must pass its size bound before submission becomes uncertain. Authentication
+errors retain that submission state, so a mid-turn token failure cannot be
+treated as a safe pre-submission login failure. Opaque session IDs remain
+available for correlation and are omitted from diagnostic `Debug` output.
 
 Only an original prompt response with `stopReason: cancelled` acknowledges a
 requested cancellation. Sending `session/cancel`, killing a process, or receiving

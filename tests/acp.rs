@@ -446,7 +446,7 @@ async fn acp_missing_login_reports_an_actionable_error() {
     .expect("spawn");
     assert_eq!(
         result.outcome.expect_err("auth"),
-        ClientError::AuthenticationRequired
+        ClientError::AuthenticationRequired { submitted: false }
     );
     assert!(
         !result
@@ -590,4 +590,94 @@ async fn acp_host_credentials_cannot_be_copied_into_literal_argv() {
         .await,
         Err(ClientError::InvalidConfiguration(_))
     ));
+}
+
+#[tokio::test]
+async fn acp_authentication_errors_retain_post_submission_uncertainty() {
+    let root = tempfile::tempdir().expect("temp");
+    let result = run_turn(
+        &profile("prompt_auth_required"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("spawn");
+    assert_eq!(
+        result.outcome.expect_err("auth expired"),
+        ClientError::AuthenticationRequired { submitted: true }
+    );
+    assert!(
+        result
+            .evidence
+            .iter()
+            .any(|frame| frame.payload["method"] == "session/prompt")
+    );
+}
+
+#[tokio::test]
+async fn acp_live_update_debug_hides_opaque_session_credentials() {
+    let root = tempfile::tempdir().expect("temp");
+    let mut launch = context(root.path());
+    launch
+        .environment
+        .insert("AUTH_SOURCE".into(), "opaque-session-secret".into());
+    let mut config = profile("secret_session");
+    config
+        .env_refs
+        .insert("TEST_AUTH".into(), "AUTH_SOURCE".into());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let result = run_turn(
+        &config,
+        launch,
+        "hello".into(),
+        CancellationToken::new(),
+        Some(tx),
+        limits(),
+    )
+    .await
+    .expect("spawn");
+    assert!(!format!("{result:?}").contains("opaque-session-secret"));
+    assert!(result.outcome.expect("completed").succeeded());
+    let update = rx.recv().await.expect("update");
+    assert_eq!(update.session_id, "opaque-session-secret");
+    assert!(!format!("{update:?}").contains("opaque-session-secret"));
+}
+
+#[tokio::test]
+async fn acp_env_reference_sources_are_retained_only_when_explicitly_targeted() {
+    for mode in ["complete", "preserve_source"] {
+        let root = tempfile::tempdir().expect("temp");
+        let mut launch = context(root.path());
+        launch
+            .environment
+            .insert("AUTH_SOURCE".into(), "scoped-auth-secret".into());
+        let mut config = profile(mode);
+        config
+            .env_refs
+            .insert("TEST_AUTH".into(), "AUTH_SOURCE".into());
+        if mode == "preserve_source" {
+            config
+                .env_refs
+                .insert("AUTH_SOURCE".into(), "AUTH_SOURCE".into());
+        }
+        let result = run_turn(
+            &config,
+            launch,
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            limits(),
+        )
+        .await
+        .expect("spawn");
+        assert!(
+            result
+                .outcome
+                .expect("child verifies scoped environment")
+                .succeeded()
+        );
+    }
 }

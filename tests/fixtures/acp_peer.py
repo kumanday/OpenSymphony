@@ -6,7 +6,7 @@ import sys
 import time
 
 mode = sys.argv[1]
-session = "opaque/session:zero"
+session = os.environ["TEST_AUTH"] if mode == "secret_session" else "opaque/session:zero"
 prompt_id = None
 
 
@@ -49,10 +49,18 @@ for line in sys.stdin:
             continue
         assert message["params"]["cwd"] == os.getcwd()
         assert "CHECKOUT_SECRET" not in os.environ
+        if mode == "preserve_source":
+            assert os.environ["AUTH_SOURCE"] == os.environ["TEST_AUTH"]
+        else:
+            assert "AUTH_SOURCE" not in os.environ
         respond(message, {"sessionId": session})
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
         prompt_id = message["id"]
+        if mode == "prompt_auth_required":
+            update("started")
+            send({"id": prompt_id, "error": {"code": -32000, "message": "Token expired"}})
+            continue
         if mode in ("missing_update", "null_update", "missing_session_id"):
             params = {"sessionId": session}
             if mode == "null_update":

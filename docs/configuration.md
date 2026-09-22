@@ -952,7 +952,9 @@ acp:
 
 Central configuration migration transfers `routing.harness_profile` and the full
 `acp.profiles` map from the legacy workflow before rewriting its prompt body.
-Environment references remain names throughout migration.
+Environment references remain names throughout migration. At launch, each source
+variable is removed from the child environment unless that name is also an
+explicit target in `env_refs`; only the intended credential aliases are passed.
 
 The executable ACP client is available through `opensymphony_acp::run_turn`.
 Production `opensymphony run` routing is a separate implementation slice; an ACP

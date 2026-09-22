@@ -101,9 +101,9 @@ pub enum ClientError {
     #[error("ACP setup failed: {0}")]
     Setup(String),
     #[error(
-        "ACP authentication is required; configure an advertised noninteractive auth.method_id or establish agent login before launch"
+        "ACP authentication is required; prompt may have been submitted: {submitted}; configure an advertised noninteractive auth.method_id or establish agent login before launch"
     )]
-    AuthenticationRequired,
+    AuthenticationRequired { submitted: bool },
     #[error("ACP setup deadline exceeded")]
     SetupTimeout,
     #[error("ACP cancelled before prompt submission")]
@@ -130,10 +130,18 @@ pub struct SourceFrame {
     pub payload: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionUpdate {
     pub session_id: String,
     pub update: Value,
+}
+
+impl std::fmt::Debug for SessionUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionUpdate")
+            .field("update", &self.update)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -311,7 +319,17 @@ fn validate_launch(
     let mut environment = context
         .environment
         .iter()
-        .filter(|(k, _)| !excluded(k))
+        .filter(|(key, _)| {
+            !excluded(key)
+                && (!profile
+                    .env_refs
+                    .values()
+                    .any(|source| environment_variable_names_equal(source, key))
+                    || profile
+                        .env_refs
+                        .keys()
+                        .any(|target| environment_variable_names_equal(target, key)))
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut secrets = Vec::new();
@@ -672,7 +690,9 @@ pub async fn run_turn(
                     submitted: submitted.load(Ordering::Acquire),
                 }
             } else if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired {
-                ClientError::AuthenticationRequired
+                ClientError::AuthenticationRequired {
+                    submitted: submitted.load(Ordering::Acquire),
+                }
             } else if agent_client_protocol::is_incoming_transport_closed(&error) {
                 ClientError::Disconnected {
                     submitted: submitted.load(Ordering::Acquire),
