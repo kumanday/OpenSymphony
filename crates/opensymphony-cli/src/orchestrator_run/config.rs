@@ -58,6 +58,8 @@ struct RunConfigFile {
 #[serde(deny_unknown_fields)]
 struct CentralConfigFile {
     #[serde(default)]
+    acp: crate::opensymphony_workflow::AcpConfig,
+    #[serde(default)]
     schema_version: u32,
     instance: CentralInstanceFile,
     routing: CentralRoutingFile,
@@ -101,6 +103,8 @@ struct CentralInstanceFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentralRoutingFile {
+    #[serde(default)]
+    harness_profile: Option<String>,
     mode: String,
     #[serde(default)]
     active_project_set: Option<String>,
@@ -1428,6 +1432,20 @@ fn resolve_central_config(
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
     let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
+    config
+        .acp
+        .validate_selection(
+            config
+                .routing
+                .harness
+                .as_deref()
+                .unwrap_or("openhands_agent_server"),
+            config.routing.harness_profile.as_deref(),
+            config.routing.model.is_some() || config.routing.model_profile.is_some(),
+        )
+        .map_err(|_| CentralConfigError::InvalidReference {
+            field: "acp".into(),
+        })?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     let repository_instruction_path = legacy_repository_instruction_path;
     Ok(ResolvedCentralConfig {
@@ -1501,6 +1519,18 @@ fn reject_checkout_credential_env_reuse(
         }
     }
 
+    for (profile_id, profile) in &config.acp.profiles {
+        if profile.env_refs.iter().any(|(target, source)| {
+            checkout_variables.iter().any(|checkout| {
+                environment_variable_names_equal(checkout, target)
+                    || environment_variable_names_equal(checkout, source)
+            })
+        }) {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("acp.profiles.{profile_id}.env_refs"),
+            });
+        }
+    }
     let mut non_checkout_variables = BTreeMap::new();
     if let Some(variable) = config.openhands.transport_session_api_key_env.as_deref() {
         non_checkout_variables.insert(
@@ -2017,7 +2047,9 @@ fn central_workflow_front_matter(
                 })
                 .transpose()?,
         },
+        acp: config.acp.clone(),
         routing: RoutingFrontMatter {
+            harness_profile: config.routing.harness_profile.clone(),
             harness: config.routing.harness.clone(),
             model: config.routing.model.clone(),
             model_profile: config.routing.model_profile.clone(),
@@ -2970,6 +3002,53 @@ scheduler:
 "#,
             root = root.display()
         )
+    }
+
+    #[test]
+    fn acp_central_profiles_remain_authoritative_and_validate_references() {
+        let repo = tempfile::tempdir().expect("temp root");
+        std::fs::write(
+            repo.path().join("integration.md"),
+            "Integration instructions",
+        )
+        .expect("instructions");
+        let source = central_fixture(repo.path()).replace(
+            "  mode: project_set",
+            "  harness: acp\n  harness_profile: local\n  mode: project_set",
+        ) + "acp:\n  profiles:\n    local:\n      command: python3\n      env_refs: {AGENT_TOKEN: ACP_TEST_TOKEN}\n";
+        let resolved = resolve_central_config(&repo.path().join("config.yaml"), &source)
+            .expect("ACP central config");
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .routing
+                .harness_profile
+                .as_deref(),
+            Some("local")
+        );
+        let local = WorkflowFrontMatter::default();
+        let merged = merge_repository_local_front_matter(resolved.workflow_front_matter, &local);
+        assert_eq!(
+            merged.acp.profiles["local"].env_refs["AGENT_TOKEN"],
+            "ACP_TEST_TOKEN"
+        );
+        assert!(
+            resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("harness_profile: local", "harness_profile: absent")
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace(
+                    "command: python3",
+                    "command: python3\n      extensions: [unknown]"
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]

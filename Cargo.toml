@@ -27,6 +27,8 @@ duckdb-prebuilt = []
 openhands-subscription-credentials = []
 
 [dependencies]
+agent-client-protocol = "=2.2.0"
+agent-client-protocol-schema = "=1.9.1"
 async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -120,7 +122,7 @@ thiserror = "2"
 time = "=0.3.47"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "codec"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

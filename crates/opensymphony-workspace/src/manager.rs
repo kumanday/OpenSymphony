@@ -7698,12 +7698,12 @@ async fn join_child_pipe(
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+pub(crate) fn configure_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+pub(crate) fn configure_process_group(_command: &mut Command) {}
 
 fn sanitize_git_environment(command: &mut Command) {
     for variable in [
@@ -7717,7 +7717,7 @@ fn sanitize_git_environment(command: &mut Command) {
 }
 
 #[cfg(unix)]
-async fn terminate_process_tree(
+pub(crate) async fn terminate_process_tree(
     _child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> io::Result<()> {
@@ -7745,7 +7745,7 @@ async fn terminate_process_tree(
 }
 
 #[cfg(windows)]
-async fn terminate_process_tree(
+pub(crate) async fn terminate_process_tree(
     child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> io::Result<()> {
@@ -7771,7 +7771,7 @@ async fn terminate_process_tree(
 }
 
 #[cfg(not(any(unix, windows)))]
-async fn terminate_process_tree(
+pub(crate) async fn terminate_process_tree(
     child: &mut tokio::process::Child,
     _process_id: Option<u32>,
 ) -> io::Result<()> {
@@ -7779,18 +7779,18 @@ async fn terminate_process_tree(
 }
 
 #[cfg(unix)]
-struct ProcessGroupGuard(Option<Pid>);
+pub(crate) struct ProcessGroupGuard(Option<Pid>);
 
 #[cfg(unix)]
 impl ProcessGroupGuard {
-    fn new(process_id: Option<u32>) -> Self {
+    pub(crate) fn new(process_id: Option<u32>) -> Self {
         let process_group = process_id
             .and_then(|process_id| i32::try_from(process_id).ok())
             .and_then(Pid::from_raw);
         Self(process_group)
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.0 = None;
     }
 }

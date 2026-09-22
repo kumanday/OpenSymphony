@@ -25,3 +25,7 @@ pub use paths::{
     checkout_workspace_key, parent_workspace_key, resolve_path_within_root, sanitize_workspace_key,
     workspace_path_for_root,
 };
+
+#[cfg(unix)]
+pub(crate) use manager::ProcessGroupGuard;
+pub(crate) use manager::{configure_process_group, terminate_process_tree};

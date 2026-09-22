@@ -885,6 +885,29 @@ If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.
 
+## ACP client validation and limits
+
+`cargo test-system-duckdb --test acp` launches the reusable Python fake peer through
+`opensymphony_acp::run_turn`, the same executable client API intended for host
+integration. It requires Python 3, no provider credential, and creates a distinct
+issue checkout inside a temporary workspace root. These subprocess tests establish
+the client contract; real vendor qualification remains OSYM-906.
+
+The default limits are 1 MiB per frame, 128 queued incoming frames, 256 retained
+source frames, 16 KiB stderr, 30 seconds for setup, 300 seconds for a prompt,
+10 seconds for cancellation acknowledgement, and 5 seconds for reaping. Callers
+may pass validated `ClientLimits`. A supplied update channel must be drained
+concurrently; saturation or receiver loss fails the run visibly. Evidence capture
+marks frame-budget truncation and redacts secrets and sensitive fields; diagnostic
+string previews are limited to 512 characters. Stderr overflow is replaced with a
+limit marker while the pipe continues draining. SDK wire tracing is disabled for
+this connection to prevent bypassing the redacted evidence surface.
+
+Only an original prompt response with `stopReason: cancelled` acknowledges a
+requested cancellation. Sending `session/cancel`, killing a process, or receiving
+an unrelated stop reason does not establish that acknowledgement. Prompt failures
+after possible submission are uncertain and are never retried by this client.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

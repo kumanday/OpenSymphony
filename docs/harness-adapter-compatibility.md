@@ -113,3 +113,12 @@ Known gaps:
 - Concrete SDK/runtime selection is not implemented yet.
 - Hosted execution would need an isolation model before remote support is
   advertised.
+
+## ACP stdio client foundation
+
+`opensymphony_acp::run_turn` implements an SDK-backed ACP v1 stdio session through
+setup, one text prompt, ordered updates, cancellation, and supervised teardown.
+Only the executable client and typed launch profiles are available in this slice.
+ACP is not yet advertised as a runnable scheduler harness; production routing,
+retained sessions, negotiated public capabilities, complete callbacks and operator
+responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).

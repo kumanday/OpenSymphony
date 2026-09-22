@@ -627,6 +627,20 @@ That document covers:
 - logging, manifests, and recovery inspection
 - version pinning, CI, and local safety posture
 
+## ACP stdio client tests
+
+Run `cargo test-system-duckdb --test acp` for the executable client contract and
+`cargo test-system-duckdb --lib acp` for central configuration coverage. The reusable
+`tests/fixtures/acp_peer.py` peer validates initialize/authenticate/new/prompt,
+process/session cwd equality, capability honesty, credential exclusion,
+interleaved updates and callbacks, opaque string/zero IDs, unknown notifications,
+unknown updates and stop reasons, cancellation acknowledgement/deadline, malformed
+and oversized frames, EOF/crash, output floods, bounded stderr/evidence, and a hung
+process tree. A current-thread Tokio test checks callback/cancellation responsiveness.
+Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
+require bundled-mode validation. Vendor interoperability evidence belongs to the
+later live-qualification task and must not be inferred from fake-peer tests.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
