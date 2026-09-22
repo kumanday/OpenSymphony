@@ -10171,7 +10171,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             // Let the worker persist the stopped run and execute after_run before
             // revoking grants or releasing its workspace to scheduler cleanup.
             if let Some(task) = self.tasks.get_mut(worker_id.as_str()) {
-                timeout(
+                let completion = timeout(
                     self.workspace_manager.config().hooks.timeout + Duration::from_secs(5),
                     &mut task.handle,
                 )
@@ -10180,7 +10180,30 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     CliWorkerError::InterruptFailed(
                         "ACP workspace finalization deadline exceeded".into(),
                     )
-                })??;
+                })?;
+                if let Err(error) = completion {
+                    // The join result has been consumed. Remove the handle before
+                    // poll_updates can observe it again, and report the failure
+                    // through the scheduler's normal worker message boundary.
+                    if let Some(task) = self.take_tracked_task(worker_id.as_str()) {
+                        self.acp_active
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(worker_id.as_str());
+                        let _ = self.updates_tx.send(WorkerUpdate::Finished {
+                            worker_id: worker_id.clone(),
+                            outcome: WorkerOutcomeRecord::from_run(
+                                &task.run,
+                                WorkerOutcomeKind::Failed,
+                                now_timestamp(),
+                                Some("ACP worker task failed during abort finalization".into()),
+                                Some(error.to_string()),
+                            )
+                            .with_harness_stopped(),
+                        });
+                    }
+                    return Err(error.into());
+                }
             }
         }
         let issue_identifier = self
@@ -17406,6 +17429,51 @@ exit 64
             fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts"),
             prompts
         );
+    }
+
+    #[tokio::test]
+    async fn acp_abort_observes_failed_task_once() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        backend
+            .start_worker(acp_test_request(&manager.config().root, "hang", 1))
+            .await
+            .expect("launch");
+        let worker_id = WorkerId::new("acp-worker-1").expect("worker");
+        backend
+            .tasks
+            .get(worker_id.as_str())
+            .expect("task")
+            .handle
+            .abort();
+        backend
+            .abort_worker(&worker_id, WorkerAbortReason::TrackerTerminal)
+            .await
+            .expect_err("join failure is reported");
+        let updates = backend
+            .poll_updates()
+            .await
+            .expect("completed join is not polled twice");
+        assert!(updates.iter().any(|update| matches!(update,
+            WorkerUpdate::Finished { worker_id: id, outcome } if id == &worker_id
+                && outcome.outcome == WorkerOutcomeKind::Failed && outcome.harness_stopped)));
+        assert!(!backend.tasks.contains_key(worker_id.as_str()));
+        assert!(
+            !backend
+                .acp_active
+                .lock()
+                .expect("sessions")
+                .contains_key(worker_id.as_str())
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     #[tokio::test]
