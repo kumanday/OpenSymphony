@@ -926,21 +926,42 @@ environment with scoped memory grants and checkout credential exclusions. The
 client clears ambient inheritance and rejects profile references that would
 reintroduce excluded credentials.
 
-The initial client owns one process per `run_turn` call and reuses the workspace
-process-group teardown helpers. It records local reaping independently of ACP
-cancellation acknowledgement. `process_tree_signal_error` records any failed
-process-group signal separately from the child exit; consumers must not infer
-process-tree quiescence from child reaping alone. Local process termination does not prove delegated
-remote work has stopped. Host session retention, durable run identity, recovery
-and cleanup fencing are follow-on work in OSYM-901 and OSYM-902; this API does not
-persist or replay prompts. Local process access remains trusted host execution,
-not a sandbox.
+`SessionHost` retains one supervised process/connection per issue. A stable
+`.opensymphony/acp-owner.lock` prevents competing owners without creating another
+session database. The profile fingerprint also hashes host callback policy and
+resolved MCP attachments, so changed facilities or grants reject session reuse
+without persisting credential values. The conversation manifest records that fingerprint,
+credential/grant revision, exact workspace/repository/checkout binding, opaque
+session ID, run/attempt, connection generation, negotiated capabilities and
+submission/outcome state. Native manifests remain readable and cannot be silently
+replaced by ACP. Every command checks the owning connection generation.
+
+The manifest is atomically replaced and synced, including its parent directory,
+before a prompt can reach the transport. `submitted` without a known terminal
+outcome becomes `uncertain` and prevents automatic recovery or prompt replay.
+Local EOF, process reaping and protocol cancellation acknowledgement are separate
+evidence. Workspace cleanup remains fenced after an uncertain remote outcome.
+
+Recovery prefers advertised resume, then advertised load. Load source events are
+tagged as replay through the load response; subsequent live frames keep their
+own sequence and run binding. A finished nonpersistent session resets to a fresh
+agent with an explicit full-context requirement. Its old transcript remains
+inspection evidence. Unsupported required persistence rejects setup.
+
+On Unix, owner takeover also requires the prior process group to be absent.
+A crash between the durable launch reservation and process-ID checkpoint leaves
+a conservative launch-uncertain fence. Windows uses the existing kill-on-close
+Job Object. Retirement waits for active work and leases to clear, then terminates
+and reaps owned process resources before acknowledging cleanup. Trusted local
+host execution provides filesystem/process access; it is not a sandbox.
 
 
 Filesystem callbacks require absolute paths in the bound workspace and reject
 parent traversal, escaping or dangling symlinks and non-regular file targets.
 On Unix, descriptor-relative opens reject every symlink component, including
-in-workspace links, and use no-follow opens for new files. Writes create missing
+in-workspace links, and use no-follow opens for new files. Windows pins every
+ancestor without write/delete sharing, rejects reparse points through opened
+handles, and holds those guards through file I/O or terminal spawn. Writes create missing
 parent directories only after containment validation. Terminal cwd defaults to
 the same workspace; alternate directories must remain inside it. Terminal env
 entries may only repeat existing host-owned values, protecting executable lookup
@@ -953,7 +974,9 @@ owned terminal trees; connection teardown expires callbacks and waits for proces
 cleanup. SDK dispatch continues while terminal wait requests are pending.
 A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh
-cancellation token. Cleanup failure prevents the new prompt.
+cancellation token before the durable submission marker. The owner keeps handling
+observation and shutdown commands while preparation waits; cancellation, timeout
+or cleanup failure ends the connection before the new prompt.
 `HostServices` is captured at connection creation and has no attachment mutation
 path, so editor-like extension requests cannot replace cwd, environment, callbacks
 or MCP grants.

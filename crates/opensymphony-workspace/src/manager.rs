@@ -7012,7 +7012,7 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    async fn validate_workspace_owned_path(
+    pub(crate) async fn validate_workspace_owned_path(
         &self,
         workspace: &WorkspaceHandle,
         path: &Path,

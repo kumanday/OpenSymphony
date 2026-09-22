@@ -482,10 +482,19 @@ Notable removals:
 The `opensymphony_acp` internal module uses the official Rust ACP SDK for typed
 requests, JSON-RPC correlation and ordered application dispatch. OpenSymphony owns
 the child process and supplies bounded LF framing to the SDK line transport.
-The initial `run_turn` API creates one session, runs one prompt, and tears down
-its child. It has no scheduler mutation authority. Host-owned retained sessions,
-recovery and production worker routing are defined by the
-[ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+`SessionHost` owns a bounded registry of supervised per-issue sessions. Each
+session actor accepts generation-fenced commands and allows one outstanding
+prompt. Worker handles borrow a process across attempts; dropping a handle or
+subscriber preserves the session. Idle expiry and explicit retirement use the
+same supervised process teardown. The `run_turn` compatibility API creates one
+session for one prompt. Neither API mutates scheduling state. Production worker
+routing is the separate OSYM-902 integration slice.
+
+Durable ACP identity and submission/outcome markers live in the existing
+conversation manifest, with additive ACP identity in its runtime envelope.
+`ControlPlaneServer::with_acp_host` exposes authenticated observation commands
+and ordered source events for a separate debug process. It does not grant IDE
+writer control; scheduler holds and writer transfer belong to OSYM-907.
 
 Handlers are installed before initialization. Permission callbacks receive the
 protocol cancellation outcome; unknown requests receive method-not-found and
@@ -495,8 +504,10 @@ advertisements. The ordered dispatch handler admits callbacks to one bounded
 connection-owned actor. File operations are serialized; terminal waits use
 bounded asynchronous responses so they cannot block RPC dispatch. Terminal
 processes use the existing process-group or Windows Job Object supervisors.
-Session config responses and updates are committed in SDK dispatch order before
-prompt completion. No OpenHands server or client participates in this launch path.
+Each retained prompt first retires the prior callback epoch through a bounded,
+cancellable preparation step while the owner continues servicing commands. Only
+then does it persist submission and dispatch the prompt. Session config responses
+and updates are committed in SDK dispatch order before prompt completion. No OpenHands server or client participates in this launch path.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

@@ -105,6 +105,8 @@ pub struct TerminalRuntimeEnvelope {
     pub target_commit: String,
     pub instruction: InstructionProvenance,
     pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session: Option<AcpSessionIdentity>,
     pub model_profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1189,6 +1191,66 @@ impl RunManifest {
     }
 }
 
+/// Host-owned ACP identity. Credential scope is an opaque grant revision, never
+/// a credential value; the profile fingerprint hashes secret-free configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionIdentity {
+    pub profile_id: String,
+    pub profile_fingerprint: String,
+    pub credential_scope: String,
+    pub workspace_path: PathBuf,
+    pub repository_binding: Option<RepositoryBinding>,
+    pub checkout_generation: Option<String>,
+    pub generation: u64,
+    pub run_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpSessionStatus {
+    Ready,
+    Submitted,
+    Finished,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpRecovery {
+    Fresh,
+    LiveAttach,
+    RestoredLoad,
+    RestoredResume,
+    TranscriptOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpProcessState {
+    LaunchPending,
+    Running {
+        pid: u32,
+    },
+    #[default]
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionState {
+    pub harness: String,
+    pub identity: AcpSessionIdentity,
+    pub session_id: Option<String>,
+    /// Negotiated initialization metadata, redacted by the protocol client.
+    pub initialization: serde_json::Value,
+    pub status: AcpSessionStatus,
+    pub stop_reason: Option<String>,
+    pub recovery: AcpRecovery,
+    pub owner_id: String,
+    #[serde(default)]
+    pub process: AcpProcessState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationManifest {
     pub issue_id: String,
@@ -1205,6 +1267,8 @@ pub struct ConversationManifest {
     pub runtime_contract_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpSessionState>,
 }
 
 impl ConversationManifest {
@@ -1227,6 +1291,7 @@ impl ConversationManifest {
             reset_reason: None,
             runtime_contract_version: runtime_contract_version.into(),
             runtime_envelope: None,
+            acp: None,
         }
     }
 }

@@ -120,7 +120,7 @@ Known gaps:
 setup, one text prompt, ordered updates, cancellation, and supervised teardown.
 The executable client includes typed launch profiles and host-owned callbacks.
 ACP is not yet advertised as a runnable scheduler harness; production routing,
-retained sessions, negotiated public capabilities and operator
+negotiated public capabilities and operator
 responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
 
 
@@ -134,8 +134,8 @@ responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-packa
 | Permission | Cancelled response until operator routing is implemented. |
 | Interactive auth and elicitation | Not advertised. |
 
-Windows callback path validation rejects reparse points, including junctions,
-before file access or terminal launch. Callback epoch handoff shares the setup
+Windows callback operations pin path ancestors through use and reject reparse
+points, including junctions, through no-follow handles. Callback epoch handoff shares the setup
 deadline and observes caller cancellation before prompt submission.
 
 Callback policies do not establish a sandbox for the local agent process.

@@ -1,6 +1,6 @@
 //! Executable ACP v1 stdio client. Durable ownership and worker routing live in the host.
 //!
-//! `run_turn` owns one process for one complete turn; it never resumes or retries a prompt.
+//! `SessionHost` retains process ownership; `run_turn` remains a one-turn compatibility API.
 //! A protocol stop reason is distinct from proof that remote delegated work has stopped.
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -20,8 +20,9 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             AuthMethod, AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest,
-            InitializeResponse, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
-            RequestPermissionRequest, RequestPermissionResponse, TextContent,
+            InitializeResponse, LoadSessionRequest, NewSessionRequest, PromptRequest,
+            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            ResumeSessionRequest, TextContent,
         },
     },
 };
@@ -41,8 +42,11 @@ use tokio_util::{
 };
 use tracing::instrument::WithSubscriber;
 
+mod durable;
+mod host;
 mod services;
 mod session_config;
+pub use host::*;
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
 #[cfg(windows)]
@@ -342,6 +346,7 @@ struct Capture {
     bytes: usize,
     max_bytes: usize,
     secrets: SecretRedactor,
+    publisher: Option<EventPublisher>,
 }
 
 impl Capture {
@@ -385,6 +390,16 @@ impl Capture {
     }
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
+        if let Some(publisher) = &self.publisher {
+            let mut source = payload.clone();
+            self.redact(&mut source, false);
+            publisher.publish(SourceFrame {
+                sequence: self.sequence,
+                direction: direction.into(),
+                observed_at: chrono::Utc::now(),
+                payload: source,
+            });
+        }
         if self.frames.len() == self.max || self.bytes == self.max_bytes {
             self.truncated = true;
             return;
@@ -673,6 +688,27 @@ pub async fn run_turn(
     updates: Option<mpsc::Sender<SessionUpdate>>,
     limits: ClientLimits,
 ) -> Result<RunResult, ClientError> {
+    run_connection(
+        profile,
+        context,
+        prompt,
+        cancellation,
+        updates,
+        limits,
+        None,
+    )
+    .await
+}
+
+async fn run_connection(
+    profile: &AcpProfile,
+    context: LaunchContext,
+    prompt: String,
+    cancellation: CancellationToken,
+    updates: Option<mpsc::Sender<SessionUpdate>>,
+    limits: ClientLimits,
+    mut driver: Option<&mut SessionDriver>,
+) -> Result<RunResult, ClientError> {
     let PreparedLaunch {
         cwd,
         environment,
@@ -689,6 +725,7 @@ pub async fn run_turn(
         bytes: 0,
         max_bytes: limits.evidence_bytes,
         secrets,
+        publisher: driver.as_ref().map(|driver| driver.publisher.clone()),
     }));
     let mut command = Command::new(&profile.command);
     command
@@ -711,6 +748,9 @@ pub async fn run_turn(
     let process_id = child.id();
     #[cfg(unix)]
     let mut group_guard = crate::opensymphony_workspace::ProcessGroupGuard::new(process_id);
+    if let Some(driver) = driver.as_deref_mut() {
+        driver.launched(child.id()).await?;
+    }
     let stdin = child.stdin.take().ok_or(ClientError::Teardown)?;
     let stdout = child.stdout.take().ok_or(ClientError::Teardown)?;
     let stderr = child.stderr.take().ok_or(ClientError::Teardown)?;
@@ -977,35 +1017,86 @@ pub async fn run_turn(
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
-                let (session_tx, session_rx) = oneshot::channel();
-                let active_session = active_session.clone();
-                let session_configuration = configuration.clone();
-                // Register before yielding. The ordered callback binds ownership before
-                // the SDK releases any adjacent session/update or permission request.
-                connection.send_request(NewSessionRequest::new(cwd).mcp_servers(context.services.mcp_servers.clone()))
-                    .on_receiving_result(async move |result| {
-                        if let Ok(session) = &result {
-                            *active_session.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(session.session_id.0.to_string());
-                            session_configuration.lock().unwrap_or_else(|e|e.into_inner()).initial(&serde_json::to_value(session)?);
+                let restoration = match driver.as_deref_mut() {
+                    Some(driver) => driver.restoration(&initialization).map_err(|error| {
+                        phase_error = Some(ClientError::Setup(error.to_string()));
+                        agent_client_protocol::Error::internal_error()
+                    })?,
+                    None => None,
+                };
+                let restored_id = if let Some((session_id, replay)) = restoration {
+                    // Bind before loading: replay notifications can precede the load response.
+                    *active_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
+                    let restored = if replay {
+                        let (loaded_tx, loaded_rx) = oneshot::channel();
+                        let publisher = driver.as_ref().map(|driver| driver.publisher.clone());
+                        let session_configuration = configuration.clone();
+                        connection.send_request(LoadSessionRequest::new(session_id.clone(), cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
+                            .on_receiving_result(async move |result| {
+                                if let Ok(session) = &result {
+                                    session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                                }
+                                if let Some(publisher) = publisher {
+                                    publisher.end_replay();
+                                }
+                                let _ = loaded_tx.send(result);
+                                Ok(())
+                            })?;
+                        loaded_rx.await.map_err(|_| agent_client_protocol::Error::internal_error())?.map(|_| ())
+                    } else {
+                        let (resumed_tx, resumed_rx) = oneshot::channel();
+                        let session_configuration = configuration.clone();
+                        connection.send_request(ResumeSessionRequest::new(session_id.clone(), cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
+                            .on_receiving_result(async move |result| {
+                                if let Ok(session) = &result {
+                                    session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                                }
+                                let _ = resumed_tx.send(result);
+                                Ok(())
+                            })?;
+                        resumed_rx.await.map_err(|_| agent_client_protocol::Error::internal_error())?.map(|_| ())
+                    };
+                    match restored {
+                        Ok(()) => Some(session_id),
+                        Err(error) if driver.as_deref_mut().is_some_and(|driver| driver.reset_missing_session(&error)) => None,
+                        Err(error) => {
+                            phase_error = rpc_failure(if replay { "session/load" } else { "session/resume" }, &error, &capture_state, false);
+                            return Err(error);
                         }
-                        let _ = session_tx.send(result);
-                        Ok(())
-                    })?;
-                let session = session_rx.await
-                    .map_err(|_| agent_client_protocol::Error::internal_error())?
-                    .inspect_err(|error| {
-                        phase_error = rpc_failure("session/new", error, &capture_state, false);
-                    })?;
-                if let Err(error) = session_config::apply(&connection, profile, session.session_id.0.as_ref(), &configuration, &capture_state).await {
+                    }
+                } else { None };
+                let session_id = if let Some(session_id) = restored_id { session_id.into() } else {
+                    let (session_tx, session_rx) = oneshot::channel();
+                    let active_session = active_session.clone();
+                    let session_configuration = configuration.clone();
+                    // Bind in ordered response dispatch before any adjacent session update.
+                    connection.send_request(NewSessionRequest::new(cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
+                        .on_receiving_result(async move |result| {
+                            if let Ok(session) = &result {
+                                *active_session.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(session.session_id.0.to_string());
+                                session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                            }
+                            let _ = session_tx.send(result);
+                            Ok(())
+                        })?;
+                    session_rx.await
+                        .map_err(|_| agent_client_protocol::Error::internal_error())?
+                        .inspect_err(|error| {
+                            phase_error = rpc_failure("session/new", error, &capture_state, false);
+                        })?.session_id
+                };
+                if let Err(error) = session_config::apply(&connection, profile, session_id.0.as_ref(), &configuration, &capture_state).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
-                if let Err(error) = service_sender.begin_turn(cancellation.clone(), limits.setup_timeout).await {
+                if driver.is_none()
+                    && let Err(error) = service_sender.begin_turn(cancellation.clone(), limits.setup_timeout).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
-                Ok((initialization, session.session_id))
+                Ok((initialization, session_id))
+
             };
             let setup_result = tokio::select! {
                 _ = cancellation.cancelled() => {
@@ -1021,6 +1112,13 @@ pub async fn run_turn(
                     return Err(agent_client_protocol::Error::internal_error());
                 }
             };
+            if let Some(driver) = driver.as_deref_mut() {
+                return driver.drive(connection, initialization, session_id, &capture_state, &limits, &service_sender, &configuration).await
+                    .map_err(|error| {
+                        phase_error = Some(error);
+                        agent_client_protocol::Error::internal_error()
+                    });
+            }
             if cancellation.is_cancelled() {
                 phase_error = Some(ClientError::CancelledBeforePrompt);
                 return Err(agent_client_protocol::Error::internal_error());
@@ -1296,6 +1394,7 @@ mod tests {
                 bytes: 0,
                 max_bytes: budget,
                 secrets: SecretRedactor::new(Vec::new()).expect("empty matcher"),
+                publisher: None,
             };
             capture.retain_frame(frame.clone());
             capture.retain_frame(frame.clone());

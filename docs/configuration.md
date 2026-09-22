@@ -956,7 +956,15 @@ Environment references remain names throughout migration. At launch, each source
 variable is removed from the child environment unless that name is also an
 explicit target in `env_refs`; only the intended credential aliases are passed.
 
-The executable ACP client is available through `opensymphony_acp::run_turn`.
+The executable ACP APIs are `opensymphony_acp::SessionHost` for retained sessions
+and `opensymphony_acp::run_turn` for one-turn compatibility. Host callers supply
+an explicit `RetentionPolicy`: defaults are eight sessions, 15 minutes idle
+retention, 60-second renewable attachment leases, and 16 leases per session.
+Active prompts and leases pin the process; capacity exhaustion refuses a new
+launch. These host API settings are independent of profile protocol capabilities.
+`SessionLaunch::require_persistence` rejects peers without negotiated load/resume
+support. The caller supplies a non-secret credential/grant revision and the
+scheduler's exact workspace identity; changes prevent session reuse.
 Production `opensymphony run` routing is a separate implementation slice; an ACP
 route currently fails scheduler capability selection before worker dispatch.
 Central profiles remain authoritative over repository-local workflow files.
@@ -994,7 +1002,9 @@ session:
 `session.model` and `session.mode` select advertised config options by category;
 `session.options` selects by exact option ID, including grouped select values.
 The client applies choices before prompting, validates the returned complete
-option list, and consumes subsequent config and mode updates. Legacy
+option list, and consumes subsequent config and mode updates. Currently supported
+model/mode prerequisites apply before dependent options, using the refreshed
+advertisements after each response. Legacy
 `session/set_mode` is used when the peer supplies modes without config options.
 Unsupported explicit choices fail setup. Boolean options and legacy experimental
 model RPCs are not advertised. The generic routing model override remains

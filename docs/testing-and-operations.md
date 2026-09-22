@@ -660,13 +660,27 @@ owner and verifies descendant termination on normal teardown, parent exit,
 wait deadline, and dropped futures. It also executes the shared environment
 replacement helper against a real child to verify case-insensitive alias
 precedence. The shared Windows callback path validator rejects real junctions
-for existing reads, nonexistent writes and terminal directories. Dependencies
+for existing reads, nonexistent writes and terminal directories; pinned-handle
+tests attempt directory and leaf swaps during I/O and terminal spawn. Dependencies
 are read from the root manifest. On another host,
 `--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
 installed; cross-compilation alone does not prove Windows process behavior.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
 require bundled-mode validation. Vendor interoperability evidence belongs to the
 later live-qualification task and must not be inferred from fake-peer tests.
+
+`cargo test-system-duckdb --test acp_session_host` exercises the retained owner
+with executable subprocesses: repeated attempts, concurrent issues, live leases,
+idle expiry, cancellation/busy fencing, negotiated load/replay and resume, fresh
+nonpersistent reset, durable uncertain-submission refusal and stale generations.
+Callback integration covers cancellation followed by a fresh turn on the same
+process, stale terminal rejection, live configuration and secret-safe host-policy/
+MCP grant compatibility checks.
+The peer verifies that the submitted marker is already on disk when a prompt
+arrives. `cargo test-system-duckdb --lib opensymphony_acp::durable::tests` covers
+owner locks, process-group loss, the launch checkpoint gap, compatibility bounds,
+identity mismatches and legacy manifests. Workspace and control-plane regression
+targets remain required for changes to persistence or the host observation seam.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
