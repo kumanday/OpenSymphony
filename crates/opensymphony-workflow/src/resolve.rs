@@ -344,9 +344,15 @@ fn resolve_routing<E: Environment>(
     let model_profile_from_env = model_profile_override.is_some();
     let model_profile = model_profile_override.or(configured_model_profile);
 
+    let harness_profile = if harness_from_env && harness != "acp" {
+        None
+    } else {
+        routing.harness_profile.clone()
+    };
+
     Ok(RoutingConfig {
         harness,
-        harness_profile: routing.harness_profile.clone(),
+        harness_profile,
         model,
         model_profile,
         harness_env,

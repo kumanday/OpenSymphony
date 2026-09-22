@@ -962,7 +962,9 @@ route currently fails scheduler capability selection before worker dispatch.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated
-after workflow environment overrides resolve. Windows environment references
+after workflow environment overrides resolve. An explicit harness environment
+override to another harness clears the ACP selector; an override to ACP retains
+it. Windows environment references
 use case-insensitive variable names; a resolved alias replaces inherited target
 values regardless of their casing.
 Profile arguments are literal argv entries, never shell templates. `env_refs`

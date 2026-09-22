@@ -332,6 +332,20 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         resolved.config.routing.harness_profile.as_deref(),
         Some("fake")
     );
+    for harness in ["acp", "openhands_agent_server", "codex_app_server"] {
+        let mut overrides = env.clone();
+        overrides.insert("OPENSYMPHONY_HARNESS".into(), harness.into());
+        let overridden = WorkflowDefinition::parse(source)
+            .expect("parse override")
+            .resolve(Path::new("/repo"), &overrides)
+            .expect("resolve explicit harness override");
+        assert_eq!(overridden.config.routing.harness, harness);
+        assert!(overridden.config.routing.harness_from_env);
+        assert_eq!(
+            overridden.config.routing.harness_profile.as_deref(),
+            if harness == "acp" { Some("fake") } else { None }
+        );
+    }
     let rendered = serde_yaml::to_string(&resolved.extensions.acp).expect("render");
     assert!(rendered.contains("AUTH_SOURCE"));
     assert!(!rendered.contains("auth-secret"));
