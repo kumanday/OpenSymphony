@@ -3,6 +3,9 @@ mod error;
 mod manager;
 mod models;
 mod paths;
+mod sensitive_fields;
+
+pub(crate) use sensitive_fields::{normalize_secret_field_name, runtime_field_is_sensitive};
 
 pub use environment::environment_variable_names_equal;
 pub(crate) use environment::insert_environment_value;

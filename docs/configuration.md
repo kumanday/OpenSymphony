@@ -983,6 +983,12 @@ The current prompt API sends text. ACP model overrides are rejected until the
 session configuration implementation is available. Filesystem, terminal, MCP,
 extension, and operator permission policies are follow-on slices.
 
+ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
+`--client-secret`, and `--pat` are rejected in separate-value and equals forms,
+including mixed case; credentials belong in `env_refs`. A top-level `acp` section
+selects the central configuration parser, so incomplete central files fail
+validation before legacy defaults can be applied.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

@@ -23,6 +23,7 @@ use crate::opensymphony_workflow::{
 };
 use crate::opensymphony_workspace::{
     CheckoutRepository, SSH_AUTH_SOCK_ENV, environment_variable_names_equal,
+    normalize_secret_field_name, runtime_field_is_sensitive,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -749,6 +750,7 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
 }
 
 const CENTRAL_CONFIG_KEYS: &[&str] = &[
+    "acp",
     "instance",
     "routing",
     "tracker_profiles",
@@ -2465,7 +2467,7 @@ fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
                 normalize_secret_field_name(key) == "command"
                     && openhands_command_has_literal_secret(value)
             });
-            let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
+            let secret_name = key.as_str().is_some_and(runtime_field_is_sensitive)
                 && match value.as_str() {
                     Some(value) => !is_central_credential_reference(value),
                     None => !value.is_null(),
@@ -2526,67 +2528,6 @@ fn validate_openhands_env_references(
         }
     }
     Ok(())
-}
-
-fn openhands_secret_field_name(name: &str) -> bool {
-    // OpenHands emits some identity headers with hyphens (for example,
-    // `chatgpt-account-id`) even though most serialized config uses
-    // underscore-separated keys. Normalize the separator before applying the
-    // secret-shaped field rules so both spellings fail closed.
-    let name = normalize_secret_field_name(name);
-    [
-        "access_token",
-        "api_key",
-        "apikey",
-        "authorization",
-        "access_key",
-        "accesskey",
-        "account_id",
-        "accountid",
-        "account_identifier",
-        "account_identity",
-        "chatgpt_account_id",
-        "credential",
-        "password",
-        "pat",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|part| name == *part || name.ends_with(&format!("_{part}")))
-}
-
-fn normalize_secret_field_name(name: &str) -> String {
-    let characters = name.chars().collect::<Vec<_>>();
-    let mut normalized = String::with_capacity(name.len());
-    for (index, character) in characters.iter().copied().enumerate() {
-        if character == '-' {
-            if !normalized.ends_with('_') {
-                normalized.push('_');
-            }
-            continue;
-        }
-        if character.is_ascii_uppercase() {
-            let previous_is_lower_or_digit = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
-            let previous_is_acronym_boundary = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_uppercase())
-                && characters
-                    .get(index + 1)
-                    .is_some_and(|next| next.is_ascii_lowercase());
-            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
-                && !normalized.ends_with('_')
-            {
-                normalized.push('_');
-            }
-            normalized.push(character.to_ascii_lowercase());
-        } else {
-            normalized.push(character.to_ascii_lowercase());
-        }
-    }
-    normalized
 }
 
 fn validate_active_repository_aliases(
@@ -3784,6 +3725,30 @@ scheduler:
         let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect("zero automatic retries should be valid");
         assert_eq!(resolved.retry_max_attempts, Some(0));
+    }
+
+    #[tokio::test]
+    async fn acp_only_central_config_fails_closed_before_legacy_resolution() {
+        let root = tempfile::tempdir().expect("config root");
+        let path = root.path().join("config.yaml");
+        for raw in [
+            "schema_version: 1\nacp: {}\n",
+            "acp:\n  profiles: [broken\n",
+        ] {
+            std::fs::write(&path, raw).expect("write config");
+            assert!(looks_like_central_config(raw));
+            let error = resolve_runtime_config(&RunArgs {
+                config: Some(path.clone()),
+                dry_run: true,
+            })
+            .await
+            .err()
+            .expect("incomplete central config must fail");
+            assert!(
+                matches!(error, RunCommandError::CentralConfig(_)),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -70,6 +70,15 @@ for line in sys.stdin:
             send({"method": "session/update", "params": params})
             respond(message, {"stopReason": "end_turn"})
             continue
+        if mode == "paced_queue":
+            send({"id": "queued-0", "method": "_unknown/request", "params": {"data": "x" * 256}})
+            continue
+        if mode == "account_identity":
+            fields = {key: "acct-sensitive" for key in ["account_id", "account-id", "accountIdentity", "accountIdentifier", "accountID", "chatgpt-account-id", "providerAccountIdentity"]}
+            fields["account_display_name"] = "safe display"
+            send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "future_update", "identities": [fields]}}})
+            respond(message, {"stopReason": "end_turn"})
+            continue
         if mode == "evidence_flood":
             for index in range(16):
                 send({"method": "_future/evidence", "params": {"index": index, "values": ["small"] * 1024}})
@@ -129,7 +138,14 @@ for line in sys.stdin:
             update("before cancellation response")
             send({"id": prompt_id, "result": {"stopReason": "cancelled"}})
     elif method is None:
-        if message["id"] == 0:
+        if mode == "paced_queue":
+            assert message["error"]["code"] == -32601
+            index = int(message["id"].removeprefix("queued-")) + 1
+            if index < 16:
+                send({"id": f"queued-{index}", "method": "_unknown/request", "params": {"data": "x" * 256}})
+            else:
+                send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+        elif message["id"] == 0:
             assert message["error"]["code"] == -32601
         elif message["id"] == "opaque-request":
             assert message["result"]["outcome"]["outcome"] == "cancelled"

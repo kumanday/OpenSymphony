@@ -3,13 +3,13 @@
 //! `run_turn` owns one process for one complete turn; it never resumes or retries a prompt.
 //! A protocol stop reason is distinct from proof that remote delegated work has stopped.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     path::PathBuf,
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -46,7 +46,7 @@ mod windows_process;
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
     environment_variable_names_equal, insert_environment_value, redact_runtime_diagnostic,
-    sanitize_workspace_key,
+    runtime_field_is_sensitive, sanitize_workspace_key,
 };
 
 #[cfg(not(windows))]
@@ -69,6 +69,8 @@ pub struct LaunchContext {
 pub struct ClientLimits {
     pub frame_bytes: usize,
     pub queued_frames: usize,
+    /// Cumulative wire bytes awaiting SDK dispatch, independently of frame count.
+    pub queued_bytes: usize,
     pub evidence_frames: usize,
     /// Cumulative serialized bytes of retained, redacted SourceFrame values.
     pub evidence_bytes: usize,
@@ -84,6 +86,7 @@ impl Default for ClientLimits {
         Self {
             frame_bytes: 1024 * 1024,
             queued_frames: 128,
+            queued_bytes: 4 * 1024 * 1024,
             evidence_frames: 256,
             evidence_bytes: 1024 * 1024,
             stderr_bytes: 16 * 1024,
@@ -192,6 +195,30 @@ pub struct RunResult {
     pub process_tree_signal_error: Option<io::ErrorKind>,
 }
 
+#[derive(Default)]
+struct QueuedInput {
+    frame_sizes: VecDeque<usize>,
+    bytes: usize,
+}
+
+impl QueuedInput {
+    fn admit(&mut self, bytes: usize, max_frames: usize, max_bytes: usize) -> bool {
+        if self.frame_sizes.len() >= max_frames || bytes > max_bytes.saturating_sub(self.bytes) {
+            return false;
+        }
+        self.bytes += bytes;
+        self.frame_sizes.push_back(bytes);
+        true
+    }
+
+    fn dispatched(&mut self) {
+        // The SDK dispatch callback applies every accepted frame in wire order.
+        if let Some(bytes) = self.frame_sizes.pop_front() {
+            self.bytes -= bytes;
+        }
+    }
+}
+
 struct Capture {
     frames: Vec<SourceFrame>,
     sequence: u64,
@@ -216,17 +243,18 @@ impl Capture {
             Value::Array(values) => values.iter_mut().for_each(|v| self.redact(v, diagnostic)),
             Value::Object(values) => {
                 for (mut key, mut value) in std::mem::take(values) {
-                    if [
-                        "token",
-                        "secret",
-                        "password",
-                        "authorization",
-                        "api_key",
-                        "apikey",
-                        "credential",
-                    ]
-                    .iter()
-                    .any(|s| key.to_ascii_lowercase().contains(s))
+                    if runtime_field_is_sensitive(&key)
+                        || [
+                            "token",
+                            "secret",
+                            "password",
+                            "authorization",
+                            "api_key",
+                            "apikey",
+                            "credential",
+                        ]
+                        .iter()
+                        .any(|s| key.to_ascii_lowercase().contains(s))
                     {
                         value = json!("[redacted]");
                     } else {
@@ -299,6 +327,7 @@ fn validate_launch(
         .map_err(|e| ClientError::InvalidConfiguration(e.to_string()))?;
     if !(256..=16 * 1024 * 1024).contains(&limits.frame_bytes)
         || !(1..=4096).contains(&limits.queued_frames)
+        || !(256..=64 * 1024 * 1024).contains(&limits.queued_bytes)
         || limits.evidence_frames > 4096
         || limits.evidence_bytes > 16 * 1024 * 1024
         || limits.stderr_bytes > 1024 * 1024
@@ -470,7 +499,7 @@ pub async fn run_turn(
     let stdin = child.stdin.take().ok_or(ClientError::Teardown)?;
     let stdout = child.stdout.take().ok_or(ClientError::Teardown)?;
     let stderr = child.stderr.take().ok_or(ClientError::Teardown)?;
-    let queued = Arc::new(AtomicUsize::new(0));
+    let queued = Arc::new(Mutex::new(QueuedInput::default()));
     let resource_failure = Arc::new(AtomicBool::new(false));
     let submitted = Arc::new(AtomicBool::new(false));
     let fatal = CancellationToken::new();
@@ -489,7 +518,11 @@ pub async fn run_turn(
             if !value.is_object() || value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
                 return Err(io_failure());
             }
-            if queued.fetch_add(1, Ordering::AcqRel) >= limits.queued_frames {
+            if !queued.lock().unwrap_or_else(|e| e.into_inner()).admit(
+                line.len(),
+                limits.queued_frames,
+                limits.queued_bytes,
+            ) {
                 resource_failure.store(true, Ordering::Release);
                 return Err(io_failure());
             }
@@ -530,7 +563,10 @@ pub async fn run_turn(
             let fatal = fatal.clone();
             let redactor = capture_state.clone();
             async move |message: Dispatch, _cx| {
-                queued.fetch_sub(1, Ordering::AcqRel);
+                queued
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .dispatched();
                 match message {
                     Dispatch::Request(request, responder) => {
                         if request.method == "session/request_permission" {
@@ -815,6 +851,26 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, max: usize) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_input_enforces_both_budgets_and_releases_dispatched_bytes() {
+        let mut queue = QueuedInput::default();
+        assert!(queue.admit(3, 4, 8));
+        assert!(queue.admit(5, 4, 8));
+        assert!(!queue.admit(1, 4, 8));
+        assert_eq!(queue.bytes, 8);
+        assert_eq!(queue.frame_sizes.len(), 2);
+        queue.dispatched();
+        assert_eq!(queue.bytes, 5);
+        assert!(!queue.admit(4, 4, 8));
+        assert!(queue.admit(3, 4, 8));
+        queue.dispatched();
+        queue.dispatched();
+        assert_eq!(queue.bytes, 0);
+        assert!(!queue.admit(9, 4, 8));
+        assert!(queue.admit(1, 1, 8));
+        assert!(!queue.admit(1, 1, 8));
+    }
 
     #[test]
     fn evidence_byte_budget_includes_metadata_and_accepts_exact_boundary() {

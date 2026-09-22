@@ -255,7 +255,7 @@ async fn acp_bounds_update_delivery_stderr_and_evidence() {
 #[tokio::test]
 async fn acp_invalid_launch_inputs_fail_before_execution() {
     let root = tempfile::tempdir().expect("temp");
-    for case in 0..6 {
+    for case in 0..7 {
         let mut config = profile("complete");
         let mut launch = context(root.path());
         let mut bound = limits();
@@ -281,7 +281,8 @@ async fn acp_invalid_launch_inputs_fail_before_execution() {
                 config.args.push("known-secret".into());
             }
             4 => config.args.push("--token=secret".into()),
-            _ => bound.evidence_bytes = 16 * 1024 * 1024 + 1,
+            5 => bound.evidence_bytes = 16 * 1024 * 1024 + 1,
+            _ => bound.queued_bytes = 64 * 1024 * 1024 + 1,
         }
         assert!(
             run_turn(
@@ -372,6 +373,26 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         let workflow =
             WorkflowDefinition::parse(&source.replace(old, new)).expect("parse invalid semantics");
         assert!(workflow.resolve(Path::new("/repo"), &env).is_err(), "{new}");
+    }
+    for flag in [
+        "--access-token",
+        "--oauth2-bearer",
+        "--client-secret",
+        "--pat",
+    ] {
+        for args in [
+            format!("['{flag}', 'literal-secret']"),
+            format!("['{}=literal-secret']", flag.to_ascii_uppercase()),
+        ] {
+            let workflow = WorkflowDefinition::parse(
+                &source.replace("args: [agent.py]", &format!("args: {args}")),
+            )
+            .expect("parse credential flags");
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("credential flags rejected");
+            assert!(!error.to_string().contains("literal-secret"));
+        }
     }
     let unsupported = WorkflowDefinition::parse(&source.replace("harness: acp", "harness: absent"))
         .expect("parse")
@@ -582,6 +603,82 @@ async fn acp_live_updates_preserve_whitespace_and_long_content() {
             "x".repeat(1024)
         )
     );
+}
+
+#[tokio::test]
+async fn acp_live_input_queue_bounds_bytes_and_releases_dispatched_charges() {
+    let root = tempfile::tempdir().expect("temp");
+    for (mode, succeeds) in [("evidence_flood", false), ("paced_queue", true)] {
+        let result = run_turn(
+            &profile(mode),
+            context(root.path()),
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            ClientLimits {
+                frame_bytes: 16384,
+                queued_frames: 4096,
+                queued_bytes: 1024,
+                evidence_frames: 0,
+                ..limits()
+            },
+        )
+        .await
+        .expect("launch");
+        if succeeds {
+            assert!(
+                result
+                    .outcome
+                    .expect("repeated round trips release queue bytes")
+                    .succeeded()
+            );
+        } else {
+            assert_eq!(
+                result
+                    .outcome
+                    .expect_err("legal frame exceeds live queue byte budget"),
+                ClientError::ResourceLimit { submitted: true }
+            );
+        }
+        assert!(result.process_reaped);
+    }
+}
+
+#[tokio::test]
+async fn acp_account_identity_fields_are_redacted_in_evidence_and_live_updates() {
+    let root = tempfile::tempdir().expect("temp");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let result = run_turn(
+        &profile("account_identity"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        Some(tx),
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(result.outcome.as_ref().expect("turn").succeeded());
+    let evidence = serde_json::to_string(&result.evidence).expect("JSON");
+    assert!(!evidence.contains("acct-sensitive"));
+    assert!(!format!("{result:?}").contains("acct-sensitive"));
+    let update = rx.recv().await.expect("update");
+    assert!(!format!("{update:?}").contains("acct-sensitive"));
+    let serialized = serde_json::to_string(&update).expect("JSON");
+    assert!(!serialized.contains("acct-sensitive"));
+    let identities = &update.update["identities"][0];
+    for key in [
+        "account_id",
+        "account-id",
+        "accountIdentity",
+        "accountIdentifier",
+        "accountID",
+        "chatgpt-account-id",
+        "providerAccountIdentity",
+    ] {
+        assert_eq!(identities[key], "[redacted]", "{key}");
+    }
+    assert_eq!(identities["account_display_name"], "safe display");
 }
 
 #[tokio::test]

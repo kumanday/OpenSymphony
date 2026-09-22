@@ -78,13 +78,22 @@ impl AcpProfile {
             || self.args.iter().any(|a| {
                 a.len() > 8192
                     || a.contains(['\0', '\n', '\r', '$'])
-                    || ["--api-key", "--token", "--password", "--secret"]
-                        .iter()
-                        .any(|flag| {
-                            a.split('=')
-                                .next()
-                                .is_some_and(|name| name.eq_ignore_ascii_case(flag))
-                        })
+                    || [
+                        "--api-key",
+                        "--access-token",
+                        "--oauth2-bearer",
+                        "--client-secret",
+                        "--password",
+                        "--secret",
+                        "--pat",
+                        "--token",
+                    ]
+                    .iter()
+                    .any(|flag| {
+                        a.split('=')
+                            .next()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(flag))
+                    })
             })
         {
             return Err(invalid(
