@@ -68,6 +68,14 @@ pub(super) struct Durability {
     _owner_lock: File,
 }
 
+impl Drop for Durability {
+    fn drop(&mut self) {
+        // Release explicitly: a concurrent fork can temporarily inherit an open
+        // descriptor before exec closes it, delaying close-only flock release.
+        let _ = self._owner_lock.unlock();
+    }
+}
+
 impl Durability {
     /// Zero generation is the trusted host's request to claim the latest record.
     /// A nonzero generation requires an exact match before reserving its successor.
