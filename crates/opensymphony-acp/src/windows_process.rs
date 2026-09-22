@@ -25,7 +25,6 @@ impl WindowsChild {
         })
     }
 
-    #[cfg(test)]
     pub(super) fn id(&self) -> Option<u32> {
         self.inner.id()
     }

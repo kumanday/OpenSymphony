@@ -956,7 +956,15 @@ Environment references remain names throughout migration. At launch, each source
 variable is removed from the child environment unless that name is also an
 explicit target in `env_refs`; only the intended credential aliases are passed.
 
-The executable ACP client is available through `opensymphony_acp::run_turn`.
+The executable ACP APIs are `opensymphony_acp::SessionHost` for retained sessions
+and `opensymphony_acp::run_turn` for one-turn compatibility. Host callers supply
+an explicit `RetentionPolicy`: defaults are eight sessions, 15 minutes idle
+retention, 60-second renewable attachment leases, and 16 leases per session.
+Active prompts and leases pin the process; capacity exhaustion refuses a new
+launch. These host API settings are independent of profile protocol capabilities.
+`SessionLaunch::require_persistence` rejects peers without negotiated load/resume
+support. The caller supplies a non-secret credential/grant revision and the
+scheduler's exact workspace identity; changes prevent session reuse.
 Production `opensymphony run` routing is a separate implementation slice; an ACP
 route currently fails scheduler capability selection before worker dispatch.
 Central profiles remain authoritative over repository-local workflow files.

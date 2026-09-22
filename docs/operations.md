@@ -940,6 +940,25 @@ requested cancellation. Sending `session/cancel`, killing a process, or receivin
 an unrelated stop reason does not establish that acknowledgement. Prompt failures
 after possible submission are uncertain and are never retried by this client.
 
+Retained ACP ownership is available through `SessionHost`. A finished worker may
+borrow the same live process again; nonpersistent agents remain attachable while
+that process is alive. Owner loss allows only capability-gated restoration of a
+known-finished session. `uncertain` prompt outcomes and launch-checkpoint gaps
+require execution-risk reconciliation before another process can launch. Do not
+clear a manifest marker merely because a local process exited: delegated remote
+work can remain active.
+
+An opted-in control server accepts a dedicated bearer token (at least 32
+non-whitespace characters). `POST /api/v1/acp/{owner_id}` accepts generation-bound
+`inspect`, `attach`, `renew`, and `release` actions. Observation leases grant no
+prompt authority. `GET /api/v1/acp/{owner_id}/events?generation=N` returns private
+SSE state/source events and explicit history-gap events when a bounded buffer or
+subscriber loses data. Tokens belong in the Authorization header. Source frames
+preserve redacted content and unknown payloads, with connection generation,
+arrival sequence, run binding and replay origin. Recorded history is bounded by
+the client's queue count and byte budgets. Production CLI routing and IDE writer
+handoff are separate integration slices.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
