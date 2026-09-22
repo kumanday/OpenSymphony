@@ -1,67 +1,70 @@
 ---
 id: OSYM-845
-title: ACP Debug Integration Tests And Failure Guidance
-milestone: "M13: ACP Debugging And IDE Attach"
+title: Multi-Harness IDE Attachment Qualification
+milestone: 'M13: ACP Debugging And IDE Attach'
 priority: 2
 estimate: 8
-blockedBy: ["OSYM-840", "OSYM-841", "OSYM-843", "OSYM-844"]
-blocks: []
+blockedBy:
+- OSYM-841
+- OSYM-843
+- OSYM-906
+- OSYM-907
+blocks:
+- OSYM-844
 areas:
-  - debugging
-  - acp
-  - testing
+- debugging
+- acp
+- testing
 parent: null
 ---
 
 ## Summary
 
-Add end-to-end ACP debug coverage and polish failure guidance for invalid workspaces, missing manifests, missing conversations, active turns, and store mismatches.
+Qualify scheduler-to-IDE attachment across multiple ACP harnesses before the default debug command switches to the IDE flow.
 
 ## Scope
 
 ### In scope
 
-- Add a minimal ACP stdio client harness around the fake OpenHands server.
-- Test initialize, `session/new`, `session/prompt`, `session/close`, and stream detach behavior.
-- Cover invalid cwd variants, missing conversation manifest, invalid conversation id, missing OpenHands conversation, already-running turn, and existing server with different store.
-- Verify ACP close leaves durable issue workspaces, manifests, memory, and OpenHands conversations intact.
+- Exercise real opensymphony run -> retained runtime owner -> separate ACP bridge -> IDE prompt -> operator callback -> cancellation/release -> scheduler continuation.
+- Use an adversarial fake IDE/harness pair plus at least two independently implemented live ACP harnesses with pinned versions, and a real Zed smoke test for both profiles.
+- Cover vendor extension requests, metadata fidelity, unsupported IDE fallback, optional persistence differences, archived native debug and exact workspace binding.
+- Inject scheduler/IDE races, pending approvals, disconnects, stale lease/replies, host loss, output floods and cleanup attempts.
+- Publish compatibility/failure guidance and reproducible evidence separately for fake protocol tests and actual harness/editor runs.
 
 ### Out of scope
 
-- Zed UI automation.
-- Multi-session ACP multiplexing.
+- Requiring Zed installation for hermetic CI; broad GUI automation or editor multiplexing.
 
 ## Deliverables
 
-- ACP debug integration test harness.
-- Failure-mode tests and operator guidance assertions.
-- Documentation updates for troubleshooting.
+- End-to-end attachment/race regression suite and live editor evidence.
+- Verified capability matrix and troubleshooting for runtime/IDE boundary failures.
 
 ## Acceptance Criteria
 
-- [ ] A fake-server integration test attaches to a fixture issue workspace and runs a prompt through ACP.
-- [ ] Invalid cwd errors identify the expected exact issue workspace shape.
-- [ ] Missing manifest and invalid conversation id errors name the relevant file or field.
-- [ ] `session/close` is verified as detach-only behavior.
+- [ ] Two real ACP profiles attach to the same session used by the scheduler and exchange debug prompts through Zed; no duplicate agent or fresh-context substitution occurs.
+- [ ] A vendor blocking request and its validated IDE/operator response traverse both protocol legs, or a documented capability fallback is explicitly exercised.
+- [ ] Ownership tests prove no concurrent scheduler/IDE prompts, no duplicate/stale replies, and no scheduler release before debug work settles.
+- [ ] Close cancels owned work before releasing resources while preserving durable workspace/session data; disconnect uncertainty remains fenced.
+- [ ] OpenHands store compatibility and native Codex unarchive/resume/--app regressions pass; the qualification report gates OSYM-844.
 
 ## Test Plan
 
-- Run the ACP debug integration test harness.
-- Run debug-session unit and CLI regression tests.
-- Run fake OpenHands server contract tests touched by debug attachment.
+- Run fake IDE/ACP/runtime integration, scheduler race and native debug regression tests.
+- Run documented live Zed attachment scenarios for both pinned profiles and record exact versions, capabilities, outcomes and limitations.
 
 ## Context
 
-- Builds on OSYM-840, OSYM-841, OSYM-843, and OSYM-844.
-- Read `docs/specs/opensymphony-acp-debugging-spec.md` failure behavior, test plan, and acceptance criteria.
-- Keep legacy flat, active, and archived OpenHands stores supported.
+- docs/specs/opensymphony-acp-debugging-spec.md: acceptance and failure matrix.
+- OSYM-906 runtime qualification evidence, OSYM-907 handoff tests and OSYM-841 bridge.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [ ] Linked specifications and repository contracts have been read.
+- [ ] Required dependencies are merged and their evidence is available.
+- [ ] The implementation can begin using this task and its referenced sources.
 
 ## Notes
 
-The test harness should not depend on Zed being installed.
+The default UX transition depends on this task. A fake OpenHands-only test cannot satisfy multi-harness IDE qualification.

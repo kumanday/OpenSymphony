@@ -196,8 +196,7 @@ of broadening the existing hardening milestone:
 | M10.6 Desktop Run Detail Operations And Interrupts | after M10.5 OKF memory, before M14 hosted alpha | harness interrupt contract, OpenHands/Codex cancel wiring, Human Review to Merging supersede, Run Detail action cleanup, TUI parity, lazy desktop launcher |
 | M10.7 Project Grouping And Dependency Signals | after M10.6 desktop operations, before M14 hosted alpha | control-plane project/dependency metadata, TUI project headers and dependency gutter, desktop grouping and collapse |
 | M11.5 LLM Wiki Graph View | after M14 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
-| M13 ACP Debugging And IDE Attach | after M12 harness/model seams, before M15 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
-| M12.6 Tree-sitter Code Intelligence | after M13 ACP debugging, before M15 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
+| M12.6 Tree-sitter Code Intelligence | after memory foundations, before M12.9 code graph and M15 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
 | M12.7 Workflow Target Branch Configuration | after M12.6 code intelligence, before M15 release hardening | configurable target branch markers, init prompt and flag, marker-only update settings mode, template/docs hardening |
 | M12.8 Desktop App Installer And Auto-Update | after M12.7 workflow target branch configuration, before M15 release hardening | lazy desktop installer/launcher, verified release bundles, source-build fallback, auto-update prompts, and installer docs |
 | M12.85 Codex Thread Lifecycle | after M10.3 Codex production harness, before M15 release hardening | manifest-backed per-issue thread reuse, retained terminal workspaces, durable archive transitions, and debug/reopen recovery |
@@ -205,6 +204,8 @@ of broadening the existing hardening milestone:
 | M12.95 Multi-Repository Foundations | after M12.9 target snapshots/overlays and completed COE-448 memory-server foundations | central instance config, canonical task binding, verified per-repository checkouts/instructions, per-instance memory catalog, and scoped leaf memory |
 | M12.96 Parent Integration Lifecycle | after M12.95 foundations, before multi-repository operator rollout | hierarchy generations, durable leases, retained-child worktree reuse, restart-safe parent integration, repair PRs, and bottom-up cleanup |
 | M12.97 Multi-Repository Operations And Rollout | after M12.96 parent lifecycle, before M15 release hardening | cross-client operator truth, hermetic lifecycle/fault validation, migration rollback, and isolated non-production activation |
+| M12.99 ACP Harness Runtime Adapter | on current native-harness and multi-repository foundations, before M13 qualification | executable ACP v1 stdio client, profiles, host-owned sessions, concrete worker routing, callbacks, operator response delivery, extensions and two-harness live qualification |
+| M13 ACP Debugging And IDE Attach | builds on M12.99 routing and session ownership, before M15 release hardening | multi-harness attachment, scheduler/IDE control handoff, ACP bridge fidelity, static editor setup, desktop launch and qualification before default UX transition |
 
 M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
 subscription credential adapter, model configuration UI metadata, Codex
@@ -258,10 +259,27 @@ finally they expose truthful operator state and gate activation on deterministic
 fault-injected validation. The wave reuses completed COE-448 memory-server work
 and M12.9 code snapshots/overlays instead of creating parallel implementations.
 
-The current default planning source is `docs/tasks/task-package.yaml` for the
-`multi-repository-orchestration` wave. The ACP debugging wave remains in
-`docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
-`docs/tasks/linear-publish.yaml` records the latest published planning wave.
+M12.99 follows `docs/specs/acp-harness-adapter.md`. It delivers a working generic
+ACP runtime through the real `opensymphony run` path, including configured
+profile selection, retained host-owned sessions, filesystem/terminal callbacks,
+scoped MCP setup, operator replies and registered extension operations. Adding
+capability metadata without executable routing and response delivery does not
+satisfy this milestone. ACP v2 and network transports are follow-on work.
+
+M13 follows `docs/specs/opensymphony-acp-debugging-spec.md`. All supported ACP
+profiles are core IDE attachment targets. A separate editor bridge attaches to
+the same host-owned session; the orchestrator holds scheduling while transferring
+exclusive control. The bridge preserves ACP source events and supported extension
+semantics. OpenHands and native Codex debug compatibility remain explicit. Two
+live harnesses and actual editor attachment must pass qualification before the
+default debug UX changes.
+
+The default `docs/tasks/task-package.yaml` and `docs/tasks/linear-publish.yaml`
+track `multi-repository-orchestration`. The ACP runtime and IDE wave uses
+`docs/tasks/acp-runtime-ide-task-package.yaml` and its matching
+`acp-runtime-ide-linear-publish.yaml`, retaining the existing M13 issue identities.
+`docs/tasks/advanced-knowledge-debug-task-package.yaml` contains the OKF and wiki
+graph work; its published mapping remains available for those original issues.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

@@ -1,68 +1,71 @@
 ---
 id: OSYM-841
-title: ACP Stdio Server Protocol Adapter
-milestone: "M13: ACP Debugging And IDE Attach"
+title: Multi-Harness ACP IDE Bridge
+milestone: 'M13: ACP Debugging And IDE Attach'
 priority: 2
 estimate: 13
-blockedBy: ["OSYM-840"]
-blocks: ["OSYM-842", "OSYM-845"]
+blockedBy:
+- OSYM-907
+- OSYM-903
+- OSYM-905
+blocks:
+- OSYM-842
+- OSYM-845
 areas:
-  - debugging
-  - acp
-  - cli
+- debugging
+- acp
+- cli
 parent: null
 ---
 
 ## Summary
 
-Add `opensymphony debug --acp-stdio` as a noninteractive ACP JSON-RPC server that attaches Zed or another ACP client to an existing issue conversation.
+Implement opensymphony debug --acp-stdio as an ACP server that connects an IDE to the existing host-owned runtime session for any supported ACP profile.
 
 ## Scope
 
 ### In scope
 
-- Implement ACP stdio server mode under the existing `debug` command family.
-- Support initialize, `session/new`, `session/prompt`, and `session/close`.
-- Treat `session/new.params.cwd` as the authoritative workspace selection input.
-- Enforce one active ACP debug session per spawned process.
-- Ensure stdout contains only protocol messages in ACP mode.
+- Use the official SDK in server role for initialize, session/new, prompt, cancel and advertised close; keep one attachment per spawned bridge process and stdout protocol-only.
+- Negotiate IDE and harness legs independently; initialize uses conservative capabilities before cwd selects a profile, then expose accurate session options and diagnostics.
+- Forward ACP-native content/tool updates, config/modes, permitted metadata and registered extensions from the ordered source stream. Normalize native OpenHands events at its boundary; do not reconstruct ACP from lossy scheduler summaries.
+- Remap outer session/RPC IDs to bound inner IDs, including bidirectional blocking requests and concurrent updates; route IDE permission/input responses through the same owner validation as operator clients.
+- Keep filesystem, terminals, environment and scoped MCP bound to the existing host. Define explicit unsupported/fallback behavior when an IDE lacks a callback or extension already required by the harness.
+- Implement writer acquisition, cancellation, completion ordering and close/disconnect through OSYM-907. Optional outer load/resume/list remain unadvertised until implemented.
 
 ### Out of scope
 
-- ACP `session/list`, `session/load`, and `session/resume`.
-- Zed launch UI.
+- A new native Codex ACP bridge, ACP v2, remote IDE hosting and multiple sessions in one bridge process.
 
 ## Deliverables
 
-- ACP stdio protocol adapter.
-- Strict cwd validation and actionable ACP errors.
-- Event mapping from normalized OpenHands runtime events to ACP updates.
+- Production ACP server/bridge command and source-event forwarding.
+- Bidirectional ID/capability mapping and actionable protocol errors.
 
 ## Acceptance Criteria
 
-- [ ] `opensymphony debug --acp-stdio` starts without requiring an issue key.
-- [ ] `session/new` rejects parent workspace roots, nested paths, target repo roots, and OpenHands conversation store paths.
-- [ ] `session/prompt` sends the message, runs the existing OpenHands conversation, and streams useful updates.
-- [ ] `session/close` detaches without deleting workspaces, manifests, memory, or OpenHands conversations.
+- [ ] The same bridge attaches to two distinct ACP harness profiles and prompts their existing sessions without vendor-specific bridge branches.
+- [ ] IDE callbacks return exactly once to the originating inner request; zero/string IDs, metadata and partial tool updates survive correct mapping.
+- [ ] An unsupported IDE feature fails or takes the documented host-operator fallback; attaching cannot expand previously negotiated downstream capabilities.
+- [ ] Prompt completion follows the bound terminal result; cancel and close remain responsive under output load and stop attachment-owned work before release.
+- [ ] Logs/secrets stay off stdout; invalid cwd/binding, unavailable owner, busy control and unsupported restoration produce actionable errors.
 
 ## Test Plan
 
-- Add ACP stdio unit tests with a minimal JSON-RPC harness.
-- Add fixture tests for valid cwd and invalid cwd variants.
-- Run focused debug-session and OpenHands runtime tests.
+- Drive an outer fake ACP IDE and inner fake ACP harness through the actual host owner with interleaved prompts, callbacks, extensions, cancellation and EOF.
+- Assert payload fidelity, version/capability negotiation, ID isolation, bounded buffering and native OpenHands mapping.
 
 ## Context
 
-- Builds on OSYM-840.
-- Read `docs/specs/opensymphony-acp-debugging-spec.md` command surface, ACP method behavior, event mapping, concurrency, and failure sections.
-- Keep protocol output off human-readable stdout.
+- docs/specs/opensymphony-acp-debugging-spec.md; official ACP v1 initialize, prompt-turn, session-setup and extensibility contracts.
+- Shared attachment and handoff from OSYM-840/OSYM-907; ACP source stream, callbacks and extension registry from M12.99.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [ ] Linked specifications and repository contracts have been read.
+- [ ] Required dependencies are merged and their evidence is available.
+- [ ] The implementation can begin using this task and its referenced sources.
 
 ## Notes
 
-The ACP session id is an attachment id, not a raw OpenHands conversation id.
+The IDE-facing ACP session ID identifies an attachment; it is distinct from the harness session and control lease. session/close must cancel owned ongoing work.
