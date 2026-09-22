@@ -22,6 +22,8 @@ use windows_sys::{
 
 pub(super) fn create_stage(path: &Path) -> io::Result<File> {
     OpenOptions::new()
+        .read(true)
+        .write(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
         // Neither another writer nor a rename can change this stage before
         // its handle-relative promotion. Clones refer to the same file object.
