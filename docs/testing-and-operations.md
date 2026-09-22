@@ -654,6 +654,14 @@ adjacent response/update pair is dispatched, and saturate callback output while
 a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
+Native Unix tests swap a pinned terminal directory for an external symlink before
+spawning the command and verify it reads from the original directory. The sole
+`unsafe_code` allowance wraps child-only `pre_exec` registration for `fchdir`;
+the repository lint is `deny`, and the closure performs no allocation, locking,
+logging or host cwd mutation. Callback tests cancel a file operation queued behind
+a blocked filesystem worker and verify no write occurs. Executable peers exercise
+JSON-escaped file/terminal responses against smaller response budgets, deferred
+model-to-mode selection, and rejection of credentials embedded in MCP URLs.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,

@@ -620,7 +620,9 @@ async fn recorded_inspection_and_bounded_source_history_are_truthful() {
         .expect("recorded");
     assert!(!recorded.live && !recorded.retirement_eligible);
     assert_eq!(recorded.state.recovery, AcpRecovery::TranscriptOnly);
-    let mut bounded = launch(root.path(), "ISSUE-1", "none").await;
+    // Changed limits identify a different owner; exercise bounded history on
+    // a fresh workspace rather than changing the recorded owner contract.
+    let mut bounded = launch(root.path(), "BOUNDED", "none").await;
     bounded.limits.queued_frames = 2;
     bounded.limits.queued_bytes = 256;
     let bounded = host.open(bounded).await.expect("bounded owner");
@@ -788,4 +790,32 @@ async fn restored_sessions_receive_scoped_mcp_and_apply_returned_configuration()
             "session/resume"
         }));
     }
+}
+
+#[tokio::test]
+async fn retained_identity_rejects_changed_callback_and_response_limits() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "LIMITS", "none").await)
+        .await
+        .expect("open");
+    for kind in 0..8 {
+        let mut changed = launch(root.path(), "LIMITS", "none").await;
+        match kind {
+            0 => changed.limits.file_bytes = 1024,
+            1 => changed.limits.terminal_output_bytes = 1024,
+            2 => changed.limits.terminal_count = 1,
+            3 => changed.limits.pending_callbacks = 1,
+            4 => changed.limits.callback_timeout = Duration::from_secs(1),
+            5 => changed.limits.frame_bytes = 4096,
+            6 => changed.limits.callback_bytes = 4096,
+            _ => changed.limits.callback_frames = 1,
+        }
+        assert!(
+            matches!(host.open(changed).await, Err(HostError::IdentityMismatch)),
+            "kind {kind}"
+        );
+    }
+    retire(&handle).await;
 }

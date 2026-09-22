@@ -1537,3 +1537,95 @@ async fn acp_configuration_rpc_errors_preserve_classification_and_redact_context
         }
     }
 }
+
+#[tokio::test]
+async fn acp_configuration_resolves_mode_category_after_model_prerequisite() {
+    let root = tempfile::tempdir().expect("root");
+    let mut profile = services_profile("config_dependent_mode");
+    profile.session.model = Some("second".into());
+    profile.session.mode = Some("code".into());
+    let run = run_turn(
+        &profile,
+        context(root.path()),
+        "configured".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    let report = run.outcome.expect("dependent mode applied");
+    assert!(report.succeeded(), "{}", run.stderr);
+    assert!(
+        report
+            .configuration
+            .options
+            .iter()
+            .any(|option| option["category"] == "mode" && option["currentValue"] == "code")
+    );
+}
+
+#[tokio::test]
+async fn acp_mcp_urls_reject_embedded_credentials_before_launch() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerHttp, McpServerSse};
+    for url in [
+        "https://user:password@example.com/mcp",
+        "https://example.com/mcp?access_token=url-secret",
+        "https://example.com/mcp?api%5fkey=url-secret",
+        "https://example.com/mcp#url-secret",
+    ] {
+        for sse in [false, true] {
+            let root = tempfile::tempdir().expect("root");
+            let mut context = context(root.path());
+            context.services.mcp_servers.push(if sse {
+                McpServer::Sse(McpServerSse::new("memory", url))
+            } else {
+                McpServer::Http(McpServerHttp::new("memory", url))
+            });
+            let error = run_turn(
+                &services_profile("mcp"),
+                context,
+                "unused".into(),
+                CancellationToken::new(),
+                None,
+                services_limits(),
+            )
+            .await
+            .expect_err("URL rejected before source capture");
+            assert!(matches!(error, ClientError::InvalidConfiguration(_)));
+            assert!(!error.to_string().contains("url-secret"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_encoded_facility_output_respects_small_response_budgets() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    std::fs::write(context.issue_workspace.join("escaped"), vec![0; 2048]).expect("escaped");
+    std::fs::write(context.issue_workspace.join("small"), "ok").expect("small");
+    let run = run_turn(
+        &services_profile("response_budget"),
+        context,
+        "bounded".into(),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            file_bytes: 4096,
+            terminal_output_bytes: 4096,
+            frame_bytes: 1024,
+            callback_bytes: 1024,
+            ..services_limits()
+        },
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome
+            .expect("oversized callbacks do not tear down transport")
+            .succeeded(),
+        "{}",
+        run.stderr
+    );
+    assert!(run.process_reaped);
+}

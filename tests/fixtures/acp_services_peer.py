@@ -9,6 +9,7 @@ session = 'services-session'
 serial = 100
 model_choice = "first"
 reasoning = "low"
+mode_choice = "ask"
 
 
 def send(value):
@@ -46,6 +47,8 @@ def config(value='first'):
     if mode == 'config_dependent':
         result.append({'id': 'a-reasoning', 'name': 'Reasoning', 'type': 'select', 'currentValue': reasoning,
                        'options': [{'value': v, 'name': v} for v in (['low', 'high'] if value == 'second' else ['low'])]})
+    if mode == 'config_dependent_mode' and value == 'second':
+        result.append({'id': 'behavior', 'category': 'mode', 'name': 'Mode', 'type': 'select', 'currentValue': mode_choice, 'options': [{'value': v, 'name': v} for v in ['ask', 'code']]})
     return result
 
 
@@ -91,10 +94,13 @@ while True:
             send({'id': message['id'], 'error': {'code': -32000 if mode == 'config_auth_error' else -32603,
                  'message': 'configuration unavailable rpc-secret-610'}})
             continue
-        if mode == 'config_dependent':
+        if mode in ('config_dependent', 'config_dependent_mode'):
             if model_choice == 'first':
                 assert message['params'] == {'sessionId': session, 'configId': 'pick', 'value': 'second'}
                 model_choice = 'second'
+            elif mode == 'config_dependent_mode':
+                assert message['params'] == {'sessionId': session, 'configId': 'behavior', 'value': 'code'}
+                mode_choice = 'code'
             else:
                 assert message['params'] == {'sessionId': session, 'configId': 'a-reasoning', 'value': 'high'}
                 reasoning = 'high'
@@ -112,6 +118,8 @@ while True:
     elif method == 'session/prompt':
         prompt_id = message['id']
         assert not mode.endswith('_error')
+        if mode == 'config_dependent_mode':
+            assert model_choice == 'second' and mode_choice == 'code'
         if mode == 'config_dependent':
             assert model_choice == 'second' and reasoning == 'high'
         if mode == 'mcp_argv':
@@ -122,6 +130,15 @@ while True:
         elif mode == 'disabled':
             assert request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'file')}, True)['code'] == -32601
             assert request('terminal/create', {'command': sys.executable}, True)['code'] == -32601
+        elif mode == 'response_budget':
+            request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'escaped')}, True)
+            assert request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'small')})['content'] == 'ok'
+            terminal = request('terminal/create', {'command': sys.executable, 'args': ['-c', 'import sys; sys.stdout.write(chr(0)*2048)']})['terminalId']
+            request('terminal/wait_for_exit', {'terminalId': terminal})
+            output = request('terminal/output', {'terminalId': terminal})
+            assert output['truncated'] and output['exitStatus']['exitCode'] == 0
+            assert set(output['output']) <= {chr(0)}
+            request('terminal/release', {'terminalId': terminal})
         elif mode == 'files':
             path = os.path.join(os.getcwd(), 'new', 'nested', 'file')
             text = 'uno\r\ndos 😀\nlast'

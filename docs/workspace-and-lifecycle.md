@@ -928,8 +928,9 @@ reintroduce excluded credentials.
 
 `SessionHost` retains one supervised process/connection per issue. A stable
 `.opensymphony/acp-owner.lock` prevents competing owners without creating another
-session database. The profile fingerprint also hashes host callback policy and
-resolved MCP attachments, so changed facilities or grants reject session reuse
+session database. The profile fingerprint also hashes host callback policy,
+client resource limits and resolved MCP attachments, so changed limits, facilities
+or grants reject session reuse
 without persisting credential values. The conversation manifest records that fingerprint,
 credential/grant revision, exact workspace/repository/checkout binding, opaque
 session ID, run/attempt, connection generation, negotiated capabilities and
@@ -959,7 +960,9 @@ host execution provides filesystem/process access; it is not a sandbox.
 Filesystem callbacks require absolute paths in the bound workspace and reject
 parent traversal, escaping or dangling symlinks and non-regular file targets.
 On Unix, descriptor-relative opens reject every symlink component, including
-in-workspace links, and use no-follow opens for new files. Windows pins every
+in-workspace links, and use no-follow opens for new files. Terminal launch pins
+the directory through descriptor-relative no-follow traversal; the child enters
+that directory using `fchdir` before executing the command. Windows pins every
 ancestor without write/delete sharing, rejects reparse points through opened
 handles, and holds those guards through file I/O or terminal spawn. Writes create missing
 parent directories only after containment validation. Terminal cwd defaults to
@@ -970,7 +973,7 @@ and scoped grants from callback overrides.
 Each terminal belongs to one connection/session and receives an unguessable ID.
 Release invalidates the ID immediately, kills outstanding work and waits for
 reaping. Kill preserves the handle and its final output. Cancellation stops all
-owned terminal trees; connection teardown expires callbacks and waits for process
+owned terminal trees and interrupts in-flight callback waits; connection teardown expires callbacks and waits for process
 cleanup. SDK dispatch continues while terminal wait requests are pending.
 A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh

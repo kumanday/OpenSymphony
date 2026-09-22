@@ -77,7 +77,7 @@ pub struct LaunchContext {
     pub services: HostServices,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ClientLimits {
     pub frame_bytes: usize,
     pub queued_frames: usize,
@@ -602,20 +602,26 @@ fn validate_launch(
     for server in &context.services.mcp_servers {
         use agent_client_protocol::schema::v1::McpServer;
         match server {
-            McpServer::Http(server) => secrets.extend(
-                server
-                    .headers
-                    .iter()
-                    .map(|h| h.value.clone())
-                    .filter(|v| !v.is_empty()),
-            ),
-            McpServer::Sse(server) => secrets.extend(
-                server
-                    .headers
-                    .iter()
-                    .map(|h| h.value.clone())
-                    .filter(|v| !v.is_empty()),
-            ),
+            McpServer::Http(server) => {
+                validate_mcp_url(&server.url)?;
+                secrets.extend(
+                    server
+                        .headers
+                        .iter()
+                        .map(|h| h.value.clone())
+                        .filter(|v| !v.is_empty()),
+                );
+            }
+            McpServer::Sse(server) => {
+                validate_mcp_url(&server.url)?;
+                secrets.extend(
+                    server
+                        .headers
+                        .iter()
+                        .map(|h| h.value.clone())
+                        .filter(|v| !v.is_empty()),
+                );
+            }
             McpServer::Stdio(server) => {
                 if server.env.iter().any(|v| excluded(&v.name)) {
                     return Err(ClientError::InvalidConfiguration(
@@ -674,6 +680,26 @@ fn validate_launch(
         environment,
         secrets,
     })
+}
+
+// Credentials belong in resolved headers, which are registered with the redactor.
+// Reject credential-bearing URLs before either a process or source observer exists.
+fn validate_mcp_url(value: &str) -> Result<(), ClientError> {
+    let invalid =
+        || ClientError::InvalidConfiguration("invalid or credential-bearing MCP URL".into());
+    let url = url::Url::parse(value).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url
+            .query_pairs()
+            .any(|(key, _)| runtime_field_is_sensitive(&key))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Run a fresh session through setup, one prompt, cancellation, and supervised teardown.

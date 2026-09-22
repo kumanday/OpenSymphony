@@ -428,8 +428,11 @@ impl SessionHost {
                     }
                     HostCommand::Open { mut launch, reply } => {
                         let key = launch.workspace.issue_id().to_owned();
-                        let fingerprint =
-                            profile_fingerprint(&launch.profile, &launch.context.services);
+                        let fingerprint = profile_fingerprint(
+                            &launch.profile,
+                            &launch.context.services,
+                            &launch.limits,
+                        );
                         let Ok(fingerprint) = fingerprint else {
                             let _ = reply.send(Err(HostError::Persistence));
                             continue;

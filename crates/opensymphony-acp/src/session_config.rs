@@ -60,32 +60,6 @@ impl SessionConfiguration {
         }
         Ok(())
     }
-    fn selections(&self, profile: &AcpProfile) -> Result<BTreeMap<String, String>, ClientError> {
-        let mut result = profile.session.options.clone();
-        for (category, value) in [
-            ("model", &profile.session.model),
-            ("mode", &profile.session.mode),
-        ] {
-            let Some(value) = value else { continue };
-            if let Some(option) = self
-                .options
-                .iter()
-                .find(|o| o.get("category").and_then(Value::as_str) == Some(category))
-            {
-                let id = option
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| unsupported(category))?;
-                if result.get(id).is_some_and(|existing| existing != value) {
-                    return Err(unsupported("conflicting selections"));
-                }
-                result.insert(id.into(), value.clone());
-            } else if category != "mode" || !self.options.is_empty() {
-                return Err(unsupported(category));
-            }
-        }
-        Ok(result)
-    }
     fn accepts(&self, id: &str, value: &str) -> bool {
         self.options
             .iter()
@@ -143,12 +117,46 @@ pub(super) async fn apply(
     state: &std::sync::Arc<std::sync::Mutex<SessionConfiguration>>,
     capture: &SharedCapture,
 ) -> Result<(), ClientError> {
-    let selections = state
+    let legacy_mode = state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .selections(profile)?;
+        .options
+        .is_empty();
+    let mut selections = profile.session.options.clone();
     let mut pending = selections.clone();
-    while !pending.is_empty() {
+    let mut categories = BTreeMap::new();
+    if let Some(model) = &profile.session.model {
+        categories.insert("model", model.clone());
+    }
+    if !legacy_mode && let Some(mode) = &profile.session.mode {
+        categories.insert("mode", mode.clone());
+    }
+    while !pending.is_empty() || !categories.is_empty() {
+        {
+            let state = state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut resolved = Vec::new();
+            for (&category, value) in &categories {
+                if let Some(option) = state
+                    .options
+                    .iter()
+                    .find(|option| option.get("category").and_then(Value::as_str) == Some(category))
+                {
+                    let id = option
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| unsupported(category))?;
+                    if selections.get(id).is_some_and(|existing| existing != value) {
+                        return Err(unsupported("conflicting selections"));
+                    }
+                    selections.insert(id.to_owned(), value.clone());
+                    pending.insert(id.to_owned(), value.clone());
+                    resolved.push(category);
+                }
+            }
+            for category in resolved {
+                categories.remove(category);
+            }
+        }
         let (id, value) = {
             let state = state.lock().unwrap_or_else(|e| e.into_inner());
             pending
@@ -204,14 +212,7 @@ pub(super) async fn apply(
                 configuration_rpc_error("session/set_config_option", &error, capture)
             })?;
     }
-    let legacy_mode = {
-        let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.options.is_empty() {
-            profile.session.mode.clone()
-        } else {
-            None
-        }
-    };
+    let legacy_mode = legacy_mode.then(|| profile.session.mode.clone()).flatten();
     if let Some(mode) = legacy_mode {
         if !state
             .lock()

@@ -190,14 +190,10 @@ impl Services {
                         }
                     };
                     let shutdown = self.shutdown.clone();
-                    let result = if self.cancellation.is_cancelled() {
-                        Err(Error::new(-32603, "session cancelled"))
-                    } else {
-                        tokio::select! {
-                            _ = shutdown.cancelled() => break,
-                            result = tokio::time::timeout(self.limits.callback_timeout, self.handle(&request.method, request.params)) =>
-                                result.unwrap_or_else(|_| Err(Error::new(-32603, "callback deadline exceeded"))),
-                        }
+                    let result = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => break,
+                        result = self.handle_callback(&request.method, request.params) => result,
                     };
                     let output = self.output.clone();
                     let resource_failure = self.resource_failure.clone();
@@ -220,6 +216,7 @@ impl Services {
                             },
                             Err(error) => Err(error),
                         };
+                        let result = bounded_response(result, request.responder.id(), &limits);
                         let frame = serde_json::to_string(&agent_client_protocol::RawJsonRpcMessage::response(request.responder.id().clone(), result.clone()));
                         // Reservation and SDK enqueue are one critical section: asynchronous
                         // waits may finish together, but the writer must see matching FIFO order.
@@ -290,6 +287,16 @@ impl Services {
         })
         .await
         .map_err(|_| Error::internal_error())?
+    }
+
+    async fn handle_callback(&mut self, method: &str, params: Value) -> Result<Reply, Error> {
+        let cancellation = self.cancellation.clone();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(Error::new(-32603, "session cancelled")),
+            result = tokio::time::timeout(self.limits.callback_timeout, self.handle(method, params)) =>
+                result.unwrap_or_else(|_| Err(Error::new(-32603, "callback deadline exceeded"))),
+        }
     }
 
     async fn handle(&mut self, method: &str, params: Value) -> Result<Reply, Error> {
@@ -395,13 +402,16 @@ impl Services {
                 let mut command = Command::new(request.command);
                 command
                     .args(request.args)
-                    .current_dir(cwd)
                     .env_clear()
                     .envs(&self.environment)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
+                #[cfg(not(unix))]
+                command.current_dir(&cwd);
+                #[cfg(unix)]
+                pin_terminal_cwd(&mut command, &self.root, &cwd).map_err(io_error)?;
                 #[cfg(not(windows))]
                 configure_process_group(&mut command);
                 #[cfg(not(windows))]
@@ -572,6 +582,36 @@ impl Services {
     }
 }
 
+#[cfg(unix)]
+fn pin_terminal_cwd(command: &mut Command, root: &Path, cwd: &Path) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = open(root, flags, Mode::empty())?;
+    let relative = cwd
+        .strip_prefix(root)
+        .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        directory = openat(&directory, component.as_os_str(), flags, Mode::empty())?;
+    }
+    set_child_directory(command, directory);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn set_child_directory(command: &mut Command, directory: std::os::fd::OwnedFd) {
+    // SAFETY: the closure only invokes async-signal-safe fchdir on the owned,
+    // already-contained directory. It allocates nothing, takes no locks and
+    // changes only the forked child's cwd. Command owns the descriptor through
+    // spawn; CLOEXEC closes the child copy after the cwd has been established.
+    unsafe {
+        command.pre_exec(move || rustix::process::fchdir(&directory).map_err(std::io::Error::from));
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReadFile {
@@ -605,6 +645,54 @@ struct Env {
 struct TerminalRequest {
     terminal_id: String,
 }
+// Bound the complete encoded frame, including the peer's request ID and JSON
+// escaping. An oversized file is a callback error; terminal tails are truncatable.
+fn bounded_response(
+    mut result: Result<Value, Error>,
+    id: &agent_client_protocol::schema::v1::RequestId,
+    limits: &ClientLimits,
+) -> Result<Value, Error> {
+    let budget = limits
+        .frame_bytes
+        .min(limits.callback_bytes.saturating_sub(1));
+    let fits = |result: &Result<Value, Error>| {
+        serde_json::to_vec(&agent_client_protocol::RawJsonRpcMessage::response(
+            id.clone(),
+            result.clone(),
+        ))
+        .is_ok_and(|frame| frame.len() <= budget)
+    };
+    if fits(&result) {
+        return result;
+    }
+    if let Ok(value) = &mut result
+        && let Some(output) = value.get("output").and_then(Value::as_str)
+    {
+        let output = output.to_owned();
+        value["output"] = json!("");
+        value["truncated"] = json!(true);
+        let overhead = serde_json::to_vec(&agent_client_protocol::RawJsonRpcMessage::response(
+            id.clone(),
+            Ok(value.clone()),
+        ))
+        .map_or(budget, |frame| frame.len());
+        // Any UTF-8 byte needs at most six JSON bytes (e.g. a NUL).
+        let keep = budget.saturating_sub(overhead) / 6;
+        let mut start = output.len().saturating_sub(keep);
+        while !output.is_char_boundary(start) {
+            start += 1;
+        }
+        value["output"] = json!(&output[start..]);
+        if fits(&result) {
+            return result;
+        }
+    }
+    Err(Error::new(
+        -32602,
+        "callback response exceeds configured byte budget",
+    ))
+}
+
 fn io_error(error: std::io::Error) -> Error {
     Error::new(
         -32603,
@@ -768,6 +856,118 @@ async fn run_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_cwd_uses_pinned_directory_after_rename_and_symlink_swap() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical");
+        let cwd = root.join("cwd");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(&cwd).expect("cwd");
+        std::fs::write(cwd.join("marker"), "original").expect("marker");
+        std::fs::write(outside.path().join("marker"), "outside").expect("outside marker");
+        let mut command = Command::new("/bin/cat");
+        command.arg("marker");
+        pin_terminal_cwd(&mut command, &root, &cwd).expect("pin");
+        std::fs::rename(&cwd, root.join("moved")).expect("rename");
+        std::os::unix::fs::symlink(outside.path(), &cwd).expect("swap");
+        let output = command.output().await.expect("spawn");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"original");
+        assert!(pin_terminal_cwd(&mut Command::new("/bin/cat"), &root, &cwd).is_err());
+    }
+
+    #[test]
+    fn facility_responses_fit_encoded_budgets_without_resource_failure() {
+        for frame_bytes in [256, 1024] {
+            for callback_bytes in [256, 1024] {
+                let limits = ClientLimits {
+                    frame_bytes,
+                    callback_bytes,
+                    ..Default::default()
+                };
+                let id =
+                    agent_client_protocol::schema::v1::RequestId::from("callback-id".to_owned());
+                for content in ["x".repeat(4096), "\0".repeat(4096), "😀".repeat(1024)] {
+                    let file = bounded_response(Ok(json!({"content":content})), &id, &limits);
+                    assert!(file.is_err());
+                    let terminal = bounded_response(
+                        Ok(json!({"output":content,"truncated":false,"exitStatus":{"exitCode":0}})),
+                        &id,
+                        &limits,
+                    );
+                    assert_eq!(terminal.as_ref().expect("tail")["truncated"], true);
+                    for result in [file, terminal] {
+                        let encoded = serde_json::to_string(
+                            &agent_client_protocol::RawJsonRpcMessage::response(id.clone(), result),
+                        )
+                        .expect("encode");
+                        assert!(CallbackOutput::default().admit(encoded, &limits));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_filesystem_callback_observes_turn_cancellation() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical");
+        let path = root.join("file");
+        std::fs::write(&path, "original").expect("file");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let cancellation = CancellationToken::new();
+            let (_, mut service) = Services::new(
+                root,
+                BTreeMap::new(),
+                HostServices {
+                    write_files: true,
+                    ..Default::default()
+                },
+                ClientLimits::default(),
+                Arc::new(Mutex::new(CallbackOutput::default())),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                CancellationToken::new(),
+                cancellation.clone(),
+                CancellationToken::new(),
+            );
+            let (started, ready) = oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let blocking = tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                blocked.recv().expect("release");
+            });
+            ready.await.expect("blocking pool occupied");
+            let request = service.handle_callback(
+                "fs/write_text_file",
+                json!({"path":path,"content":"changed"}),
+            );
+            tokio::pin!(request);
+            // Poll the production path until its filesystem lookup is queued
+            // behind the occupied blocking pool, then cancel before I/O resumes.
+            std::future::poll_fn(|cx| {
+                assert!(request.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            cancellation.cancel();
+            let result = tokio::time::timeout(Duration::from_millis(100), &mut request).await;
+            release.send(()).expect("release");
+            blocking.await.expect("blocking task");
+            let error = match result {
+                Ok(Err(error)) => error,
+                _ => panic!("active callback ignored cancellation"),
+            };
+            assert_eq!(error.message, "session cancelled");
+        });
+        assert_eq!(std::fs::read_to_string(path).expect("file"), "original");
+    }
+
     #[tokio::test]
     async fn retained_turn_epoch_reaps_prior_terminals_without_cancelling_caller_tokens() {
         let root = tempfile::tempdir().expect("root");
