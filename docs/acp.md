@@ -1,18 +1,16 @@
 ---
 type: topic-doc
-area: provider
+area: acp
 visibility: public
-last_memory_sync: 2026-09-13T06:27:30.577415+00:00
+last_memory_sync: 2026-09-22T11:51:20.924956+00:00
 ---
 
-# Provider
+# Acp
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
 
-- COE-555 contributed: PR #238: COE-555: Add parent repair review and merge lifecycle (merge `52d3ba3`)
-- COE-556 contributed: PR #239: COE-556: Add bottom-up subtree cleanup and recovery (merge `bc471f8`)
 - COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
 
 ## Important invariants
@@ -30,14 +28,10 @@ last_memory_sync: 2026-09-13T06:27:30.577415+00:00
 
 ## Recent changes
 
-- COE-555: Parent Repair Review And Merge Lifecycle
-- COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-608: ACP Profiles And Executable Protocol Client
 
 ## Source refs
 
-- COE-555
-- COE-556
 - COE-608
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

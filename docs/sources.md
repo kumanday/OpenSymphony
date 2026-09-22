@@ -353,6 +353,7 @@ Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-563: Implement task-packet admission and freeze tooling
+- COE-608: ACP Profiles And Executable Protocol Client
 
 ## Source refs
 
@@ -434,5 +435,6 @@ Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/
 - COE-550
 - COE-551
 - COE-563
+- COE-608
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

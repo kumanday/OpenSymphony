@@ -125,6 +125,7 @@ last_memory_sync: 2026-06-21T19:11:22.267420+00:00
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
 - PR-196: Desktop task and diff latency plus live-refresh UX fixes
 - PR-197: Graph visualization command center and shared fixtures
 
@@ -222,6 +223,7 @@ last_memory_sync: 2026-06-21T19:11:22.267420+00:00
 - COE-565
 - COE-566
 - COE-567
+- COE-608
 - PR-196
 - PR-197
 
