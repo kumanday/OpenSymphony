@@ -39,6 +39,7 @@ last_memory_sync: 2026-08-31T00:07:01.092515+00:00
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-564: Implement verifier execution and outcome records
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -48,5 +49,6 @@ last_memory_sync: 2026-08-31T00:07:01.092515+00:00
 - COE-556
 - COE-564
 - COE-608
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -12,6 +12,7 @@ last_memory_sync: 2026-09-22T11:51:20.924956+00:00
 ## Current model
 
 - COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
+- COE-609 contributed: PR #243: feat(acp): retain host-owned sessions with durable recovery (merge `5b67134`)
 
 ## Important invariants
 
@@ -29,9 +30,11 @@ last_memory_sync: 2026-09-22T11:51:20.924956+00:00
 ## Recent changes
 
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
 - COE-608
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

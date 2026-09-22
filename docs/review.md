@@ -14,6 +14,7 @@ last_memory_sync: 2026-09-13T06:27:30.581384+00:00
 - COE-555 contributed: PR #238: COE-555: Add parent repair review and merge lifecycle (merge `52d3ba3`)
 - COE-556 contributed: PR #239: COE-556: Add bottom-up subtree cleanup and recovery (merge `bc471f8`)
 - COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
+- COE-609 contributed: PR #243: feat(acp): retain host-owned sessions with durable recovery (merge `5b67134`)
 
 ## Important invariants
 
@@ -33,11 +34,13 @@ last_memory_sync: 2026-09-13T06:27:30.581384+00:00
 - COE-555: Parent Repair Review And Merge Lifecycle
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
 - COE-555
 - COE-556
 - COE-608
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

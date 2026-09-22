@@ -90,6 +90,7 @@ last_memory_sync: 2026-07-02T03:46:15.376296+00:00
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
 
 ## Source refs
 
@@ -150,5 +151,6 @@ last_memory_sync: 2026-07-02T03:46:15.376296+00:00
 - COE-566
 - COE-567
 - COE-608
+- COE-609
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
