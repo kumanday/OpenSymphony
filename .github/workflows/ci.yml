@@ -30,7 +30,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: ACP Windows process ownership regressions
-        run: python scripts/validation/check-acp-windows.py
+        run: |
+          python scripts/validation/windows-rename-probe.py
+          python scripts/validation/check-acp-windows.py
   typescript:
     runs-on: ubuntu-latest
     steps:
