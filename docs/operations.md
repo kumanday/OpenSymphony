@@ -881,6 +881,13 @@ Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback
 record.
 
+Before enabling strict routing for any project set, follow
+`docs/multi-repository-rollout.md`. The hermetic gate must pass at the clean
+candidate commit and selected config hash. The first enabled set must be the
+script-created disposable non-production set; its process, provider, tracker,
+port, credential-copy, and workspace cleanup receipts are part of the release
+evidence. Production project sets are enabled only by a later operator decision.
+
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.

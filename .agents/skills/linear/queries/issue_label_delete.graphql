@@ -1,0 +1,5 @@
+mutation IssueLabelDelete($id: String!) {
+  issueLabelDelete(id: $id) {
+    success
+  }
+}

@@ -127,6 +127,11 @@ Current implementation:
 - `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
 - `cargo test --test workspace_manager` covers durable checkout/staging ownership-marker sweeps, preservation of foreign generation-shaped directories and staging content, receipt-owned recovery, and the retry verification mode that permits legitimate worker changes while retaining checkout provenance checks
 - `cargo test --lib opensymphony_workspace::manager::tests::discover_agents` and the memory scope tests cover bounded tracked-instruction probes, failure propagation, canonical project-ID filtering, and project-scoped direct capsule reads
+- `scripts/hermetic_multi_repo_lifecycle.sh` is the M12.97 release gate. It
+  composes the inherited strict-config, migration/rollback, three-bare-repository
+  workspace, scheduler/provider restart, memory-scope, gateway/TUI, and
+  web/desktop suites and writes exact commit/config-hash evidence. The numbered
+  boundary and fault mapping lives in `docs/multi-repository-rollout.md`.
 - `cargo test --lib orchestrator_run::backends::tests` covers deferred cross-harness retirement so a failed replacement keeps the previous session recoverable
 - `tests/doctor.rs` runs the CLI live-probe path against the internal `opensymphony_testkit` module
 - `scripts/smoke_local.sh` runs the static doctor pass

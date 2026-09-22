@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "commit_sha": "<clean candidate HEAD>",
+    "central_config_sha256": "<selected config SHA-256>"
+  },
+  "hermetic": {
+    "run_id": "<run id>",
+    "result": "passed",
+    "evidence_path": "<release-evidence.json>",
+    "ci_url": "<green CI run>"
+  },
+  "live": {
+    "run_id": "<run id>",
+    "project_set": "<disposable non-production project set>",
+    "result": "passed",
+    "requested_change_repair": true,
+    "parent_repair_merge": true,
+    "teardown_complete": true,
+    "evidence_path": "<release-evidence.json>",
+    "teardown_path": "<teardown.json>"
+  },
+  "activation": {
+    "project_set": "<explicit non-production project set>",
+    "production_activation": false,
+    "operator": "<operator identity>",
+    "approved_at": "<RFC 3339 timestamp>"
+  }
+}
