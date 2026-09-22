@@ -6877,7 +6877,8 @@ impl RuntimeWorkerBackend {
             }
 
             if route.harness_kind == acp::KIND {
-                let mut outcome = acp::run_issue(
+                // Keep the ACP future off the shared task stack for every route.
+                let mut outcome = Box::pin(acp::run_issue(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -6894,7 +6895,7 @@ impl RuntimeWorkerBackend {
                     worker_environment,
                     checkout_credential_envs,
                     recovered,
-                )
+                ))
                 .await;
                 attach_parent_verification_receipt(
                     &mut outcome,
