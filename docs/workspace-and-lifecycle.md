@@ -916,6 +916,26 @@ trait WorkspaceManager {
 - issue and run metadata file write and reload
 - conversation reset path preserves workspace safety
 
+## ACP client process ownership
+
+The executable ACP client takes a host-supplied workspace root, sanitized checkout
+key, and canonical issue workspace. Both process cwd and session cwd use that
+verified directory; root execution, missing directories and symlink escapes are
+rejected before spawn. Profiles cannot supply a cwd. The host supplies an explicit
+environment with scoped memory grants and checkout credential exclusions. The
+client clears ambient inheritance and rejects profile references that would
+reintroduce excluded credentials.
+
+The initial client owns one process per `run_turn` call and reuses the workspace
+process-group teardown helpers. It records local reaping independently of ACP
+cancellation acknowledgement. `process_tree_signal_error` records any failed
+process-group signal separately from the child exit; consumers must not infer
+process-tree quiescence from child reaping alone. Local process termination does not prove delegated
+remote work has stopped. Host session retention, durable run identity, recovery
+and cleanup fencing are follow-on work in OSYM-901 and OSYM-902; this API does not
+persist or replay prompts. Local process access remains trusted host execution,
+not a sandbox.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

@@ -43,14 +43,6 @@ pub struct CheckoutRepository {
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";
 
-pub fn environment_variable_names_equal(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(right)
-    } else {
-        left == right
-    }
-}
-
 pub fn checkout_credential_environment_variables(
     repositories: &BTreeMap<String, CheckoutRepository>,
 ) -> BTreeSet<String> {

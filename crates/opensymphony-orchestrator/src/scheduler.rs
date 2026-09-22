@@ -10178,6 +10178,7 @@ mod tests {
             tracker_project_id_slug_fallbacks: Vec::new(),
             tracker_project_slugs: Vec::new(),
             routing: RoutingConfig {
+                harness_profile: None,
                 harness: "rust_native".to_owned(),
                 model: None,
                 model_profile: None,

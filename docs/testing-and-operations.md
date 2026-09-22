@@ -627,6 +627,36 @@ That document covers:
 - logging, manifests, and recovery inspection
 - version pinning, CI, and local safety posture
 
+## ACP stdio client tests
+
+Run `cargo test-system-duckdb --test acp` for the executable client contract and
+`cargo test-system-duckdb --lib acp` for central configuration coverage. The reusable
+`tests/fixtures/acp_peer.py` peer validates initialize/authenticate/new/prompt,
+process/session cwd equality, capability honesty, credential exclusion,
+interleaved updates and callbacks, opaque string/zero IDs, unknown notifications,
+unknown updates and stop reasons, cancellation acknowledgement/deadline, malformed
+and oversized frames, EOF/crash, output floods, bounded stderr/evidence, and a hung
+process tree. Regressions cover cancellation in every setup phase, pre-cancelled
+launches, JSON-escaped prompt overflow, missing update payloads, preservation of
+whitespace and long code chunks, ACP profile migration, environment alias
+scoping, post-submission authentication errors, and opaque-ID debug redaction. Current-thread Tokio
+tests check callback/cancellation responsiveness, bind a new session before an
+adjacent response/update pair is dispatched, and saturate callback output while
+a peer stops reading stdin. Count and encoded-byte budgets cover successful,
+unknown and invalid permission callbacks; sequential round trips verify that
+completed transport writes release reservations.
+The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
+on Windows. Its temporary Cargo harness compiles the production Windows process
+owner and verifies descendant termination on normal teardown, parent exit,
+wait deadline, and dropped futures. It also executes the shared environment
+replacement helper against a real child to verify case-insensitive alias
+precedence. Dependencies are read from the root manifest. On another host,
+`--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
+installed; cross-compilation alone does not prove Windows process behavior.
+Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
+require bundled-mode validation. Vendor interoperability evidence belongs to the
+later live-qualification task and must not be inferred from fake-peer tests.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

@@ -477,6 +477,22 @@ Notable removals:
 - the old bridge CLI command
 - provider-specific AI review secret naming
 
+## ACP executable protocol client
+
+The `opensymphony_acp` internal module uses the official Rust ACP SDK for typed
+requests, JSON-RPC correlation and ordered application dispatch. OpenSymphony owns
+the child process and supplies bounded LF framing to the SDK line transport.
+The initial `run_turn` API creates one session, runs one prompt, and tears down
+its child. It has no scheduler mutation authority. Host-owned retained sessions,
+recovery and production worker routing are defined by the
+[ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+
+Handlers are installed before initialization. Permission callbacks receive the
+protocol cancellation outcome; unknown requests receive method-not-found and
+unknown notifications receive no response. Updates are processed before the
+prompt response is returned. The client advertises no filesystem or terminal
+capabilities. No OpenHands server or client participates in this launch path.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

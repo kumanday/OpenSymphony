@@ -1,3 +1,5 @@
+mod acp;
+pub use acp::{AcpAuth, AcpConfig, AcpProfile};
 mod error;
 mod loader;
 mod model;

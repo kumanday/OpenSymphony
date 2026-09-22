@@ -1,0 +1,34 @@
+planningWave: acp-runtime-and-ide-attachment
+tasksDir: docs/tasks
+milestones:
+- 'M12.99: ACP Harness Runtime Adapter'
+- 'M13: ACP Debugging And IDE Attach'
+tasks:
+- id: OSYM-900
+  file: docs/tasks/osym-900-acp-profiles-and-executable-protocol-client.md
+- id: OSYM-901
+  file: docs/tasks/osym-901-acp-session-ownership-and-durable-recovery.md
+- id: OSYM-902
+  file: docs/tasks/osym-902-acp-execution-routing-and-worker-integration.md
+- id: OSYM-903
+  file: docs/tasks/osym-903-acp-client-callbacks-and-session-configuration.md
+- id: OSYM-904
+  file: docs/tasks/osym-904-acp-operator-requests-and-response-routing.md
+- id: OSYM-905
+  file: docs/tasks/osym-905-acp-extensions-and-harness-operations.md
+- id: OSYM-906
+  file: docs/tasks/osym-906-acp-runtime-conformance-and-live-qualification.md
+- id: OSYM-840
+  file: docs/tasks/osym-840-debug-attachment-core-refactor.md
+- id: OSYM-907
+  file: docs/tasks/osym-907-debug-control-handoff-and-scheduler-fencing.md
+- id: OSYM-841
+  file: docs/tasks/osym-841-acp-stdio-server-protocol-adapter.md
+- id: OSYM-842
+  file: docs/tasks/osym-842-zed-static-agent-configuration-and-setup-ux.md
+- id: OSYM-843
+  file: docs/tasks/osym-843-tauri-debug-in-zed-launch-action.md
+- id: OSYM-845
+  file: docs/tasks/osym-845-acp-debug-integration-tests-and-failure-guidance.md
+- id: OSYM-844
+  file: docs/tasks/osym-844-default-debug-ux-transition-and-cli-compatibility.md

@@ -885,6 +885,61 @@ If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.
 
+## ACP client validation and limits
+
+`cargo test-system-duckdb --test acp` launches the reusable Python fake peer through
+`opensymphony_acp::run_turn`, the same executable client API intended for host
+integration. It requires Python 3, no provider credential, and creates a distinct
+issue checkout inside a temporary workspace root. These subprocess tests establish
+the client contract; real vendor qualification remains OSYM-906.
+
+The default limits are 1 MiB per frame, 128 queued incoming frames with a
+cumulative 4 MiB wire-byte budget, 128 outstanding callback responses with an
+independent 4 MiB encoded-byte budget, 256 retained source frames with a cumulative
+1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, 300 seconds
+for a prompt, 10 seconds for cancellation acknowledgement, and one 5-second
+deadline for process termination and reaping. Windows launches enter a kill-on-close Job Object before
+the child resumes, so dropping the turn future also terminates descendants. Unix
+launches retain process-group ownership for the same drop path. Callers
+may pass validated `ClientLimits`. A supplied update channel must be drained
+concurrently; saturation or receiver loss fails the run visibly. Incoming queue
+charges are released when each frame reaches SDK dispatch. Its byte budget is
+independent of frame count, ranges from 256 bytes to 64 MiB, and rejects a single
+frame that exceeds it even when the per-frame limit is larger. Callback output
+reserves count and encoded bytes (including LF) before SDK enqueue and releases
+these only after stdin writes flush. Its count ranges from 1 to 4,096 and its byte
+budget from 256 bytes to 64 MiB. Saturation fails promptly with ResourceLimit and
+reaps the child, including when the peer stops reading stdin. Session creation
+binds the new session ID in an ordered SDK response callback before subsequent
+updates or permission requests are dispatched. Evidence capture
+marks truncation when either the frame count or byte budget is exhausted. The byte
+budget includes redacted payloads and source metadata, can be configured up to
+16 MiB, and can be zero to disable retention. Frames that exceed the remaining
+budget are omitted while protocol processing continues. Capture redacts secrets
+and sensitive fields, including normalized account-identity keys; diagnostic
+string previews are limited to 512 characters. Live update content preserves
+whitespace and complete strings while removing known secrets and sensitive
+fields; it does not use diagnostic preview normalization. Stderr overflow is replaced with a
+limit marker while the pipe continues draining. SDK wire tracing is disabled for
+this connection to prevent bypassing the redacted evidence surface. Known secrets
+use one multi-pattern scan per string; matcher inputs are limited to 1,024 distinct
+values and 1 MiB combined. Generic diagnostic normalization examines at most 2,048
+characters after full known-secret redaction and emits a 512-character preview.
+Non-authentication RPC errors retain the request method, numeric code, submission
+state and bounded redacted message even when source-frame retention is disabled.
+
+Cancellation before prompt submission interrupts setup and tears down the child;
+an already-cancelled token prevents launch. The complete serialized prompt frame
+must pass its size bound before submission becomes uncertain. Authentication
+errors retain that submission state, so a mid-turn token failure cannot be
+treated as a safe pre-submission login failure. Opaque session IDs remain
+available for correlation and are omitted from diagnostic `Debug` output.
+
+Only an original prompt response with `stopReason: cancelled` acknowledges a
+requested cancellation. Sending `session/cancel`, killing a process, or receiving
+an unrelated stop reason does not establish that acknowledgement. Prompt failures
+after possible submission are uncertain and are never retried by this client.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

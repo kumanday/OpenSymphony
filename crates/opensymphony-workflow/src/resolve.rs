@@ -43,6 +43,7 @@ pub(crate) fn resolve_workflow<E: Environment>(
     env: &E,
 ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
     let routing = resolve_routing(&workflow.front_matter.routing, env)?;
+    workflow.front_matter.acp.validate_route(&routing)?;
     let config = WorkflowConfig {
         tracker: resolve_tracker(&workflow.front_matter.tracker, env)?,
         polling: resolve_polling(&workflow.front_matter.polling)?,
@@ -52,6 +53,7 @@ pub(crate) fn resolve_workflow<E: Environment>(
         routing,
     };
     let mut extensions = WorkflowExtensions {
+        acp: workflow.front_matter.acp.clone(),
         openhands: if config.routing.harness == DEFAULT_ROUTING_HARNESS {
             resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?
         } else {
@@ -342,8 +344,15 @@ fn resolve_routing<E: Environment>(
     let model_profile_from_env = model_profile_override.is_some();
     let model_profile = model_profile_override.or(configured_model_profile);
 
+    let harness_profile = if harness_from_env && harness != "acp" {
+        None
+    } else {
+        routing.harness_profile.clone()
+    };
+
     Ok(RoutingConfig {
         harness,
+        harness_profile,
         model,
         model_profile,
         harness_env,
@@ -357,13 +366,13 @@ fn resolve_routing<E: Environment>(
 }
 
 fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
-    if HarnessKind::parse(value).is_some() {
+    if value == "acp" || HarnessKind::parse(value).is_some() {
         Ok(())
     } else {
         Err(WorkflowConfigError::InvalidField {
             field,
             message: format!(
-                "must be one of `{}`",
+                "must be one of `{}`, `acp`",
                 HarnessKind::supported_names().join("`, `")
             ),
         })

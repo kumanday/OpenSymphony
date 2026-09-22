@@ -23,6 +23,7 @@ use crate::opensymphony_workflow::{
 };
 use crate::opensymphony_workspace::{
     CheckoutRepository, SSH_AUTH_SOCK_ENV, environment_variable_names_equal,
+    normalize_secret_field_name, runtime_field_is_sensitive,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,8 @@ struct RunConfigFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentralConfigFile {
+    #[serde(default)]
+    acp: crate::opensymphony_workflow::AcpConfig,
     #[serde(default)]
     schema_version: u32,
     instance: CentralInstanceFile,
@@ -101,6 +104,8 @@ struct CentralInstanceFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentralRoutingFile {
+    #[serde(default)]
+    harness_profile: Option<String>,
     mode: String,
     #[serde(default)]
     active_project_set: Option<String>,
@@ -392,6 +397,11 @@ pub enum CentralConfigError {
     EmptyField { field: &'static str },
     #[error("central config reference `{field}` does not resolve")]
     InvalidReference { field: String },
+    #[error("invalid central ACP configuration: {source}")]
+    InvalidAcp {
+        #[source]
+        source: crate::opensymphony_workflow::WorkflowConfigError,
+    },
     #[error("central config aliases must be unique: `{alias}`")]
     DuplicateAlias { alias: String },
     #[error(
@@ -740,6 +750,7 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
 }
 
 const CENTRAL_CONFIG_KEYS: &[&str] = &[
+    "acp",
     "instance",
     "routing",
     "tracker_profiles",
@@ -1428,6 +1439,12 @@ fn resolve_central_config(
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
     let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
+    // Selection depends on harness/model environment overrides. The workflow
+    // resolver validates it after those values resolve; central load checks shape.
+    config
+        .acp
+        .validate_profiles()
+        .map_err(|source| CentralConfigError::InvalidAcp { source })?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     let repository_instruction_path = legacy_repository_instruction_path;
     Ok(ResolvedCentralConfig {
@@ -1501,6 +1518,18 @@ fn reject_checkout_credential_env_reuse(
         }
     }
 
+    for (profile_id, profile) in &config.acp.profiles {
+        if profile.env_refs.iter().any(|(target, source)| {
+            checkout_variables.iter().any(|checkout| {
+                environment_variable_names_equal(checkout, target)
+                    || environment_variable_names_equal(checkout, source)
+            })
+        }) {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("acp.profiles.{profile_id}.env_refs"),
+            });
+        }
+    }
     let mut non_checkout_variables = BTreeMap::new();
     if let Some(variable) = config.openhands.transport_session_api_key_env.as_deref() {
         non_checkout_variables.insert(
@@ -2017,7 +2046,9 @@ fn central_workflow_front_matter(
                 })
                 .transpose()?,
         },
+        acp: config.acp.clone(),
         routing: RoutingFrontMatter {
+            harness_profile: config.routing.harness_profile.clone(),
             harness: config.routing.harness.clone(),
             model: config.routing.model.clone(),
             model_profile: config.routing.model_profile.clone(),
@@ -2436,7 +2467,7 @@ fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
                 normalize_secret_field_name(key) == "command"
                     && openhands_command_has_literal_secret(value)
             });
-            let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
+            let secret_name = key.as_str().is_some_and(runtime_field_is_sensitive)
                 && match value.as_str() {
                     Some(value) => !is_central_credential_reference(value),
                     None => !value.is_null(),
@@ -2497,67 +2528,6 @@ fn validate_openhands_env_references(
         }
     }
     Ok(())
-}
-
-fn openhands_secret_field_name(name: &str) -> bool {
-    // OpenHands emits some identity headers with hyphens (for example,
-    // `chatgpt-account-id`) even though most serialized config uses
-    // underscore-separated keys. Normalize the separator before applying the
-    // secret-shaped field rules so both spellings fail closed.
-    let name = normalize_secret_field_name(name);
-    [
-        "access_token",
-        "api_key",
-        "apikey",
-        "authorization",
-        "access_key",
-        "accesskey",
-        "account_id",
-        "accountid",
-        "account_identifier",
-        "account_identity",
-        "chatgpt_account_id",
-        "credential",
-        "password",
-        "pat",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|part| name == *part || name.ends_with(&format!("_{part}")))
-}
-
-fn normalize_secret_field_name(name: &str) -> String {
-    let characters = name.chars().collect::<Vec<_>>();
-    let mut normalized = String::with_capacity(name.len());
-    for (index, character) in characters.iter().copied().enumerate() {
-        if character == '-' {
-            if !normalized.ends_with('_') {
-                normalized.push('_');
-            }
-            continue;
-        }
-        if character.is_ascii_uppercase() {
-            let previous_is_lower_or_digit = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
-            let previous_is_acronym_boundary = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_uppercase())
-                && characters
-                    .get(index + 1)
-                    .is_some_and(|next| next.is_ascii_lowercase());
-            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
-                && !normalized.ends_with('_')
-            {
-                normalized.push('_');
-            }
-            normalized.push(character.to_ascii_lowercase());
-        } else {
-            normalized.push(character.to_ascii_lowercase());
-        }
-    }
-    normalized
 }
 
 fn validate_active_repository_aliases(
@@ -2970,6 +2940,115 @@ scheduler:
 "#,
             root = root.display()
         )
+    }
+
+    #[test]
+    fn acp_central_profiles_remain_authoritative_and_validate_references() {
+        let repo = tempfile::tempdir().expect("temp root");
+        std::fs::write(
+            repo.path().join("integration.md"),
+            "Integration instructions",
+        )
+        .expect("instructions");
+        let source = central_fixture(repo.path()).replace(
+            "  mode: project_set",
+            "  harness: acp\n  harness_profile: local\n  mode: project_set",
+        ) + "acp:\n  profiles:\n    local:\n      command: python3\n      env_refs: {AGENT_TOKEN: ACP_TEST_TOKEN}\n";
+        let resolved = resolve_central_config(&repo.path().join("config.yaml"), &source)
+            .expect("ACP central config");
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .routing
+                .harness_profile
+                .as_deref(),
+            Some("local")
+        );
+        let local = WorkflowFrontMatter::default();
+        let merged = merge_repository_local_front_matter(resolved.workflow_front_matter, &local);
+        assert_eq!(
+            merged.acp.profiles["local"].env_refs["AGENT_TOKEN"],
+            "ACP_TEST_TOKEN"
+        );
+        let env = BTreeMap::from([("LINEAR_API_KEY".into(), "test-key".into())]);
+        let absent = resolve_central_config(
+            &repo.path().join("config.yaml"),
+            &source.replace("harness_profile: local", "harness_profile: absent"),
+        )
+        .expect("selection is resolved with workflow environment");
+        let workflow = WorkflowDefinition {
+            front_matter: absent.workflow_front_matter,
+            prompt_template: "Prompt".into(),
+        };
+        assert!(
+            workflow
+                .resolve(repo.path(), &env)
+                .expect_err("unknown profile")
+                .to_string()
+                .contains("routing.harness_profile")
+        );
+        for (replacement, expected) in [
+            (
+                "command: python3\n      extensions: [unknown]",
+                "extensions must be empty",
+            ),
+            (
+                "command: python3\n      protocol_versions: [2]",
+                "protocol_versions",
+            ),
+            (
+                "command: python3\n      auth: {method_id: ''}",
+                "auth.method_id",
+            ),
+        ] {
+            let error = resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("command: python3", replacement),
+            )
+            .expect_err("invalid ACP shape")
+            .to_string();
+            assert!(
+                error.contains("profile `local`") && error.contains(expected),
+                "{error}"
+            );
+        }
+        // Central loading preserves the selection until workflow environment
+        // overrides are available, including configurable override variable names.
+        for raw_harness in [
+            "harness: openhands_agent_server",
+            "harness: $ACP_HARNESS",
+            "",
+        ] {
+            let central = resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("harness: acp", raw_harness),
+            )
+            .expect("central config");
+            let workflow = WorkflowDefinition {
+                front_matter: central.workflow_front_matter,
+                prompt_template: "Prompt".into(),
+            };
+            let mut overrides = env.clone();
+            overrides.insert("TEST_HARNESS".into(), "acp".into());
+            overrides.insert("ACP_HARNESS".into(), "openhands_agent_server".into());
+            assert_eq!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect("resolved ACP override")
+                    .config
+                    .routing
+                    .harness,
+                "acp"
+            );
+            overrides.insert("TEST_MODEL".into(), "unsupported-model".into());
+            assert!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect_err("resolved model override")
+                    .to_string()
+                    .contains("ACP model overrides")
+            );
+        }
     }
 
     #[test]
@@ -3646,6 +3725,30 @@ scheduler:
         let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect("zero automatic retries should be valid");
         assert_eq!(resolved.retry_max_attempts, Some(0));
+    }
+
+    #[tokio::test]
+    async fn acp_only_central_config_fails_closed_before_legacy_resolution() {
+        let root = tempfile::tempdir().expect("config root");
+        let path = root.path().join("config.yaml");
+        for raw in [
+            "schema_version: 1\nacp: {}\n",
+            "acp:\n  profiles: [broken\n",
+        ] {
+            std::fs::write(&path, raw).expect("write config");
+            assert!(looks_like_central_config(raw));
+            let error = resolve_runtime_config(&RunArgs {
+                config: Some(path.clone()),
+                dry_run: true,
+            })
+            .await
+            .err()
+            .expect("incomplete central config must fail");
+            assert!(
+                matches!(error, RunCommandError::CentralConfig(_)),
+                "{error}"
+            );
+        }
     }
 
     #[test]

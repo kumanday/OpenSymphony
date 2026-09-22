@@ -928,6 +928,69 @@ lives in the OpenSymphony docs at
 [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md); `init` does not
 copy that guide into the target repository.
 
+## ACP stdio profiles
+
+Workflow front matter and central configuration accept the same typed `acp.profiles`
+map and `routing.harness_profile` selector:
+
+```yaml
+routing:
+  harness: acp
+  harness_profile: local
+acp:
+  profiles:
+    local:
+      command: /absolute/path/to/agent
+      args: [acp]
+      transport: stdio
+      protocol_versions: [1]
+      env_refs:
+        AGENT_API_KEY: OPERATOR_AGENT_API_KEY
+      auth:
+        method_id: agent_login
+```
+
+Central configuration migration transfers `routing.harness_profile` and the full
+`acp.profiles` map from the legacy workflow before rewriting its prompt body.
+Environment references remain names throughout migration. At launch, each source
+variable is removed from the child environment unless that name is also an
+explicit target in `env_refs`; only the intended credential aliases are passed.
+
+The executable ACP client is available through `opensymphony_acp::run_turn`.
+Production `opensymphony run` routing is a separate implementation slice; an ACP
+route currently fails scheduler capability selection before worker dispatch.
+Central profiles remain authoritative over repository-local workflow files.
+Profile shape is validated at central load with the profile ID and specific
+validation cause. Harness/profile selection and model restrictions are validated
+after workflow environment overrides resolve. An explicit harness environment
+override to another harness clears the ACP selector; an override to ACP retains
+it. Windows environment references
+use case-insensitive variable names; a resolved alias replaces inherited target
+values regardless of their casing. Configured target names must themselves be
+distinct under host name rules; Windows rejects case-equivalent `env_refs` targets
+before launch, while POSIX preserves case-distinct variables.
+Profile arguments are literal argv entries, never shell templates. `env_refs`
+contains variable names; resolved values stay in the host-owned launch context.
+The selected authentication method must be an advertised agent-handled method;
+terminal/browser authentication is not advertised. Omit `auth` for agents with
+existing login state that need no `authenticate` call.
+
+Profiles reject cwd overrides, unsupported wire versions/transports, extension
+handlers, credential arguments regardless of flag casing, and invalid environment
+references. Optional
+`required_capabilities` supports `prompt.image`, `prompt.audio`, and
+`prompt.embedded_context`; each requirement is checked before session creation,
+and a failed check names the missing capability.
+The current prompt API sends text. ACP model overrides are rejected until the
+session configuration implementation is available. Filesystem, terminal, MCP,
+extension, and operator permission policies are follow-on slices.
+
+ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
+`--client-secret`, and `--pat` are rejected in separate-value and equals forms,
+including mixed case; credentials belong in `env_refs`. A top-level `acp` section
+selects the central configuration parser, so incomplete central files fail
+validation before legacy defaults can be applied.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

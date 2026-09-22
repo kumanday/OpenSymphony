@@ -229,6 +229,26 @@ Key takeaways carried forward:
 - Session-oriented harness integration is the right abstraction.
 - Real-time runtime streaming is important enough to build in early rather than retrofit later.
 
+## ACP executable client baseline
+
+The client pins [`agent-client-protocol` 2.2.0](https://crates.io/crates/agent-client-protocol/2.2.0)
+and [`agent-client-protocol-schema` 1.9.1](https://crates.io/crates/agent-client-protocol-schema/1.9.1).
+The released SDK records source commit
+[`2a78849d3eb3dcb140dade3b8fc938cf1e2b9ce5`](https://github.com/agentclientprotocol/rust-sdk/tree/2a78849d3eb3dcb140dade3b8fc938cf1e2b9ce5).
+These package versions are distinct from negotiated ACP wire version 1.
+The implementation uses the SDK's `Lines` transport, `Client` builder, typed v1
+setup requests, raw SDK prompt response decoding for future stop reasons, and
+ordered `Dispatch` handler. ACP v2 features are disabled.
+Windows process ownership uses the safe Job Object API from
+[`process-wrap` 10.0.0](https://docs.rs/process-wrap/10.0.0/process_wrap/):
+`JobObject` assigns the suspended child before resuming it, and `KillOnDrop`
+terminates descendants when ownership ends.
+
+Wire authority: [v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization),
+[v1 prompt/cancel lifecycle](https://agentclientprotocol.com/protocol/v1/prompt-turn),
+and [v1 transports](https://agentclientprotocol.com/protocol/v1/transports).
+Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/acp.rs`.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

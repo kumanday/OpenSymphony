@@ -219,7 +219,7 @@ impl FakeSearchScript {
 
 #[derive(Debug, Clone)]
 pub enum FakeSocketAction {
-    Event(EventEnvelope),
+    Event(Box<EventEnvelope>),
     Text(String),
     Ping(Vec<u8>),
     Close,
@@ -236,7 +236,7 @@ impl FakeSocketScript {
     }
 
     pub fn event(mut self, event: EventEnvelope) -> Self {
-        self.actions.push(FakeSocketAction::Event(event));
+        self.actions.push(FakeSocketAction::Event(Box::new(event)));
         self
     }
 
