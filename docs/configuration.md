@@ -981,9 +981,33 @@ references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-The current prompt API sends text. ACP model overrides are rejected until the
-session configuration implementation is available. Filesystem, terminal, MCP,
-extension, and operator permission policies are follow-on slices.
+The prompt API sends text. Explicit session selections live in each profile:
+
+```yaml
+session:
+  model: model-id
+  mode: code
+  options:
+    thought-level: high
+```
+
+`session.model` and `session.mode` select advertised config options by category;
+`session.options` selects by exact option ID, including grouped select values.
+The client applies choices before prompting, validates the returned complete
+option list, and consumes subsequent config and mode updates. Legacy
+`session/set_mode` is used when the peer supplies modes without config options.
+Unsupported explicit choices fail setup. Boolean options and legacy experimental
+model RPCs are not advertised. The generic routing model override remains
+unavailable for ACP; use the profile's explicit session selection.
+
+The host supplies `LaunchContext.services: HostServices`. Its `read_files`,
+`write_files`, and `terminals` flags default to false and enable only the matching
+implemented callbacks. `mcp_servers` contains resolved host-owned scoped MCP
+attachments: stdio is baseline support, while HTTP and SSE require the peer's
+advertisement. Every supplied server is required; unsupported transports fail
+before session creation. Existing memory grants can be passed as an HTTP server
+named `opensymphony-memory` with the issued Authorization header. Resolved values
+stay out of the profile. Operator responses and extensions remain separate slices.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,

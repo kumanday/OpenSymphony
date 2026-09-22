@@ -629,6 +629,15 @@ That document covers:
 
 ## ACP stdio client tests
 
+`cargo test-system-duckdb --test acp` includes the executable
+`tests/fixtures/acp_services_peer.py` peer. It exercises line ranges and endings,
+invalid UTF-8, missing write parents, traversal/symlinks, oversized content,
+capability absence, cross-session rejection, UTF-8 terminal truncation, exit
+races, release-before-exit, cancellation/reaping, immutable host policy,
+advertised configuration changes and an authenticated scoped MCP HTTP attachment.
+These deterministic tests establish client behavior; live harness qualification
+is tracked separately in OSYM-906.
+
 Run `cargo test-system-duckdb --test acp` for the executable client contract and
 `cargo test-system-duckdb --lib acp` for central configuration coverage. The reusable
 `tests/fixtures/acp_peer.py` peer validates initialize/authenticate/new/prompt,

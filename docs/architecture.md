@@ -490,8 +490,13 @@ recovery and production worker routing are defined by the
 Handlers are installed before initialization. Permission callbacks receive the
 protocol cancellation outcome; unknown requests receive method-not-found and
 unknown notifications receive no response. Updates are processed before the
-prompt response is returned. The client advertises no filesystem or terminal
-capabilities. No OpenHands server or client participates in this launch path.
+prompt response is returned. Host policy gates filesystem and terminal
+advertisements. The ordered dispatch handler admits callbacks to one bounded
+connection-owned actor. File operations are serialized; terminal waits use
+bounded asynchronous responses so they cannot block RPC dispatch. Terminal
+processes use the existing process-group or Windows Job Object supervisors.
+Session config responses and updates are committed in SDK dispatch order before
+prompt completion. No OpenHands server or client participates in this launch path.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

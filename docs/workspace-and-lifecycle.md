@@ -936,6 +936,28 @@ and cleanup fencing are follow-on work in OSYM-901 and OSYM-902; this API does n
 persist or replay prompts. Local process access remains trusted host execution,
 not a sandbox.
 
+
+Filesystem callbacks require absolute paths in the bound workspace and reject
+parent traversal, escaping or dangling symlinks and non-regular file targets.
+On Unix, descriptor-relative opens reject every symlink component, including
+in-workspace links, and use no-follow opens for new files. Writes create missing
+parent directories only after containment validation. Terminal cwd defaults to
+the same workspace; alternate directories must remain inside it. Terminal env
+entries may only repeat existing host-owned values, protecting executable lookup
+and scoped grants from callback overrides.
+
+Each terminal belongs to one connection/session and receives an unguessable ID.
+Release invalidates the ID immediately, kills outstanding work and waits for
+reaping. Kill preserves the handle and its final output. Cancellation stops all
+owned terminal trees; connection teardown expires callbacks and waits for process
+cleanup. SDK dispatch continues while terminal wait requests are pending.
+A retained owner calls `begin_turn` before the next prompt to retire the prior
+callback epoch, reap its processes, invalidate old handles and install a fresh
+cancellation token. Cleanup failure prevents the new prompt.
+`HostServices` is captured at connection creation and has no attachment mutation
+path, so editor-like extension requests cannot replace cwd, environment, callbacks
+or MCP grants.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

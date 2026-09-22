@@ -41,6 +41,10 @@ use tokio_util::{
 };
 use tracing::instrument::WithSubscriber;
 
+mod services;
+mod session_config;
+pub use services::HostServices;
+pub use session_config::SessionConfiguration;
 #[cfg(windows)]
 mod windows_process;
 
@@ -64,6 +68,7 @@ pub struct LaunchContext {
     pub issue_workspace: PathBuf,
     pub environment: BTreeMap<String, String>,
     pub excluded_environment: BTreeSet<String>,
+    pub services: HostServices,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +85,11 @@ pub struct ClientLimits {
     /// Cumulative serialized bytes of retained, redacted SourceFrame values.
     pub evidence_bytes: usize,
     pub stderr_bytes: usize,
+    pub file_bytes: usize,
+    pub terminal_output_bytes: usize,
+    pub terminal_count: usize,
+    pub pending_callbacks: usize,
+    pub callback_timeout: Duration,
     pub setup_timeout: Duration,
     pub prompt_timeout: Duration,
     pub cancel_timeout: Duration,
@@ -97,6 +107,11 @@ impl Default for ClientLimits {
             evidence_frames: 256,
             evidence_bytes: 1024 * 1024,
             stderr_bytes: 16 * 1024,
+            file_bytes: 256 * 1024,
+            terminal_output_bytes: 64 * 1024,
+            terminal_count: 16,
+            pending_callbacks: 64,
+            callback_timeout: Duration::from_secs(300),
             setup_timeout: Duration::from_secs(30),
             prompt_timeout: Duration::from_secs(300),
             cancel_timeout: Duration::from_secs(10),
@@ -180,6 +195,7 @@ pub struct TurnReport {
     pub cancellation_acknowledged: bool,
     pub session_id: String,
     pub initialization: InitializeResponse,
+    pub configuration: SessionConfiguration,
 }
 
 // Negotiation metadata and opaque peer identifiers are operational values, not
@@ -453,11 +469,16 @@ fn validate_launch(
         || limits.evidence_frames > 4096
         || limits.evidence_bytes > 16 * 1024 * 1024
         || limits.stderr_bytes > 1024 * 1024
+        || limits.file_bytes > 16 * 1024 * 1024
+        || limits.terminal_output_bytes > 1024 * 1024
+        || !(1..=128).contains(&limits.terminal_count)
+        || !(1..=128).contains(&limits.pending_callbacks)
         || [
             limits.setup_timeout,
             limits.prompt_timeout,
             limits.cancel_timeout,
             limits.reap_timeout,
+            limits.callback_timeout,
         ]
         .iter()
         .any(Duration::is_zero)
@@ -553,6 +574,59 @@ fn validate_launch(
             "invalid launch environment".into(),
         ));
     }
+    if context.services.mcp_servers.len() > 32
+        || serde_json::to_vec(&context.services.mcp_servers)
+            .map_or(true, |v| v.len() > limits.frame_bytes / 2)
+    {
+        return Err(ClientError::InvalidConfiguration(
+            "scoped MCP configuration exceeds limits".into(),
+        ));
+    }
+    for server in &context.services.mcp_servers {
+        use agent_client_protocol::schema::v1::McpServer;
+        match server {
+            McpServer::Http(server) => secrets.extend(
+                server
+                    .headers
+                    .iter()
+                    .map(|h| h.value.clone())
+                    .filter(|v| !v.is_empty()),
+            ),
+            McpServer::Sse(server) => secrets.extend(
+                server
+                    .headers
+                    .iter()
+                    .map(|h| h.value.clone())
+                    .filter(|v| !v.is_empty()),
+            ),
+            McpServer::Stdio(server) => {
+                if server.env.iter().any(|v| excluded(&v.name)) {
+                    return Err(ClientError::InvalidConfiguration(
+                        "MCP environment cannot expose excluded checkout credentials".into(),
+                    ));
+                }
+                secrets.extend(
+                    server
+                        .env
+                        .iter()
+                        .map(|e| e.value.clone())
+                        .filter(|v| !v.is_empty()),
+                );
+            }
+            _ => {
+                return Err(ClientError::InvalidConfiguration(
+                    "unsupported MCP transport".into(),
+                ));
+            }
+        }
+    }
+    secrets.extend(
+        secrets
+            .clone()
+            .into_iter()
+            .filter_map(|value| value.strip_prefix("Bearer ").map(str::to_owned))
+            .filter(|value| !value.is_empty()),
+    );
     let secrets = SecretRedactor::new(secrets)?;
     if secrets.contains_secret(&profile.command)
         || profile.args.iter().any(|arg| secrets.contains_secret(arg))
@@ -602,7 +676,7 @@ pub async fn run_turn(
         .args(&profile.args)
         .current_dir(&cwd)
         .env_clear()
-        .envs(environment)
+        .envs(&environment)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -626,6 +700,22 @@ pub async fn run_turn(
     let resource_failure = Arc::new(AtomicBool::new(false));
     let submitted = Arc::new(AtomicBool::new(false));
     let fatal = CancellationToken::new();
+    let service_shutdown = CancellationToken::new();
+    let _service_guard = service_shutdown.clone().drop_guard();
+    let (service_sender, service_actor) = services::Services::new(
+        cwd.clone(),
+        environment,
+        context.services.clone(),
+        limits.clone(),
+        callback_output.clone(),
+        resource_failure.clone(),
+        fatal.clone(),
+        CancellationToken::new(),
+        service_shutdown.clone(),
+    );
+    let service_run = service_actor.run();
+    tokio::pin!(service_run);
+    let configuration = Arc::new(Mutex::new(SessionConfiguration::default()));
     let input = FramedRead::new(stdout, LinesCodec::new_with_max_length(limits.frame_bytes));
     let incoming = input.map({
         let queued = queued.clone();
@@ -707,6 +797,8 @@ pub async fn run_turn(
             let resource_failure = resource_failure.clone();
             let fatal = fatal.clone();
             let redactor = capture_state.clone();
+            let configuration = configuration.clone();
+            let service_sender = service_sender.clone();
             async move |message: Dispatch, _cx| {
                 queued
                     .lock()
@@ -714,6 +806,24 @@ pub async fn run_turn(
                     .dispatched();
                 match message {
                     Dispatch::Request(request, responder) => {
+                        let service_method = request.method.starts_with("fs/")
+                            || request.method.starts_with("terminal/");
+                        let session = request.params.get("sessionId").and_then(Value::as_str);
+                        if service_method
+                            && session.is_some()
+                            && active_session
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_deref()
+                                == session
+                        {
+                            return service_sender
+                                .enqueue(request.method, request.params, responder)
+                                .inspect_err(|_| {
+                                    resource_failure.store(true, Ordering::Release);
+                                    fatal.cancel();
+                                });
+                        }
                         let response = if request.method == "session/request_permission" {
                             match serde_json::from_value::<RequestPermissionRequest>(request.params)
                             {
@@ -739,11 +849,9 @@ pub async fn run_turn(
                             responder.id().clone(),
                             response.clone(),
                         ))?;
-                        if !callback_output
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .admit(frame, &limits)
-                        {
+                        let mut callback_output =
+                            callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                        if !callback_output.admit(frame, &limits) {
                             resource_failure.store(true, Ordering::Release);
                             fatal.cancel();
                             // Individual-request responders send nothing on drop. Batches
@@ -775,6 +883,11 @@ pub async fn run_turn(
                                 fatal.cancel();
                                 return Err(agent_client_protocol::Error::invalid_params());
                             }
+                            configuration
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .update(update)
+                                .inspect_err(|_| fatal.cancel())?;
                             if let Some(tx) = &updates {
                                 let mut update = update.clone();
                                 redactor
@@ -805,7 +918,7 @@ pub async fn run_turn(
         .connect_with(Lines::new(outgoing, incoming), async |connection| {
             let setup = async {
                 let initialization = connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(context.services.capabilities()))
                     .block_task()
                     .await.inspect_err(|error| {
                         phase_error = rpc_failure("initialize", error, &capture_state, false);
@@ -841,15 +954,21 @@ pub async fn run_turn(
                         phase_error = rpc_failure("authenticate", error, &capture_state, false);
                     })?;
                 }
+                if let Err(error) = session_config::validate_transports(&context.services.mcp_servers, &initialization.agent_capabilities) {
+                    phase_error = Some(error);
+                    return Err(agent_client_protocol::Error::internal_error());
+                }
                 let (session_tx, session_rx) = oneshot::channel();
                 let active_session = active_session.clone();
+                let session_configuration = configuration.clone();
                 // Register before yielding. The ordered callback binds ownership before
                 // the SDK releases any adjacent session/update or permission request.
-                connection.send_request(NewSessionRequest::new(cwd))
+                connection.send_request(NewSessionRequest::new(cwd).mcp_servers(context.services.mcp_servers.clone()))
                     .on_receiving_result(async move |result| {
                         if let Ok(session) = &result {
                             *active_session.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(session.session_id.0.to_string());
+                            session_configuration.lock().unwrap_or_else(|e|e.into_inner()).initial(&serde_json::to_value(session)?);
                         }
                         let _ = session_tx.send(result);
                         Ok(())
@@ -859,6 +978,10 @@ pub async fn run_turn(
                     .inspect_err(|error| {
                         phase_error = rpc_failure("session/new", error, &capture_state, false);
                     })?;
+                if let Err(error) = session_config::apply(&connection, profile, session.session_id.0.as_ref(), &configuration).await {
+                    phase_error = Some(error);
+                    return Err(agent_client_protocol::Error::internal_error());
+                }
                 Ok((initialization, session.session_id))
             };
             let setup_result = tokio::select! {
@@ -875,6 +998,13 @@ pub async fn run_turn(
                     return Err(agent_client_protocol::Error::internal_error());
                 }
             };
+            if cancellation.is_cancelled() {
+                phase_error = Some(ClientError::CancelledBeforePrompt);
+                return Err(agent_client_protocol::Error::internal_error());
+            }
+            service_sender.begin_turn(cancellation.clone()).await.inspect_err(|_| {
+                phase_error = Some(ClientError::Teardown);
+            })?;
             if cancellation.is_cancelled() {
                 phase_error = Some(ClientError::CancelledBeforePrompt);
                 return Err(agent_client_protocol::Error::internal_error());
@@ -912,16 +1042,22 @@ pub async fn run_turn(
             Ok(TurnReport {
                 cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",
                 cancellation_requested, stop_reason, session_id: session_id.0.to_string(), initialization,
+                configuration: configuration.lock().unwrap_or_else(|e|e.into_inner()).clone(),
             })
         })
         .with_subscriber(tracing::subscriber::NoSubscriber::default());
     let stderr_drain = drain_stderr(stderr, limits.stderr_bytes);
     tokio::pin!(stderr_drain);
     let mut stderr_result = None;
+    let mut service_completed = None;
     let result = {
         tokio::pin!(run);
         loop {
             tokio::select! {
+                completed = &mut service_run => {
+                    service_completed = Some(completed);
+                    break Err(agent_client_protocol::Error::internal_error());
+                },
                 _ = fatal.cancelled() => break Err(agent_client_protocol::Error::internal_error()),
                 result = &mut run => break result,
                 stderr = &mut stderr_drain, if stderr_result.is_none() => {
@@ -960,6 +1096,13 @@ pub async fn run_turn(
         outcome = Err(ClientError::ResourceLimit {
             submitted: submitted.load(Ordering::Acquire),
         });
+    }
+    service_shutdown.cancel();
+    if !match service_completed {
+        Some(completed) => completed,
+        None => service_run.await,
+    } {
+        outcome = Err(ClientError::Teardown);
     }
     let reap_deadline = tokio::time::Instant::now() + limits.reap_timeout;
     #[cfg(windows)]

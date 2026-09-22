@@ -247,7 +247,13 @@ terminates descendants when ownership ends.
 Wire authority: [v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization),
 [v1 prompt/cancel lifecycle](https://agentclientprotocol.com/protocol/v1/prompt-turn),
 and [v1 transports](https://agentclientprotocol.com/protocol/v1/transports).
-Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/acp.rs`.
+Client facilities follow the [v1 filesystem](https://agentclientprotocol.com/protocol/v1/file-system),
+[v1 terminals](https://agentclientprotocol.com/protocol/v1/terminals),
+[v1 session config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+and [v1 MCP attachments](https://agentclientprotocol.com/protocol/v1/session-setup)
+contracts. Optional callback fields use strict local deserialization so malformed
+line, cwd, environment and output limits cannot silently become defaults.
+Implementation and tests are in `crates/opensymphony-acp/src/` and `tests/acp.rs`.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
