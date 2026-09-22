@@ -123,7 +123,9 @@ recovery and terminal cleanup use the shared worker and scheduler boundaries.
 
 `/api/v1/capabilities` separates generic adapter support (`harnesses`) from
 configured profile preflight readiness (`harness_profiles`). Preflight checks
-profile shape, executable availability and environment references; it does not
+profile shape, executable availability and environment references. Executable
+lookup honors profile-mapped `PATH` values and requires absolute search directories
+because no issue cwd is available during preflight. It does not
 claim agent authentication or session negotiation succeeded. Run details expose
 `harness_capability` only after negotiation, including the selected profile,
 load/resume and history replay support. These DTOs are shared by Rust and

@@ -221,28 +221,67 @@ pub fn run_capability(
 pub fn profile_capabilities(
     config: &crate::opensymphony_workflow::AcpConfig,
 ) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
+    let environment = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
+    profile_capabilities_with_environment(config, &environment)
+}
+
+fn profile_capabilities_with_environment(
+    config: &crate::opensymphony_workflow::AcpConfig,
+    environment: &BTreeMap<String, String>,
+) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
+    use crate::opensymphony_workspace::{
+        environment_variable_names_equal, has_environment_name_collision,
+    };
+    let value = |name: &str| {
+        environment
+            .iter()
+            .find(|(key, _)| environment_variable_names_equal(key, name))
+            .map(|(_, value)| value)
+    };
     config
         .profiles
         .iter()
         .map(|(id, profile)| {
+            // Launch replaces mapped targets and removes source-only variables.
+            // Resolve PATH with the same precedence before advertising readiness.
+            let path = match profile
+                .env_refs
+                .iter()
+                .find(|(target, _)| environment_variable_names_equal(target, "PATH"))
+            {
+                Some((_, source)) => value(source),
+                None if profile
+                    .env_refs
+                    .values()
+                    .any(|source| environment_variable_names_equal(source, "PATH")) =>
+                {
+                    None
+                }
+                None => value("PATH"),
+            };
             let command = std::path::Path::new(&profile.command);
             let available = if command.components().count() > 1 {
                 command.is_absolute() && executable(command)
             } else {
-                std::env::var_os("PATH").is_some_and(|paths| {
-                    std::env::split_paths(&paths).any(|path| executable(&path.join(command)))
+                path.is_some_and(|paths| {
+                    std::env::split_paths(paths).any(|path| {
+                        // A profile preflight has no issue cwd yet.
+                        path.is_absolute() && executable(&path.join(command))
+                    })
                 })
             };
-            let reason = if profile.validate().is_err() {
+            let reason = if profile.validate().is_err()
+                || has_environment_name_collision(profile.env_refs.keys().map(String::as_str))
+            {
                 Some("invalid_profile")
+            } else if profile.env_refs.values().any(|name| {
+                value(name).is_none_or(|value| value.is_empty() || value.contains('\0'))
+            }) {
+                Some("credential_reference_unavailable")
             } else if !available {
                 Some("executable_unavailable")
-            } else if profile
-                .env_refs
-                .values()
-                .any(|name| std::env::var(name).map_or(true, |value| value.is_empty()))
-            {
-                Some("credential_reference_unavailable")
             } else {
                 None
             };
@@ -257,6 +296,10 @@ pub fn profile_capabilities(
 }
 
 fn executable(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    if path.extension().is_none() && path.with_extension("exe").is_file() {
+        return true;
+    }
     let Ok(metadata) = path.metadata() else {
         return false;
     };
@@ -277,6 +320,54 @@ fn executable(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_preflight_resolves_mapped_path_and_rejects_missing_references() {
+        let temp = tempfile::tempdir().expect("temporary executable directory");
+        let command = if cfg!(windows) { "peer.exe" } else { "peer" };
+        let path = temp.path().join(command);
+        std::fs::write(&path, "fixture").expect("executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("executable permissions");
+        }
+        let mut config: crate::opensymphony_workflow::AcpConfig = serde_json::from_value(json!({
+            "profiles": {"profile": {"command": "peer", "env_refs": {"PATH": "ACP_PATH"}}}
+        }))
+        .expect("profile");
+        let environment = BTreeMap::from([
+            (
+                "PATH".into(),
+                temp.path().join("missing").to_string_lossy().into_owned(),
+            ),
+            (
+                "ACP_PATH".into(),
+                temp.path().to_string_lossy().into_owned(),
+            ),
+        ]);
+        assert!(profile_capabilities_with_environment(&config, &environment)[0].preflight_ready);
+        let profile = config.profiles.get_mut("profile").expect("profile");
+        profile.env_refs.insert("PATH".into(), "MISSING".into());
+        assert_eq!(
+            profile_capabilities_with_environment(&config, &environment)[0]
+                .unavailable_reason
+                .as_deref(),
+            Some("credential_reference_unavailable")
+        );
+        let profile = config.profiles.get_mut("profile").expect("profile");
+        profile.env_refs = BTreeMap::from([("OTHER".into(), "PATH".into())]);
+        let environment =
+            BTreeMap::from([("PATH".into(), temp.path().to_string_lossy().into_owned())]);
+        assert_eq!(
+            profile_capabilities_with_environment(&config, &environment)[0]
+                .unavailable_reason
+                .as_deref(),
+            Some("executable_unavailable")
+        );
+    }
+
     fn event(sequence: u64, replay: bool, update: Value) -> SessionEvent {
         SessionEvent::Source {
             generation: 1,
