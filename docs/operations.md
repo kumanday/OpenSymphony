@@ -894,15 +894,18 @@ issue checkout inside a temporary workspace root. These subprocess tests establi
 the client contract; real vendor qualification remains OSYM-906.
 
 The default limits are 1 MiB per frame, 128 queued incoming frames, 256 retained
-source frames, 16 KiB stderr, 30 seconds for setup, 300 seconds for a prompt,
-10 seconds for cancellation acknowledgement, and one 5-second deadline for process
+source frames with a cumulative 1 MiB serialized evidence budget, 16 KiB stderr,
+30 seconds for setup, 300 seconds for a prompt, 10 seconds for cancellation acknowledgement, and one 5-second deadline for process
 termination and reaping. Windows launches enter a kill-on-close Job Object before
 the child resumes, so dropping the turn future also terminates descendants. Unix
 launches retain process-group ownership for the same drop path. Callers
 may pass validated `ClientLimits`. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Evidence capture
-marks frame-budget truncation and redacts secrets and sensitive fields; diagnostic
-string previews are limited to 512 characters. Live update content preserves
+marks truncation when either the frame count or byte budget is exhausted. The byte
+budget includes redacted payloads and source metadata, can be configured up to
+16 MiB, and can be zero to disable retention. Frames that exceed the remaining
+budget are omitted while protocol processing continues. Capture redacts secrets
+and sensitive fields; diagnostic string previews are limited to 512 characters. Live update content preserves
 whitespace and complete strings while removing known secrets and sensitive
 fields; it does not use diagnostic preview normalization. Stderr overflow is replaced with a
 limit marker while the pipe continues draining. SDK wire tracing is disabled for

@@ -255,9 +255,10 @@ async fn acp_bounds_update_delivery_stderr_and_evidence() {
 #[tokio::test]
 async fn acp_invalid_launch_inputs_fail_before_execution() {
     let root = tempfile::tempdir().expect("temp");
-    for case in 0..5 {
+    for case in 0..6 {
         let mut config = profile("complete");
         let mut launch = context(root.path());
+        let mut bound = limits();
         match case {
             0 => launch.issue_workspace = launch.workspace_root.clone(),
             1 => {
@@ -279,7 +280,8 @@ async fn acp_invalid_launch_inputs_fail_before_execution() {
                     .insert("AUTH_SOURCE".into(), "known-secret".into());
                 config.args.push("known-secret".into());
             }
-            _ => config.args.push("--token=secret".into()),
+            4 => config.args.push("--token=secret".into()),
+            _ => bound.evidence_bytes = 16 * 1024 * 1024 + 1,
         }
         assert!(
             run_turn(
@@ -288,7 +290,7 @@ async fn acp_invalid_launch_inputs_fail_before_execution() {
                 "hello".into(),
                 CancellationToken::new(),
                 None,
-                limits()
+                bound
             )
             .await
             .is_err()
@@ -580,6 +582,72 @@ async fn acp_live_updates_preserve_whitespace_and_long_content() {
             "x".repeat(1024)
         )
     );
+}
+
+#[tokio::test]
+async fn acp_plain_prompt_above_half_frame_budget_is_admitted() {
+    let root = tempfile::tempdir().expect("temp");
+    let result = run_turn(
+        &profile("complete"),
+        context(root.path()),
+        "x".repeat(2500),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            frame_bytes: 4096,
+            ..limits()
+        },
+    )
+    .await
+    .expect("prompt fits encoded frame");
+    assert!(result.outcome.expect("completed turn").succeeded());
+    assert!(result.process_reaped);
+    assert!(
+        result
+            .evidence
+            .iter()
+            .any(|frame| frame.payload["method"] == "session/prompt")
+    );
+}
+
+#[tokio::test]
+async fn acp_retained_evidence_bytes_are_bounded_across_legal_frames() {
+    let root = tempfile::tempdir().expect("temp");
+    for budget in [0, 4096, 16384] {
+        let result = run_turn(
+            &profile("evidence_flood"),
+            context(root.path()),
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            ClientLimits {
+                evidence_bytes: budget,
+                ..limits()
+            },
+        )
+        .await
+        .expect("launch");
+        assert!(
+            result
+                .outcome
+                .expect("evidence truncation preserves completion")
+                .succeeded()
+        );
+        let retained_bytes: usize = result
+            .evidence
+            .iter()
+            .map(|frame| serde_json::to_vec(frame).expect("frame JSON").len())
+            .sum();
+        assert!(retained_bytes <= budget);
+        assert!(result.evidence_truncated);
+        assert!(result.evidence.len() < limits().evidence_frames);
+        assert!(result.process_reaped);
+        if budget == 0 {
+            assert!(result.evidence.is_empty());
+        } else {
+            assert!(!result.evidence.is_empty());
+        }
+    }
 }
 
 #[tokio::test]

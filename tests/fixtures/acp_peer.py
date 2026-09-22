@@ -70,6 +70,11 @@ for line in sys.stdin:
             send({"method": "session/update", "params": params})
             respond(message, {"stopReason": "end_turn"})
             continue
+        if mode == "evidence_flood":
+            for index in range(16):
+                send({"method": "_future/evidence", "params": {"index": index, "values": ["small"] * 1024}})
+            respond(message, {"stopReason": "end_turn"})
+            continue
         if mode == "rich_update":
             update(" ")
             update("def example():\n\treturn '  spaced  '\n" + "x" * 1024)

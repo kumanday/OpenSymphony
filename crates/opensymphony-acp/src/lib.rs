@@ -70,6 +70,8 @@ pub struct ClientLimits {
     pub frame_bytes: usize,
     pub queued_frames: usize,
     pub evidence_frames: usize,
+    /// Cumulative serialized bytes of retained, redacted SourceFrame values.
+    pub evidence_bytes: usize,
     pub stderr_bytes: usize,
     pub setup_timeout: Duration,
     pub prompt_timeout: Duration,
@@ -83,6 +85,7 @@ impl Default for ClientLimits {
             frame_bytes: 1024 * 1024,
             queued_frames: 128,
             evidence_frames: 256,
+            evidence_bytes: 1024 * 1024,
             stderr_bytes: 16 * 1024,
             setup_timeout: Duration::from_secs(30),
             prompt_timeout: Duration::from_secs(300),
@@ -194,6 +197,8 @@ struct Capture {
     sequence: u64,
     truncated: bool,
     max: usize,
+    bytes: usize,
+    max_bytes: usize,
     secrets: Vec<String>,
 }
 
@@ -238,17 +243,30 @@ impl Capture {
     }
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
-        if self.frames.len() == self.max {
+        if self.frames.len() == self.max || self.bytes == self.max_bytes {
             self.truncated = true;
             return;
         }
         self.redact(&mut payload, true);
-        self.frames.push(SourceFrame {
+        self.retain_frame(SourceFrame {
             sequence: self.sequence,
             direction: direction.into(),
             observed_at: chrono::Utc::now(),
             payload,
         });
+    }
+
+    fn retain_frame(&mut self, frame: SourceFrame) {
+        let Ok(encoded) = serde_json::to_vec(&frame) else {
+            self.truncated = true;
+            return;
+        };
+        if encoded.len() > self.max_bytes.saturating_sub(self.bytes) {
+            self.truncated = true;
+            return;
+        }
+        self.bytes += encoded.len();
+        self.frames.push(frame);
     }
 }
 
@@ -282,6 +300,7 @@ fn validate_launch(
     if !(256..=16 * 1024 * 1024).contains(&limits.frame_bytes)
         || !(1..=4096).contains(&limits.queued_frames)
         || limits.evidence_frames > 4096
+        || limits.evidence_bytes > 16 * 1024 * 1024
         || limits.stderr_bytes > 1024 * 1024
         || [
             limits.setup_timeout,
@@ -415,11 +434,6 @@ pub async fn run_turn(
         environment,
         secrets,
     } = validate_launch(profile, &context, &limits)?;
-    if prompt.len() > limits.frame_bytes / 2 {
-        return Err(ClientError::InvalidConfiguration(
-            "prompt exceeds frame budget".into(),
-        ));
-    }
     if cancellation.is_cancelled() {
         return Err(ClientError::CancelledBeforePrompt);
     }
@@ -428,6 +442,8 @@ pub async fn run_turn(
         sequence: 0,
         truncated: false,
         max: limits.evidence_frames,
+        bytes: 0,
+        max_bytes: limits.evidence_bytes,
         secrets,
     }));
     let mut command = Command::new(&profile.command);
@@ -793,5 +809,37 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, max: usize) -> String
         "[stderr capture limit exceeded]".into()
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evidence_byte_budget_includes_metadata_and_accepts_exact_boundary() {
+        let frame = SourceFrame {
+            sequence: 1,
+            direction: "incoming".into(),
+            observed_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
+            payload: json!({"jsonrpc": "2.0", "method": "_future/notice", "params": ["a", "b"]}),
+        };
+        let size = serde_json::to_vec(&frame).expect("frame JSON").len();
+        for budget in [0, size - 1, size, size * 2 - 1, size * 2] {
+            let mut capture = Capture {
+                frames: Vec::new(),
+                sequence: 0,
+                truncated: false,
+                max: 256,
+                bytes: 0,
+                max_bytes: budget,
+                secrets: Vec::new(),
+            };
+            capture.retain_frame(frame.clone());
+            capture.retain_frame(frame.clone());
+            assert_eq!(capture.frames.len(), budget / size);
+            assert_eq!(capture.bytes, size * (budget / size));
+            assert_eq!(capture.truncated, budget < size * 2);
+        }
     }
 }
