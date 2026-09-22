@@ -966,7 +966,9 @@ after workflow environment overrides resolve. An explicit harness environment
 override to another harness clears the ACP selector; an override to ACP retains
 it. Windows environment references
 use case-insensitive variable names; a resolved alias replaces inherited target
-values regardless of their casing.
+values regardless of their casing. Configured target names must themselves be
+distinct under host name rules; Windows rejects case-equivalent `env_refs` targets
+before launch, while POSIX preserves case-distinct variables.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
 The selected authentication method must be an advertised agent-handled method;

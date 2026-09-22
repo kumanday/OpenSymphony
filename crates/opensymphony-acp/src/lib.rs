@@ -25,6 +25,7 @@ use agent_client_protocol::{
         },
     },
 };
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,8 +46,8 @@ mod windows_process;
 
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
-    environment_variable_names_equal, insert_environment_value, redact_runtime_diagnostic,
-    runtime_field_is_sensitive, sanitize_workspace_key,
+    environment_variable_names_equal, has_environment_name_collision, insert_environment_value,
+    redact_runtime_diagnostic, runtime_field_is_sensitive, sanitize_workspace_key,
 };
 
 #[cfg(not(windows))]
@@ -122,6 +123,15 @@ pub enum ClientError {
     CancelledBeforePrompt,
     #[error("ACP transport or RPC failed; prompt may have been submitted: {submitted}")]
     Protocol { submitted: bool },
+    #[error(
+        "ACP {method} RPC error {code}: {message}; prompt may have been submitted: {submitted}"
+    )]
+    Rpc {
+        method: &'static str,
+        code: i32,
+        message: String,
+        submitted: bool,
+    },
     #[error("ACP prompt deadline exceeded; outcome is uncertain")]
     PromptTimeout,
     #[error("ACP cancellation deadline exceeded; cancellation is unacknowledged")]
@@ -219,6 +229,52 @@ impl QueuedInput {
     }
 }
 
+struct SecretRedactor {
+    matcher: AhoCorasick,
+}
+
+impl SecretRedactor {
+    fn new(mut secrets: Vec<String>) -> Result<Self, ClientError> {
+        secrets.sort();
+        secrets.dedup();
+        if secrets.len() > 1024
+            || secrets
+                .iter()
+                .map(String::len)
+                .fold(0usize, usize::saturating_add)
+                > 1024 * 1024
+        {
+            return Err(ClientError::InvalidConfiguration(
+                "credential redaction inputs exceed the 1024-pattern or 1 MiB budget".into(),
+            ));
+        }
+        let matcher = AhoCorasick::builder()
+            .match_kind(MatchKind::LeftmostLongest)
+            .kind(Some(AhoCorasickKind::ContiguousNFA))
+            .build(secrets)
+            .map_err(|_| {
+                ClientError::InvalidConfiguration(
+                    "credential redaction matcher could not be built".into(),
+                )
+            })?;
+        Ok(Self { matcher })
+    }
+
+    fn contains_secret(&self, text: &str) -> bool {
+        self.matcher.is_match(text)
+    }
+
+    fn redact(&self, text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        self.matcher
+            .replace_all_with(text, &mut result, |_, _, output| {
+                output.push_str("[redacted]");
+                true
+            });
+        result
+    }
+}
+
 struct Capture {
     frames: Vec<SourceFrame>,
     sequence: u64,
@@ -226,18 +282,19 @@ struct Capture {
     max: usize,
     bytes: usize,
     max_bytes: usize,
-    secrets: Vec<String>,
+    secrets: SecretRedactor,
 }
 
 impl Capture {
     fn redact(&self, value: &mut Value, diagnostic: bool) {
         match value {
             Value::String(s) => {
-                for secret in &self.secrets {
-                    *s = s.replace(secret, "[redacted]");
-                }
+                *s = self.secrets.redact(s);
                 if diagnostic {
-                    *s = redact_runtime_diagnostic(s);
+                    // Known-secret matching sees the complete value before truncation;
+                    // generic preview normalization only examines a bounded prefix.
+                    let preview = s.chars().take(2048).collect::<String>();
+                    *s = redact_runtime_diagnostic(&preview);
                 }
             }
             Value::Array(values) => values.iter_mut().for_each(|v| self.redact(v, diagnostic)),
@@ -260,9 +317,7 @@ impl Capture {
                     } else {
                         self.redact(&mut value, diagnostic);
                     }
-                    for secret in &self.secrets {
-                        key = key.replace(secret, "[redacted]");
-                    }
+                    key = self.secrets.redact(&key);
                     values.insert(key, value);
                 }
             }
@@ -307,6 +362,30 @@ fn capture(capture: &SharedCapture, direction: &str, payload: Value) {
         .record(direction, payload);
 }
 
+fn rpc_failure(
+    method: &'static str,
+    error: &agent_client_protocol::Error,
+    capture: &SharedCapture,
+    submitted: bool,
+) -> Option<ClientError> {
+    if error.code == agent_client_protocol::schema::v1::ErrorCode::AuthRequired
+        || agent_client_protocol::is_incoming_transport_closed(error)
+    {
+        return None;
+    }
+    let mut message = Value::String(error.message.clone());
+    capture
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .redact(&mut message, true);
+    Some(ClientError::Rpc {
+        method,
+        code: error.code.into(),
+        message: message.as_str().unwrap_or_default().to_owned(),
+        submitted,
+    })
+}
+
 fn io_failure() -> io::Error {
     io::Error::other("ACP transport rejected a frame")
 }
@@ -314,7 +393,7 @@ fn io_failure() -> io::Error {
 struct PreparedLaunch {
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
-    secrets: Vec<String>,
+    secrets: SecretRedactor,
 }
 
 fn validate_launch(
@@ -364,6 +443,11 @@ fn validate_launch(
     {
         return Err(ClientError::InvalidWorkspace);
     }
+    if has_environment_name_collision(profile.env_refs.keys().map(String::as_str)) {
+        return Err(ClientError::InvalidConfiguration(
+            "env_refs contains duplicate platform-equivalent targets".into(),
+        ));
+    }
     let excluded = |key: &str| {
         context
             .excluded_environment
@@ -404,17 +488,13 @@ fn validate_launch(
                     "env_refs references a missing or invalid variable".into(),
                 )
             })?;
-        if profile.command.contains(value) || profile.args.iter().any(|a| a.contains(value)) {
-            return Err(ClientError::InvalidConfiguration(
-                "referenced credentials cannot appear in argv".into(),
-            ));
-        }
         secrets.push(value.clone());
         insert_environment_value(&mut environment, target.clone(), value.clone());
     }
     for (key, value) in &context.environment {
         if !value.is_empty()
             && (excluded(key)
+                || runtime_field_is_sensitive(key)
                 || ["TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL"]
                     .iter()
                     .any(|s| key.to_ascii_uppercase().contains(s)))
@@ -430,15 +510,14 @@ fn validate_launch(
             "invalid launch environment".into(),
         ));
     }
-    if secrets.iter().any(|secret| {
-        profile.command.contains(secret) || profile.args.iter().any(|arg| arg.contains(secret))
-    }) {
+    let secrets = SecretRedactor::new(secrets)?;
+    if secrets.contains_secret(&profile.command)
+        || profile.args.iter().any(|arg| secrets.contains_secret(arg))
+    {
         return Err(ClientError::InvalidConfiguration(
             "credentials cannot appear in argv".into(),
         ));
     }
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    secrets.dedup();
     Ok(PreparedLaunch {
         cwd,
         environment,
@@ -648,7 +727,9 @@ pub async fn run_turn(
                 let initialization = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
-                    .await?;
+                    .await.inspect_err(|error| {
+                        phase_error = rpc_failure("initialize", error, &capture_state, false);
+                    })?;
                 if initialization.protocol_version != ProtocolVersion::V1 {
                     phase_error = Some(ClientError::Setup("agent did not negotiate ACP v1".into()));
                     return Err(agent_client_protocol::Error::internal_error());
@@ -676,9 +757,13 @@ pub async fn run_turn(
                         return Err(agent_client_protocol::Error::internal_error());
                     }
                     connection.send_request(AuthenticateRequest::new(auth.method_id.clone()))
-                        .block_task().await?;
+                        .block_task().await.inspect_err(|error| {
+                        phase_error = rpc_failure("authenticate", error, &capture_state, false);
+                    })?;
                 }
-                let session = connection.send_request(NewSessionRequest::new(cwd)).block_task().await?;
+                let session = connection.send_request(NewSessionRequest::new(cwd)).block_task().await.inspect_err(|error| {
+                        phase_error = rpc_failure("session/new", error, &capture_state, false);
+                    })?;
                 *active_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.session_id.0.to_string());
                 Ok((initialization, session.session_id))
             };
@@ -725,7 +810,9 @@ pub async fn run_turn(
                     phase_error = Some(ClientError::PromptTimeout);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
-            }?;
+            }.inspect_err(|error| {
+                phase_error = rpc_failure("session/prompt", error, &capture_state, submitted.load(Ordering::Acquire));
+            })?;
             let stop_reason = result.get("stopReason").and_then(Value::as_str)
                 .ok_or_else(agent_client_protocol::Error::invalid_params)?.to_owned();
             Ok(TurnReport {
@@ -853,6 +940,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn secret_matching_handles_many_patterns_overlaps_and_large_input() {
+        let mut secrets = (0..128)
+            .map(|i| format!("credential-{i:03}-value"))
+            .collect::<Vec<_>>();
+        secrets.extend(["overlap".into(), "overlapping".into(), "[redacted]".into()]);
+        let redactor = SecretRedactor::new(secrets).expect("bounded matcher");
+        assert_eq!(
+            redactor.redact("overlapping overlap credential-127-value"),
+            "[redacted] [redacted] [redacted]"
+        );
+        let input = format!("{}credential-127-value", "x".repeat(16 * 1024 * 1024));
+        let result = redactor.redact(&input);
+        assert!(result.ends_with("[redacted]"));
+        assert_eq!(result.len(), 16 * 1024 * 1024 + "[redacted]".len());
+        assert!(SecretRedactor::new(vec!["x".repeat(1024 * 1024 + 1)]).is_err());
+        assert!(SecretRedactor::new((0..1025).map(|i| format!("secret-{i}")).collect()).is_err());
+    }
+
+    #[test]
     fn queued_input_enforces_both_budgets_and_releases_dispatched_bytes() {
         let mut queue = QueuedInput::default();
         assert!(queue.admit(3, 4, 8));
@@ -889,7 +995,7 @@ mod tests {
                 max: 256,
                 bytes: 0,
                 max_bytes: budget,
-                secrets: Vec::new(),
+                secrets: SecretRedactor::new(Vec::new()).expect("empty matcher"),
             };
             capture.retain_frame(frame.clone());
             capture.retain_frame(frame.clone());

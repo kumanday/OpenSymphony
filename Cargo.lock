@@ -2510,6 +2510,7 @@ version = "2.11.3"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
+ "aho-corasick",
  "async-stream",
  "async-trait",
  "axum",

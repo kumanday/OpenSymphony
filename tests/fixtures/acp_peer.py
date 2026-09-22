@@ -26,6 +26,9 @@ def update(text):
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if mode == "rpc_" + str(method).replace("/", "_"):
+        send({"id": message["id"], "error": {"code": -32602, "message": "bad params " + os.environ["TEST_AUTH"] + " account_id=acct-rpc-sensitive " + "x" * 4096, "data": {"secret": os.environ["TEST_AUTH"]}}})
+        continue
     if (mode, method) in (("setup_hang", "initialize"), ("auth_hang", "authenticate"), ("new_hang", "session/new")):
         with open("setup-waiting", "w") as marker:
             marker.write(method)

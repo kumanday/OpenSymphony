@@ -914,7 +914,12 @@ string previews are limited to 512 characters. Live update content preserves
 whitespace and complete strings while removing known secrets and sensitive
 fields; it does not use diagnostic preview normalization. Stderr overflow is replaced with a
 limit marker while the pipe continues draining. SDK wire tracing is disabled for
-this connection to prevent bypassing the redacted evidence surface.
+this connection to prevent bypassing the redacted evidence surface. Known secrets
+use one multi-pattern scan per string; matcher inputs are limited to 1,024 distinct
+values and 1 MiB combined. Generic diagnostic normalization examines at most 2,048
+characters after full known-secret redaction and emits a 512-character preview.
+Non-authentication RPC errors retain the request method, numeric code, submission
+state and bounded redacted message even when source-frame retention is disabled.
 
 Cancellation before prompt submission interrupts setup and tears down the child;
 an already-cancelled token prevents launch. The complete serialized prompt frame

@@ -606,6 +606,94 @@ async fn acp_live_updates_preserve_whitespace_and_long_content() {
 }
 
 #[tokio::test]
+async fn acp_rpc_errors_preserve_redacted_context_without_evidence() {
+    let root = tempfile::tempdir().expect("temp");
+    for method in [
+        "initialize",
+        "authenticate",
+        "session/new",
+        "session/prompt",
+    ] {
+        let mut config = profile(&format!("rpc_{}", method.replace('/', "_")));
+        config
+            .env_refs
+            .insert("TEST_AUTH".into(), "AUTH_SOURCE".into());
+        let mut launch = context(root.path());
+        launch
+            .environment
+            .insert("AUTH_SOURCE".into(), "rpc-known-sensitive".into());
+        let result = run_turn(
+            &config,
+            launch,
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            ClientLimits {
+                evidence_bytes: 0,
+                ..limits()
+            },
+        )
+        .await
+        .expect("launch");
+        assert!(result.evidence.is_empty());
+        assert!(result.process_reaped);
+        let error = result.outcome.expect_err("peer RPC error");
+        assert!(!format!("{error:?} {error}").contains("rpc-known-sensitive"));
+        assert!(!format!("{error:?} {error}").contains("acct-rpc-sensitive"));
+        match error {
+            ClientError::Rpc {
+                method: failed_method,
+                code,
+                message,
+                submitted,
+            } => {
+                assert_eq!(failed_method, method);
+                assert_eq!(code, -32602);
+                assert_eq!(submitted, method == "session/prompt");
+                assert!(message.starts_with("bad params [redacted]"));
+                assert!(message.chars().count() <= 515);
+            }
+            other => panic!("missing RPC context: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_configured_environment_targets_follow_platform_name_rules() {
+    let root = tempfile::tempdir().expect("temp");
+    let mut config = profile("complete");
+    config.env_refs = BTreeMap::from([
+        ("AGENT_TOKEN".into(), "SOURCE_A".into()),
+        ("agent_token".into(), "SOURCE_B".into()),
+    ]);
+    let mut launch = context(root.path());
+    launch.environment.extend([
+        ("SOURCE_A".into(), "credential-a".into()),
+        ("SOURCE_B".into(), "credential-b".into()),
+    ]);
+    let result = run_turn(
+        &config,
+        launch,
+        "hello".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await;
+    if cfg!(windows) {
+        assert!(matches!(result, Err(ClientError::InvalidConfiguration(_))));
+    } else {
+        assert!(
+            result
+                .expect("POSIX targets are distinct")
+                .outcome
+                .expect("turn")
+                .succeeded()
+        );
+    }
+}
+
+#[tokio::test]
 async fn acp_live_input_queue_bounds_bytes_and_releases_dispatched_charges() {
     let root = tempfile::tempdir().expect("temp");
     for (mode, succeeds) in [("evidence_flood", false), ("paced_queue", true)] {

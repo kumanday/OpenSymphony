@@ -29,6 +29,7 @@ openhands-subscription-credentials = []
 [dependencies]
 agent-client-protocol = "=2.2.0"
 agent-client-protocol-schema = "=1.9.1"
+aho-corasick = "=1.1.4"
 async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
