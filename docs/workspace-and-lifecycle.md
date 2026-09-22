@@ -4,6 +4,10 @@
 
 Preserve the Symphony workspace contract while adapting it to OpenHands conversation persistence and local MVP safety constraints.
 
+Remote operator views receive repository aliases, canonical IDs, and checkout
+generations when authoritative state provides them. Exact local paths remain
+limited to trusted local diagnostics.
+
 ## 2. Workspace mapping
 
 Each issue maps to exactly one workspace path:

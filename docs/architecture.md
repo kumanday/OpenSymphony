@@ -13,6 +13,11 @@ The system must preserve these boundaries:
 - `WORKFLOW.md` remains the repo-owned policy and prompt contract
 - UI is optional and must not affect correctness
 
+The control-plane issue snapshot may carry an optional sanitized operator
+projection for repository, parent, lease, repair, memory, containment,
+provider, verification, and cleanup facts. Missing facts remain unknown. No
+client infers completion, permission, or workspace confinement from absence.
+
 ## 2. Layered design
 
 OpenSymphony is split into five layers:

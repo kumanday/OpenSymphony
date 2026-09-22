@@ -182,6 +182,63 @@ fn map_issue(
         .as_ref()
         .is_some_and(|binding| binding.resolved_binding().is_none());
     let hierarchy_blocked = hierarchy.and_then(|state| state.blocked_reason.clone());
+    let operator = Some(crate::opensymphony_domain::ControlPlaneOperatorSnapshot {
+        routing_mode: None,
+        active_project_set: Vec::new(),
+        linear_project: issue
+            .issue
+            .project_slug
+            .clone()
+            .or_else(|| issue.issue.project_id.clone()),
+        binding_status: repository_binding.as_ref().map(|binding| match binding {
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_) => "resolved",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MissingBinding => "missing_binding",
+            crate::opensymphony_domain::RepositoryBindingOutcome::UnknownAlias(_) => "unknown_alias",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MultipleBindings(_) => "multiple_bindings",
+            crate::opensymphony_domain::RepositoryBindingOutcome::RepositoryNotAllowedForProject(_, _) => "repository_not_allowed_for_project",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ParentBindingNotAllowed => "parent_binding_not_allowed",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ProjectOutsideActiveSet(_) => "project_outside_active_set",
+        }.to_owned()),
+        parent: hierarchy.map(
+            |state| crate::opensymphony_domain::ControlPlaneParentSnapshot {
+                parent_id: issue.issue.identifier.to_string(),
+                state: None,
+                hierarchy_generation: Some(state.generation),
+                blocked_reason: hierarchy_blocked.clone(),
+                descendant_repositories: Vec::new(),
+                checkout_handles: Vec::new(),
+            },
+        ),
+        repository: repository_binding.as_ref().and_then(|binding| {
+            binding.resolved_binding().map(|binding| {
+                crate::opensymphony_domain::ControlPlaneRepositorySnapshot {
+                    canonical_id: binding.repository.id.as_str().to_owned(),
+                    display_alias: binding.alias.clone(),
+                    safe_remote_fingerprint: Some(
+                        binding
+                            .repository
+                            .safe_remote_fingerprint
+                            .as_str()
+                            .to_owned(),
+                    ),
+                    config_generation: Some(binding.config_generation.clone()),
+                    inventory_generation: Some(binding.inventory_generation.clone()),
+                    checkout_generation: None,
+                    target_branch: None,
+                    target_commit: None,
+                    instruction_source: None,
+                    instruction_hash: None,
+                }
+            })
+        }),
+        leases: Vec::new(),
+        repairs: Vec::new(),
+        memory: None,
+        containment: None,
+        provider: None,
+        verification: None,
+        cleanup: None,
+    });
 
     IssueSnapshot {
         identifier: issue.issue.identifier.to_string(),
@@ -363,6 +420,7 @@ fn map_issue(
             Some(HarnessInterruptStatus::TimedOut)
         ),
         cancel_reason: interrupt.map(|interrupt| interrupt.command.reason.as_str().to_string()),
+        operator,
     }
 }
 
