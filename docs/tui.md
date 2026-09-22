@@ -125,6 +125,7 @@ last_memory_sync: 2026-06-21T19:06:47.556695+00:00
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
 
 ## Source refs
 
@@ -220,5 +221,6 @@ last_memory_sync: 2026-06-21T19:06:47.556695+00:00
 - COE-565
 - COE-566
 - COE-567
+- COE-608
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
