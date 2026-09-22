@@ -963,7 +963,8 @@ Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated
 after workflow environment overrides resolve. Windows environment references
-use case-insensitive variable names.
+use case-insensitive variable names; a resolved alias replaces inherited target
+values regardless of their casing.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
 The selected authentication method must be an advertised agent-handled method;
@@ -974,7 +975,8 @@ Profiles reject cwd overrides, unsupported wire versions/transports, extension
 handlers, credential arguments regardless of flag casing, and invalid environment
 references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
-`prompt.embedded_context`; each requirement is checked before session creation.
+`prompt.embedded_context`; each requirement is checked before session creation,
+and a failed check names the missing capability.
 The current prompt API sends text. ACP model overrides are rejected until the
 session configuration implementation is available. Filesystem, terminal, MCP,
 extension, and operator permission policies are follow-on slices.

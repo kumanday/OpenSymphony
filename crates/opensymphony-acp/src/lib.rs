@@ -45,7 +45,8 @@ mod windows_process;
 
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
-    environment_variable_names_equal, redact_runtime_diagnostic, sanitize_workspace_key,
+    environment_variable_names_equal, insert_environment_value, redact_runtime_diagnostic,
+    sanitize_workspace_key,
 };
 
 #[cfg(not(windows))]
@@ -361,7 +362,7 @@ fn validate_launch(
             ));
         }
         secrets.push(value.clone());
-        environment.insert(target.clone(), value.clone());
+        insert_environment_value(&mut environment, target.clone(), value.clone());
     }
     for (key, value) in &context.environment {
         if !value.is_empty()
@@ -609,7 +610,7 @@ pub async fn run_turn(
                         _ => false,
                     };
                     if !present {
-                        phase_error = Some(ClientError::Setup("required agent capability is unavailable".into()));
+                        phase_error = Some(ClientError::Setup(format!("required agent capability `{capability}` is unavailable")));
                         return Err(agent_client_protocol::Error::internal_error());
                     }
                 }

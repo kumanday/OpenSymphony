@@ -1,8 +1,11 @@
+mod environment;
 mod error;
 mod manager;
 mod models;
 mod paths;
 
+pub use environment::environment_variable_names_equal;
+pub(crate) use environment::insert_environment_value;
 pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
 pub use manager::{
     WorkspaceManager, compose_parent_continuation_prompt, compose_parent_prompt,
@@ -18,8 +21,7 @@ pub use models::{
     ParentRetainedCheckout, ParentRuntimeCheckout, ParentRuntimeDescriptor, ParentRuntimeEnvelope,
     PromptCaptureDescriptor, PromptCaptureManifest, PromptKind, RunDescriptor, RunManifest,
     RunStatus, SSH_AUTH_SOCK_ENV, SessionContextArtifact, TerminalRuntimeEnvelope, WorkspaceHandle,
-    WorkspaceManagerConfig, checkout_credential_environment_variables,
-    environment_variable_names_equal, redact_runtime_diagnostic,
+    WorkspaceManagerConfig, checkout_credential_environment_variables, redact_runtime_diagnostic,
 };
 pub use paths::{
     checkout_workspace_key, parent_workspace_key, resolve_path_within_root, sanitize_workspace_key,

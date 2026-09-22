@@ -408,15 +408,20 @@ async fn acp_unresponsive_process_tree_is_terminated() {
 
 #[tokio::test]
 async fn acp_required_capability_and_authentication_fail_before_prompt() {
-    for auth in [false, true] {
+    for capability in [
+        Some("prompt.image"),
+        Some("prompt.audio"),
+        Some("prompt.embedded_context"),
+        None,
+    ] {
         let root = tempfile::tempdir().expect("temp");
         let mut config = profile("complete");
-        if auth {
+        if let Some(capability) = capability {
+            config.required_capabilities = vec![capability.into()];
+        } else {
             config.auth = Some(AcpAuth {
                 method_id: "not-advertised".into(),
             });
-        } else {
-            config.required_capabilities = vec!["prompt.image".into()];
         }
         let result = run_turn(
             &config,
@@ -429,6 +434,16 @@ async fn acp_required_capability_and_authentication_fail_before_prompt() {
         .await
         .expect("spawn");
         assert!(matches!(result.outcome, Err(ClientError::Setup(_))));
+        if let Some(capability) = capability {
+            assert!(
+                result
+                    .outcome
+                    .as_ref()
+                    .expect_err("missing capability")
+                    .to_string()
+                    .contains(capability)
+            );
+        }
         assert!(
             !result
                 .evidence

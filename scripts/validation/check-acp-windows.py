@@ -43,7 +43,9 @@ with tempfile.TemporaryDirectory(prefix="acp-windows-") as temp:
     (harness / "lib.rs").write_text(
         '#![cfg(windows)]\n#[path = '
         + json.dumps(str(root / "crates/opensymphony-acp/src/windows_process.rs"))
-        + ']\nmod windows_process;\n'
+        + ']\nmod windows_process;\n#[path = '
+        + json.dumps(str(root / "crates/opensymphony-workspace/src/environment.rs"))
+        + ']\nmod environment;\n'
     )
     shutil.copyfile(root / "Cargo.lock", harness / "Cargo.lock")
     command = ["cargo", "check", "--tests", "--target", args.check_target] if args.check_target else ["cargo", "test"]

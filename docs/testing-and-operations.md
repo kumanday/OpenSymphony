@@ -644,7 +644,9 @@ tests check callback/cancellation responsiveness.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,
-wait deadline, and dropped futures. Dependencies are read from the root manifest. On another host,
+wait deadline, and dropped futures. It also executes the shared environment
+replacement helper against a real child to verify case-insensitive alias
+precedence. Dependencies are read from the root manifest. On another host,
 `--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
 installed; cross-compilation alone does not prove Windows process behavior.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
