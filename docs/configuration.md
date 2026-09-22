@@ -960,6 +960,10 @@ The executable ACP client is available through `opensymphony_acp::run_turn`.
 Production `opensymphony run` routing is a separate implementation slice; an ACP
 route currently fails scheduler capability selection before worker dispatch.
 Central profiles remain authoritative over repository-local workflow files.
+Profile shape is validated at central load with the profile ID and specific
+validation cause. Harness/profile selection and model restrictions are validated
+after workflow environment overrides resolve. Windows environment references
+use case-insensitive variable names.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
 The selected authentication method must be an advertised agent-handled method;
@@ -967,7 +971,8 @@ terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.
 
 Profiles reject cwd overrides, unsupported wire versions/transports, extension
-handlers, credential arguments and invalid environment references. Optional
+handlers, credential arguments regardless of flag casing, and invalid environment
+references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation.
 The current prompt API sends text. ACP model overrides are rejected until the

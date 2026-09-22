@@ -895,7 +895,10 @@ the client contract; real vendor qualification remains OSYM-906.
 
 The default limits are 1 MiB per frame, 128 queued incoming frames, 256 retained
 source frames, 16 KiB stderr, 30 seconds for setup, 300 seconds for a prompt,
-10 seconds for cancellation acknowledgement, and 5 seconds for reaping. Callers
+10 seconds for cancellation acknowledgement, and one 5-second deadline for process
+termination and reaping. Windows launches enter a kill-on-close Job Object before
+the child resumes, so dropping the turn future also terminates descendants. Unix
+launches retain process-group ownership for the same drop path. Callers
 may pass validated `ClientLimits`. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Evidence capture
 marks frame-budget truncation and redacts secrets and sensitive fields; diagnostic

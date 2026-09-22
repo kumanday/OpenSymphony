@@ -239,6 +239,10 @@ These package versions are distinct from negotiated ACP wire version 1.
 The implementation uses the SDK's `Lines` transport, `Client` builder, typed v1
 setup requests, raw SDK prompt response decoding for future stop reasons, and
 ordered `Dispatch` handler. ACP v2 features are disabled.
+Windows process ownership uses the safe Job Object API from
+[`process-wrap` 10.0.0](https://docs.rs/process-wrap/10.0.0/process_wrap/):
+`JobObject` assigns the suspended child before resuming it, and `KillOnDrop`
+terminates descendants when ownership ends.
 
 Wire authority: [v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization),
 [v1 prompt/cancel lifecycle](https://agentclientprotocol.com/protocol/v1/prompt-turn),

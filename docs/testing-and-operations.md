@@ -641,6 +641,12 @@ launches, JSON-escaped prompt overflow, missing update payloads, preservation of
 whitespace and long code chunks, ACP profile migration, environment alias
 scoping, post-submission authentication errors, and opaque-ID debug redaction. Current-thread Tokio
 tests check callback/cancellation responsiveness.
+The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
+on Windows. Its temporary Cargo harness compiles the production Windows process
+owner and verifies descendant termination on normal teardown, parent exit,
+wait deadline, and dropped futures. Dependencies are read from the root manifest. On another host,
+`--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
+installed; cross-compilation alone does not prove Windows process behavior.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
 require bundled-mode validation. Vendor interoperability evidence belongs to the
 later live-qualification task and must not be inferred from fake-peer tests.

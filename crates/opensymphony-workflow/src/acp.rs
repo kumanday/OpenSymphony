@@ -80,7 +80,11 @@ impl AcpProfile {
                     || a.contains(['\0', '\n', '\r', '$'])
                     || ["--api-key", "--token", "--password", "--secret"]
                         .iter()
-                        .any(|flag| a == flag || a.starts_with(&format!("{flag}=")))
+                        .any(|flag| {
+                            a.split('=')
+                                .next()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(flag))
+                        })
             })
         {
             return Err(invalid(
@@ -128,18 +132,25 @@ impl AcpProfile {
 }
 
 impl AcpConfig {
+    pub fn validate_profiles(&self) -> Result<(), WorkflowConfigError> {
+        for (id, profile) in &self.profiles {
+            if !valid_id(id) {
+                return Err(invalid("profile IDs must be nonempty stable identifiers"));
+            }
+            profile
+                .validate()
+                .map_err(|error| invalid(&format!("profile `{id}`: {error}")))?;
+        }
+        Ok(())
+    }
+
     pub fn validate_selection(
         &self,
         harness: &str,
         profile: Option<&str>,
         model_override: bool,
     ) -> Result<(), WorkflowConfigError> {
-        for (id, profile) in &self.profiles {
-            if !valid_id(id) {
-                return Err(invalid("profile IDs must be nonempty stable identifiers"));
-            }
-            profile.validate()?;
-        }
+        self.validate_profiles()?;
         match (harness, profile) {
             ("acp", Some(id)) if self.profiles.contains_key(id) => {}
             ("acp", _) => {

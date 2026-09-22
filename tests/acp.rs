@@ -337,6 +337,10 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
     assert!(!rendered.contains("auth-secret"));
     for (old, new) in [
         ("harness_profile: fake", "harness_profile: missing"),
+        ("args: [agent.py]", "args: ['--TOKEN=secret']"),
+        ("args: [agent.py]", "args: ['--Api-Key', 'secret']"),
+        ("args: [agent.py]", "args: ['--PaSsWoRd=secret']"),
+        ("args: [agent.py]", "args: ['--SECRET', 'secret']"),
         ("args: [agent.py]", "transport: http"),
         ("args: [agent.py]", "protocol_versions: [2]"),
         ("args: [agent.py]", "extensions: [cursor]"),
@@ -353,6 +357,11 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
             WorkflowDefinition::parse(&source.replace(old, new)).expect("parse invalid semantics");
         assert!(workflow.resolve(Path::new("/repo"), &env).is_err(), "{new}");
     }
+    let unsupported = WorkflowDefinition::parse(&source.replace("harness: acp", "harness: absent"))
+        .expect("parse")
+        .resolve(Path::new("/repo"), &env)
+        .expect_err("unknown harness");
+    assert!(unsupported.to_string().contains("`acp`"));
     assert!(WorkflowDefinition::parse(&source.replace("args: [agent.py]", "cwd: /tmp")).is_err());
 }
 

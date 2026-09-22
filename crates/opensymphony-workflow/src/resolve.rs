@@ -366,7 +366,7 @@ fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), Workflo
         Err(WorkflowConfigError::InvalidField {
             field,
             message: format!(
-                "must be one of `{}`",
+                "must be one of `{}`, `acp`",
                 HarnessKind::supported_names().join("`, `")
             ),
         })

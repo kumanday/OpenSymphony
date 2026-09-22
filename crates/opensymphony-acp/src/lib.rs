@@ -40,11 +40,16 @@ use tokio_util::{
 };
 use tracing::instrument::WithSubscriber;
 
+#[cfg(windows)]
+mod windows_process;
+
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
-    configure_process_group, environment_variable_names_equal, redact_runtime_diagnostic,
-    sanitize_workspace_key, terminate_process_tree,
+    environment_variable_names_equal, redact_runtime_diagnostic, sanitize_workspace_key,
 };
+
+#[cfg(not(windows))]
+use crate::opensymphony_workspace::{configure_process_group, terminate_process_tree};
 
 pub const SDK_VERSION: &str = "2.2.0";
 pub const SCHEMA_VERSION: &str = "1.9.1";
@@ -341,7 +346,9 @@ fn validate_launch(
         }
         let value = context
             .environment
-            .get(source)
+            .iter()
+            .find(|(key, _)| environment_variable_names_equal(key, source))
+            .map(|(_, value)| value)
             .filter(|v| !v.is_empty() && !v.contains('\0'))
             .ok_or_else(|| {
                 ClientError::InvalidConfiguration(
@@ -432,8 +439,14 @@ pub async fn run_turn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(not(windows))]
     configure_process_group(&mut command);
+    #[cfg(not(windows))]
     let mut child = command.spawn().map_err(|e| ClientError::Launch(e.kind()))?;
+    #[cfg(windows)]
+    let mut child =
+        windows_process::WindowsChild::spawn(command).map_err(|e| ClientError::Launch(e.kind()))?;
+    #[cfg(not(windows))]
     let process_id = child.id();
     #[cfg(unix)]
     let mut group_guard = crate::opensymphony_workspace::ProcessGroupGuard::new(process_id);
@@ -714,14 +727,27 @@ pub async fn run_turn(
             submitted: submitted.load(Ordering::Acquire),
         });
     }
-    let stopped_result = terminate_process_tree(&mut child, process_id).await;
-    let reaped_result = tokio::time::timeout(limits.reap_timeout, child.wait()).await;
+    let reap_deadline = tokio::time::Instant::now() + limits.reap_timeout;
+    #[cfg(windows)]
+    let stopped_result = child.start_kill();
+    #[cfg(not(windows))]
+    let stopped_result = tokio::time::timeout_at(
+        reap_deadline,
+        terminate_process_tree(&mut child, process_id),
+    )
+    .await
+    .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()));
+    let reaped_result = tokio::time::timeout_at(reap_deadline, child.wait()).await;
     let process_reaped = matches!(reaped_result, Ok(Ok(_)));
     #[cfg(unix)]
     if process_reaped && stopped_result.is_ok() {
         group_guard.disarm();
     }
-    if !process_reaped {
+    if !process_reaped
+        || stopped_result
+            .as_ref()
+            .is_err_and(|e| e.kind() == io::ErrorKind::TimedOut)
+    {
         outcome = Err(ClientError::Teardown);
     }
     let stderr = match stderr_result {

@@ -396,6 +396,11 @@ pub enum CentralConfigError {
     EmptyField { field: &'static str },
     #[error("central config reference `{field}` does not resolve")]
     InvalidReference { field: String },
+    #[error("invalid central ACP configuration: {source}")]
+    InvalidAcp {
+        #[source]
+        source: crate::opensymphony_workflow::WorkflowConfigError,
+    },
     #[error("central config aliases must be unique: `{alias}`")]
     DuplicateAlias { alias: String },
     #[error(
@@ -1432,20 +1437,12 @@ fn resolve_central_config(
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
     let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
+    // Selection depends on harness/model environment overrides. The workflow
+    // resolver validates it after those values resolve; central load checks shape.
     config
         .acp
-        .validate_selection(
-            config
-                .routing
-                .harness
-                .as_deref()
-                .unwrap_or("openhands_agent_server"),
-            config.routing.harness_profile.as_deref(),
-            config.routing.model.is_some() || config.routing.model_profile.is_some(),
-        )
-        .map_err(|_| CentralConfigError::InvalidReference {
-            field: "acp".into(),
-        })?;
+        .validate_profiles()
+        .map_err(|source| CentralConfigError::InvalidAcp { source })?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     let repository_instruction_path = legacy_repository_instruction_path;
     Ok(ResolvedCentralConfig {
@@ -3032,23 +3029,85 @@ scheduler:
             merged.acp.profiles["local"].env_refs["AGENT_TOKEN"],
             "ACP_TEST_TOKEN"
         );
+        let env = BTreeMap::from([("LINEAR_API_KEY".into(), "test-key".into())]);
+        let absent = resolve_central_config(
+            &repo.path().join("config.yaml"),
+            &source.replace("harness_profile: local", "harness_profile: absent"),
+        )
+        .expect("selection is resolved with workflow environment");
+        let workflow = WorkflowDefinition {
+            front_matter: absent.workflow_front_matter,
+            prompt_template: "Prompt".into(),
+        };
         assert!(
-            resolve_central_config(
-                &repo.path().join("config.yaml"),
-                &source.replace("harness_profile: local", "harness_profile: absent")
-            )
-            .is_err()
+            workflow
+                .resolve(repo.path(), &env)
+                .expect_err("unknown profile")
+                .to_string()
+                .contains("routing.harness_profile")
         );
-        assert!(
-            resolve_central_config(
+        for (replacement, expected) in [
+            (
+                "command: python3\n      extensions: [unknown]",
+                "extensions must be empty",
+            ),
+            (
+                "command: python3\n      protocol_versions: [2]",
+                "protocol_versions",
+            ),
+            (
+                "command: python3\n      auth: {method_id: ''}",
+                "auth.method_id",
+            ),
+        ] {
+            let error = resolve_central_config(
                 &repo.path().join("config.yaml"),
-                &source.replace(
-                    "command: python3",
-                    "command: python3\n      extensions: [unknown]"
-                )
+                &source.replace("command: python3", replacement),
             )
-            .is_err()
-        );
+            .expect_err("invalid ACP shape")
+            .to_string();
+            assert!(
+                error.contains("profile `local`") && error.contains(expected),
+                "{error}"
+            );
+        }
+        // Central loading preserves the selection until workflow environment
+        // overrides are available, including configurable override variable names.
+        for raw_harness in [
+            "harness: openhands_agent_server",
+            "harness: $ACP_HARNESS",
+            "",
+        ] {
+            let central = resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("harness: acp", raw_harness),
+            )
+            .expect("central config");
+            let workflow = WorkflowDefinition {
+                front_matter: central.workflow_front_matter,
+                prompt_template: "Prompt".into(),
+            };
+            let mut overrides = env.clone();
+            overrides.insert("TEST_HARNESS".into(), "acp".into());
+            overrides.insert("ACP_HARNESS".into(), "openhands_agent_server".into());
+            assert_eq!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect("resolved ACP override")
+                    .config
+                    .routing
+                    .harness,
+                "acp"
+            );
+            overrides.insert("TEST_MODEL".into(), "unsupported-model".into());
+            assert!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect_err("resolved model override")
+                    .to_string()
+                    .contains("ACP model overrides")
+            );
+        }
     }
 
     #[test]
