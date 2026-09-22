@@ -636,7 +636,10 @@ process/session cwd equality, capability honesty, credential exclusion,
 interleaved updates and callbacks, opaque string/zero IDs, unknown notifications,
 unknown updates and stop reasons, cancellation acknowledgement/deadline, malformed
 and oversized frames, EOF/crash, output floods, bounded stderr/evidence, and a hung
-process tree. A current-thread Tokio test checks callback/cancellation responsiveness.
+process tree. Regressions cover cancellation in every setup phase, pre-cancelled
+launches, JSON-escaped prompt overflow, missing update payloads, preservation of
+whitespace and long code chunks, and ACP profile migration. Current-thread Tokio
+tests check callback/cancellation responsiveness.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
 require bundled-mode validation. Vendor interoperability evidence belongs to the
 later live-qualification task and must not be inferred from fake-peer tests.

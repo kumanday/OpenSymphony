@@ -106,6 +106,8 @@ pub enum ClientError {
     AuthenticationRequired,
     #[error("ACP setup deadline exceeded")]
     SetupTimeout,
+    #[error("ACP cancelled before prompt submission")]
+    CancelledBeforePrompt,
     #[error("ACP transport or RPC failed; prompt may have been submitted: {submitted}")]
     Protocol { submitted: bool },
     #[error("ACP prompt deadline exceeded; outcome is uncertain")]
@@ -134,7 +136,7 @@ pub struct SessionUpdate {
     pub update: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnReport {
     /// Only `end_turn` is a successful turn. Unknown values remain unsupported outcomes.
     pub stop_reason: String,
@@ -142,6 +144,18 @@ pub struct TurnReport {
     pub cancellation_acknowledged: bool,
     pub session_id: String,
     pub initialization: InitializeResponse,
+}
+
+// Negotiation metadata and opaque peer identifiers are operational values, not
+// diagnostics: a peer can echo credentials in either. Captured frames are redacted.
+impl std::fmt::Debug for TurnReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnReport")
+            .field("succeeded", &self.succeeded())
+            .field("cancellation_requested", &self.cancellation_requested)
+            .field("cancellation_acknowledged", &self.cancellation_acknowledged)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TurnReport {
@@ -170,15 +184,17 @@ struct Capture {
 }
 
 impl Capture {
-    fn redact(&self, value: &mut Value) {
+    fn redact(&self, value: &mut Value, diagnostic: bool) {
         match value {
             Value::String(s) => {
                 for secret in &self.secrets {
                     *s = s.replace(secret, "[redacted]");
                 }
-                *s = redact_runtime_diagnostic(s);
+                if diagnostic {
+                    *s = redact_runtime_diagnostic(s);
+                }
             }
-            Value::Array(values) => values.iter_mut().for_each(|v| self.redact(v)),
+            Value::Array(values) => values.iter_mut().for_each(|v| self.redact(v, diagnostic)),
             Value::Object(values) => {
                 for (mut key, mut value) in std::mem::take(values) {
                     if [
@@ -195,7 +211,7 @@ impl Capture {
                     {
                         value = json!("[redacted]");
                     } else {
-                        self.redact(&mut value);
+                        self.redact(&mut value, diagnostic);
                     }
                     for secret in &self.secrets {
                         key = key.replace(secret, "[redacted]");
@@ -212,7 +228,7 @@ impl Capture {
             self.truncated = true;
             return;
         }
-        self.redact(&mut payload);
+        self.redact(&mut payload, true);
         self.frames.push(SourceFrame {
             sequence: self.sequence,
             direction: direction.into(),
@@ -340,6 +356,13 @@ fn validate_launch(
             "invalid launch environment".into(),
         ));
     }
+    if secrets.iter().any(|secret| {
+        profile.command.contains(secret) || profile.args.iter().any(|arg| arg.contains(secret))
+    }) {
+        return Err(ClientError::InvalidConfiguration(
+            "credentials cannot appear in argv".into(),
+        ));
+    }
     secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
     secrets.dedup();
     Ok(PreparedLaunch {
@@ -370,6 +393,9 @@ pub async fn run_turn(
         return Err(ClientError::InvalidConfiguration(
             "prompt exceeds frame budget".into(),
         ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(ClientError::CancelledBeforePrompt);
     }
     let capture_state = Arc::new(Mutex::new(Capture {
         frames: Vec::new(),
@@ -427,13 +453,19 @@ pub async fn run_turn(
     let outgoing = <_ as SinkExt<String>>::sink_map_err(output, |_| io_failure()).with({
         let capture_state = capture_state.clone();
         let resource_failure = resource_failure.clone();
+        let submitted = submitted.clone();
         move |line: String| {
             let result = if line.len() > limits.frame_bytes {
                 resource_failure.store(true, Ordering::Release);
                 Err(io_failure())
             } else {
-                serde_json::from_str(&line)
+                serde_json::from_str::<Value>(&line)
                     .map(|value| {
+                        // The complete serialized envelope passed the local size gate.
+                        // Any subsequent transport failure can leave remote execution uncertain.
+                        if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
+                            submitted.store(true, Ordering::Release);
+                        }
                         capture(&capture_state, "outgoing", value);
                         line
                     })
@@ -479,11 +511,18 @@ pub async fn run_turn(
                     }
                     Dispatch::Notification(notification) => {
                         if notification.method == "session/update" {
-                            let id = notification
-                                .params
-                                .get("sessionId")
-                                .and_then(Value::as_str)
-                                .ok_or_else(agent_client_protocol::Error::invalid_params)?;
+                            let id = notification.params.get("sessionId").and_then(Value::as_str);
+                            let update = notification.params.get("update").filter(|update| {
+                                update.is_object()
+                                    && update
+                                        .get("sessionUpdate")
+                                        .and_then(Value::as_str)
+                                        .is_some()
+                            });
+                            let (Some(id), Some(update)) = (id, update) else {
+                                fatal.cancel();
+                                return Err(agent_client_protocol::Error::invalid_params());
+                            };
                             if active_session
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -494,15 +533,11 @@ pub async fn run_turn(
                                 return Err(agent_client_protocol::Error::invalid_params());
                             }
                             if let Some(tx) = &updates {
-                                let mut update = notification
-                                    .params
-                                    .get("update")
-                                    .cloned()
-                                    .unwrap_or(Value::Null);
+                                let mut update = update.clone();
                                 redactor
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .redact(&mut update);
+                                    .redact(&mut update, false);
                                 tx.try_send(SessionUpdate {
                                     session_id: id.into(),
                                     update,
@@ -563,7 +598,14 @@ pub async fn run_turn(
                 *active_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.session_id.0.to_string());
                 Ok((initialization, session.session_id))
             };
-            let (initialization, session_id) = match tokio::time::timeout(limits.setup_timeout, setup).await {
+            let setup_result = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    phase_error = Some(ClientError::CancelledBeforePrompt);
+                    return Err(agent_client_protocol::Error::internal_error());
+                },
+                result = tokio::time::timeout(limits.setup_timeout, setup) => result,
+            };
+            let (initialization, session_id) = match setup_result {
                 Ok(result) => result?,
                 Err(_) => {
                     phase_error = Some(ClientError::SetupTimeout);
@@ -571,7 +613,7 @@ pub async fn run_turn(
                 }
             };
             if cancellation.is_cancelled() {
-                phase_error = Some(ClientError::Setup("cancelled before prompt submission".into()));
+                phase_error = Some(ClientError::CancelledBeforePrompt);
                 return Err(agent_client_protocol::Error::internal_error());
             }
             let request = PromptRequest::new(
@@ -579,7 +621,6 @@ pub async fn run_turn(
             );
             // Raw SDK response decoding preserves future stop reasons; request serialization stays typed.
             let request = UntypedMessage::new("session/prompt", request)?;
-            submitted.store(true, Ordering::Release);
             let response = connection.send_request(request).block_task();
             tokio::pin!(response);
             let mut cancellation_requested = false;
@@ -671,7 +712,7 @@ pub async fn run_turn(
     };
     let mut state = capture_state.lock().unwrap_or_else(|e| e.into_inner());
     let mut stderr = json!(stderr);
-    state.redact(&mut stderr);
+    state.redact(&mut stderr, true);
     Ok(RunResult {
         outcome,
         evidence: std::mem::take(&mut state.frames),

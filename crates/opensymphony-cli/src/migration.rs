@@ -1976,6 +1976,9 @@ fn build_report(
     if front_matter.routing.harness.is_some() {
         recognized.push("routing");
     }
+    if !front_matter.acp.profiles.is_empty() {
+        recognized.push("acp");
+    }
     if front_matter.openhands.transport.base_url.is_some() {
         recognized.push("openhands");
     }
@@ -2140,6 +2143,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
     )?;
     let root = json!({
         "schema_version": 1,
+        "acp": source.workflow.front_matter.acp.clone(),
         "instance": {
             "id": instance_id,
             "state_root": state_root,
@@ -2148,6 +2152,7 @@ fn generate_central_config(source: &SourceContext) -> Result<String, MigrationEr
             "mode": "legacy_single",
             "repository": "legacy-repository",
             "harness": source.workflow.front_matter.routing.harness.clone(),
+            "harness_profile": source.workflow.front_matter.routing.harness_profile.clone(),
             "model": source.workflow.front_matter.routing.model.clone(),
             "model_profile": source.workflow.front_matter.routing.model_profile.clone(),
             "harness_env": source.workflow.front_matter.routing.harness_env.clone(),
@@ -2253,6 +2258,7 @@ fn workflow_has_orchestration_front_matter(source: &str) -> bool {
         || front_matter.agent != Default::default()
         || front_matter.openhands != Default::default()
         || front_matter.routing != Default::default()
+        || front_matter.acp != Default::default()
 }
 
 fn workflow_body(source: &SourceContext) -> Result<Vec<u8>, MigrationError> {
@@ -4860,6 +4866,49 @@ mod tests {
         let generated = generate_central_config(&source).expect("migration should generate");
         assert!(generated.contains("path: WORKFLOW.md"));
         assert!(!generated.contains("path: AGENTS.md"));
+    }
+
+    #[test]
+    fn migration_preserves_acp_profiles_and_selector_in_central_configuration() {
+        let root = tempfile::tempdir().expect("migration root");
+        let target_repo = root.path().join("repo");
+        fs::create_dir_all(&target_repo).expect("repository");
+        let workflow_source = "---\ntracker:\n  kind: linear\n  project_slug: project\nrouting:\n  harness: acp\n  harness_profile: local\nacp:\n  profiles:\n    local:\n      command: agent\n      args: [--acp]\n      env_refs: {AGENT_TOKEN: ACP_TOKEN_SOURCE}\n---\nTarget branch: develop\n".to_owned();
+        let workflow = WorkflowDefinition::parse(&workflow_source).expect("parse");
+        let expected = workflow.front_matter.acp.clone();
+        let source = SourceContext {
+            source_config: target_repo.join("config.yaml"),
+            config_source: String::new(),
+            source_config_present: false,
+            workflow_path: target_repo.join("WORKFLOW.md"),
+            workflow_source,
+            target_repo,
+            workflow,
+            config: LegacyConfigProbe {
+                target_repo: None,
+                control_plane: LegacyControlPlaneProbe::default(),
+                openhands: LegacyOpenHandsProbe::default(),
+                memory: LegacyMemoryProbe::default(),
+            },
+            remote: "git@github.com:example/repo.git".to_owned(),
+        };
+        let generated = generate_central_config(&source).expect("generate");
+        let generated: serde_yaml::Value = serde_yaml::from_str(&generated).expect("central YAML");
+        let acp: crate::opensymphony_workflow::AcpConfig =
+            serde_yaml::from_value(generated["acp"].clone()).expect("profiles");
+        assert_eq!(acp, expected);
+        acp.validate_selection(
+            generated["routing"]["harness"].as_str().expect("harness"),
+            generated["routing"]["harness_profile"].as_str(),
+            false,
+        )
+        .expect("migrated selection remains valid");
+        let rewritten = String::from_utf8(workflow_body(&source).expect("body")).expect("UTF-8");
+        assert!(rewritten.contains("Target branch: develop"));
+        assert!(!rewritten.contains("ACP_TOKEN_SOURCE"));
+        assert!(workflow_has_orchestration_front_matter(
+            "---\nacp:\n  profiles:\n    unused:\n      command: agent\n---\nPrompt\n"
+        ));
     }
 
     #[test]

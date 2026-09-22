@@ -899,9 +899,15 @@ source frames, 16 KiB stderr, 30 seconds for setup, 300 seconds for a prompt,
 may pass validated `ClientLimits`. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Evidence capture
 marks frame-budget truncation and redacts secrets and sensitive fields; diagnostic
-string previews are limited to 512 characters. Stderr overflow is replaced with a
+string previews are limited to 512 characters. Live update content preserves
+whitespace and complete strings while removing known secrets and sensitive
+fields; it does not use diagnostic preview normalization. Stderr overflow is replaced with a
 limit marker while the pipe continues draining. SDK wire tracing is disabled for
 this connection to prevent bypassing the redacted evidence surface.
+
+Cancellation before prompt submission interrupts setup and tears down the child;
+an already-cancelled token prevents launch. The complete serialized prompt frame
+must pass its size bound before submission becomes uncertain.
 
 Only an original prompt response with `stopReason: cancelled` acknowledges a
 requested cancellation. Sending `session/cancel`, killing a process, or receiving

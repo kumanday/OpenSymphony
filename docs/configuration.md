@@ -950,6 +950,10 @@ acp:
         method_id: agent_login
 ```
 
+Central configuration migration transfers `routing.harness_profile` and the full
+`acp.profiles` map from the legacy workflow before rewriting its prompt body.
+Environment references remain names throughout migration.
+
 The executable ACP client is available through `opensymphony_acp::run_turn`.
 Production `opensymphony run` routing is a separate implementation slice; an ACP
 route currently fails scheduler capability selection before worker dispatch.

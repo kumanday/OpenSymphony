@@ -26,16 +26,18 @@ def update(text):
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if (mode, method) in (("setup_hang", "initialize"), ("auth_hang", "authenticate"), ("new_hang", "session/new")):
+        with open("setup-waiting", "w") as marker:
+            marker.write(method)
+        time.sleep(60)
     if method == "initialize":
         assert message["params"]["protocolVersion"] == 1
         caps = message["params"].get("clientCapabilities", {})
         assert not caps.get("terminal")
         assert not any(caps.get("fs", {}).values())
         assert not caps.get("auth", {}).get("terminal")
-        if mode == "setup_hang":
-            time.sleep(60)
         respond(message, {"protocolVersion": 2 if mode == "v2" else 1,
-                          "agentInfo": {"name": "test-peer", "version": "1"},
+                          "agentInfo": {"name": os.environ.get("TEST_AUTH", "test-peer"), "version": "1"},
                           "agentCapabilities": {},
                           "authMethods": [{"id": "test_auth", "name": "Fake auth"}]})
     elif method == "authenticate":
@@ -51,6 +53,20 @@ for line in sys.stdin:
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
         prompt_id = message["id"]
+        if mode in ("missing_update", "null_update", "missing_session_id"):
+            params = {"sessionId": session}
+            if mode == "null_update":
+                params["update"] = None
+            if mode == "missing_session_id":
+                params = {"update": {"sessionUpdate": "future_update"}}
+            send({"method": "session/update", "params": params})
+            respond(message, {"stopReason": "end_turn"})
+            continue
+        if mode == "rich_update":
+            update(" ")
+            update("def example():\n\treturn '  spaced  '\n" + "x" * 1024)
+            respond(message, {"stopReason": "end_turn"})
+            continue
         if mode == "foreign_session":
             send({"method": "session/update", "params": {"sessionId": "another-session", "update": {"sessionUpdate": "future_update"}}})
             respond(message, {"stopReason": "end_turn"})

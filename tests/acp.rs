@@ -73,6 +73,7 @@ async fn acp_process_completes_ordered_callbacks_and_redacts_evidence() {
     )
     .await
     .expect("launch");
+    assert!(!format!("{run:?}").contains("fake-sensitive-auth-material"));
     let report = run.outcome.expect("completed protocol");
     assert_eq!(report.stop_reason, "end_turn");
     assert!(!report.cancellation_acknowledged);
@@ -150,6 +151,9 @@ async fn acp_cancel_waits_for_prompt_response_and_keeps_tokio_responsive() {
 async fn acp_adversarial_frames_deadlines_eof_and_unknown_outcomes() {
     for mode in [
         "foreign_session",
+        "missing_update",
+        "null_update",
+        "missing_session_id",
         "malformed",
         "oversized",
         "eof",
@@ -450,4 +454,140 @@ async fn acp_missing_login_reports_an_actionable_error() {
             .iter()
             .any(|frame| frame.payload["method"] == "session/prompt")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_setup_cancellation_stops_before_prompt_and_pre_cancelled_tokens_do_not_spawn() {
+    let root = tempfile::tempdir().expect("temp");
+    let token = CancellationToken::new();
+    token.cancel();
+    let mut config = profile("complete");
+    config.command = "nonexistent-acp-executable".into();
+    assert_eq!(
+        run_turn(
+            &config,
+            context(root.path()),
+            "hello".into(),
+            token,
+            None,
+            limits()
+        )
+        .await
+        .expect_err("pre-cancelled launch"),
+        ClientError::CancelledBeforePrompt
+    );
+    for mode in ["setup_hang", "auth_hang", "new_hang"] {
+        let root = tempfile::tempdir().expect("temp");
+        let launch = context(root.path());
+        let marker = launch.issue_workspace.join("setup-waiting");
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let config = profile(mode);
+        let bound = ClientLimits {
+            setup_timeout: Duration::from_secs(30),
+            ..limits()
+        };
+        let cancel_at_setup = async {
+            while !tokio::fs::try_exists(&marker).await.expect("marker") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                run_turn(&config, launch, "hello".into(), token, None, bound),
+                cancel_at_setup
+            )
+        })
+        .await
+        .expect("setup cancellation is prompt");
+        let result = result.expect("spawn");
+        assert_eq!(
+            result.outcome.expect_err("cancelled setup"),
+            ClientError::CancelledBeforePrompt
+        );
+        assert!(result.process_reaped);
+        assert!(
+            !result
+                .evidence
+                .iter()
+                .any(|frame| frame.payload["method"] == "session/prompt")
+        );
+    }
+}
+
+#[tokio::test]
+async fn acp_live_updates_preserve_whitespace_and_long_content() {
+    let root = tempfile::tempdir().expect("temp");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let result = run_turn(
+        &profile("rich_update"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        Some(tx),
+        limits(),
+    )
+    .await
+    .expect("spawn");
+    assert!(result.outcome.expect("completed").succeeded());
+    assert_eq!(
+        rx.recv().await.expect("space").update["content"]["text"],
+        " "
+    );
+    assert_eq!(
+        rx.recv().await.expect("code").update["content"]["text"],
+        format!(
+            "def example():\n\treturn '  spaced  '\n{}",
+            "x".repeat(1024)
+        )
+    );
+}
+
+#[tokio::test]
+async fn acp_escaped_prompt_overflow_is_rejected_before_submission() {
+    let root = tempfile::tempdir().expect("temp");
+    let result = run_turn(
+        &profile("complete"),
+        context(root.path()),
+        "\0".repeat(100),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            frame_bytes: 512,
+            ..limits()
+        },
+    )
+    .await
+    .expect("setup can launch");
+    assert_eq!(
+        result.outcome.expect_err("encoded prompt too large"),
+        ClientError::ResourceLimit { submitted: false }
+    );
+    assert!(result.process_reaped);
+    assert!(
+        !result
+            .evidence
+            .iter()
+            .any(|frame| frame.payload["method"] == "session/prompt")
+    );
+}
+
+#[tokio::test]
+async fn acp_host_credentials_cannot_be_copied_into_literal_argv() {
+    let root = tempfile::tempdir().expect("temp");
+    let mut config = profile("complete");
+    config.args.push("checkout-secret-value".into());
+    assert!(matches!(
+        run_turn(
+            &config,
+            context(root.path()),
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            limits()
+        )
+        .await,
+        Err(ClientError::InvalidConfiguration(_))
+    ));
 }
