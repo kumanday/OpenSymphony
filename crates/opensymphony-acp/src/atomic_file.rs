@@ -141,11 +141,17 @@ impl AtomicFile {
             self.temporary.clear();
         }
         #[cfg(not(unix))]
-        self.temporary
-            .take()
-            .ok_or(io::ErrorKind::InvalidInput)?
-            .persist(&self.destination)
-            .map_err(|error| error.error)?;
+        {
+            // Close staging data handles before Windows promotion. Parent
+            // guards remain owned by self until the atomic rename finishes.
+            drop(self.file);
+            self.temporary
+                .take()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .into_temp_path()
+                .persist(&self.destination)
+                .map_err(|error| error.error)?;
+        }
         Ok(())
     }
 }
