@@ -9,7 +9,6 @@ use tokio::fs::{File, OpenOptions};
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-const FILE_READ_ATTRIBUTES: u32 = 0x80;
 const FILE_SHARE_READ: u32 = 1;
 
 /// Keep every ancestor pinned from the drive/share root. Excluding write and
@@ -37,7 +36,8 @@ pub(super) async fn pin_directory(path: &Path, create: bool) -> io::Result<Vec<F
             }
         }
         let directory = OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
+            // Attribute-only handles do not participate in Windows sharing checks.
+            .read(true)
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .open(&current)
