@@ -10108,16 +10108,43 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 continue;
             };
             if let Err(error) = task.handle.await {
+                let acp_session = self
+                    .acp_active
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&worker_id);
+                let (kind, harness_stopped) = if let Some(session) = acp_session {
+                    session.cancellation.cancel();
+                    let stopped = session.handle.inspect().await.is_ok_and(|snapshot| {
+                        matches!(
+                            snapshot.state.status,
+                            crate::opensymphony_workspace::AcpSessionStatus::Ready
+                                | crate::opensymphony_workspace::AcpSessionStatus::Finished
+                        )
+                    });
+                    (
+                        if stopped {
+                            WorkerOutcomeKind::Failed
+                        } else {
+                            WorkerOutcomeKind::Detached
+                        },
+                        stopped,
+                    )
+                } else {
+                    (WorkerOutcomeKind::Failed, false)
+                };
+                let mut outcome = WorkerOutcomeRecord::from_run(
+                    &task.run,
+                    kind,
+                    now_timestamp(),
+                    Some("worker task terminated unexpectedly".to_string()),
+                    Some(error.to_string()),
+                );
+                outcome.harness_stopped = harness_stopped;
                 updates.push(WorkerUpdate::Finished {
                     worker_id: crate::opensymphony_domain::WorkerId::new(worker_id)
                         .expect("worker id should remain valid"),
-                    outcome: WorkerOutcomeRecord::from_run(
-                        &task.run,
-                        WorkerOutcomeKind::Failed,
-                        now_timestamp(),
-                        Some("worker task terminated unexpectedly".to_string()),
-                        Some(error.to_string()),
-                    ),
+                    outcome,
                 });
             }
         }
@@ -17429,6 +17456,73 @@ exit 64
             fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts"),
             prompts
         );
+    }
+
+    #[tokio::test]
+    async fn acp_poll_removes_failed_task_and_uses_owner_stop_evidence() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        backend
+            .start_worker(acp_test_request(&manager.config().root, "hang", 1))
+            .await
+            .expect("launch");
+        let worker_id = WorkerId::new("acp-worker-1").expect("worker");
+        let session = backend
+            .acp_active
+            .lock()
+            .expect("sessions")
+            .get(worker_id.as_str())
+            .expect("active")
+            .clone();
+        backend
+            .tasks
+            .get(worker_id.as_str())
+            .expect("task")
+            .handle
+            .abort();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = session.handle.inspect().await.expect("owner");
+                if session.cancellation.is_cancelled()
+                    && matches!(
+                        snapshot.state.status,
+                        crate::opensymphony_workspace::AcpSessionStatus::Ready
+                            | crate::opensymphony_workspace::AcpSessionStatus::Finished
+                    )
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owner observes cancellation");
+        let outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(outcome.harness_stopped);
+        assert!(
+            !backend
+                .acp_active
+                .lock()
+                .expect("sessions")
+                .contains_key(worker_id.as_str())
+        );
+        assert!(
+            backend
+                .poll_updates()
+                .await
+                .expect("second poll")
+                .is_empty()
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     #[tokio::test]
