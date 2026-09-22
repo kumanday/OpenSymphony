@@ -696,8 +696,9 @@ Callback integration covers cancellation followed by a fresh turn on the same
 process, stale terminal rejection, live configuration and secret-safe host-policy/
 MCP grant compatibility checks. Normal-completion tests send adjacent late file
 and terminal callbacks, verify rejection while idle and process reaping before
-completion, then start a fresh callback epoch. File-payload tests verify exact
-wire contents with structural redaction in both retained history and evidence.
+completion, then start a fresh callback epoch. Pre-prompt tests reject file and
+terminal requests after session binding. File and terminal-output tests verify
+exact wire contents with structural redaction in retained history and evidence.
 Configuration tests check preparation-frame attribution on success, cancellation
 and timeout; MCP tests reject query strings and aliased excluded credentials.
 The peer verifies that the submitted marker is already on disk when a prompt

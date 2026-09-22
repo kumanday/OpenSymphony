@@ -112,6 +112,10 @@ for line in sys.stdin:
         assert services_enabled
         with open('.opensymphony/conversation.json') as file:
             assert json.load(file)['acp']['status'] != 'submitted'
+        if mode == 'services_pre_prompt' and not os.path.exists('pre-prompt-rejected'):
+            callback('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'pre-prompt-write'), 'content': 'must reject'}, error=True)
+            callback('terminal/create', {'command': sys.executable, 'args': ['-c', "open('pre-prompt-process','w').write('must reject')"]}, error=True)
+            open('pre-prompt-rejected', 'w').close()
         if os.path.exists('stall-config'):
             with open('preparing-config', 'w') as file:
                 file.write('pending')
@@ -136,6 +140,10 @@ for line in sys.stdin:
             content = callback('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
             assert content == 'opaque_workspace_payload_610'
             callback('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'private-copy'), 'content': content})
+            terminal = callback('terminal/create', {'command': sys.executable, 'args': ['-c', "import sys; sys.stdout.write(open('private-file').read())"]})['terminalId']
+            assert callback('terminal/wait_for_exit', {'terminalId': terminal})['exitCode'] == 0
+            assert callback('terminal/output', {'terminalId': terminal})['output'] == content
+            callback('terminal/release', {'terminalId': terminal})
         if text == 'late-callbacks':
             import time
             terminal = callback('terminal/create', {'command': sys.executable, 'args': ['-c', "import os,time; open('normal-child.pid','w').write(str(os.getpid())); time.sleep(60)"]})['terminalId']

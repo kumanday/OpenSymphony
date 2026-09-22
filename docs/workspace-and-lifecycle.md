@@ -985,8 +985,9 @@ cleanup. SDK dispatch continues while terminal wait requests are pending.
 A retained owner calls `begin_turn` before the next prompt to retire the prior
 callback epoch, reap its processes, invalidate old handles and install a fresh
 cancellation token before the durable submission marker. Initial idle readiness
-has no active callback epoch. A prompt response closes its callback epoch inside
-ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
+has no active callback epoch; callbacks after session binding remain denied until
+`begin_turn` installs the first epoch. A prompt response closes its callback epoch
+inside ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
 finishes before the owner publishes `Finished` or returns the turn report. The
 owner keeps handling
 observation and shutdown commands while preparation waits; cancellation, timeout

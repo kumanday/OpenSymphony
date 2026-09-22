@@ -134,6 +134,10 @@ while True:
             content = request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
             assert content == 'opaque_workspace_payload_610'
             request('fs/write_text_file', {'path': os.path.join(os.getcwd(), 'private-copy'), 'content': content})
+            terminal = request('terminal/create', {'command': sys.executable, 'args': ['-c', "import sys; sys.stdout.write(open('private-file').read())"]})['terminalId']
+            assert request('terminal/wait_for_exit', {'terminalId': terminal})['exitCode'] == 0
+            assert request('terminal/output', {'terminalId': terminal})['output'] == content
+            request('terminal/release', {'terminalId': terminal})
         elif mode == 'response_budget':
             request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'escaped')}, True)
             assert request('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'small')})['content'] == 'ok'

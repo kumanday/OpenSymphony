@@ -244,14 +244,14 @@ struct CallbackOutput {
 
 impl CallbackOutput {
     fn admit(&mut self, frame: String, limits: &ClientLimits) -> bool {
-        self.admit_with_file_payload(frame, limits, false)
+        self.admit_with_opaque_payload(frame, limits, false)
     }
 
-    fn admit_with_file_payload(
+    fn admit_with_opaque_payload(
         &mut self,
         frame: String,
         limits: &ClientLimits,
-        file_payload: bool,
+        opaque_payload: bool,
     ) -> bool {
         let bytes = frame.len() + 1; // LinesCodec adds LF.
         if frame.len() > limits.frame_bytes
@@ -261,7 +261,7 @@ impl CallbackOutput {
             return false;
         }
         self.bytes += bytes;
-        self.frames.push_back((frame, file_payload));
+        self.frames.push_back((frame, opaque_payload));
         true
     }
 
@@ -852,6 +852,8 @@ async fn run_connection(
     let fatal = CancellationToken::new();
     let service_shutdown = CancellationToken::new();
     let _service_guard = service_shutdown.clone().drop_guard();
+    let initial_callback_epoch = CancellationToken::new();
+    initial_callback_epoch.cancel();
     let (service_sender, service_actor) = services::Services::new(
         cwd.clone(),
         environment,
@@ -860,7 +862,7 @@ async fn run_connection(
         callback_output.clone(),
         resource_failure.clone(),
         fatal.clone(),
-        CancellationToken::new(),
+        initial_callback_epoch,
         service_shutdown.clone(),
     );
     let service_run = service_actor.run();
@@ -919,13 +921,12 @@ async fn run_connection(
                         // Unreserved SDK errors cannot bypass callback admission.
                         return Err(io_failure());
                     }
-                    if output
-                        .frames
-                        .front()
-                        .is_some_and(|(_, file_payload)| *file_payload)
-                        && let Some(content) = value.pointer_mut("/result/content")
-                    {
-                        *content = json!("[redacted]");
+                    if output.frames.front().is_some_and(|(_, opaque)| *opaque) {
+                        for field in ["/result/content", "/result/output"] {
+                            if let Some(content) = value.pointer_mut(field) {
+                                *content = json!("[redacted]");
+                            }
+                        }
                     }
                 }
                 if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
@@ -1163,7 +1164,7 @@ async fn run_connection(
                         Ok(()) => Some(session_id),
                         Err(error) if driver.as_deref_mut().is_some_and(|driver| driver.reset_missing_session(&error)) => {
                             // Retire accepted restoration work and handles before binding a fresh session.
-                            if let Err(error) = service_sender.begin_turn(cancellation.child_token(), limits.setup_timeout).await {
+                            if let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
                                 phase_error = Some(error);
                                 return Err(agent_client_protocol::Error::internal_error());
                             }

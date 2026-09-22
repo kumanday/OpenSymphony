@@ -240,7 +240,7 @@ impl Services {
                         // Reservation and SDK enqueue are one critical section: asynchronous
                         // waits may finish together, but the writer must see matching FIFO order.
                         let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
-                        if frame.is_ok_and(|frame| output.admit_with_file_payload(frame, &limits, request.method == "fs/read_text_file")) {
+                        if frame.is_ok_and(|frame| output.admit_with_opaque_payload(frame, &limits, matches!(request.method.as_str(), "fs/read_text_file" | "terminal/output"))) {
                             if request.responder.respond_with_result(result).is_err() { fatal.cancel(); }
                         } else {
                             resource_failure.store(true, std::sync::atomic::Ordering::Release);

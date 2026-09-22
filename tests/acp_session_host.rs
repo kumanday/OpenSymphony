@@ -1051,6 +1051,7 @@ async fn retained_source_redacts_file_payloads_without_changing_callback_wire_co
     let mut request = launch(root.path(), "PRIVATE", "services").await;
     request.context.services.read_files = true;
     request.context.services.write_files = true;
+    request.context.services.terminals = true;
     std::fs::write(
         request.workspace.workspace_path().join("private-file"),
         "opaque_workspace_payload_610",
@@ -1071,6 +1072,29 @@ async fn retained_source_redacts_file_payloads_without_changing_callback_wire_co
     );
     assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["result"]["content"] == "[redacted]")));
     assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["method"] == "fs/write_text_file" && frame.payload["params"]["content"] == "[redacted]")));
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["result"]["output"] == "[redacted]")));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn retained_pre_prompt_callbacks_are_rejected_until_begin_turn() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "BEFORE", "services_pre_prompt").await;
+    request.context.services.write_files = true;
+    request.context.services.terminals = true;
+    request.profile.session.model = Some("second".into());
+    let handle = host.open(request).await.expect("open");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("BEFORE/pre-prompt-rejected").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("pre-prompt callbacks rejected");
+    assert!(!root.path().join("BEFORE/pre-prompt-write").exists());
+    assert!(!root.path().join("BEFORE/pre-prompt-process").exists());
+    assert!(prompt(&handle, "first", "first").await.succeeded());
     retire(&handle).await;
 }
 

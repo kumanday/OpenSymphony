@@ -1035,9 +1035,10 @@ tail and reports truncation. Scoped HTTP/SSE MCP endpoints must use HTTP or HTTP
 without URL userinfo, fragments or query strings; pass resolved grants in headers.
 MCP attachments cannot include resolved excluded checkout credentials, including
 values aliased under another environment name, header or argument. Filesystem
-callback contents remain intact on the wire and are structurally redacted from
-source history and evidence. Model and mode categories are resolved from each
-refreshed option list so prerequisite selections can reveal dependent options.
+contents and terminal output remain intact on the wire and are structurally
+redacted from source history and evidence. Model and mode categories are
+resolved from each refreshed option list so prerequisite selections can reveal
+dependent options.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

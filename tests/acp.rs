@@ -1644,6 +1644,11 @@ async fn acp_filesystem_payloads_stay_on_wire_and_out_of_evidence() {
             .any(|frame| frame.payload["method"] == "fs/write_text_file"
                 && frame.payload["params"]["content"] == "[redacted]")
     );
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["result"]["output"] == "[redacted]")
+    );
 }
 
 #[tokio::test]
