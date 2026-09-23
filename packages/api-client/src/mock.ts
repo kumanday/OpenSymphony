@@ -557,7 +557,9 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `approval-${approvalId}-${crypto.randomUUID()}`,
       action_kind: "approval_decision",
-      target_entity: { entity_kind: "run", entity_id: interaction?.issue_id ?? approvalId },
+      target_entity: interaction
+        ? { entity_kind: "run", entity_id: interaction.issue_identifier }
+        : { entity_kind: "approval", entity_id: approvalId },
       payload: interaction ? { decision, explanation, option_id: optionId, request_id: interaction.request_id, run_id: interaction.run_id, issue_id: interaction.issue_id, session_id: interaction.session_id, generation: interaction.generation, rpc_id: interaction.rpc_id } : { decision, explanation },
       idempotency_key: interaction ? undefined : `approval-${approvalId}-${decision}`,
     });

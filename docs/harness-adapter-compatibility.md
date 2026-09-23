@@ -122,8 +122,11 @@ ACP v1 JSON-RPC 2.0, UTF-8 and LF framing. Start, continuation, cancellation,
 recovery and terminal cleanup use the shared worker and scheduler boundaries.
 
 `/api/v1/capabilities` separates generic adapter support (`harnesses`) from
-configured profile preflight readiness (`harness_profiles`). Preflight checks
-profile shape, executable availability and environment references, including
+configured profile preflight readiness (`harness_profiles`). The desktop
+`gateway_capabilities` command reads this response from its attached gateway
+with the configured connection credentials, so ACP availability and profile
+readiness match the daemon the operator is using. Preflight checks profile
+shape, executable availability and environment references, including
 checkout-only credential exclusions. Executable lookup honors profile-mapped
 `PATH` values and requires absolute search directories
 because no issue cwd is available during preflight. It does not

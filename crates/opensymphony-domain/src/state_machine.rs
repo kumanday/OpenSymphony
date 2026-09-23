@@ -600,6 +600,15 @@ impl IssueExecution {
         }
     }
 
+    /// A delivered or closed operator request resumes the worker's idle clock.
+    /// This records liveness without fabricating an agent runtime event or
+    /// changing the absolute runtime cap anchored to the run's start.
+    pub fn observe_operator_resolution(&mut self, observed_at: TimestampMs) {
+        if let SchedulerState::Running { stall, .. } = &mut self.state {
+            stall.observe_activity(observed_at);
+        }
+    }
+
     pub fn queue_retry(
         mut self,
         retry: RetryEntry,

@@ -10,6 +10,9 @@ use crate::opensymphony_domain::{
     RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting,
     RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory, TrackerIssueRef,
 };
+use crate::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+};
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
     IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
@@ -932,6 +935,7 @@ struct FakeWorker {
     interrupts: Vec<HarnessInterruptCommand>,
     interrupt_results: VecDeque<Result<WorkerInterruptAcknowledgement, FakeError>>,
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
+    operator_responses: Vec<(WorkerId, String)>,
 }
 
 impl WorkerBackend for FakeWorker {
@@ -963,6 +967,17 @@ impl WorkerBackend for FakeWorker {
         Ok(self.updates.drain(..).collect())
     }
 
+    async fn respond_operator_request(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        _answer: OperatorAnswer,
+    ) -> Result<bool, Self::Error> {
+        self.operator_responses
+            .push((worker_id.clone(), request_id.to_owned()));
+        Ok(true)
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -984,6 +999,110 @@ impl WorkerBackend for FakeWorker {
                 detail: None,
                 timed_out: false,
             }))
+    }
+}
+
+#[tokio::test]
+async fn delayed_operator_answer_and_closure_restart_stall_clock() {
+    for answer_by_operator in [true, false] {
+        let now = Utc::now();
+        let start = ts((now.timestamp_millis() - 1_000) as u64);
+        let issue_id = IssueId::new("operator-stall").expect("issue id");
+        let tracker = FakeTracker {
+            active: vec![tracker_issue(
+                issue_id.as_str(),
+                "COE-612",
+                "In Progress",
+                0,
+            )],
+            ..Default::default()
+        };
+        let mut config = scheduler_config();
+        config.routing.harness = "acp".into();
+        config.stall_timeout_ms = Some(500);
+        let mut scheduler = Scheduler::new(
+            tracker,
+            FakeWorkspace::default(),
+            FakeWorker::default(),
+            config,
+        );
+        scheduler.tick(start).await.expect("dispatch ACP worker");
+        let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+        let interaction = OperatorInteraction {
+            request_id: format!("request-{answer_by_operator}"),
+            run_id: format!("run-{worker_id}"),
+            issue_id: issue_id.to_string(),
+            issue_identifier: "COE-612".into(),
+            session_id: "session".into(),
+            generation: 1,
+            rpc_id: "1".into(),
+            kind: OperatorInteractionKind::Permission,
+            title: "Permission".into(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        scheduler
+            .worker_mut()
+            .updates
+            .push_back(WorkerUpdate::OperatorRequest {
+                worker_id: worker_id.clone(),
+                interaction: interaction.clone(),
+            });
+        let opened = scheduler
+            .drain_worker_updates(ts(now.timestamp_millis() as u64))
+            .await
+            .expect("accept operator request");
+        assert_eq!(opened.operator_interactions.len(), 1);
+        let old_deadline = opened.issues[0]
+            .runtime
+            .stalled_at
+            .expect("running stall deadline");
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        assert!(old_deadline < ts(Utc::now().timestamp_millis() as u64));
+
+        if answer_by_operator {
+            scheduler
+                .respond_operator_request(&interaction, OperatorAnswer::Cancel)
+                .await
+                .expect("deliver operator answer");
+            assert_eq!(scheduler.worker().operator_responses.len(), 1);
+        } else {
+            scheduler
+                .worker_mut()
+                .updates
+                .push_back(WorkerUpdate::OperatorClosed {
+                    worker_id,
+                    request_id: interaction.request_id,
+                });
+            scheduler
+                .drain_worker_updates(ts(Utc::now().timestamp_millis() as u64))
+                .await
+                .expect("close operator request");
+        }
+        let resumed = scheduler.snapshot(ts(Utc::now().timestamp_millis() as u64));
+        assert!(resumed.operator_interactions.is_empty());
+        assert!(
+            resumed.issues[0]
+                .runtime
+                .stalled_at
+                .expect("resumed stall deadline")
+                > ts(Utc::now().timestamp_millis() as u64)
+        );
+        scheduler
+            .tick(ts(Utc::now().timestamp_millis() as u64))
+            .await
+            .expect("resumed scheduler tick");
+        assert_eq!(
+            scheduler
+                .execution(&issue_id)
+                .expect("active execution")
+                .status(),
+            SchedulerStatus::Running
+        );
+        assert!(scheduler.worker().aborted.is_empty());
     }
 }
 

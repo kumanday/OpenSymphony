@@ -76,7 +76,29 @@ enum RunWake {
     TrackerTick,
 }
 
+async fn start_shutdown_listener() -> tokio::task::JoinHandle<io::Result<()>> {
+    use std::future::Future;
+
+    let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let signal = tokio::signal::ctrl_c();
+        tokio::pin!(signal);
+        let mut armed = Some(armed_tx);
+        std::future::poll_fn(|cx| {
+            let result = signal.as_mut().poll(cx);
+            if let Some(armed) = armed.take() {
+                let _ = armed.send(());
+            }
+            result
+        })
+        .await
+    });
+    let _ = armed_rx.await;
+    task
+}
+
 async fn next_run_wake(
+    shutdown_task: &mut tokio::task::JoinHandle<io::Result<()>>,
     server_task: &mut tokio::task::JoinHandle<io::Result<()>>,
     operator_commands_rx: &mut tokio::sync::mpsc::Receiver<
         crate::opensymphony_gateway::OperatorCommand,
@@ -85,7 +107,7 @@ async fn next_run_wake(
     ticker: &mut tokio::time::Interval,
 ) -> RunWake {
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => RunWake::Shutdown,
+        _ = shutdown_task => RunWake::Shutdown,
         result = server_task => RunWake::Server(result),
         Some(command) = operator_commands_rx.recv() => RunWake::OperatorCommand(Box::new(command)),
         _ = operator_update_notify.notified() => RunWake::OperatorUpdate,
@@ -1256,12 +1278,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             )
             .with_terminal_states(terminal_state_set(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
+    // Keep SIGINT armed while bootstrap and scheduler mutations await. A
+    // short-lived ctrl_c future inside select can miss a signal during a tick.
+    let mut shutdown_task = start_shutdown_listener().await;
     let mut gateway_action_cursor = 0;
 
     let bootstrap_snapshot = match scheduler.bootstrap(now_timestamp()).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             server_task.abort();
+            shutdown_task.abort();
             shutdown_memory_server(&mut memory_server).await?;
             return Err(RunCommandError::SchedulerConfig(error));
         }
@@ -1303,6 +1329,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         // Only wait for the next event inside select. Scheduler mutations can
         // await after changing state and must run to completion once started.
         let wake = next_run_wake(
+            &mut shutdown_task,
             &mut server_task,
             &mut operator_commands_rx,
             &operator_update_notify,
@@ -1512,6 +1539,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     server_task.abort();
+    shutdown_task.abort();
     shutdown_memory_server(&mut memory_server).await?;
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
@@ -2148,8 +2176,10 @@ mod tests {
         let (commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
         let operator_notify = Arc::new(tokio::sync::Notify::new());
         let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let mut shutdown_task = tokio::spawn(std::future::pending::<io::Result<()>>());
         assert!(matches!(
             next_run_wake(
+                &mut shutdown_task,
                 &mut server_task,
                 &mut commands_rx,
                 &operator_notify,
@@ -2200,6 +2230,7 @@ mod tests {
         queued_wakes.await.expect("queued wakes");
 
         let first = next_run_wake(
+            &mut shutdown_task,
             &mut server_task,
             &mut commands_rx,
             &operator_notify,
@@ -2207,6 +2238,7 @@ mod tests {
         )
         .await;
         let second = next_run_wake(
+            &mut shutdown_task,
             &mut server_task,
             &mut commands_rx,
             &operator_notify,
@@ -2226,6 +2258,53 @@ mod tests {
             matches!(&second, RunWake::OperatorCommand(_)),
             "both queued event types remain available after the tick"
         );
+        server_task.abort();
+        shutdown_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_queued_during_tick_wakes_after_tick_completes() {
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = tokio::sync::Notify::new();
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        // Model a long scheduler mutation: the signal listener must remain
+        // armed while the selected tick is in progress.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let queue_shutdown = tokio::spawn(async move {
+            shutdown_tx.send(()).expect("queue shutdown");
+            release_tx.send(()).expect("release tick");
+        });
+        release_rx.await.expect("tick completed");
+        queue_shutdown.await.expect("queued signal");
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::Shutdown
+        ));
         server_task.abort();
     }
 

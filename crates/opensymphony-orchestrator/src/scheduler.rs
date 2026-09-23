@@ -2261,13 +2261,39 @@ where
         {
             Ok(true) => {
                 self.pending_operator.remove(&binding.request_id);
+                self.observe_operator_resolution(&worker_id, binding);
                 Ok(())
             }
             Ok(false) => {
                 self.pending_operator.remove(&binding.request_id);
+                self.observe_operator_resolution(&worker_id, binding);
                 Err("ACP responder is no longer live".into())
             }
             Err(error) => Err(format!("ACP response delivery failed: {error}")),
+        }
+    }
+
+    fn observe_operator_resolution(
+        &mut self,
+        worker_id: &WorkerId,
+        interaction: &OperatorInteraction,
+    ) {
+        let Ok(issue_id) = IssueId::new(interaction.issue_id.clone()) else {
+            return;
+        };
+        if self
+            .worker_metadata
+            .get(worker_id)
+            .is_none_or(|metadata| metadata.issue_id != issue_id)
+        {
+            return;
+        }
+        if let Some(execution) = self.executions.get_mut(&issue_id)
+            && execution
+                .current_run()
+                .is_some_and(|run| run.worker_id == *worker_id)
+        {
+            execution.observe_operator_resolution(datetime_to_timestamp(Utc::now()));
         }
     }
 
@@ -6896,12 +6922,12 @@ where
                     worker_id,
                     request_id,
                 } => {
-                    if self
-                        .pending_operator
-                        .get(&request_id)
-                        .is_some_and(|(owner, _)| *owner == worker_id)
+                    if let Some((owner, interaction)) = self.pending_operator.get(&request_id)
+                        && *owner == worker_id
                     {
+                        let interaction = interaction.clone();
                         self.pending_operator.remove(&request_id);
+                        self.observe_operator_resolution(&worker_id, &interaction);
                     }
                 }
                 WorkerUpdate::RuntimeEvent {
