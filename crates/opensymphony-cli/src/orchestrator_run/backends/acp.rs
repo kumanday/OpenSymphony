@@ -1,8 +1,8 @@
 //! Production worker wiring. ACP wire types and protocol ownership stay in opensymphony_acp.
 use super::*;
 use crate::opensymphony_acp::{
-    ClientLimits, LaunchContext, RetentionPolicy, RuntimeProjection, SessionControl, SessionEvent,
-    SessionHandle, SessionHost, SessionLaunch,
+    ClientLimits, HostServices, LaunchContext, RetentionPolicy, RuntimeProjection, SessionControl,
+    SessionEvent, SessionHandle, SessionHost, SessionLaunch,
 };
 use crate::opensymphony_workspace::{AcpProcessState, AcpSessionIdentity, AcpSessionStatus};
 use tokio_util::sync::CancellationToken;
@@ -390,6 +390,21 @@ async fn try_run(
                 .unwrap_or_else(|| "unsupported".into()));
         }
     }
+    let mut services = HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..HostServices::default()
+    };
+    if let Some(endpoint) = environment.get("OPENSYMPHONY_MEMORY_ENDPOINT") {
+        services.attach_scoped_memory(
+            endpoint,
+            environment
+                .get("OPENSYMPHONY_MEMORY_TOKEN")
+                .map(String::as_str)
+                .filter(|token| !token.is_empty()),
+        );
+    }
     let mut inherited = env::vars().collect::<BTreeMap<_, _>>();
     for (name, value) in environment {
         crate::opensymphony_workspace::insert_environment_value(&mut inherited, name, value);
@@ -399,13 +414,17 @@ async fn try_run(
         .harness_profile
         .as_ref()
         .ok_or("ACP route has no profile identity")?;
-    let profile = workflow
+    let mut profile = workflow
         .extensions
         .acp
         .profiles
         .get(profile_id)
         .cloned()
         .ok_or("persisted ACP profile is unavailable")?;
+    if let Some(model) = &route.model {
+        profile.session.model = Some(model.clone());
+    }
+    profile.validate().map_err(|error| error.to_string())?;
     // Fingerprint resolved credential scope without persisting credentials or environment.
     use sha2::{Digest, Sha256};
     let mut scope = Sha256::new();
@@ -466,6 +485,7 @@ async fn try_run(
                 issue_workspace: workspace.workspace_path().to_path_buf(),
                 environment,
                 excluded_environment,
+                services,
             },
             limits: ClientLimits::default(),
             require_persistence: false,

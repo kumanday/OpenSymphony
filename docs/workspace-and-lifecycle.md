@@ -928,15 +928,21 @@ reintroduce excluded credentials.
 
 `SessionHost` retains one supervised process/connection per issue. A stable
 `.opensymphony/acp-owner.lock` prevents competing owners without creating another
-session database. The conversation manifest records the profile fingerprint,
+session database. The profile fingerprint also hashes host callback policy,
+client resource limits and resolved MCP attachments, so changed limits, facilities
+or grants reject session reuse
+without persisting credential values. The conversation manifest records that fingerprint,
 credential/grant revision, exact workspace/repository/checkout binding, opaque
 session ID, run/attempt, connection generation, negotiated capabilities and
 submission/outcome state. Native manifests remain readable and cannot be silently
 replaced by ACP. Every command checks the owning connection generation.
 
 The manifest is atomically replaced and synced, including its parent directory,
-before a prompt can reach the transport. `submitted` without a known terminal
-outcome becomes `uncertain` and prevents automatic recovery or prompt replay.
+before a prompt can reach the transport. Cancellation after the synced
+`submitted` marker is rechecked before transport submission; when no prompt was
+sent, a `cancelled_before_prompt` outcome closes that marker. `submitted`
+without a known terminal outcome becomes `uncertain` and prevents automatic
+recovery or prompt replay.
 Local EOF, process reaping and protocol cancellation acknowledgement are separate
 evidence. Workspace cleanup remains fenced after an uncertain remote outcome.
 
@@ -962,6 +968,58 @@ old owner before archiving its manifest. Interrupted or failed launches execute
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check
 without launching another peer.
+
+
+Filesystem callbacks require absolute paths in the bound workspace and reject
+parent traversal, escaping or dangling symlinks and non-regular file targets.
+On Unix, the service actor pins the verified workspace directory before the
+agent starts, and the agent child enters that same directory inode with
+`fchdir`. Descriptor-relative callback opens stay anchored to that root even
+if its original pathname is replaced, reject every symlink component,
+including in-workspace links, and use no-follow opens for new files. Terminal
+launch traverses from the same pinned root; its child enters the selected
+directory using `fchdir` before executing the command. On macOS, terminal
+teardown retries a transient process-group permission error after natural exit;
+cleanup succeeds only when group signaling succeeds or the group is confirmed
+absent. An inaccessible live group remains a teardown failure. Windows pins every
+ancestor without write/delete sharing, rejects reparse points through opened
+handles, and holds those guards through file I/O or terminal spawn. Writes create missing
+parent directories only after containment validation. File writes stage in the
+same directory and atomically replace the destination after a complete flush;
+cancellation or I/O failure removes the stage and preserves the original file.
+Unix replacement remains relative to the pinned parent descriptor. Windows uses
+a same-directory NT rename on the owned stage handle, with parent and stage
+handles denying write/delete sharing through promotion. Cancellation marks the
+stage for deletion by handle, including when a blocking write still owns a
+clone. Terminal cwd defaults to
+the same workspace; alternate directories must remain inside it. Terminal env
+entries may only repeat existing host-owned values, protecting executable lookup
+and scoped grants from callback overrides.
+
+Each terminal belongs to one connection/session and receives an unguessable ID.
+Release invalidates the ID immediately, kills outstanding work and waits for
+reaping. Kill preserves the handle and its final output. Cancellation stops all
+owned terminal trees and interrupts in-flight callback waits; connection teardown expires callbacks and waits for process
+cleanup. SDK dispatch continues while terminal wait requests are pending.
+A retained owner calls `begin_turn` before the next prompt to retire the prior
+callback epoch, reap its processes, invalidate old handles and install a fresh
+cancellation token before the durable submission marker. Initial idle readiness
+has no active callback epoch; callbacks after session binding remain denied until
+`begin_turn` installs the first epoch. Both one-turn and retained prompt responses close their callback epochs
+inside ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
+finishes before the owner publishes `Finished` or returns the turn report. The
+owner keeps handling
+observation and shutdown commands while preparation waits; cancellation, timeout
+or cleanup failure ends the connection before the new prompt. The same bounded,
+cancellable preparation reapplies explicit model, mode and option choices after
+agent configuration updates, before recording durable submission. Preparation
+frames carry the accepted run identity, including when preparation fails before
+submission. Missing-context
+restoration clears the callback binding inside ordered response dispatch and
+retires accepted restoration work before creating a fresh session.
+`HostServices` is captured at connection creation and has no attachment mutation
+path, so editor-like extension requests cannot replace cwd, environment, callbacks
+or MCP grants.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

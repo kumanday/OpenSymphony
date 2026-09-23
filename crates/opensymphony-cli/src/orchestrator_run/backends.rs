@@ -17088,12 +17088,21 @@ exit 64
             "setup_retry",
             "permission",
             "corrupt",
+            "configured",
         ] {
             let profile = serde_json::from_value(serde_json::json!({
                 "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
             })).expect("profile");
             workflow.extensions.acp.profiles.insert(id.into(), profile);
         }
+        workflow
+            .extensions
+            .acp
+            .profiles
+            .get_mut("configured")
+            .expect("configured profile")
+            .session
+            .model = Some("profile-model".into());
         workflow.config.routing.harness = "acp".into();
         workflow.config.routing.harness_profile = Some("first".into());
         let manager = Arc::new(
@@ -17125,6 +17134,101 @@ exit 64
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("ACP worker did not finish")
+    }
+
+    #[tokio::test]
+    async fn acp_worker_applies_route_model_and_host_services_before_prompt() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        backend.worker_env.insert(
+            "OPENSYMPHONY_MEMORY_ENDPOINT".into(),
+            "http://127.0.0.1:8765/mcp".into(),
+        );
+        backend
+            .worker_env
+            .insert("OPENSYMPHONY_MEMORY_TOKEN".into(), "scoped-grant".into());
+        let root = manager.config().root.clone();
+        let mut request = acp_test_request(&root, "configured", 1);
+        request.route.model = Some("route-model".into());
+        backend
+            .start_worker(request)
+            .await
+            .expect("configured launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json"))
+                .expect("peer evidence"),
+        )
+        .expect("json");
+        assert_eq!(evidence["selected_model"], "route-model");
+        assert_eq!(evidence["memory_mcp_attached"], true);
+        assert_eq!(evidence["callback_roundtrip"], true);
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-callback.txt")).expect("file"),
+            "configured worker"
+        );
+        let first_owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state")
+            .owner_id;
+
+        backend
+            .start_worker(acp_test_request(&root, "configured", 2))
+            .await
+            .expect("profile-model launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json"))
+                .expect("peer evidence"),
+        )
+        .expect("json");
+        assert_eq!(evidence["selected_model"], "profile-model");
+        let second_owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state")
+            .owner_id;
+        assert_ne!(first_owner, second_owner);
+        let prompts =
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts");
+        let mut unsupported = acp_test_request(&root, "configured", 3);
+        unsupported.route.model = Some("unsupported-model".into());
+        backend
+            .start_worker(unsupported)
+            .await
+            .expect("unsupported model setup");
+        let outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert!(outcome.summary.as_deref().is_some_and(|summary| {
+            summary.contains("explicit session") && summary.contains("not advertised")
+        }));
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts"),
+            prompts,
+            "unsupported model must fail before submission"
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     #[tokio::test]

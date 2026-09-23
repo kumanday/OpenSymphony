@@ -44,6 +44,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
             issue_workspace: workspace.workspace_path().into(),
             environment: BTreeMap::from([("PATH".into(), std::env::var("PATH").expect("PATH"))]),
             excluded_environment: BTreeSet::new(),
+            services: Default::default(),
         },
         manager,
         workspace,
@@ -63,6 +64,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
             auth: None,
             required_capabilities: vec![],
             extensions: vec![],
+            session: Default::default(),
         },
         limits: ClientLimits {
             setup_timeout: Duration::from_secs(3),
@@ -169,13 +171,93 @@ async fn concurrent_sessions_busy_prompt_fence_and_cancellation_keep_other_comma
     retire(&b).await;
 }
 
+#[test]
+fn cancellation_while_submission_sync_is_blocked_never_sends_prompt() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let request = launch(root.path(), "SUBMIT", "none").await;
+        let workspace = request.workspace.workspace_path().to_path_buf();
+        let handle = host.open(request).await.expect("open");
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx
+                .recv()
+                .expect("release blocking filesystem worker");
+        });
+        started_rx.await.expect("filesystem worker occupied");
+
+        let cancellation = CancellationToken::new();
+        let pending = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                handle
+                    .prompt(
+                        "barrier-run".into(),
+                        1,
+                        "must-not-send".into(),
+                        cancellation,
+                    )
+                    .await
+            }
+        });
+        let barrier = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // Preparation remains command-responsive. A stalled inspect
+                // identifies the actor awaiting the durable filesystem write.
+                if tokio::time::timeout(Duration::from_millis(20), handle.inspect())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        cancellation.cancel();
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocking worker");
+        barrier.expect("submission reached filesystem barrier");
+        let error = pending.await.expect("prompt task").expect_err("cancelled");
+        assert!(
+            error
+                .to_string()
+                .contains("cancelled before prompt submission")
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(workspace.join(".opensymphony/conversation.json")).expect("manifest"),
+        )
+        .expect("manifest JSON");
+        assert_eq!(manifest["acp"]["status"], "finished");
+        assert_eq!(manifest["acp"]["stop_reason"], "cancelled_before_prompt");
+        assert!(
+            !std::fs::read_to_string(workspace.join("methods"))
+                .expect("peer method log")
+                .contains("session/prompt"),
+            "cancelled prompt crossed the transport barrier"
+        );
+    });
+}
+
 #[tokio::test]
 async fn retention_leases_expire_and_resource_limits_refuse_active_owners() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy {
         max_sessions: 1,
         idle_timeout: Duration::from_millis(100),
-        attachment_ttl: Duration::from_millis(300),
+        // Leave room for parallel workspace setup before the renewal; expiry
+        // is asserted after the full lease interval below.
+        attachment_ttl: Duration::from_secs(2),
         ..RetentionPolicy::default()
     })
     .expect("host");
@@ -198,7 +280,7 @@ async fn retention_leases_expire_and_resource_limits_refuse_active_owners() {
     a.control(SessionControl::Renew { lease_id })
         .await
         .expect("renew");
-    tokio::time::sleep(Duration::from_millis(380)).await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(
         a.inspect().await.is_err(),
         "expired attachment allows visible retirement"
@@ -618,7 +700,9 @@ async fn recorded_inspection_and_bounded_source_history_are_truthful() {
         .expect("recorded");
     assert!(!recorded.live && !recorded.retirement_eligible);
     assert_eq!(recorded.state.recovery, AcpRecovery::TranscriptOnly);
-    let mut bounded = launch(root.path(), "ISSUE-1", "none").await;
+    // Changed limits identify a different owner; exercise bounded history on
+    // a fresh workspace rather than changing the recorded owner contract.
+    let mut bounded = launch(root.path(), "BOUNDED", "none").await;
     bounded.limits.queued_frames = 2;
     bounded.limits.queued_bytes = 256;
     let bounded = host.open(bounded).await.expect("bounded owner");
@@ -666,4 +750,513 @@ async fn missing_persisted_context_resets_only_when_persistence_is_optional() {
             .expect("reset diagnostic")
             .contains("persisted context")
     );
+}
+
+#[tokio::test]
+async fn missing_restoration_revokes_old_callbacks_before_fresh_session_response() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    for mode in ["services_load", "services_resume"] {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        for attempt in 0..2 {
+            let mut request = launch(root.path(), "RESET", mode).await;
+            request.context.services.write_files = true;
+            request.context.services.mcp_servers.push(McpServer::Stdio(
+                McpServerStdio::new("memory", "memory-server").args(vec![
+                    "--token".into(),
+                    "retained-scope-grant".into(),
+                    "--custom".into(),
+                    "opaque-generic-arg".into(),
+                ]),
+            ));
+            let handle = host.open(request).await.expect("open or reset");
+            assert!(
+                prompt(&handle, &format!("attempt-{attempt}"), "hello")
+                    .await
+                    .succeeded()
+            );
+            retire(&handle).await;
+            std::fs::write(root.path().join("RESET/forget-session"), "").expect("forget");
+        }
+        assert!(
+            root.path()
+                .join("RESET/abandoned-callback-rejected")
+                .exists()
+        );
+        assert!(!root.path().join("RESET/abandoned-write").exists());
+    }
+}
+
+async fn configured_launch(root: &Path) -> SessionLaunch {
+    let mut request = launch(root, "CONFIG", "services_config").await;
+    request.profile.session.model = Some("second".into());
+    request.profile.session.mode = Some("execute".into());
+    request
+        .profile
+        .session
+        .options
+        .insert("verbosity".into(), "loud".into());
+    request
+}
+
+async fn ended(events: &mut tokio::sync::broadcast::Receiver<SessionEvent>) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(SessionEvent::Ended { .. }) => break,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("owner closed before terminal event: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("owner ended");
+}
+
+#[tokio::test]
+async fn retained_preparation_reapplies_explicit_choices_and_rejects_removed_choices() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(configured_launch(root.path()).await)
+        .await
+        .expect("open");
+    let mut events = handle.subscribe();
+    let drifted = prompt(&handle, "drift", "config-drift").await;
+    assert_eq!(drifted.configuration.options[0]["currentValue"], "first");
+    let configured = prompt(&handle, "configured", "config-assert").await;
+    for (option, expected) in configured
+        .configuration
+        .options
+        .iter()
+        .zip(["second", "execute", "loud"])
+    {
+        assert_eq!(option["currentValue"], expected);
+    }
+    let history = handle.source_history();
+    let configured_ids = history
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::Source { run_id, frame, .. }
+                if frame.payload["method"] == "session/set_config_option"
+                    && run_id == "configured" =>
+            {
+                Some(frame.payload["id"].to_string())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        configured_ids.len(),
+        3,
+        "model/mode/option preparation belongs to pending run"
+    );
+    for event in &history.events {
+        if let SessionEvent::Source { run_id, frame, .. } = event
+            && frame.direction == "incoming"
+            && configured_ids.contains(&frame.payload["id"].to_string())
+        {
+            assert_eq!(run_id, "configured", "configuration response attribution");
+        }
+    }
+    prompt(&handle, "remove", "config-remove").await;
+    assert!(
+        handle
+            .prompt(
+                "must-not-submit".into(),
+                1,
+                "config-assert".into(),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    ended(&mut events).await;
+    let manifest: ConversationManifest = serde_json::from_slice(
+        &std::fs::read(root.path().join("CONFIG/.opensymphony/conversation.json"))
+            .expect("manifest"),
+    )
+    .expect("JSON");
+    assert_eq!(manifest.acp.expect("ACP").identity.run_id, "remove");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("CONFIG/methods"))
+            .expect("methods")
+            .lines()
+            .filter(|method| *method == "session/prompt")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn retained_configuration_preparation_remains_cancellable_and_deadline_bounded() {
+    for cancel in [false, true] {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = configured_launch(root.path()).await;
+        request.limits.setup_timeout = Duration::from_secs(2);
+        let handle = host.open(request).await.expect("open");
+        let mut events = handle.subscribe();
+        prompt(&handle, "stall", "config-stall").await;
+        let cancellation = CancellationToken::new();
+        let marker = root.path().join("CONFIG/preparing-config");
+        let (result, ()) = tokio::join!(
+            handle.prompt(
+                "must-not-submit".into(),
+                1,
+                "config-assert".into(),
+                cancellation.clone()
+            ),
+            async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("preparation started");
+                let state = handle.inspect().await.expect("owner stays responsive");
+                assert_eq!(state.state.status, AcpSessionStatus::Finished);
+                assert!(handle.source_history().events.iter().any(|event| matches!(event, SessionEvent::Source {run_id, frame, ..} if run_id == "must-not-submit" && frame.payload["method"] == "session/set_config_option")), "preparation attribution does not depend on later submission");
+                if cancel {
+                    cancellation.cancel();
+                }
+            }
+        );
+        let error = result.expect_err("preparation must stop").to_string();
+        assert!(
+            error.contains(if cancel { "cancel" } else { "deadline" }),
+            "{error}"
+        );
+        ended(&mut events).await;
+        let manifest: ConversationManifest = serde_json::from_slice(
+            &std::fs::read(root.path().join("CONFIG/.opensymphony/conversation.json"))
+                .expect("manifest"),
+        )
+        .expect("JSON");
+        assert_eq!(manifest.acp.expect("ACP").identity.run_id, "stall");
+    }
+}
+
+#[tokio::test]
+async fn retained_callbacks_reset_after_cancellation_and_keep_live_configuration() {
+    let root = tempfile::tempdir().expect("root");
+    let mut launch = launch(root.path(), "SERVICES", "services").await;
+    launch.context.services = HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..Default::default()
+    };
+    launch.profile.session.model = Some("second".into());
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host.open(launch).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let cancel = cancellation.clone();
+    let marker = root.path().join("SERVICES/callback.pid");
+    let (first, ()) = tokio::join!(
+        handle.prompt(
+            "cancel-turn".into(),
+            1,
+            "services-cancel".into(),
+            cancellation
+        ),
+        async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !marker.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("terminal started");
+            cancel.cancel();
+        }
+    );
+    let first = first.expect("cancel acknowledgement");
+    assert!(first.cancellation_acknowledged);
+    assert_eq!(first.configuration.options[0]["currentValue"], "second");
+    let second = prompt(&handle, "next-turn", "services-next").await;
+    assert!(second.succeeded());
+    assert_eq!(first.session_id, second.session_id);
+    assert_eq!(second.configuration.options[0]["currentValue"], "first");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("SERVICES/launches"))
+            .expect("launches")
+            .lines()
+            .count(),
+        1
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn retained_identity_fingerprints_host_policy_and_resolved_mcp_grants() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let server = |token: &str| {
+        McpServer::Stdio(
+            McpServerStdio::new("memory", "memory-server")
+                .args(vec!["--token".into(), token.into()]),
+        )
+    };
+    let mut first = launch(root.path(), "GRANTS", "none").await;
+    first.context.services.mcp_servers = vec![server("original-scoped-grant")];
+    let handle = host.open(first).await.expect("open");
+    for changed_policy in [true, false] {
+        let mut changed = launch(root.path(), "GRANTS", "none").await;
+        changed.context.services.read_files = changed_policy;
+        changed.context.services.mcp_servers = vec![server(if changed_policy {
+            "original-scoped-grant"
+        } else {
+            "replacement-scoped-grant"
+        })];
+        assert!(matches!(
+            host.open(changed).await,
+            Err(HostError::IdentityMismatch)
+        ));
+    }
+    let manifest =
+        std::fs::read_to_string(root.path().join("GRANTS/.opensymphony/conversation.json"))
+            .expect("manifest");
+    assert!(!manifest.contains("original-scoped-grant"));
+    assert!(!manifest.contains("replacement-scoped-grant"));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn restored_sessions_receive_scoped_mcp_and_apply_returned_configuration() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    for mode in ["services_load", "services_resume"] {
+        let root = tempfile::tempdir().expect("root");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut session_id = None;
+        for attempt in 0..2 {
+            let mut launch = launch(root.path(), "RESTORE", mode).await;
+            launch.profile.session.model = Some("second".into());
+            launch.context.services.mcp_servers.push(McpServer::Stdio(
+                McpServerStdio::new("memory", "memory-server").args(vec![
+                    "--token".into(),
+                    "retained-scope-grant".into(),
+                    "--custom".into(),
+                    "opaque-generic-arg".into(),
+                ]),
+            ));
+            let handle = host.open(launch).await.expect("open or restore");
+            let history = handle.source_history();
+            let mut scoped_requests = 0;
+            for event in &history.events {
+                if let SessionEvent::Source { frame, .. } = event
+                    && matches!(
+                        frame.payload["method"].as_str(),
+                        Some("session/new" | "session/load" | "session/resume")
+                    )
+                {
+                    scoped_requests += 1;
+                    let captured = frame.payload.to_string();
+                    assert!(!captured.contains("opaque-generic-arg"));
+                    assert!(!captured.contains("retained-scope-grant"));
+                    assert_eq!(
+                        frame.payload["params"]["mcpServers"][0]["args"],
+                        serde_json::json!(["[redacted]", "[redacted]", "[redacted]", "[redacted]"])
+                    );
+                }
+            }
+            assert!(scoped_requests > 0, "source history includes MCP setup");
+            let report = prompt(&handle, &format!("attempt-{attempt}"), "hello").await;
+            assert_eq!(report.configuration.options[0]["currentValue"], "second");
+            if let Some(id) = &session_id {
+                assert_eq!(&report.session_id, id);
+            } else {
+                session_id = Some(report.session_id);
+            }
+            retire(&handle).await;
+        }
+        let methods =
+            std::fs::read_to_string(root.path().join("RESTORE/methods")).expect("methods");
+        assert!(methods.contains(if mode == "services_load" {
+            "session/load"
+        } else {
+            "session/resume"
+        }));
+    }
+}
+
+#[tokio::test]
+async fn retained_identity_rejects_changed_callback_and_response_limits() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "LIMITS", "none").await)
+        .await
+        .expect("open");
+    for kind in 0..8 {
+        let mut changed = launch(root.path(), "LIMITS", "none").await;
+        match kind {
+            0 => changed.limits.file_bytes = 1024,
+            1 => changed.limits.terminal_output_bytes = 1024,
+            2 => changed.limits.terminal_count = 1,
+            3 => changed.limits.pending_callbacks = 1,
+            4 => changed.limits.callback_timeout = Duration::from_secs(1),
+            5 => changed.limits.frame_bytes = 4096,
+            6 => changed.limits.callback_bytes = 4096,
+            _ => changed.limits.callback_frames = 1,
+        }
+        assert!(
+            matches!(host.open(changed).await, Err(HostError::IdentityMismatch)),
+            "kind {kind}"
+        );
+    }
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn ordinary_mcp_environment_does_not_poison_launch_or_retained_source_values() {
+    use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "MCPENV", "none").await;
+    request.context.services.mcp_servers.push(McpServer::Stdio(
+        McpServerStdio::new("memory", "memory-server").env(vec![
+            EnvVariable::new("DEBUG", "3"),
+            EnvVariable::new("ACCESS_TOKEN", "retained-env-secret"),
+        ]),
+    ));
+    let handle = host
+        .open(request)
+        .await
+        .expect("DEBUG=3 must not reject python3");
+    prompt(&handle, "env", "debug 3 retained-env-secret").await;
+    let history = handle.source_history();
+    let request = history
+        .events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::Source { frame, .. } if frame.payload["method"] == "session/new" => {
+                Some(&frame.payload)
+            }
+            _ => None,
+        })
+        .expect("source request");
+    assert_eq!(
+        request["params"]["mcpServers"][0]["env"][0]["value"],
+        "[redacted]"
+    );
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source { frame, .. } if frame.payload["params"]["update"]["content"]["text"] == "debug 3 [redacted]")));
+    assert!(
+        !serde_json::to_string(&history.events)
+            .expect("source")
+            .contains("retained-env-secret")
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn retained_source_redacts_file_payloads_without_changing_callback_wire_content() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "PRIVATE", "services").await;
+    request.context.services.read_files = true;
+    request.context.services.write_files = true;
+    request.context.services.terminals = true;
+    std::fs::write(
+        request.workspace.workspace_path().join("private-file"),
+        "opaque_workspace_payload_610",
+    )
+    .expect("private file");
+    let handle = host.open(request).await.expect("open");
+    assert!(prompt(&handle, "private", "file-privacy").await.succeeded());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("PRIVATE/private-copy"))
+            .expect("peer received and wrote original"),
+        "opaque_workspace_payload_610"
+    );
+    let history = handle.source_history();
+    assert!(
+        !serde_json::to_string(&history.events)
+            .expect("history")
+            .contains("opaque_workspace_payload_610")
+    );
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["result"]["content"] == "[redacted]")));
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["method"] == "fs/write_text_file" && frame.payload["params"]["content"] == "[redacted]")));
+    assert!(history.events.iter().any(|event| matches!(event, SessionEvent::Source {frame, ..} if frame.payload["result"]["output"] == "[redacted]")));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn retained_pre_prompt_callbacks_are_rejected_until_begin_turn() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "BEFORE", "services_pre_prompt").await;
+    request.context.services.write_files = true;
+    request.context.services.terminals = true;
+    request.profile.session.model = Some("second".into());
+    let handle = host.open(request).await.expect("open");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("BEFORE/pre-prompt-rejected").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("pre-prompt callbacks rejected");
+    assert!(!root.path().join("BEFORE/pre-prompt-write").exists());
+    assert!(!root.path().join("BEFORE/pre-prompt-process").exists());
+    assert!(prompt(&handle, "first", "first").await.succeeded());
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn normal_retained_completion_reaps_callbacks_and_rejects_adjacent_idle_work() {
+    let root = tempfile::tempdir().expect("root");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "LATE", "services").await;
+    request.context.services = HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..Default::default()
+    };
+    let handle = host.open(request).await.expect("open");
+    let report = prompt(&handle, "normal", "late-callbacks").await;
+    assert!(report.succeeded());
+    assert!(
+        !report.cancellation_requested,
+        "callback closure is separate from prompt cancellation"
+    );
+    #[cfg(unix)]
+    {
+        let pid: i32 = std::fs::read_to_string(root.path().join("LATE/normal-child.pid"))
+            .expect("child")
+            .parse()
+            .expect("PID");
+        assert_eq!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).expect("PID")),
+            Err(rustix::io::Errno::SRCH),
+            "child must be reaped before completion reply"
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("LATE/late-rejected").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("adjacent idle callbacks rejected");
+    assert!(!root.path().join("LATE/late-write").exists());
+    assert!(!root.path().join("LATE/late-process").exists());
+    assert_eq!(
+        handle.inspect().await.expect("idle owner").state.status,
+        AcpSessionStatus::Finished
+    );
+    // Repeated short-lived terminals exercise Darwin's exit/group-reap race
+    // while other retained-host cases run in parallel.
+    for attempt in 0..if cfg!(target_os = "macos") { 12 } else { 1 } {
+        assert!(
+            prompt(&handle, &format!("next-{attempt}"), "services-next")
+                .await
+                .succeeded()
+        );
+    }
+    retire(&handle).await;
 }

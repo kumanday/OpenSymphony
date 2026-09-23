@@ -29,6 +29,18 @@ pub struct AcpProfile {
     pub required_capabilities: Vec<String>,
     #[serde(default)]
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub session: AcpSessionConfig,
+}
+
+/// Explicit advertised session selections. Values are opaque IDs, never credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSessionConfig {
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -122,6 +134,22 @@ impl AcpProfile {
         }) {
             return Err(invalid(
                 "auth.method_id must be a nonempty bounded opaque identifier without control characters",
+            ));
+        }
+        if self.session.options.len() > 32
+            || self
+                .session
+                .model
+                .iter()
+                .chain(self.session.mode.iter())
+                .chain(self.session.options.keys())
+                .chain(self.session.options.values())
+                .any(|value| {
+                    value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control)
+                })
+        {
+            return Err(invalid(
+                "session selections must be bounded nonempty opaque identifiers",
             ));
         }
         if !self.extensions.is_empty() {

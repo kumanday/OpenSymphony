@@ -940,6 +940,19 @@ requested cancellation. Sending `session/cancel`, killing a process, or receivin
 an unrelated stop reason does not establish that acknowledgement. Prompt failures
 after possible submission are uncertain and are never retried by this client.
 
+
+ACP client facilities add independent defaults of 256 KiB per text file, 64 KiB
+of retained output per terminal, 16 terminal handles/processes, 64 pending
+callbacks, and a 300-second callback deadline. Pending callbacks also share a
+`queued_bytes` byte budget independent of transport ingress. Callback response
+reservations remain charged until stdin flush. An exceeded admission budget
+fails the run visibly and tears down owned processes. Host policy disables all
+filesystem and terminal callbacks by default. Output discards oldest characters
+at UTF-8 boundaries; zero output retention is allowed. Scoped MCP headers,
+environment values and credential option arguments join the redactor before any
+wire frame is captured. Configuration RPC failures retain method, error code and
+redacted context; authentication failures retain their dedicated classification.
+
 Retained ACP ownership is available through `SessionHost`. A finished worker may
 borrow the same live process again; nonpersistent agents remain attachable while
 that process is alive. Owner loss allows only capability-gated restoration of a

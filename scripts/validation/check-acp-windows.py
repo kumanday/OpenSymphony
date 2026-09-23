@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile/test the production Windows ACP owner without unrelated CLI dependencies.
+"""Compile/test the production Windows ACP helpers without unrelated CLI dependencies.
 
 The temporary Cargo harness is not a workspace member or published package. Its
 runtime dependency definitions come directly from the root manifest.
@@ -24,6 +24,7 @@ root = Path(__file__).resolve().parents[2]
 config = tomllib.loads((root / "Cargo.toml").read_text())
 deps = {
     "process-wrap": config["target"]["cfg(windows)"]["dependencies"]["process-wrap"],
+    "windows-sys": config["target"]["cfg(windows)"]["dependencies"]["windows-sys"],
     "tokio": config["workspace"]["dependencies"]["tokio"],
     "tempfile": config["workspace"]["dependencies"]["tempfile"],
 }
@@ -37,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="acp-windows-") as temp:
     harness = Path(temp)
     (harness / "Cargo.toml").write_text(
         '[package]\nname = "acp-windows-validation"\nversion = "0.0.0"\nedition = "2024"\n'
-        '[lib]\npath = "lib.rs"\n[lints.rust]\nunsafe_code = "forbid"\n[dependencies]\n'
+        '[lib]\npath = "lib.rs"\n[lints.rust]\nunsafe_code = "deny"\n[dependencies]\n'
         + "\n".join(f"{key} = {toml(value)}" for key, value in deps.items()) + "\n"
     )
     (harness / "lib.rs").write_text(
@@ -45,7 +46,11 @@ with tempfile.TemporaryDirectory(prefix="acp-windows-") as temp:
         + json.dumps(str(root / "crates/opensymphony-acp/src/windows_process.rs"))
         + ']\nmod windows_process;\n#[path = '
         + json.dumps(str(root / "crates/opensymphony-workspace/src/environment.rs"))
-        + ']\nmod environment;\n'
+        + ']\nmod environment;\n#[path = '
+        + json.dumps(str(root / "crates/opensymphony-acp/src/windows_path.rs"))
+        + ']\nmod windows_path;\n#[path = '
+        + json.dumps(str(root / "crates/opensymphony-acp/src/atomic_file.rs"))
+        + ']\nmod atomic_file;\n'
     )
     shutil.copyfile(root / "Cargo.lock", harness / "Cargo.lock")
     command = ["cargo", "check", "--tests", "--target", args.check_target] if args.check_target else ["cargo", "test"]

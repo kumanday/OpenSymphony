@@ -145,3 +145,25 @@ requests produce a scheduler-visible waiting event and receive the protocol
 cancellation response until operator handling is available. Unknown stop reasons
 and refusals stop automatic retry; uncertain submission or cancellation fences
 cleanup until execution risk is reconciled.
+
+| ACP client surface | Implemented contract |
+| --- | --- |
+| `fs/read_text_file` | Opt-in; session-bound UTF-8, 1-based lines, optional line count, preserved line endings, bounded file size. |
+| `fs/write_text_file` | Opt-in; contained absolute paths, checked missing parents, bounded content, regular files. |
+| `terminal/*` | Opt-in; create/output/wait/kill/release, connection-local random IDs, immutable host environment, contained cwd, bounded UTF-8 output. |
+| Session configuration | Advertised select options and grouped values; explicit model/mode choices; legacy modes; ordered updates. |
+| MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
+| Permission | Cancelled response until operator routing is implemented. |
+| Interactive auth and elicitation | Not advertised. |
+
+The production worker enables file and terminal callbacks for its verified
+issue workspace and supplies the active scoped memory grant as a host-owned MCP
+attachment. An explicit `routing.model` selection takes precedence over the
+profile's `session.model` and is validated against negotiated options before
+prompt submission.
+
+Windows callback operations pin path ancestors through use and reject reparse
+points, including junctions, through no-follow handles. Callback epoch handoff shares the setup
+deadline and observes caller cancellation before prompt submission.
+
+Callback policies do not establish a sandbox for the local agent process.

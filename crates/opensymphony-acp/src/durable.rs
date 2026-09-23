@@ -41,8 +41,22 @@ impl From<io::Error> for DurabilityError {
     }
 }
 
-pub(super) fn profile_fingerprint(profile: &AcpProfile) -> Result<String, DurabilityError> {
-    let encoded = serde_json::to_vec(profile).map_err(|_| DurabilityError::InvalidMetadata)?;
+pub(super) fn profile_fingerprint(
+    profile: &AcpProfile,
+    services: &super::HostServices,
+    limits: &super::ClientLimits,
+) -> Result<String, DurabilityError> {
+    // Persist only the digest: resolved MCP grants are part of session reuse
+    // identity but must never enter durable manifests in cleartext.
+    let encoded = serde_json::to_vec(&(
+        profile,
+        services.read_files,
+        services.write_files,
+        services.terminals,
+        &services.mcp_servers,
+        limits,
+    ))
+    .map_err(|_| DurabilityError::InvalidMetadata)?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
