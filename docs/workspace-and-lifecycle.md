@@ -961,8 +961,13 @@ Job Object. Retirement waits for active work and leases to clear, then terminate
 and reaps owned process resources before acknowledging cleanup. Trusted local
 host execution provides filesystem/process access; it is not a sandbox.
 
-The production worker persists `harness-route.json` before ACP owner reservation,
-including profile and model identity. The owner also persists verified terminal
+The production worker binds the selected ACP profile and model to `run.json`
+when preparing the run. It also persists `harness-route.json` before ACP owner
+reservation as the latest workspace route snapshot. Recovery takes its route
+from the matching run record; an older run record can use the workspace snapshot
+only when the durable ACP identity names that same run and attempt. A claim
+for a different run clears the prior turn's terminal status and stop reason
+in the synced claim checkpoint. The owner also persists verified terminal
 or parent runtime envelopes; worker finish copies the owner-updated conversation
 binding back into the run record. A profile switch, a change to effective profile
 configuration or credential scope, or a harness switch retires the old owner

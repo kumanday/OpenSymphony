@@ -489,29 +489,43 @@ pub(super) fn effective_launch_identity(
     }
     let profile_fingerprint =
         crate::opensymphony_acp::launch_profile_fingerprint(&profile, &services, limits)?;
+    let credential_scope = credential_scope(
+        profile.env_refs.values().map(String::as_str).chain([
+            "OPENSYMPHONY_MEMORY_TOKEN",
+            "OPENSYMPHONY_MEMORY_ENDPOINT",
+            "OPENSYMPHONY_MEMORY_PROJECT",
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+            "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES",
+        ]),
+        environment,
+    );
+    Ok(EffectiveLaunchIdentity {
+        profile,
+        services,
+        profile_fingerprint,
+        credential_scope,
+    })
+}
+
+fn credential_scope<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    environment: &BTreeMap<String, String>,
+) -> String {
     // Fingerprint resolved credential scope without persisting credentials or environment.
     use sha2::{Digest, Sha256};
     let mut scope = Sha256::new();
-    for name in profile.env_refs.values().map(String::as_str).chain([
-        "OPENSYMPHONY_MEMORY_TOKEN",
-        "OPENSYMPHONY_MEMORY_ENDPOINT",
-        "OPENSYMPHONY_MEMORY_PROJECT",
-        "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
-        "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES",
-    ]) {
-        if let Some(value) = environment.get(name) {
+    for name in names {
+        if let Some((_, value)) = environment
+            .iter()
+            .find(|(key, _)| environment_variable_names_equal(key, name))
+        {
             scope.update(name.as_bytes());
             scope.update([0]);
             scope.update(value.as_bytes());
             scope.update([0]);
         }
     }
-    Ok(EffectiveLaunchIdentity {
-        profile,
-        services,
-        profile_fingerprint,
-        credential_scope: format!("{:x}", scope.finalize()),
-    })
+    format!("{:x}", scope.finalize())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -792,11 +806,29 @@ fn project_event(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
+    #[test]
+    fn credential_scope_uses_platform_environment_name_rules() {
+        let first = BTreeMap::from([("AGENT_TOKEN".into(), "first".into())]);
+        let changed = BTreeMap::from([("AGENT_TOKEN".into(), "second".into())]);
+        let source = ["agent_token"];
+        assert_eq!(
+            credential_scope(source, &first) != credential_scope(source, &changed),
+            cfg!(windows),
+            "only Windows resolves the differently cased credential reference"
+        );
+        assert_ne!(
+            credential_scope(["AGENT_TOKEN"], &first),
+            credential_scope(["AGENT_TOKEN"], &changed),
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn launch_environment_skips_unrelated_non_utf8_ambient_values() {
         let ambient = [

@@ -52,7 +52,7 @@ use crate::opensymphony_orchestrator::{
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
+    AcpRunRoute, CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
     IssueLifecycleState, ParentCheckoutRequest, ParentRuntimeDescriptor, ParentRuntimeEnvelope,
     RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
     WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
@@ -92,6 +92,34 @@ const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
 const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
+
+fn acp_run_route(route: &crate::opensymphony_orchestrator::HarnessRouteDecision) -> AcpRunRoute {
+    AcpRunRoute {
+        task_type: route.task_type.clone(),
+        harness_kind: route.harness_kind.clone(),
+        harness_profile: route.harness_profile.clone(),
+        model: route.model.clone(),
+        model_profile: route.model_profile.clone(),
+        reason: route.reason.clone(),
+        dry_run: route.dry_run,
+        user_override: route.user_override,
+    }
+}
+
+fn harness_route_from_acp_run_route(
+    route: AcpRunRoute,
+) -> crate::opensymphony_orchestrator::HarnessRouteDecision {
+    crate::opensymphony_orchestrator::HarnessRouteDecision {
+        task_type: route.task_type,
+        harness_kind: route.harness_kind,
+        harness_profile: route.harness_profile,
+        model: route.model,
+        model_profile: route.model_profile,
+        reason: route.reason,
+        dry_run: route.dry_run,
+        user_override: route.user_override,
+    }
+}
 const PARENT_FINAL_VERIFICATION_PATH: &str = "evidence/final-verification.json";
 const MAX_PARENT_VERIFICATION_RECEIPT_BYTES: u64 = 64 * 1024;
 
@@ -6562,7 +6590,8 @@ impl RuntimeWorkerBackend {
                 .with_normal_retry_count(run.normal_retry_count)
                 .with_repository_binding(run.repository_binding.clone())
                 .with_runtime_envelope(runtime_envelope.clone())
-                .with_parent_runtime_envelope(parent_runtime_envelope.clone());
+                .with_parent_runtime_envelope(parent_runtime_envelope.clone())
+                .with_acp_route((route.harness_kind == acp::KIND).then(|| acp_run_route(&route)));
             let mut initialize_fresh_conversation = false;
             let mut run_manifest = if recovered {
                 match workspace_manager.load_run_manifest(&ensured.handle).await {
@@ -6620,11 +6649,17 @@ impl RuntimeWorkerBackend {
                         initialize_fresh_conversation |= route.harness_kind
                             == OPENHANDS_AGENT_SERVER_KIND
                             && memory_grant_requires_fresh_conversation;
-                        if (acp_identity_changed
+                        if (route.harness_kind == acp::KIND
+                            && run_manifest.acp_route.as_ref() == Some(&acp_run_route(&route))
                             && matches!(
                                 run_manifest.status,
                                 RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
                             ))
+                            || (acp_identity_changed
+                                && matches!(
+                                    run_manifest.status,
+                                    RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
+                                ))
                             || recoverable_run_manifest(
                                 &run_manifest,
                                 conversation_manifest.as_ref(),
@@ -10076,41 +10111,71 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 .ok_or_else(|| {
                     CliWorkerError::LaunchFailed("ACP recovery workspace missing".into())
                 })?;
-            let raw = self
+            let run = self
                 .workspace_manager
-                .read_text_artifact(&handle, &handle.metadata_dir().join("harness-route.json"))
+                .load_run_manifest(&handle)
                 .await
-                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
-            if let Some(raw) = raw {
-                let persisted: crate::opensymphony_orchestrator::HarnessRouteDecision =
-                    serde_json::from_str(&raw)
-                        .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
+                .ok_or_else(|| CliWorkerError::LaunchFailed("ACP recovery run missing".into()))?;
+            let expected_run_id = format!("run-{}", request.run.worker_id);
+            if run.run_id != expected_run_id
+                || request
+                    .run
+                    .attempt
+                    .is_some_and(|attempt| run.attempt != attempt.get())
+            {
+                return Err(CliWorkerError::LaunchFailed(
+                    "ACP recovery run identity mismatch".into(),
+                ));
+            }
+            if let Some(bound) = run.acp_route {
+                if bound.harness_kind != acp::KIND || bound.harness_profile.is_none() {
+                    return Err(CliWorkerError::LaunchFailed(
+                        "ACP recovery route identity mismatch".into(),
+                    ));
+                }
+                request.route = harness_route_from_acp_run_route(bound);
+            } else {
+                // Legacy manifests have only a workspace-wide route. It belongs to
+                // this run only if the durable ACP identity names the same run.
                 let recorded = self
                     .workspace_manager
                     .load_conversation_manifest(&handle)
                     .await
                     .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
-                    .and_then(|manifest| manifest.acp);
-                if persisted.harness_kind != acp::KIND
-                    || recorded.as_ref().is_none_or(|state| {
-                        persisted.harness_profile.as_ref() != Some(&state.identity.profile_id)
-                    })
+                    .and_then(|manifest| manifest.acp)
+                    .ok_or_else(|| {
+                        CliWorkerError::LaunchFailed("ACP recovery identity missing".into())
+                    })?;
+                if recorded.identity.run_id != run.run_id
+                    || recorded.identity.attempt != run.attempt
                 {
                     return Err(CliWorkerError::LaunchFailed(
-                        "ACP recovery route identity mismatch".into(),
+                        "ACP recovery has no route bound to the prepared run".into(),
                     ));
                 }
-                request.route = persisted;
-            } else if let Some(state) = self
-                .workspace_manager
-                .load_conversation_manifest(&handle)
-                .await
-                .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?
-                .and_then(|m| m.acp)
-            {
-                request.route.harness_profile = Some(state.identity.profile_id);
-                request.route.model = None;
-                request.route.model_profile = None;
+                let raw = self
+                    .workspace_manager
+                    .read_text_artifact(&handle, &handle.metadata_dir().join("harness-route.json"))
+                    .await
+                    .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+                if let Some(raw) = raw {
+                    let persisted: crate::opensymphony_orchestrator::HarnessRouteDecision =
+                        serde_json::from_str(&raw)
+                            .map_err(|e| CliWorkerError::LaunchFailed(e.to_string()))?;
+                    if persisted.harness_kind != acp::KIND
+                        || persisted.harness_profile.as_ref() != Some(&recorded.identity.profile_id)
+                    {
+                        return Err(CliWorkerError::LaunchFailed(
+                            "ACP recovery route identity mismatch".into(),
+                        ));
+                    }
+                    request.route = persisted;
+                } else {
+                    request.route.harness_profile = Some(recorded.identity.profile_id);
+                    request.route.model = None;
+                    request.route.model_profile = None;
+                }
             }
         }
         let pending = self.spawn_worker_task(request, true);
@@ -11270,6 +11335,7 @@ mod tests {
             repository_binding: None,
             runtime_envelope: None,
             parent_runtime_envelope: None,
+            acp_route: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -11347,6 +11413,7 @@ mod tests {
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope.clone()),
             parent_runtime_envelope: None,
+            acp_route: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -11432,6 +11499,7 @@ mod tests {
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope.clone()),
             parent_runtime_envelope: None,
+            acp_route: None,
             attempt: 1,
             normal_retry_count: 0,
             pending_retry: false,
@@ -17696,7 +17764,12 @@ exit 64
         );
         assert_eq!(prior.identity.run_id, "run-acp-worker-1");
         let prepared = manager
-            .start_run(&handle, &RunDescriptor::new("run-acp-worker-2", 2))
+            .start_run(
+                &handle,
+                &RunDescriptor::new("run-acp-worker-2", 2).with_acp_route(Some(acp_run_route(
+                    &acp_test_request(&root, "first", 2).route,
+                ))),
+            )
             .await
             .expect("prepare next run before daemon restart");
         assert_eq!(prepared.status, RunStatus::Prepared);
@@ -17756,6 +17829,129 @@ exit 64
         .expect("JSON evidence");
         assert_eq!(evidence["memory_token_present"], true);
         assert_eq!(evidence["memory_mcp_attached"], true);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_recovery_uses_prepared_run_model_instead_of_prior_turn_route() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "configured", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let old_route: crate::opensymphony_orchestrator::HarnessRouteDecision =
+            serde_json::from_str(
+                &manager
+                    .read_text_artifact(&handle, &handle.metadata_dir().join("harness-route.json"))
+                    .await
+                    .expect("route artifact")
+                    .expect("prior route"),
+            )
+            .expect("route JSON");
+        assert_eq!(old_route.model, None);
+
+        let mut selected = acp_test_request(&root, "configured", 2);
+        selected.route.model = Some("route-model".into());
+        let prepared = manager
+            .start_run(
+                &handle,
+                &RunDescriptor::new("run-acp-worker-2", 2)
+                    .with_acp_route(Some(acp_run_route(&selected.route))),
+            )
+            .await
+            .expect("prepare selected run before crash");
+        assert_eq!(prepared.status, RunStatus::Prepared);
+        assert_eq!(
+            prepared
+                .acp_route
+                .as_ref()
+                .and_then(|route| route.model.as_deref()),
+            Some("route-model")
+        );
+        let recovered = backend
+            .recover_worker(acp_test_request(&root, "configured", 2))
+            .await
+            .expect("recover prepared run");
+        assert_eq!(
+            recovered
+                .conversation
+                .harness_capability
+                .expect("ACP capability")
+                .profile_id,
+            "configured"
+        );
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json"))
+                .expect("peer evidence"),
+        )
+        .expect("evidence JSON");
+        assert_eq!(evidence["selected_model"], "route-model");
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+                .expect("prompts")
+                .lines()
+                .count(),
+            2
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_recovery_rejects_unbound_prior_turn_route() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        manager
+            .start_run(&handle, &RunDescriptor::new("run-acp-worker-2", 2))
+            .await
+            .expect("prepare unbound run");
+        let result = backend
+            .recover_worker(acp_test_request(&root, "first", 2))
+            .await;
+        assert!(
+            matches!(result, Err(CliWorkerError::LaunchFailed(message)) if message.contains("no route bound"))
+        );
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+                .expect("prompts")
+                .lines()
+                .count(),
+            1
+        );
         acp::retire(&manager, &handle, backend.acp_host.as_ref())
             .await
             .expect("retire");

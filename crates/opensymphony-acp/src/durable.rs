@@ -240,6 +240,8 @@ impl Durability {
             return Err(DurabilityError::Binding("connection generation"));
         }
         if reserve_launch {
+            let new_run = state.identity.run_id != identity.run_id
+                || state.identity.attempt != identity.attempt;
             state.identity.generation = state
                 .identity
                 .generation
@@ -247,6 +249,10 @@ impl Durability {
                 .ok_or(DurabilityError::Binding("connection generation exhausted"))?;
             state.identity.run_id = identity.run_id;
             state.identity.attempt = identity.attempt;
+            if new_run {
+                state.status = AcpSessionStatus::Ready;
+                state.stop_reason = None;
+            }
             state.owner_id = uuid::Uuid::new_v4().to_string();
             state.process = AcpProcessState::LaunchPending;
         } else {
@@ -613,6 +619,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn new_claim_clears_prior_terminal_outcome_before_launch() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let first_identity = identity(&workspace);
+        let mut first = Durability::open(
+            manager(root.path()),
+            workspace.clone(),
+            first_identity.clone(),
+        )
+        .await
+        .expect("first owner");
+        first
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready first turn");
+        first
+            .submitted(first_identity.run_id, first_identity.attempt)
+            .await
+            .expect("submit first turn");
+        first
+            .finished("end_turn".into())
+            .await
+            .expect("first terminal outcome");
+        first.stopped().await.expect("quiescent");
+        drop(first);
+
+        let mut next_identity = identity(&workspace);
+        next_identity.run_id = "run-2".into();
+        next_identity.attempt = 2;
+        let next = Durability::open(manager(root.path()), workspace.clone(), next_identity)
+            .await
+            .expect("next owner");
+        assert_eq!(next.state().process, AcpProcessState::LaunchPending);
+        assert_eq!(next.state().status, AcpSessionStatus::Ready);
+        assert_eq!(next.state().stop_reason, None);
+        let persisted = manager(root.path())
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(persisted.identity.run_id, "run-2");
+        assert_eq!(persisted.identity.attempt, 2);
+        assert_eq!(persisted.status, AcpSessionStatus::Ready);
+        assert_eq!(persisted.stop_reason, None);
+    }
+
     #[test]
     fn owner_lock_child() {
         let Some(path) = std::env::var_os("ACP_TEST_OWNER_LOCK") else {
@@ -771,9 +832,13 @@ mod tests {
             .expect("terminal evidence");
         restored.stopped().await.expect("supervised process reaped");
         drop(restored);
-        let mut reopened = Durability::open(manager(root.path()), workspace.clone(), input.clone())
-            .await
-            .expect("finished recovery");
+        let mut finished_identity = input.clone();
+        finished_identity.run_id = "run-3".into();
+        finished_identity.attempt = 3;
+        let mut reopened =
+            Durability::open(manager(root.path()), workspace.clone(), finished_identity)
+                .await
+                .expect("finished recovery");
         assert_eq!(reopened.state().status, AcpSessionStatus::Finished);
         assert_eq!(reopened.state().stop_reason.as_deref(), Some("end_turn"));
         reopened.uncertain().await.expect("explicit risk fence");

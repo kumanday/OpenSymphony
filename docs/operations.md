@@ -979,7 +979,11 @@ Configure `routing.harness: acp`, a named `routing.harness_profile`, and its
 preflight readiness separately from negotiated run support. An unavailable
 executable or missing credential reference is reported without exposing its value.
 Retained profile identity survives a default-profile change on restart. A known
-terminal prompt is reconciled without sending it again; a possibly submitted
+ACP profile and model are bound to the prepared run manifest. Recovery rejects
+an older unbound prepared run when its workspace route snapshot belongs to a
+different ACP run. Claims for a new run clear the old terminal result before launch,
+so a crash at that checkpoint cannot complete the new run from the prior turn.
+A known terminal prompt is reconciled without sending it again; a possibly submitted
 prompt remains uncertain and blocks automatic retry and workspace removal.
 Recovered finished turns reconcile only the matching run ID and attempt; a
 prepared later run receives its own scoped memory environment and prompt.

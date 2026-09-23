@@ -15097,6 +15097,7 @@ Public memory concept.
             repository_binding: None,
             runtime_envelope: Some(runtime_envelope),
             parent_runtime_envelope: None,
+            acp_route: None,
             attempt: 2,
             normal_retry_count: 0,
             pending_retry: false,
