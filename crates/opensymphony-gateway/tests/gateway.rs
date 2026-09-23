@@ -5505,6 +5505,7 @@ async fn harness_operation_action_uses_registered_run_operation_and_result_recei
     snapshot.issues[0].harness_capability = Some(HarnessRunCapability {
         harness: "acp".into(),
         profile_id: "fixture".into(),
+        run_binding_id: Some("run-worker-613".into()),
         protocol: "acp".into(),
         protocol_version: 1,
         rpc: "json_rpc_2_0".into(),
@@ -5528,11 +5529,29 @@ async fn harness_operation_action_uses_registered_run_operation_and_result_recei
         }],
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-    let server = GatewayServer::new(SnapshotStore::new(snapshot)).with_operator_commands(tx);
+    let journal = opensymphony::opensymphony_domain::InMemoryEventJournal::new(128, 128);
+    let server = GatewayServer::with_journal(
+        SnapshotStore::new(snapshot),
+        journal.clone(),
+        opensymphony::opensymphony_domain::StreamBroker::new(journal.clone()),
+    )
+    .with_operator_commands(tx);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     let server_task = tokio::spawn(async move { server.serve(listener).await.expect("serve") });
     let client = reqwest::Client::new();
+    let detail: serde_json::Value = client
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("run detail")
+        .json()
+        .await
+        .expect("run JSON");
+    assert_eq!(
+        detail["harness_capability"]["run_binding_id"],
+        "run-worker-613"
+    );
     let action = ActionDispatch {
         schema_version: Default::default(),
         correlation_id: "echo-once".into(),
@@ -5549,6 +5568,7 @@ async fn harness_operation_action_uses_registered_run_operation_and_result_recei
     for (field, value) in [
         ("operation_id", serde_json::json!("unregistered")),
         ("method", serde_json::json!("unsafe")),
+        ("run_id", serde_json::json!("stale-attempt")),
     ] {
         let mut invalid = action.clone();
         invalid.payload.as_mut().expect("payload")[field] = value;
@@ -5601,6 +5621,11 @@ async fn harness_operation_action_uses_registered_run_operation_and_result_recei
     let receipt: ActionReceipt = response.await.expect("task").json().await.expect("receipt");
     assert_eq!(receipt.status, ActionStatus::Accepted);
     assert_eq!(receipt.result, Some(serde_json::json!({"value":"hello"})));
+    let events = journal.all_events().await;
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        opensymphony::opensymphony_gateway_schema::event_journal::EventKind::GatewayActionCompleted { .. }
+    ) && event.correlation_id.as_deref() == Some("echo-once")));
     server_task.abort();
 }
 

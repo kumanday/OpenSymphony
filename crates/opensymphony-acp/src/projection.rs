@@ -1,5 +1,8 @@
 //! Scheduler projection of the redacted source stream; wire evidence stays on the owner.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde_json::{Value, json};
 
@@ -39,10 +42,30 @@ pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<Str
     (!reported.is_empty()).then_some(reported)
 }
 
+fn safe_artifact_path(workspace: &Path, reported: &str) -> Option<String> {
+    if reported.is_empty() || reported.len() > 4096 || reported.chars().any(char::is_control) {
+        return None;
+    }
+    let root = workspace.canonicalize().ok()?;
+    let candidate = Path::new(reported);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let resolved = candidate.canonicalize().ok()?;
+    if !resolved.is_file() {
+        return None;
+    }
+    let relative = resolved.strip_prefix(root).ok()?.to_str()?;
+    (!relative.is_empty()).then(|| relative.to_owned())
+}
+
 #[derive(Default)]
 pub struct RuntimeProjection {
     cursor_enabled: bool,
     cursor_session_id: Option<String>,
+    cursor_workspace: Option<PathBuf>,
     last: Option<(u64, u64)>,
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
@@ -61,9 +84,15 @@ impl RuntimeProjection {
         }
     }
 
-    pub fn with_cursor(mut self, enabled: bool, session_id: Option<&str>) -> Self {
+    pub fn with_cursor(
+        mut self,
+        enabled: bool,
+        session_id: Option<&str>,
+        workspace: Option<&Path>,
+    ) -> Self {
         self.cursor_enabled = enabled;
         self.cursor_session_id = session_id.map(str::to_owned);
+        self.cursor_workspace = workspace.map(Path::to_path_buf);
         self
     }
 
@@ -122,11 +151,17 @@ impl RuntimeProjection {
                     "Cursor subagent task reported",
                     json!({"toolCallId": params["toolCallId"], "description": params["description"]}),
                 ),
-                "cursor/generate_image" => (
-                    "artifact_candidate",
-                    "Cursor image output reported",
-                    json!({"toolCallId": params["toolCallId"], "filePath": params.get("filePath"), "verified": false}),
-                ),
+                "cursor/generate_image" => {
+                    let relative = safe_artifact_path(
+                        self.cursor_workspace.as_deref()?,
+                        params["filePath"].as_str()?,
+                    )?;
+                    (
+                        "artifact_candidate",
+                        "Cursor image output reported",
+                        json!({"toolCallId": params["toolCallId"], "relativePath": relative, "verified": false}),
+                    )
+                }
                 _ => unreachable!("validated Cursor notification"),
             };
             return Some(RuntimeUpdate {
@@ -472,6 +507,7 @@ pub fn run_capability(
     crate::opensymphony_gateway_schema::capability::HarnessRunCapability {
         harness: "acp".into(),
         profile_id: state.identity.profile_id.clone(),
+        run_binding_id: Some(state.identity.run_id.clone()),
         protocol: "acp".into(),
         protocol_version: 1,
         rpc: "json_rpc_2_0".into(),
@@ -552,7 +588,7 @@ fn profile_capabilities_with_environment(
                 }
                 None => value("PATH"),
             };
-            let command = std::path::Path::new(&profile.command);
+            let command = Path::new(&profile.command);
             let available = if command.components().count() > 1 {
                 command.is_absolute() && executable(command)
             } else {
@@ -596,7 +632,7 @@ fn profile_capabilities_with_environment(
         .collect()
 }
 
-fn executable(path: &std::path::Path) -> bool {
+fn executable(path: &Path) -> bool {
     #[cfg(windows)]
     if path.extension().is_none() && path.with_extension("exe").is_file() {
         return true;
@@ -840,7 +876,7 @@ mod tests {
                 .apply(&callback_event(1, "incoming", payload("s")), "run")
                 .is_none()
         );
-        let mut enabled = RuntimeProjection::default().with_cursor(true, Some("s"));
+        let mut enabled = RuntimeProjection::default().with_cursor(true, Some("s"), None);
         assert!(
             enabled
                 .apply(&callback_event(1, "incoming", payload("other")), "run")
@@ -1249,5 +1285,41 @@ mod tests {
         assert_eq!(projected.kind, "session_update");
         assert_eq!(projected.payload["truncated"], true);
         assert!(serde_json::to_vec(&projected.payload).expect("JSON").len() < 1024);
+    }
+
+    #[test]
+    fn cursor_image_artifact_stays_inside_workspace_and_uses_relative_path() {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(root.path().join("images")).expect("images");
+        std::fs::write(root.path().join("images/result.png"), b"image").expect("image");
+        std::fs::write(outside.path().join("private.png"), b"private").expect("outside image");
+        assert_eq!(
+            safe_artifact_path(root.path(), "images/result.png"),
+            Some("images/result.png".into())
+        );
+        assert_eq!(
+            safe_artifact_path(
+                root.path(),
+                outside.path().join("private.png").to_str().expect("path")
+            ),
+            None
+        );
+        assert_eq!(safe_artifact_path(root.path(), "../private.png"), None);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                outside.path().join("private.png"),
+                root.path().join("images/link.png"),
+            )
+            .expect("symlink");
+            assert_eq!(safe_artifact_path(root.path(), "images/link.png"), None);
+        }
+        let mut projection =
+            RuntimeProjection::default().with_cursor(true, Some("s"), Some(root.path()));
+        let projected = projection.apply(&callback_event(1, "incoming", json!({"method":"cursor/generate_image","params":{"sessionId":"s","toolCallId":"image-1","description":"Result","filePath":"images/result.png"}})), "run").expect("artifact candidate");
+        assert_eq!(projected.payload["relativePath"], "images/result.png");
+        assert!(projected.payload.get("filePath").is_none());
+        assert!(projection.apply(&callback_event(2, "incoming", json!({"method":"cursor/generate_image","params":{"sessionId":"s","toolCallId":"image-2","description":"Result","filePath":outside.path().join("private.png")}})), "run").is_none());
     }
 }

@@ -1,3 +1,4 @@
+use futures_util::future::join_all;
 use opensymphony::opensymphony_gateway_schema::approval::{
     OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
 };
@@ -267,6 +268,61 @@ async fn outbound_operation_timeout_reports_unknown_without_retry() {
 }
 
 #[tokio::test]
+async fn outbound_operation_inflight_limit_rejects_ninth_request() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-LIMIT", "extension_echo_timeout").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    request.limits.prompt_timeout = Duration::from_secs(8);
+    let handle = host.open(request).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let prompt_handle = handle.clone();
+    let prompt_cancel = cancellation.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_handle
+            .prompt(
+                "echo-limit-run".into(),
+                1,
+                "extension-echo".into(),
+                prompt_cancel,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("EXTENSION-LIMIT/extension-ready").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    let results = join_all((0..9).map(|_| {
+        handle.operation(
+            "echo-limit-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+    }))
+    .await;
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(HostError::ResourceLimit)))
+            .count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|result| matches!(result, Err(HostError::Client(message)) if message.contains("outcome is unknown"))).count(), 8);
+    let count =
+        std::fs::read_to_string(root.path().join("EXTENSION-LIMIT/extension-request-count"))
+            .expect("request marker");
+    assert_eq!(count.lines().count(), 8);
+    cancellation.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(3), prompt)
+        .await
+        .expect("prompt completion");
+}
+
+#[tokio::test]
+#[ignore = "Cursor workflow registration awaits an authenticated pinned callback capture"]
 async fn cursor_request_id_zero_uses_vendor_result_and_notification_has_no_response() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");

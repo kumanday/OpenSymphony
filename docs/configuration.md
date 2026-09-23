@@ -1024,9 +1024,11 @@ references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-`extensions` accepts exact registration IDs: `cursor@2026.09.08-6caf4ff`
-for the pinned Cursor callback contract and `fixture_echo@1` for executable
-outbound tests. Duplicate IDs and unspecified vendor versions fail validation.
+`extensions` accepts `fixture_echo@1` for executable outbound tests. The
+`cursor@2026.09.08-6caf4ff` handler is implemented against the documented
+contract but workflow validation rejects its registration until an authenticated
+pinned CLI supplies a captured callback and response. Duplicate IDs and
+unspecified vendor versions fail validation.
 Registration alone grants no operation: outbound use also requires the peer's
 capability predicate and an active, bound run.
 The prompt API sends text. Explicit session selections live in each profile:
@@ -1074,7 +1076,11 @@ result schemas, version, capability predicate, deadline, and effect policy in
 profile and negotiated run capabilities. Clients invoke one through
 `POST /api/v1/actions/dispatch` with `action_kind: harness_operation`, a run
 target, and exactly `run_id`, `operation_id`, and `arguments` in the payload.
-The owner resolves the wire method and session ID. The action rejects an
+Use `harness_capability.run_binding_id` from the current run detail or snapshot
+as `run_id`; the gateway and scheduler reject stale attempts. The owner resolves
+the wire method and session ID. At most eight outbound operations are outstanding
+per ACP session, and completion or failure is published to the event journal
+with the action correlation ID. The action rejects an
 idempotency key so replay cannot silently repeat an uncertain operation.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,

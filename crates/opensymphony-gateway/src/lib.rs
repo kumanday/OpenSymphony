@@ -3031,30 +3031,29 @@ async fn dispatch_action(
             reply,
             delivery: receipt_guard.0.clone(),
         });
-        match tokio::time::timeout(Duration::from_secs(10), received).await {
-            Ok(Ok(Ok(result))) => {
-                let mut completed = receipt.clone();
-                completed.result = Some(result);
-                return (StatusCode::OK, Json(completed));
-            }
-            Ok(Ok(Err(error))) => return (StatusCode::CONFLICT, Json(failed(error))),
-            Ok(Err(_)) => {
-                return (
+        let (status, final_receipt) =
+            match tokio::time::timeout(Duration::from_secs(10), received).await {
+                Ok(Ok(Ok(result))) => {
+                    let mut completed = receipt.clone();
+                    completed.result = Some(result);
+                    (StatusCode::OK, completed)
+                }
+                Ok(Ok(Err(error))) => (StatusCode::CONFLICT, failed(error)),
+                Ok(Err(_)) => (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(failed(
-                        "harness operation path closed; outcome is unknown".into(),
-                    )),
-                );
-            }
-            Err(_) => {
-                return (
+                    failed("harness operation path closed; outcome is unknown".into()),
+                ),
+                Err(_) => (
                     StatusCode::GATEWAY_TIMEOUT,
-                    Json(failed(
-                        "harness operation timed out; outcome is unknown".into(),
-                    )),
-                );
-            }
+                    failed("harness operation timed out; outcome is unknown".into()),
+                ),
+            };
+        if let Err(error) =
+            append_harness_operation_outcome(&state.journal, &action, &final_receipt).await
+        {
+            tracing::warn!(?error, "failed to journal harness operation outcome");
         }
+        return (status, Json(final_receipt));
     }
     if matches!(
         action.action_kind,
@@ -3127,6 +3126,45 @@ async fn dispatch_action(
     }
 }
 
+async fn append_harness_operation_outcome(
+    journal: &InMemoryEventJournal,
+    action: &ActionDispatch,
+    receipt: &ActionReceipt,
+) -> Result<(), JournalError> {
+    let kind = if receipt.status == ActionStatus::Accepted {
+        EventKind::GatewayActionCompleted {
+            action: action.action_kind.to_string(),
+        }
+    } else {
+        EventKind::GatewayActionFailed {
+            action: action.action_kind.to_string(),
+            reason: receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "operation failed".into()),
+        }
+    };
+    journal.append(
+        EventRecord::builder()
+            .actor(EventActor::system("gateway"))
+            .correlation_id(action.correlation_id.clone())
+            .entity_ref(EntityRef {
+                kind: EntityKind::Run,
+                id: action.target_entity.entity_id.clone(),
+                identifier: None,
+            })
+            .kind(kind)
+            .summary(format!("Harness operation {}", if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" }))
+            .payload(serde_json::json!({
+                "action_id": receipt.action_id,
+                "correlation_id": action.correlation_id,
+                "status": if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" },
+                "reason": receipt.reason,
+            }))
+            .build()
+    ).await.map(|_| ())
+}
+
 fn harness_operation_action(
     envelope: &SnapshotEnvelope,
     action: &ActionDispatch,
@@ -3171,6 +3209,7 @@ fn harness_operation_action(
     if issue.runtime_state != ControlPlaneIssueRuntimeState::Running
         || issue.harness_capability.as_ref().is_none_or(|capability| {
             capability.harness != "acp"
+                || capability.run_binding_id.as_deref() != Some(run_id)
                 || !capability
                     .operations
                     .iter()

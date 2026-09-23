@@ -10,6 +10,19 @@ pub const FIXTURE_ECHO_VERSION: &str = "fixture_echo@1";
 pub const FIXTURE_ECHO_OPERATION: &str = "fixture.echo";
 pub const FIXTURE_ECHO_METHOD: &str = "_opensymphony.test/echo";
 
+fn metadata_schema() -> Value {
+    json!({
+        "type": "object",
+        "maxProperties": 8,
+        "propertyNames": {
+            "allOf": [
+                {"maxLength": 128},
+                {"anyOf": [{"pattern": "/"}, {"enum": ["traceparent", "tracestate", "baggage"]}]}
+            ]
+        }
+    })
+}
+
 pub fn cursor_enabled(profile: &AcpProfile) -> bool {
     profile.extensions.iter().any(|id| id == CURSOR_VERSION)
 }
@@ -65,7 +78,9 @@ pub fn cursor_notification(method: &str, params: &Value) -> bool {
                 && bounded("prompt", 8192)
                 && object.get("subagentType").is_some()
         }
-        "cursor/generate_image" => bounded("toolCallId", 128) && bounded("description", 2048),
+        "cursor/generate_image" => {
+            bounded("toolCallId", 128) && bounded("description", 2048) && bounded("filePath", 4096)
+        }
         _ => false,
     }
 }
@@ -92,8 +107,8 @@ pub fn outbound_operation(
         namespace: "opensymphony.test".into(),
         version: "1".into(),
         capability_predicate: "agentCapabilities._meta['opensymphony.dev/fixtureEcho'] == 1".into(),
-        parameters_schema: json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","maxLength":4096},"_meta":{"type":"object"}},"additionalProperties":false}),
-        result_schema: json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","maxLength":4096}},"additionalProperties":false}),
+        parameters_schema: json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","maxLength":4096},"_meta":metadata_schema()},"additionalProperties":false}),
+        result_schema: json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","maxLength":4096},"_meta":metadata_schema()},"additionalProperties":false}),
         deadline_ms: 5000,
         effect: "read_only_idempotent".into(),
     })
@@ -182,7 +197,16 @@ mod tests {
         assert!(outbound_operation(&profile, &advertised, FIXTURE_ECHO_OPERATION).is_none());
         profile.extensions.push(FIXTURE_ECHO_VERSION.into());
         assert!(outbound_operation(&profile, &json!({}), FIXTURE_ECHO_OPERATION).is_none());
-        assert!(outbound_operation(&profile, &advertised, FIXTURE_ECHO_OPERATION).is_some());
+        let operation = outbound_operation(&profile, &advertised, FIXTURE_ECHO_OPERATION)
+            .expect("negotiated operation");
+        assert_eq!(
+            operation.result_schema["properties"]["_meta"]["type"],
+            "object"
+        );
+        assert_eq!(
+            operation.result_schema["properties"]["_meta"]["maxProperties"],
+            8
+        );
         assert!(validate_echo_arguments(
             &json!({"value":"ok","_meta":{"traceparent":"trace"}})
         ));

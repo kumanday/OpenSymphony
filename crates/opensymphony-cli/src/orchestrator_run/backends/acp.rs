@@ -775,8 +775,11 @@ async fn try_run(
         .source_history()
         .latest_cursor
         .unwrap_or((handle.generation, 0));
-    let mut projection = RuntimeProjection::after(baseline)
-        .with_cursor(cursor_enabled, snapshot.state.session_id.as_deref());
+    let mut projection = RuntimeProjection::after(baseline).with_cursor(
+        cursor_enabled,
+        snapshot.state.session_id.as_deref(),
+        Some(&snapshot.state.identity.workspace_path),
+    );
     let prompt = handle.prompt_with_operator(
         manifest.run_id.clone(),
         manifest.attempt,

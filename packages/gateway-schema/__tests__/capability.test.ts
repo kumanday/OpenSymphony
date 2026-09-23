@@ -12,6 +12,7 @@ test("Rust and TypeScript share ACP profile and negotiated run projections", () 
   expect(negotiated).toBe(true);
   expect(fixture.profile.operations?.[0].operation_id).toBe("fixture.echo");
   expect(fixture.run.operations?.[0].deadline_ms).toBe(5000);
+  expect(fixture.run.run_binding_id).toBe("run-worker-613");
   expect(fixture.run).not.toHaveProperty("input_tokens");
   expect(fixture.profile).not.toHaveProperty("command");
   expect(JSON.parse(JSON.stringify(fixture))).toEqual(fixture);

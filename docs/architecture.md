@@ -534,11 +534,14 @@ connection-owned actor. File operations are serialized; terminal waits use
 bounded asynchronous responses so they cannot block RPC dispatch. Terminal
 processes use the existing process-group or Windows Job Object supervisors.
 ACP extension registrations are exact profile/version entries inside the ACP
-module. Registered Cursor requests reuse the scheduler-owned question and plan
+module. Cursor request handlers reuse the scheduler-owned question and plan
 response path; known notifications contribute bounded activity or artifact
-evidence without authorizing new work. Outbound operation dispatch enters
+evidence without authorizing new work. Cursor workflow registration remains
+disabled until an authenticated pinned callback is captured. Outbound operation dispatch enters
 through the gateway's operator action, binds the current run in the scheduler,
-and resolves the registered method and session inside the retained owner.
+and resolves the registered method and session inside the retained owner. The
+public run capability supplies its attempt binding; the host bounds concurrent
+requests and the gateway journals each accepted operation's outcome.
 Negotiated peer support and profile enablement are both required. Timeouts
 report an unknown outcome, and lifecycle state remains orchestrator-owned.
 Each retained prompt first retires the prior callback epoch through a bounded,

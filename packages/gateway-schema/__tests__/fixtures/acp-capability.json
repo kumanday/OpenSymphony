@@ -42,6 +42,7 @@
   "run": {
     "harness": "acp",
     "profile_id": "local",
+    "run_binding_id": "run-worker-613",
     "protocol": "acp",
     "protocol_version": 1,
     "rpc": "json_rpc_2_0",

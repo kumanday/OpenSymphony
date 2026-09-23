@@ -102,6 +102,7 @@ export interface HarnessOperationCapability {
 export interface HarnessRunCapability {
   harness: string;
   profile_id: string;
+  run_binding_id?: string | null;
   protocol: string;
   protocol_version: number;
   rpc: string;

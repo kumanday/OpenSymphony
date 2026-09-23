@@ -542,6 +542,9 @@ pub struct HarnessOperationCapability {
 pub struct HarnessRunCapability {
     pub harness: String,
     pub profile_id: String,
+    /// Opaque scheduler attempt binding required for operator operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_binding_id: Option<String>,
     pub protocol: String,
     pub protocol_version: u16,
     pub rpc: String,

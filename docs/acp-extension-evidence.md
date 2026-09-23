@@ -18,7 +18,9 @@ client identity omitted. No credentials or account identifiers were captured.
 `agent status` reported `Not logged in`. The probe reached initialization but
 could not create a session or observe a Cursor extension callback. A live
 `cursor/ask_question`, `cursor/create_plan`, or notification frame and its
-response remain required before vendor compatibility is qualified.
+response remain required before vendor compatibility is qualified. Workflow
+validation refuses the Cursor registration until that evidence is captured and
+the handler is checked against the real envelope.
 
 ## Deterministic contract evidence
 

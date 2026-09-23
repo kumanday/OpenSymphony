@@ -2998,7 +2998,7 @@ scheduler:
         for (replacement, expected) in [
             (
                 "command: python3\n      extensions: [unknown]",
-                "extensions must be empty",
+                "extensions must name distinct supported contract versions",
             ),
             (
                 "command: python3\n      protocol_versions: [2]",

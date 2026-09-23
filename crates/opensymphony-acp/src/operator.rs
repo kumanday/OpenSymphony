@@ -154,7 +154,6 @@ fn valid_cursor_meta(meta: &Option<Value>) -> bool {
 fn valid_cursor_todo(todo: &CursorTodo) -> bool {
     bounded(&todo.id, 128)
         && bounded(&todo.content, 2048)
-        && no_secret_prompt(&todo.content)
         && matches!(
             todo.status.as_str(),
             "pending" | "in_progress" | "completed" | "cancelled"
@@ -409,7 +408,6 @@ pub(super) fn parse_interaction(
                 || !valid_cursor_meta(&request.meta)
                 || request.plan.trim().is_empty()
                 || request.plan.len() > 64 * 1024
-                || !no_secret_prompt(&request.plan)
                 || request.todos.len() > 128
                 || request.phases.len() > 32
                 || request.todos.iter().any(|todo| !valid_cursor_todo(todo))
@@ -434,7 +432,7 @@ pub(super) fn parse_interaction(
         _ => return Err(agent_client_protocol::Error::method_not_found()),
     };
     if !bounded(&title, 2048)
-        || !no_secret_prompt(&title)
+        || (kind != OperatorInteractionKind::PlanApproval && !no_secret_prompt(&title))
         || !rpc_id.is_number() && !rpc_id.is_string()
     {
         return Err(invalid());
@@ -806,6 +804,12 @@ mod tests {
             ),
             json!({"outcome":{"outcome":"accepted"}})
         );
+        let credential_plan = parse_interaction(
+            "cursor/create_plan",
+            &json!({"sessionId":"s","toolCallId":"call-credentials","name":"Rotate credentials","plan":"Validate token handling","todos":[{"id":"t1","content":"Update secret storage","status":"pending"}]}),
+            json!(2), "s", Duration::from_secs(30),
+        ).expect("plan text can discuss credential-related code");
+        assert_eq!(credential_plan.title, "Rotate credentials");
     }
 
     #[test]

@@ -566,17 +566,22 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
     let rendered = serde_yaml::to_string(&resolved.extensions.acp).expect("render");
     assert!(rendered.contains("AUTH_SOURCE"));
     assert!(!rendered.contains("auth-secret"));
-    for version in ["cursor@2026.09.08-6caf4ff", "fixture_echo@1"] {
-        let configured = WorkflowDefinition::parse(&source.replace(
-            "args: [agent.py]",
-            &format!("args: [agent.py]\n      extensions: [{version}]"),
-        ))
-        .expect("versioned ACP profile");
-        assert!(
-            configured.resolve(Path::new("/repo"), &env).is_ok(),
-            "{version}"
-        );
-    }
+    let configured = WorkflowDefinition::parse(&source.replace(
+        "args: [agent.py]",
+        "args: [agent.py]\n      extensions: [fixture_echo@1]",
+    ))
+    .expect("versioned ACP profile");
+    assert!(configured.resolve(Path::new("/repo"), &env).is_ok());
+    let unqualified_cursor = WorkflowDefinition::parse(&source.replace(
+        "args: [agent.py]",
+        "args: [agent.py]\n      extensions: [cursor@2026.09.08-6caf4ff]",
+    ))
+    .expect("versioned Cursor profile");
+    assert!(
+        unqualified_cursor
+            .resolve(Path::new("/repo"), &env)
+            .is_err()
+    );
     for (old, new) in [
         ("harness_profile: fake", "harness_profile: missing"),
         ("args: [agent.py]", "args: ['--TOKEN=secret']"),

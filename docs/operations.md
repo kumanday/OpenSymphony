@@ -1085,14 +1085,20 @@ while the same request remains pending.
 
 Registered ACP harness operations appear in profile and active run capabilities.
 An operator invokes `harness_operation` through the gateway with a run target
-and advertised operation ID. The service binds the current run and session and
+and advertised operation ID. The payload `run_id` is the current
+`harness_capability.run_binding_id` in the run detail or snapshot. The service
+binds the current run and session and
 validates arguments before sending a structured result receipt. Permission
 failure, stale binding, absent peer capability, invalid arguments, and disabled
 registration reject the action. `fixture.echo` is read-only and available only
 to `fixture_echo@1` profiles when the peer advertises
 `opensymphony.dev/fixtureEcho: 1`; it exists for executable contract tests.
 A deadline or disconnect after dispatch reports an unknown outcome, requiring
-evidence inspection before any repeat.
+evidence inspection before any repeat. The event journal emits a correlated
+completion or failure for each accepted dispatch. Image notifications project a
+relative artifact candidate only when the reported file resolves within the
+issue workspace. Cursor profile registration remains disabled pending the
+pinned live callback evidence in [acp-extension-evidence.md](acp-extension-evidence.md).
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

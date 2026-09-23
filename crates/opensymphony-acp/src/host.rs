@@ -964,6 +964,7 @@ impl SessionDriver {
         self.publish(false);
         let mut active: Option<ActivePrompt> = None;
         let mut preparing: Option<PreparingPrompt> = None;
+        let operation_permits = Arc::new(tokio::sync::Semaphore::new(8));
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut commands_closed = false;
         loop {
@@ -1058,6 +1059,10 @@ impl SessionDriver {
                                 let _ = reply.send(Err(HostError::Client("invalid registered operation arguments".into())));
                                 continue;
                             }
+                            let Ok(operation_permit) = operation_permits.clone().try_acquire_owned() else {
+                                let _ = reply.send(Err(HostError::ResourceLimit));
+                                continue;
+                            };
                             let mut params = arguments;
                             params["sessionId"] = serde_json::Value::String(session_id.0.to_string());
                             let request = match UntypedMessage::new(super::extensions::FIXTURE_ECHO_METHOD, params) {
@@ -1072,6 +1077,7 @@ impl SessionDriver {
                             let epoch = self.operator_router.lock().unwrap_or_else(|e| e.into_inner())
                                 .as_ref().map(|(_, epoch)| epoch.clone());
                             tokio::spawn(async move {
+                                let _operation_permit = operation_permit;
                                 let result = tokio::select! {
                                     result = tokio::time::timeout(timeout, request.block_task()) => match result {
                                         Ok(Ok(value)) if super::extensions::validate_echo_result(&value) => Ok(value),
