@@ -106,6 +106,19 @@ fn acp_run_route(route: &crate::opensymphony_orchestrator::HarnessRouteDecision)
     }
 }
 
+fn bind_acp_profile_model(
+    route: &mut crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workflow: &ResolvedWorkflow,
+) {
+    if route.harness_kind == acp::KIND && route.model.is_none() {
+        route.model = route
+            .harness_profile
+            .as_ref()
+            .and_then(|profile| workflow.extensions.acp.profiles.get(profile))
+            .and_then(|profile| profile.session.model.clone());
+    }
+}
+
 fn harness_route_from_acp_run_route(
     route: AcpRunRoute,
 ) -> crate::opensymphony_orchestrator::HarnessRouteDecision {
@@ -5735,7 +5748,10 @@ impl RuntimeWorkerBackend {
         let finished_worker_id = worker_id.clone();
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
-        let route = request.route.clone();
+        let mut route = request.route.clone();
+        if !recovered {
+            bind_acp_profile_model(&mut route, &workflow);
+        }
         let recovered = recovered
             && matches!(
                 route.harness_kind.as_str(),
@@ -6952,6 +6968,10 @@ impl RuntimeWorkerBackend {
             }
 
             if route.harness_kind == acp::KIND {
+                let fresh_conversation_grants = worker_memory_env
+                    .as_ref()
+                    .and_then(|memory| memory.scope_grants.as_ref())
+                    .filter(|_| memory_grant_requires_fresh_conversation);
                 // Keep the ACP future off the shared task stack for every route.
                 let mut outcome = Box::pin(acp::run_issue(
                     &route,
@@ -6970,6 +6990,7 @@ impl RuntimeWorkerBackend {
                     worker_environment,
                     checkout_credential_envs,
                     recovered,
+                    fresh_conversation_grants,
                 ))
                 .await;
                 attach_parent_verification_receipt(
@@ -17733,6 +17754,211 @@ exit 64
     }
 
     #[tokio::test]
+    async fn acp_worker_rotates_retained_owner_when_memory_run_scope_changes() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let mut previous_owner = None;
+        for (ordinal, name, value) in [
+            (1, "OPENSYMPHONY_MEMORY_RUN_ID", "run-a"),
+            (2, "OPENSYMPHONY_MEMORY_RUN_ID", "run-b"),
+            (3, "OPENSYMPHONY_MEMORY_ATTEMPT", "2"),
+            (4, "OPENSYMPHONY_MEMORY_PROJECT_SET", "project-set-b"),
+        ] {
+            backend.worker_env.insert(name.into(), value.into());
+            backend
+                .start_worker(acp_test_request(&root, "first", ordinal))
+                .await
+                .expect("ACP launch");
+            assert_eq!(
+                acp_test_finished(&mut backend).await.outcome,
+                WorkerOutcomeKind::Succeeded
+            );
+            let handle = manager
+                .list_all_workspaces()
+                .await
+                .expect("workspaces")
+                .remove(0)
+                .0;
+            let current = manager
+                .load_conversation_manifest(&handle)
+                .await
+                .expect("manifest")
+                .expect("manifest")
+                .acp
+                .expect("ACP state");
+            if let Some(previous) = previous_owner.as_ref() {
+                assert_ne!(&current.owner_id, previous);
+            }
+            previous_owner = Some(current.owner_id);
+            if ordinal == 4 {
+                acp::retire(&manager, &handle, backend.acp_host.as_ref())
+                    .await
+                    .expect("retire");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_fresh_memory_grant_is_acknowledged_after_owner_launch() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let grants = MemoryScopeGrantRegistry::default();
+        backend.memory_env = Some(RuntimeMemoryEnv {
+            endpoint: "http://127.0.0.1:8765/mcp".into(),
+            token: None,
+            project: "project-scope".into(),
+            project_set: None,
+            visibility: crate::opensymphony_memory::MemoryVisibility::Private,
+            run_id: None,
+            attempt: None,
+            target_commit: None,
+            checkout_head: None,
+            execution_repo: "repo-scope".into(),
+            parent_scope: false,
+            authorized_repositories: BTreeSet::from(["repo-scope".into()]),
+            authorized_repositories_by_project: BTreeMap::new(),
+            scope_grants: Some(grants.clone()),
+        });
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let first_owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state")
+            .owner_id;
+        assert!(grants.revoke_issue("COE-284"));
+        assert!(grants.fresh_conversation_required("COE-284"));
+
+        backend
+            .start_worker(acp_test_request(&root, "first", 2))
+            .await
+            .expect("fresh owner launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        assert!(!grants.fresh_conversation_required("COE-284"));
+        let second_owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state")
+            .owner_id;
+        assert_ne!(first_owner, second_owner);
+
+        backend
+            .start_worker(acp_test_request(&root, "first", 3))
+            .await
+            .expect("retained owner launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let third_owner = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state")
+            .owner_id;
+        assert_eq!(second_owner, third_owner);
+        assert!(grants.revoke_issue("COE-284"));
+        assert!(
+            backend
+                .start_worker(acp_test_request(&root, "missing", 4))
+                .await
+                .is_err(),
+            "an unavailable profile cannot acknowledge a fresh grant"
+        );
+        assert!(grants.fresh_conversation_required("COE-284"));
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_worker_ignores_unmanaged_ambient_memory_scope() {
+        let output = Command::new(env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "opensymphony_cli::orchestrator_run::backends::tests::acp_worker_ignores_unmanaged_ambient_memory_scope_child",
+                "--nocapture",
+            ])
+            .env("ACP_TEST_AMBIENT_SCOPE", "1")
+            .env("OPENSYMPHONY_MEMORY_PROJECT", "stale-project")
+            .env("OPENSYMPHONY_MEMORY_EXECUTION_REPO", "stale-repo")
+            .env_remove("OPENSYMPHONY_MEMORY_ENDPOINT")
+            .env_remove("OPENSYMPHONY_MEMORY_TOKEN")
+            .output()
+            .await
+            .expect("child test");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[tokio::test]
+    async fn acp_worker_ignores_unmanaged_ambient_memory_scope_child() {
+        if env::var_os("ACP_TEST_AMBIENT_SCOPE").is_none() {
+            return;
+        }
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        backend.worker_env.clear();
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("ACP launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json")).expect("evidence"),
+        )
+        .expect("JSON");
+        let prompt = evidence["prompt"].as_str().expect("prompt");
+        assert!(!prompt.contains("Memory tool scope:"));
+        assert!(!prompt.contains("stale-project"));
+        assert!(!prompt.contains("stale-repo"));
+        assert_eq!(evidence["memory_mcp_attached"], false);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
     async fn acp_recovery_does_not_complete_a_prepared_run_from_the_prior_turn() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
@@ -17862,7 +18088,7 @@ exit 64
                     .expect("prior route"),
             )
             .expect("route JSON");
-        assert_eq!(old_route.model, None);
+        assert_eq!(old_route.model.as_deref(), Some("profile-model"));
 
         let mut selected = acp_test_request(&root, "configured", 2);
         selected.route.model = Some("route-model".into());
@@ -17904,6 +18130,91 @@ exit 64
         )
         .expect("evidence JSON");
         assert_eq!(evidence["selected_model"], "route-model");
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+                .expect("prompts")
+                .lines()
+                .count(),
+            2
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_recovery_keeps_profile_model_selected_when_run_was_prepared() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "configured", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let first_run = manager
+            .load_run_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("run");
+        assert_eq!(
+            first_run
+                .acp_route
+                .as_ref()
+                .and_then(|route| route.model.as_deref()),
+            Some("profile-model")
+        );
+        let mut selected = acp_test_request(&root, "configured", 2);
+        bind_acp_profile_model(&mut selected.route, &backend.workflow);
+        let prepared = manager
+            .start_run(
+                &handle,
+                &RunDescriptor::new("run-acp-worker-2", 2)
+                    .with_acp_route(Some(acp_run_route(&selected.route))),
+            )
+            .await
+            .expect("prepare profile model before crash");
+        assert_eq!(
+            prepared
+                .acp_route
+                .as_ref()
+                .and_then(|route| route.model.as_deref()),
+            Some("profile-model")
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("prior owner retired before recovery");
+        Arc::make_mut(&mut backend.workflow)
+            .extensions
+            .acp
+            .profiles
+            .get_mut("configured")
+            .expect("profile")
+            .session
+            .model = Some("other-model".into());
+        backend
+            .recover_worker(acp_test_request(&root, "configured", 2))
+            .await
+            .expect("recover selected profile model");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let evidence: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(handle.workspace_path().join("acp-worker.json"))
+                .expect("peer evidence"),
+        )
+        .expect("evidence JSON");
+        assert_eq!(evidence["selected_model"], "profile-model");
         assert_eq!(
             fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
                 .expect("prompts")

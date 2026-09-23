@@ -2546,6 +2546,15 @@ pub(crate) struct MemoryScopeGrant {
 
 impl MemoryScopeGrantRegistry {
     #[cfg(test)]
+    pub(crate) fn fresh_conversation_required(&self, issue: &str) -> bool {
+        self.state
+            .read()
+            .expect("memory grant registry poisoned")
+            .revoked_issues
+            .contains(issue)
+    }
+
+    #[cfg(test)]
     pub(crate) fn issue_or_refresh_with_lifecycle(
         &self,
         project: &str,

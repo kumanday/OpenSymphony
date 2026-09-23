@@ -968,7 +968,9 @@ scheduler's exact workspace identity; changes prevent session reuse.
 Production `opensymphony run` selects this profile through the scheduler and
 persists the effective route under the workspace metadata directory. Recovery
 uses the route bound to the prepared `run.json` record even when the current
-default profile differs. Older run records may use the workspace route snapshot
+default profile differs. If `routing.model` is unset, preparation resolves the
+profile's `session.model` into that route and the runtime envelope. Older run
+records may use the workspace route snapshot
 only when the durable ACP identity matches their run ID and attempt. A finished ACP
 turn reconciles a recovered run only when its durable run ID and attempt match;
 a newly prepared attempt submits its own prompt. ACP-only execution
@@ -981,6 +983,10 @@ credential scope changes.
 Credential source names follow the host platform's environment-name rules;
 Windows aliases differing only in ASCII case resolve to the same credential
 when checking whether a retained owner must rotate.
+Managed memory run ID, attempt and project-set values are part of that scope;
+when they change, the retained ACP process is replaced so its environment
+matches the active run. ACP memory prompt guidance uses the scoped worker
+overlay that supplies the managed memory attachment.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated

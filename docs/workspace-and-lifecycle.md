@@ -961,7 +961,8 @@ Job Object. Retirement waits for active work and leases to clear, then terminate
 and reaps owned process resources before acknowledging cleanup. Trusted local
 host execution provides filesystem/process access; it is not a sandbox.
 
-The production worker binds the selected ACP profile and model to `run.json`
+The production worker binds the selected ACP profile and effective model,
+including a profile default when there is no routing override, to `run.json`
 when preparing the run. It also persists `harness-route.json` before ACP owner
 reservation as the latest workspace route snapshot. Recovery takes its route
 from the matching run record; an older run record can use the workspace snapshot

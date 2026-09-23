@@ -987,6 +987,12 @@ A known terminal prompt is reconciled without sending it again; a possibly submi
 prompt remains uncertain and blocks automatic retry and workspace removal.
 Recovered finished turns reconcile only the matching run ID and attempt; a
 prepared later run receives its own scoped memory environment and prompt.
+The bound model includes a profile's `session.model` when no routing override is
+set. Changes to managed memory run ID, attempt or project set rotate the retained
+ACP process so child environment and memory evidence remain scoped to the run.
+After a revoked memory grant requires a fresh owner, the revocation marker clears
+when that owner reports a successful launch; failed setup leaves it in place.
+ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
 An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
 outcome on recovery.
 Cleanup after a known-finished owner loss acquires the durable owner lock and

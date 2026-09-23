@@ -291,6 +291,7 @@ pub(super) async fn run_issue(
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
     recovered: bool,
+    fresh_conversation_grants: Option<&MemoryScopeGrantRegistry>,
 ) -> WorkerOutcomeRecord {
     let result = try_run(
         route,
@@ -309,6 +310,7 @@ pub(super) async fn run_issue(
         environment,
         excluded_environment,
         recovered,
+        fresh_conversation_grants,
     )
     .await;
     let (kind, status, stopped, detail) = match result {
@@ -494,8 +496,11 @@ pub(super) fn effective_launch_identity(
             "OPENSYMPHONY_MEMORY_TOKEN",
             "OPENSYMPHONY_MEMORY_ENDPOINT",
             "OPENSYMPHONY_MEMORY_PROJECT",
+            "OPENSYMPHONY_MEMORY_PROJECT_SET",
             "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
             "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES",
+            "OPENSYMPHONY_MEMORY_RUN_ID",
+            "OPENSYMPHONY_MEMORY_ATTEMPT",
         ]),
         environment,
     );
@@ -546,6 +551,7 @@ async fn try_run(
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
     recovered: bool,
+    fresh_conversation_grants: Option<&MemoryScopeGrantRegistry>,
 ) -> Result<String, String> {
     let previous = manager
         .load_conversation_manifest(workspace)
@@ -590,7 +596,7 @@ async fn try_run(
         )
         .await
         .map_err(|e| e.to_string())?;
-    let memory_prompt = memory_scope_prompt_from_environment(&environment);
+    let memory_prompt = memory_scope_prompt_from_environment(&worker_environment);
     let handle = host
         .open(SessionLaunch {
             manager: manager.clone(),
@@ -688,10 +694,16 @@ async fn try_run(
         .unwrap_or_else(|e| e.into_inner())
         .insert(run.worker_id.to_string(), active_session.clone());
     if let Some(sender) = launch.take() {
-        let _ = sender.send(LaunchReport::Conversation {
+        let reported = sender.send(LaunchReport::Conversation {
             conversation: Box::new(metadata),
             started_at: manifest.started_at.map(datetime_to_timestamp_ms),
         });
+        if fresh
+            && reported.is_ok()
+            && let Some(grants) = fresh_conversation_grants
+        {
+            grants.acknowledge_fresh_conversation(issue.identifier.as_str());
+        }
     }
     let mut receiver = handle.subscribe();
     let mut projection = RuntimeProjection::default();
