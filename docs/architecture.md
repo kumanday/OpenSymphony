@@ -22,6 +22,8 @@ orchestrator actor owns pending decisions; gateway clients submit a response
 command, and the active ACP worker returns it to the original RPC responder.
 Worker callback reports wake that actor for immediate application and snapshot
 publication, independently of the tracker polling interval.
+The run loop selects an event before mutating scheduler state, so a newly
+arriving callback or operator command cannot cancel an in-progress tick.
 Pending interactions are discarded on completion, cancellation, expiry, or
 restart and cannot be reconstructed from stored evidence.
 

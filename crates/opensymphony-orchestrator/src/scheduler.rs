@@ -6858,9 +6858,36 @@ where
                         && self
                             .executions
                             .get(&meta.issue_id)
-                            .and_then(IssueExecution::current_run)
-                            .is_some_and(|run| run.worker_id == worker_id)
+                            .is_some_and(|execution| {
+                                execution.status() == SchedulerStatus::Running
+                                    && execution
+                                        .current_run()
+                                        .is_some_and(|run| run.worker_id == worker_id)
+                            })
                     {
+                        let (reason, summary) = match interaction.kind {
+                            OperatorInteractionKind::Permission => {
+                                ("permission_request", "ACP agent requested permission")
+                            }
+                            OperatorInteractionKind::Question => {
+                                ("form_request", "ACP agent requested form input")
+                            }
+                            OperatorInteractionKind::PlanApproval => {
+                                ("plan_request", "ACP agent requested plan approval")
+                            }
+                        };
+                        if let Some(execution) = self.executions.get_mut(&meta.issue_id) {
+                            execution.observe_runtime_event(
+                                datetime_to_timestamp(Utc::now()),
+                                Some(format!("acp-operator-{}", interaction.request_id)),
+                                Some("acp.waiting_for_input".into()),
+                                Some(summary.into()),
+                                Some(serde_json::json!({
+                                    "reason": reason,
+                                    "operator_responses": true,
+                                })),
+                            )?;
+                        }
                         self.pending_operator
                             .insert(interaction.request_id.clone(), (worker_id, interaction));
                     }

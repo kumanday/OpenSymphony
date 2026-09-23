@@ -1059,6 +1059,9 @@ stall detection only until its deadline. Disconnect, cancellation, completion,
 and restart clear the live responder; operators must wait for a fresh request.
 Callback arrivals and closures publish updated snapshots without waiting for
 the next tracker poll.
+Only requests accepted into the scheduler's live pending set emit waiting
+activity. Web and desktop retain selected form choices across live refreshes
+while the same request remains pending.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

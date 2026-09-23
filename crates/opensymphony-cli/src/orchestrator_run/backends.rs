@@ -17696,6 +17696,17 @@ exit 64
                         .into_iter()
                         .find(|item| item.kind == kind);
                     if found.is_some() {
+                        assert!(
+                            snapshot.issues.iter().any(|issue| {
+                                issue.conversation.as_ref().is_some_and(|conversation| {
+                                    conversation
+                                        .recent_activity
+                                        .iter()
+                                        .any(|event| event.kind == "acp.waiting_for_input")
+                                })
+                            }),
+                            "accepted routed callback records waiting activity"
+                        );
                         break;
                     }
                 }
@@ -19620,7 +19631,7 @@ exit 64
     }
 
     #[tokio::test]
-    async fn acp_worker_retries_pre_submission_failure_and_reports_permission_wait() {
+    async fn acp_worker_retries_pre_submission_failure_without_false_permission_wait() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
         let root = manager.config().root.clone();
@@ -19670,7 +19681,10 @@ exit 64
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(waiting, "permission waiting state reaches the scheduler");
+        assert!(
+            !waiting,
+            "malformed permission must not claim a routed wait"
+        );
         assert_eq!(
             finished.expect("finished").outcome,
             WorkerOutcomeKind::Cancelled

@@ -68,6 +68,31 @@ use self::{
 
 const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
 
+enum RunWake {
+    Shutdown,
+    Server(Result<io::Result<()>, tokio::task::JoinError>),
+    OperatorCommand(Box<crate::opensymphony_gateway::OperatorCommand>),
+    OperatorUpdate,
+    TrackerTick,
+}
+
+async fn next_run_wake(
+    server_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    operator_commands_rx: &mut tokio::sync::mpsc::Receiver<
+        crate::opensymphony_gateway::OperatorCommand,
+    >,
+    operator_update_notify: &tokio::sync::Notify,
+    ticker: &mut tokio::time::Interval,
+) -> RunWake {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => RunWake::Shutdown,
+        result = server_task => RunWake::Server(result),
+        Some(command) = operator_commands_rx.recv() => RunWake::OperatorCommand(Box::new(command)),
+        _ = operator_update_notify.notified() => RunWake::OperatorUpdate,
+        _ = ticker.tick() => RunWake::TrackerTick,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MemoryServerBindState {
     schema_version: u32,
@@ -1233,43 +1258,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
     let mut gateway_action_cursor = 0;
 
-    let bootstrap_snapshot = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("received shutdown signal");
+    let bootstrap_snapshot = match scheduler.bootstrap(now_timestamp()).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
             server_task.abort();
             shutdown_memory_server(&mut memory_server).await?;
-            if let Some(mut supervisor) = supervisor {
-                let _ = supervisor.stop();
-            }
-            return Ok(());
+            return Err(RunCommandError::SchedulerConfig(error));
         }
-        result = &mut server_task => {
-            match result {
-                Ok(Ok(())) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    if let Some(mut supervisor) = supervisor {
-                        let _ = supervisor.stop();
-                    }
-                    return Ok(());
-                }
-                Ok(Err(error)) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(error));
-                }
-                Err(error) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
-                }
-            }
-        }
-        result = scheduler.bootstrap(now_timestamp()) => match result {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                server_task.abort();
-                shutdown_memory_server(&mut memory_server).await?;
-                return Err(RunCommandError::SchedulerConfig(error));
-            }
-        },
     };
     let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     let recovered_completed_parent_captures = scheduler.completed_subtree_cleanup_identifiers();
@@ -1305,40 +1300,49 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+        // Only wait for the next event inside select. Scheduler mutations can
+        // await after changing state and must run to completion once started.
+        let wake = next_run_wake(
+            &mut server_task,
+            &mut operator_commands_rx,
+            &operator_update_notify,
+            &mut ticker,
+        )
+        .await;
+        match wake {
+            RunWake::Shutdown => {
                 info!("received shutdown signal");
                 break;
             }
-            result = &mut server_task => {
-                match result {
-                    Ok(Ok(())) => break,
-                    Ok(Err(error)) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(error));
-                    }
-                    Err(error) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
-                    }
+            RunWake::Server(result) => match result {
+                Ok(Ok(())) => break,
+                Ok(Err(error)) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(error));
                 }
-            }
-            Some(command) = operator_commands_rx.recv() => {
+                Err(error) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                }
+            },
+            RunWake::OperatorCommand(command) => {
                 let result = scheduler
                     .respond_operator_request(&command.interaction, command.answer)
                     .await;
                 let _ = command.reply.send(result);
                 let snapshot = scheduler.snapshot(now_timestamp());
-                store.publish(map_snapshot(
-                    &snapshot,
-                    runtime.workflow.config.workspace.root.as_path(),
-                    &terminal_state_set(&runtime.workflow),
-                    current_agent_server_status(&mut supervisor, agent_server_base_url),
-                    current_memory_server_status(memory_server.as_ref()),
-                    &recent_events,
-                )).await;
+                store
+                    .publish(map_snapshot(
+                        &snapshot,
+                        runtime.workflow.config.workspace.root.as_path(),
+                        &terminal_state_set(&runtime.workflow),
+                        current_agent_server_status(&mut supervisor, agent_server_base_url),
+                        current_memory_server_status(memory_server.as_ref()),
+                        &recent_events,
+                    ))
+                    .await;
             }
-            _ = operator_update_notify.notified() => {
+            RunWake::OperatorUpdate => {
                 let observed_at = now_timestamp();
                 let snapshot = match scheduler.drain_worker_updates(observed_at).await {
                     Ok(snapshot) => snapshot,
@@ -1354,30 +1358,30 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                         scheduler.snapshot(observed_at)
                     }
                 };
-                store.publish(map_snapshot(
-                    &snapshot,
-                    runtime.workflow.config.workspace.root.as_path(),
-                    &terminal_state_set(&runtime.workflow),
-                    current_agent_server_status(&mut supervisor, agent_server_base_url),
-                    current_memory_server_status(memory_server.as_ref()),
-                    &recent_events,
-                )).await;
+                store
+                    .publish(map_snapshot(
+                        &snapshot,
+                        runtime.workflow.config.workspace.root.as_path(),
+                        &terminal_state_set(&runtime.workflow),
+                        current_agent_server_status(&mut supervisor, agent_server_base_url),
+                        current_memory_server_status(memory_server.as_ref()),
+                        &recent_events,
+                    ))
+                    .await;
             }
-            result = async {
-                ticker.tick().await;
+            RunWake::TrackerTick => {
                 let observed_at = now_timestamp();
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
                     &mut gateway_action_cursor,
                     observed_at,
-                ).await {
+                )
+                .await
+                {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, result)
-            } => {
-                let (observed_at, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1397,22 +1401,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             ),
                             Utc::now(),
                         );
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, agent_server_base_url),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                         if !auto_capture_candidates.is_empty() {
                             // Parent completion and its exact commit evidence
                             // can become durable in this scheduler tick. Load
                             // bindings afterward so capture does not use the
                             // pre-finalization controller snapshot.
-                            let capture_bindings = super::memory::load_all_terminal_capture_bindings(
-                                &runtime.workflow.config.workspace.root,
-                            );
+                            let capture_bindings =
+                                super::memory::load_all_terminal_capture_bindings(
+                                    &runtime.workflow.config.workspace.root,
+                                );
                             let auto_capture_result = match capture_bindings {
                                 Ok(capture_bindings) => {
                                     super::memory::auto_capture_terminal(
@@ -1474,7 +1481,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                     recent_events: &mut recent_events,
                                     store: &store,
                                 },
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                     Err(error) => {
@@ -1487,14 +1495,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             Utc::now(),
                         );
                         let snapshot = scheduler.snapshot(observed_at);
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, agent_server_base_url),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                     }
                 }
             }
@@ -2126,6 +2136,98 @@ pub(super) fn now_timestamp() -> TimestampMs {
 mod tests {
     use super::*;
     use crate::opensymphony_memory::MemoryError;
+
+    #[tokio::test]
+    async fn selected_tracker_tick_completes_before_queued_operator_wakes() {
+        use crate::opensymphony_gateway::OperatorCommand;
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = Arc::new(tokio::sync::Notify::new());
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        assert!(matches!(
+            next_run_wake(
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let (tick_entered_tx, tick_entered_rx) = tokio::sync::oneshot::channel();
+        let (tick_release_tx, tick_release_rx) = tokio::sync::oneshot::channel();
+        let signal = operator_notify.clone();
+        let queued_wakes = tokio::spawn(async move {
+            tick_entered_rx.await.expect("tick entered");
+            signal.notify_one();
+            let now = Utc::now();
+            let (reply, _received) = tokio::sync::oneshot::channel();
+            commands_tx
+                .send(OperatorCommand {
+                    interaction: OperatorInteraction {
+                        request_id: "request".into(),
+                        run_id: "run".into(),
+                        issue_id: "issue".into(),
+                        issue_identifier: "COE-612".into(),
+                        session_id: "session".into(),
+                        generation: 1,
+                        rpc_id: "0".into(),
+                        kind: OperatorInteractionKind::Permission,
+                        title: "Permission".into(),
+                        options: Vec::new(),
+                        questions: Vec::new(),
+                        plan: None,
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(1),
+                    },
+                    answer: OperatorAnswer::Cancel,
+                    reply,
+                })
+                .await
+                .expect("queue operator command");
+            tick_release_tx.send(()).expect("release tick");
+        });
+        let selected_tick = async {
+            tick_entered_tx.send(()).expect("start tick");
+            tick_release_rx.await.expect("tick release");
+        };
+        selected_tick.await;
+        queued_wakes.await.expect("queued wakes");
+
+        let first = next_run_wake(
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        let second = next_run_wake(
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        assert!(matches!(
+            &first,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert!(matches!(
+            &second,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert_ne!(
+            matches!(&first, RunWake::OperatorCommand(_)),
+            matches!(&second, RunWake::OperatorCommand(_)),
+            "both queued event types remain available after the tick"
+        );
+        server_task.abort();
+    }
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()

@@ -279,21 +279,6 @@ impl RuntimeProjection {
 
     fn project(&mut self, generation: u64, frame: &SourceFrame) -> Option<RuntimeUpdate> {
         let method = frame.payload.get("method")?.as_str()?;
-        if matches!(method, "session/request_permission" | "elicitation/create") {
-            let permission = method == "session/request_permission";
-            return Some(RuntimeUpdate {
-                sequence: frame.sequence,
-                generation,
-                observed_at: frame.observed_at,
-                kind: "waiting_for_input".into(),
-                summary: Some(if permission {
-                    "ACP agent requested permission".into()
-                } else {
-                    "ACP agent requested form input".into()
-                }),
-                payload: json!({"reason": if permission { "permission_request" } else { "form_request" }, "operator_responses":true}),
-            });
-        }
         if method != "session/update" {
             return None;
         }
@@ -764,21 +749,20 @@ mod tests {
     }
 
     #[test]
-    fn operator_callback_activity_reports_available_permission_and_form_routes() {
+    fn raw_operator_callbacks_do_not_claim_an_unrouted_wait() {
         let mut projection = RuntimeProjection::default();
-        for (sequence, method, reason) in [
-            (1, "session/request_permission", "permission_request"),
-            (2, "elicitation/create", "form_request"),
-        ] {
-            let update = projection.apply(&callback_event(sequence, "incoming", json!({
-                "id":sequence,"method":method,"params":{"sessionId":"s","secret":"private"}
-            })), "run").expect("operator activity");
-            assert_eq!(update.kind, "waiting_for_input");
-            assert_eq!(
-                update.payload,
-                json!({"reason":reason,"operator_responses":true})
+        for (sequence, method) in [(1, "session/request_permission"), (2, "elicitation/create")] {
+            let update = projection.apply(
+                &callback_event(
+                    sequence,
+                    "incoming",
+                    json!({
+                        "id":sequence,"method":method,"params":{"sessionId":"s","secret":"private"}
+                    }),
+                ),
+                "run",
             );
-            assert!(!update.summary.unwrap_or_default().contains("private"));
+            assert!(update.is_none(), "only accepted routed requests may wait");
         }
     }
 

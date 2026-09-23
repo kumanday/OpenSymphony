@@ -342,6 +342,7 @@ interface RunDetailBundle {
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[];
   runInputs: OperatorInteraction[];
+  runInputsLoaded: boolean;
   warnings: string[];
 }
 
@@ -457,6 +458,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   /** Guards in-flight selectDiffFile loads (superseded by newer diff clicks or opens). */
   private diffSelectSeq = 0;
   private readonly runOutlineCache = new Map<string, CodeFileOutline>();
+  private readonly operatorSelections = new Map<string, Map<string, string[]>>();
   /** Tracks bindEvents sites already attached per element (see listen()). */
   private boundListeners = new WeakMap<Element, Set<string>>();
 
@@ -632,10 +634,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     const inputs = (async () => {
       try {
-        return typeof this.transport.runInputs === "function" ? await this.transport.runInputs(runId) : [];
+        return {
+          values: typeof this.transport.runInputs === "function" ? await this.transport.runInputs(runId) : [],
+          loaded: true,
+        };
       } catch (error) {
         warnings.push(`Operator inputs unavailable: ${errorMessage(error)}`);
-        return [];
+        return { values: [], loaded: false };
       }
     })();
     const [
@@ -643,13 +648,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runEvents,
       runValidation,
       runApprovals,
-      runInputs,
+      { values: runInputs, loaded: runInputsLoaded },
     ] = await Promise.all([filesAndDiff, events, validation, approvals, inputs]);
-    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, runInputs, warnings };
+    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, runInputs, runInputsLoaded, warnings };
   }
 
   private applyRunDetailBundle(bundle: RunDetailBundle): void {
     const sameRun = this.state.runDetail?.run_id === bundle.runId;
+    if (!sameRun) this.operatorSelections.clear();
+    if (bundle.runInputsLoaded) {
+      const liveInputIds = new Set(bundle.runInputs.map((input) => input.request_id));
+      for (const requestId of this.operatorSelections.keys()) {
+        if (!liveInputIds.has(requestId)) this.operatorSelections.delete(requestId);
+      }
+    }
     const sameDiff = sameRun
       && this.state.selectedDiffPath === bundle.selectedDiffPath
       && runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", this.state.runDiff)
@@ -2533,6 +2545,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (receipt.status === "accepted") {
         this.state.runApprovals = this.state.runApprovals?.filter((item) => item.operator_interaction?.request_id !== interaction.request_id) ?? null;
         this.state.runInputs = this.state.runInputs?.filter((item) => item.request_id !== interaction.request_id) ?? null;
+        this.operatorSelections.delete(interaction.request_id);
       }
       this.state.auditTrail.push({ timestamp: new Date().toISOString(), actor: "operator", action: actionKind,
         target: interaction.request_id, status: receipt.status, details: receipt.reason });
@@ -3720,7 +3733,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const validation = hasValidationSummary(this.state.runValidation)
       ? renderValidationSummary(this.state.runValidation)
       : "";
-    const operatorInputs = this.state.runInputs?.length ? renderOperatorInputs(this.state.runInputs) : "";
+    const operatorInputs = this.state.runInputs?.length ? renderOperatorInputs(this.state.runInputs, this.operatorSelections) : "";
     const approvals = this.state.runApprovals?.length
       ? renderApprovalList(this.state.runApprovals, {
           onDecide: (id, decision, explanation) => {
@@ -4794,6 +4807,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelectorAll<HTMLFormElement>("[data-testid='operator-input']").forEach((form) => {
       const interaction = pendingOperator(form.dataset.requestId);
       if (interaction?.kind !== "question") return;
+      this.listen(form, "operator-input-choice", "change", () => {
+        const selected = new Map<string, string[]>();
+        for (const question of interaction.questions) {
+          selected.set(question.id, Array.from(form.querySelectorAll<HTMLInputElement>("input:checked"))
+            .filter((input) => input.name === `${interaction.request_id}:${question.id}`)
+            .map((input) => input.value));
+        }
+        this.operatorSelections.set(interaction.request_id, selected);
+      });
       for (const [testId, outcome] of [
         ["operator-input-answer", "answered"], ["operator-input-decline", "declined"], ["operator-input-cancel", "cancelled"],
       ] as const) {
@@ -4802,9 +4824,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.listen(button, testId, "click", () => {
           const answers = interaction.questions.map((question) => ({
             question_id: question.id,
-            selected_option_ids: Array.from(form.querySelectorAll<HTMLInputElement>("input:checked"))
-              .filter((input) => input.name === `${interaction.request_id}:${question.id}`)
-              .map((input) => input.value),
+            selected_option_ids: this.operatorSelections.get(interaction.request_id)?.get(question.id) ?? [],
           }));
           if (outcome === "answered" && answers.some((answer) => answer.selected_option_ids.length === 0)) {
             this.state.auditTrail.push({ timestamp: new Date().toISOString(), actor: "operator", action: "input_response",

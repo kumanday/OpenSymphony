@@ -938,7 +938,9 @@ describe("OpenSymphonyApp mount", () => {
     };
     const question: OperatorInteraction = { ...binding, request_id: "operator-2", kind: "question", title: "Choose region",
       options: [], questions: [{ id: "region", prompt: "Region?", allow_multiple: false,
-        options: [{ id: "west", label: "West", kind: "choice" }] }] };
+        options: [{ id: "west", label: "West", kind: "choice" }] },
+      { id: "zone", prompt: "Zone?", allow_multiple: false,
+        options: [{ id: "north", label: "North", kind: "choice" }] }] };
     transport.setRunApprovals("desktop-alpha", [approval]);
     transport.setRunInputs("desktop-alpha", [question]);
     transport.setRunApprovals("COE-449", [approval]);
@@ -956,10 +958,23 @@ describe("OpenSymphonyApp mount", () => {
     expect(permissionAction.idempotency_key).toBeUndefined();
     await flushUntil(() => root.querySelector("[data-testid='operator-input-answer']") !== null);
     (root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).click();
+    (root.querySelector("[data-testid='operator-input'] input[value='north']") as HTMLInputElement).click();
+    await handle.refresh();
+    expect((root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).checked).toBe(true);
+    expect((root.querySelector("[data-testid='operator-input'] input[value='north']") as HTMLInputElement).checked).toBe(true);
+    const inputRead = jest.spyOn(transport, "runInputs").mockRejectedValueOnce(new Error("temporary read failure"));
+    await handle.refresh();
+    inputRead.mockRestore();
+    await handle.refresh();
+    expect((root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).checked).toBe(true);
+    expect((root.querySelector("[data-testid='operator-input'] input[value='north']") as HTMLInputElement).checked).toBe(true);
     (root.querySelector("[data-testid='operator-input-answer']") as HTMLButtonElement).click();
     await flushUntil(() => dispatch.mock.calls.length === 2);
     expect(dispatch.mock.calls[1]?.[0]).toMatchObject({ action_kind: "input_response",
-      payload: { request_id: "operator-2", outcome: "answered", answers: [{ question_id: "region", selected_option_ids: ["west"] }] } });
+      payload: { request_id: "operator-2", outcome: "answered", answers: [
+        { question_id: "region", selected_option_ids: ["west"] },
+        { question_id: "zone", selected_option_ids: ["north"] },
+      ] } });
     await handle.destroy();
   });
 

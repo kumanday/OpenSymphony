@@ -57,12 +57,15 @@ export function renderApprovalList(
 }
 
 /** Render bounded, offered multiple-choice ACP questions without a free-text field. */
-export function renderOperatorInputs(inputs: OperatorInteraction[]): string {
+export function renderOperatorInputs(
+  inputs: OperatorInteraction[],
+  selections: ReadonlyMap<string, ReadonlyMap<string, readonly string[]>> = new Map(),
+): string {
   return inputs.filter((input) => input.kind === "question").map((input) => `
     <form class="os-operator-input" data-testid="operator-input" data-request-id="${escapeAttr(input.request_id)}">
       <div class="os-approval-title">${escapeHtml(input.title)}</div>
       ${input.questions.map((question) => `<fieldset data-question-id="${escapeAttr(question.id)}"><legend>${escapeHtml(question.prompt)}</legend>
-        ${question.options.map((option) => `<label><input type="${question.allow_multiple ? "checkbox" : "radio"}" name="${escapeAttr(input.request_id + ":" + question.id)}" value="${escapeAttr(option.id)}" />${escapeHtml(option.label)}</label>`).join("")}
+        ${question.options.map((option) => `<label><input type="${question.allow_multiple ? "checkbox" : "radio"}" name="${escapeAttr(input.request_id + ":" + question.id)}" value="${escapeAttr(option.id)}"${selections.get(input.request_id)?.get(question.id)?.includes(option.id) ? " checked" : ""} />${escapeHtml(option.label)}</label>`).join("")}
       </fieldset>`).join("")}
       <button type="button" data-testid="operator-input-answer">Answer</button>
       <button type="button" data-testid="operator-input-decline">Decline</button>

@@ -660,6 +660,11 @@ capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
 It uses a five-minute tracker interval and processes both callbacks through
 worker-update wakeups without another tracker tick.
+The run-loop wake regression queues a callback notification and an operator
+command during a selected tick, verifies that tick completes, and then drains
+both queued events. A malformed permission callback produces no waiting event;
+the routed production requests do. The shared web/desktop test retains two
+form selections after refresh and submits both answers.
 Native Unix tests replace the bound workspace root after service creation and
 verify file reads, atomic writes, and new terminal cwd remain on the original
 directory inode. They also swap a pinned terminal directory for an external
