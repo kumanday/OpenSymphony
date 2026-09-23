@@ -59,7 +59,7 @@ def callback(method, params, error=False):
     response = json.loads(sys.stdin.readline())
     assert response['id'] == serial, response
     assert ('error' in response) == error, response
-    return response.get('result')
+    return response.get('error') if error else response.get('result')
 
 
 with open("launches", "a") as log:
@@ -79,6 +79,7 @@ for line in sys.stdin:
     with open("methods", "a") as log:
         log.write(method + "\n")
     if method == "initialize":
+        assert message['params']['clientCapabilities']['elicitation'] == {'form': {}}
         caps = {"loadSession": persistence == "load"}
         if persistence == "resume":
             caps["sessionCapabilities"] = {"resume": {}}
@@ -138,6 +139,70 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'form-no-route':
+            result = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region',
+                'requestedSchema': {'type': 'object', 'required': ['region'], 'properties': {
+                    'region': {'type': 'string', 'enum': ['east', 'west']}}}})
+            assert result == {'action': 'cancel'}, result
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
+        if text == 'permission-epoch':
+            params = {'toolCall': {'toolCallId': 'policy-tool', 'title': 'Run tests'},
+                      'options': [{'optionId': 'allow-opaque', 'name': 'Allow once', 'kind': 'allow_once'},
+                                  {'optionId': 'deny-opaque', 'name': 'Deny once', 'kind': 'reject_once'}]}
+            active = callback('session/request_permission', params)
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            late = callback('session/request_permission', params)
+            with open('permission-epoch.json.tmp', 'w') as result_file:
+                json.dump({'active': active, 'late': late}, result_file)
+            os.replace('permission-epoch.json.tmp', 'permission-epoch.json')
+            continue
+        if text == 'operator-close-saturation':
+            request_ids = (201, 202)
+            for request_id in request_ids:
+                send({'id': request_id, 'method': 'session/request_permission', 'params': {
+                    'sessionId': session,
+                    'toolCall': {'toolCallId': f'tool-{request_id}', 'title': 'Run tests'},
+                    'options': [{'optionId': 'allow', 'name': 'Allow once', 'kind': 'allow_once'},
+                                {'optionId': 'deny', 'name': 'Deny once', 'kind': 'reject_once'}]}})
+            responses = [json.loads(sys.stdin.readline()) for _ in request_ids]
+            assert {response['id'] for response in responses} == set(request_ids), responses
+            assert all(response['result'] == {'outcome': {'outcome': 'cancelled'}}
+                       for response in responses), responses
+            open('operator-close-timed-out', 'w').close()
+            import time
+            while not os.path.exists('release-operator-close-prompt'):
+                time.sleep(0.01)
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
+        if text == 'operator-roundtrip':
+            serial = 9007199254740992
+            assert callback('cursor/ask_question', {'questions': []}, error=True)['code'] == -32601
+            assert callback('cursor/create_plan', {'plan': 'Ship'}, error=True)['code'] == -32601
+            rejected_form = callback('elicitation/create', {'mode': 'form', 'message': 'Enter API key',
+                'requestedSchema': {'type': 'object', 'required': ['key'], 'properties': {
+                    'key': {'type': 'string', 'enum': ['example']}}}})
+            assert rejected_form == {'action': 'cancel'}, rejected_form
+            rejected_url = callback('elicitation/create', {'mode': 'url', 'message': 'Open sign-in',
+                'elicitationId': 'login', 'url': 'https://example.com/sign-in'})
+            assert rejected_url == {'action': 'cancel'}, rejected_url
+            permission = callback('session/request_permission', {'toolCall': {'toolCallId': 'tool-1', 'title': 'Run tests'},
+                'options': [{'optionId': 'allow-opaque', 'name': 'Allow once', 'kind': 'allow_once'},
+                            {'optionId': 'deny-opaque', 'name': 'Deny once', 'kind': 'reject_once'}]})
+            assert permission == {'outcome': {'outcome': 'selected', 'optionId': 'allow-opaque'}}, permission
+            question = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region', 'requestedSchema': {
+                'type': 'object', 'required': ['region'], 'properties': {'region': {'type': 'string',
+                    'title': 'Region?', 'oneOf': [{'const': 'east', 'title': 'East'}, {'const': 'west', 'title': 'West'}]}}}})
+            assert question == {'action': 'accept', 'content': {'region': 'west'}}, question
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
+        if text in ('operator-decline', 'operator-cancel'):
+            question = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region', 'requestedSchema': {
+                'type': 'object', 'required': ['region'], 'properties': {'region': {'type': 'string',
+                    'enum': ['east', 'west']}}}})
+            assert question == {'action': 'decline' if text == 'operator-decline' else 'cancel'}, question
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'file-privacy':
             content = callback('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
             assert content == 'opaque_workspace_payload_610'

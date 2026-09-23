@@ -31,6 +31,25 @@ pub struct AcpProfile {
     pub extensions: Vec<String>,
     #[serde(default)]
     pub session: AcpSessionConfig,
+    #[serde(default)]
+    pub permissions: AcpPermissionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpPermissionConfig {
+    #[serde(default)]
+    pub mode: AcpPermissionPolicy,
+}
+
+/// `allow_once` is an explicit operator authorization for unattended runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpPermissionPolicy {
+    #[default]
+    Operator,
+    Deny,
+    AllowOnce,
 }
 
 /// Explicit advertised session selections. Values are opaque IDs, never credentials.

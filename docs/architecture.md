@@ -17,6 +17,20 @@ The control-plane issue snapshot may carry an optional sanitized operator
 projection for repository, parent, lease, repair, memory, containment,
 provider, verification, and cleanup facts. Missing facts remain unknown. No
 client infers completion, permission, or workspace confinement from absence.
+An ACP run may also publish ephemeral, bound operator interactions. The
+orchestrator actor owns pending decisions; gateway clients submit a response
+command, and the active ACP worker returns it to the original RPC responder.
+The actor validates and reserves a decision, then waits for the ACP input-sink
+flush in an owned task. A completion message returns to the actor to settle the
+pending decision and gateway receipt; other issues, callbacks, ticks, and
+shutdown remain responsive during that wait. An in-flight decision excludes a
+duplicate response.
+Worker callback reports wake that actor for immediate application and snapshot
+publication, independently of the tracker polling interval.
+The run loop selects an event before mutating scheduler state, so a newly
+arriving callback or operator command cannot cancel an in-progress tick.
+Pending interactions are discarded on completion, cancellation, expiry, or
+restart and cannot be reconstructed from stored evidence.
 
 ## 2. Layered design
 
@@ -522,7 +536,13 @@ processes use the existing process-group or Windows Job Object supervisors.
 Each retained prompt first retires the prior callback epoch through a bounded,
 cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses
-and updates are committed in SDK dispatch order before prompt completion. No OpenHands server or client participates in this launch path.
+and updates are committed in SDK dispatch order before prompt completion. The
+prompt response revokes its callback epoch before an adjacent request is
+dispatched; automatic permission policy also requires that live epoch.
+Callback closures use a bounded channel wait so a burst of open requests cannot
+silently drop the expiry signal. A receiver that stops draining fails the turn;
+worker completion clears its pending interactions. No
+OpenHands server or client participates in this launch path.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

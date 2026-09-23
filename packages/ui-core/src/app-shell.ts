@@ -8,6 +8,7 @@ import type {
   GatewayEnvelope,
   GatewayCapabilities,
   ApprovalRequest,
+  OperatorInteraction,
   RunAction,
   RunDetail,
   RunEvent,
@@ -86,7 +87,7 @@ import {
   renderFileDiff,
 } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
-import { renderApprovalList, type ApprovalDecision } from "./approval.js";
+import { renderApprovalList, renderOperatorInputs, type ApprovalDecision } from "./approval.js";
 import {
   buildActionBarItems,
   renderActionBar,
@@ -181,6 +182,7 @@ export interface GatewayReader {
   runDiffs?(runId: string, filePath?: string): Promise<FileDiffPage>;
   runValidation?(runId: string): Promise<RunValidationSummary>;
   runApprovals?(runId: string): Promise<ApprovalRequest[]>;
+  runInputs?(runId: string): Promise<OperatorInteraction[]>;
   events?(fromCursor?: { sequence: number; partition: string }): AsyncIterable<GatewayEnvelope>;
   /** Optional action dispatch for gateway-mediated mutations. */
   dispatchAction?(action: ActionDispatch): Promise<ActionReceipt>;
@@ -285,6 +287,7 @@ interface AppState {
   eventLogModalOpen: boolean;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
+  runInputs: OperatorInteraction[] | null;
   lastActionReceipt: ActionReceipt | null;
   auditTrail: AuditTrailEntry[];
   profiles: ConnectionProfile[];
@@ -338,6 +341,8 @@ interface RunDetailBundle {
   runEvents: RunEvent[];
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[];
+  runInputs: OperatorInteraction[];
+  runInputsLoaded: boolean;
   warnings: string[];
 }
 
@@ -453,6 +458,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   /** Guards in-flight selectDiffFile loads (superseded by newer diff clicks or opens). */
   private diffSelectSeq = 0;
   private readonly runOutlineCache = new Map<string, CodeFileOutline>();
+  private readonly operatorSelections = new Map<string, Map<string, string[]>>();
   /** Tracks bindEvents sites already attached per element (see listen()). */
   private boundListeners = new WeakMap<Element, Set<string>>();
 
@@ -495,6 +501,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       eventLogModalOpen: false,
       runValidation: null,
       runApprovals: null,
+      runInputs: null,
       lastActionReceipt: null,
       auditTrail: [],
       profiles,
@@ -625,17 +632,36 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
     })();
 
+    const inputs = (async () => {
+      try {
+        return {
+          values: typeof this.transport.runInputs === "function" ? await this.transport.runInputs(runId) : [],
+          loaded: true,
+        };
+      } catch (error) {
+        warnings.push(`Operator inputs unavailable: ${errorMessage(error)}`);
+        return { values: [], loaded: false };
+      }
+    })();
     const [
       { runFiles, selectedDiffPath, runDiff },
       runEvents,
       runValidation,
       runApprovals,
-    ] = await Promise.all([filesAndDiff, events, validation, approvals]);
-    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, warnings };
+      { values: runInputs, loaded: runInputsLoaded },
+    ] = await Promise.all([filesAndDiff, events, validation, approvals, inputs]);
+    return { runId, runFiles, selectedDiffPath, runDiff, runCodeOverlay: null, runCodeOutline: null, runEvents, runValidation, runApprovals, runInputs, runInputsLoaded, warnings };
   }
 
   private applyRunDetailBundle(bundle: RunDetailBundle): void {
     const sameRun = this.state.runDetail?.run_id === bundle.runId;
+    if (!sameRun) this.operatorSelections.clear();
+    if (bundle.runInputsLoaded) {
+      const liveInputIds = new Set(bundle.runInputs.map((input) => input.request_id));
+      for (const requestId of this.operatorSelections.keys()) {
+        if (!liveInputIds.has(requestId)) this.operatorSelections.delete(requestId);
+      }
+    }
     const sameDiff = sameRun
       && this.state.selectedDiffPath === bundle.selectedDiffPath
       && runOutlineCacheKey(bundle.runId, bundle.selectedDiffPath ?? "", this.state.runDiff)
@@ -648,6 +674,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runEvents = bundle.runEvents;
     this.state.runValidation = bundle.runValidation;
     this.state.runApprovals = bundle.runApprovals;
+    this.state.runInputs = bundle.runInputs;
     if (bundle.warnings.length > 0) {
       this.state.connectionMessage = bundle.warnings[bundle.warnings.length - 1];
     }
@@ -823,6 +850,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
+    this.state.runInputs = null;
   }
 
   /**
@@ -936,6 +964,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.collapsedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
+    this.state.runInputs = null;
       this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
       return;
     }
@@ -956,6 +985,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.collapsedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
+    this.state.runInputs = null;
     this.state.selectedDiffPath = null;
     if (this.options.mode === "desktop") {
       // Completed pane data loads independently: a memory-server hiccup must
@@ -1963,6 +1993,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.collapsedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
+    this.state.runInputs = null;
       this.state.selectedDiffPath = null;
       // An active issue the control plane does not track yet (e.g. just
       // promoted from Backlog, no run dispatched) has no run detail to
@@ -2484,6 +2515,47 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         status: "failed",
         details: errorMessage(error),
       });
+    }
+    this.render();
+  }
+
+  private async submitOperatorInteraction(
+    interaction: OperatorInteraction,
+    actionKind: "approval_decision" | "input_response" | "plan_decision",
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const action: ActionDispatch = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `operator-${interaction.request_id}-${crypto.randomUUID()}`,
+      action_kind: actionKind,
+      target_entity: { entity_kind: "run", entity_id: interaction.issue_identifier },
+      payload: {
+        request_id: interaction.request_id,
+        run_id: interaction.run_id,
+        issue_id: interaction.issue_id,
+        session_id: interaction.session_id,
+        generation: interaction.generation,
+        rpc_id: interaction.rpc_id,
+        ...payload,
+      },
+    };
+    try {
+      const receipt = await (this.transport.dispatchAction?.(action) ?? unsupportedAction(actionKind));
+      this.state.lastActionReceipt = receipt;
+      if (receipt.status === "accepted") {
+        // A live refresh may have fetched this interaction before the answer
+        // completed. Invalidate that in-flight bundle before it can restore
+        // stale controls over the accepted local state.
+        this.interactionEpoch += 1;
+        this.state.runApprovals = this.state.runApprovals?.filter((item) => item.operator_interaction?.request_id !== interaction.request_id) ?? null;
+        this.state.runInputs = this.state.runInputs?.filter((item) => item.request_id !== interaction.request_id) ?? null;
+        this.operatorSelections.delete(interaction.request_id);
+      }
+      this.state.auditTrail.push({ timestamp: new Date().toISOString(), actor: "operator", action: actionKind,
+        target: interaction.request_id, status: receipt.status, details: receipt.reason });
+    } catch (error) {
+      this.state.auditTrail.push({ timestamp: new Date().toISOString(), actor: "operator", action: actionKind,
+        target: interaction.request_id, status: "failed", details: errorMessage(error) });
     }
     this.render();
   }
@@ -3665,6 +3737,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const validation = hasValidationSummary(this.state.runValidation)
       ? renderValidationSummary(this.state.runValidation)
       : "";
+    const operatorInputs = this.state.runInputs?.length ? renderOperatorInputs(this.state.runInputs, this.operatorSelections) : "";
     const approvals = this.state.runApprovals?.length
       ? renderApprovalList(this.state.runApprovals, {
           onDecide: (id, decision, explanation) => {
@@ -3743,7 +3816,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           ${codeDeltaList}
           ${files}
         </div>
-        ${validation || approvals ? `<div class="os-run-panels">${validation ? `<div class="os-validation-panel">${validation}</div>` : ""}${approvals ? `<div class="os-approval-panel">${approvals}</div>` : ""}</div>` : ""}
+        ${validation || approvals || operatorInputs ? `<div class="os-run-panels">${validation ? `<div class="os-validation-panel">${validation}</div>` : ""}${approvals ? `<div class="os-approval-panel">${approvals}</div>` : ""}${operatorInputs ? `<div class="os-approval-panel">${operatorInputs}</div>` : ""}</div>` : ""}
         ${audit}
         <pre>${escapeHtml(run.workspace_path ?? run.workspace_id ?? "workspace path unavailable")}</pre>
       `,
@@ -4711,6 +4784,61 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const explanation = container?.querySelector<HTMLInputElement>("[data-testid='approval-explanation']")?.value;
         void this.submitApprovalDecision(approvalId, "rejected", explanation);
       });
+    });
+
+    const pendingOperator = (id: string | undefined) => this.state.runApprovals?.find((item) => item.approval_id === id)?.operator_interaction
+      ?? this.state.runInputs?.find((item) => item.request_id === id);
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='operator-permission-option']").forEach((button) => {
+      this.listen(button, "operator-permission-option", "click", () => {
+        const interaction = pendingOperator(button.dataset.approvalId);
+        const decision = button.dataset.decision;
+        const optionId = button.dataset.optionId;
+        if (interaction?.kind === "permission" && optionId && (decision === "approved" || decision === "rejected")) {
+          void this.submitOperatorInteraction(interaction, "approval_decision", { decision, option_id: optionId });
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='operator-permission-cancel'], [data-testid='operator-plan-approve'], [data-testid='operator-plan-reject'], [data-testid='operator-plan-cancel']").forEach((button) => {
+      this.listen(button, "operator-approval-response", "click", () => {
+        const interaction = pendingOperator(button.dataset.approvalId);
+        if (!interaction) return;
+        const kind = interaction.kind === "permission" ? "approval_decision" : "plan_decision";
+        const decision = button.dataset.testid === "operator-plan-approve" ? "approved"
+          : button.dataset.testid === "operator-plan-reject" ? "rejected" : "cancelled";
+        void this.submitOperatorInteraction(interaction, kind, { decision });
+      });
+    });
+    this.options.root.querySelectorAll<HTMLFormElement>("[data-testid='operator-input']").forEach((form) => {
+      const interaction = pendingOperator(form.dataset.requestId);
+      if (interaction?.kind !== "question") return;
+      this.listen(form, "operator-input-choice", "change", () => {
+        const selected = new Map<string, string[]>();
+        for (const question of interaction.questions) {
+          selected.set(question.id, Array.from(form.querySelectorAll<HTMLInputElement>("input:checked"))
+            .filter((input) => input.name === `${interaction.request_id}:${question.id}`)
+            .map((input) => input.value));
+        }
+        this.operatorSelections.set(interaction.request_id, selected);
+      });
+      for (const [testId, outcome] of [
+        ["operator-input-answer", "answered"], ["operator-input-decline", "declined"], ["operator-input-cancel", "cancelled"],
+      ] as const) {
+        const button = form.querySelector<HTMLElement>(`[data-testid='${testId}']`);
+        if (!button) continue;
+        this.listen(button, testId, "click", () => {
+          const answers = interaction.questions.map((question) => ({
+            question_id: question.id,
+            selected_option_ids: this.operatorSelections.get(interaction.request_id)?.get(question.id) ?? [],
+          }));
+          if (outcome === "answered" && answers.some((answer) => answer.selected_option_ids.length === 0)) {
+            this.state.auditTrail.push({ timestamp: new Date().toISOString(), actor: "operator", action: "input_response",
+              target: interaction.request_id, status: "failed", details: "Select an option for every question." });
+            this.render();
+            return;
+          }
+          void this.submitOperatorInteraction(interaction, "input_response", { outcome, answers });
+        });
+      }
     });
 
 

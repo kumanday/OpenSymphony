@@ -1037,6 +1037,51 @@ Scheduled ACP interrupts identify the active worker by issue ID and issue
 identifier, then verify its current owner, generation, run and conversation
 before cancellation.
 
+ACP permission and standard `elicitation/create` choice-form requests appear as
+pending interactions for the selected run. Form capability advertises only the
+form mode; URL elicitation is disabled. The supported form schema has one to
+eight required string enum or string-array enum fields, with at most 32 offered
+choices per field. Unsupported constraints, free-text fields, URL mode, and
+secret prompts are rejected without exposing them in public snapshots. Web and
+desktop Run Detail panels use offered permission option IDs and multiple-choice
+form controls. Plan approval controls are typed for a registered extension;
+Cursor method registration is handled separately. FrankenTUI shows a pending
+request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
+through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
+questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
+The gateway exposes permissions and plans at `/api/v1/runs/{run_id}/approvals`, questions at
+`/api/v1/runs/{run_id}/inputs`, and accepts bound responses through
+`/api/v1/actions/dispatch`. A response must carry the live request, run,
+issue, session, generation, and RPC binding token. The ACP responder retains the
+original peer RPC ID privately; clients echo a generated public token. Stale,
+duplicate, expired, and invalid option/answer submissions are rejected. A waiting interaction pauses
+stall detection only until its deadline. Disconnect, cancellation, completion,
+and restart clear the live responder; operators must wait for a fresh request.
+Automatic `allow_once` and `deny` permission decisions require the same active
+turn and are cancelled when a peer asks after its prompt has completed.
+Callback arrivals and closures publish updated snapshots without waiting for
+the next tracker poll. Timed-out callbacks retain their closure notification
+through bounded channel backpressure, so pending requests clear when the worker
+drains the queue.
+An un-routed form request receives an ACP `cancel` response so a direct client
+turn can continue. An operator-policy permission request without a route fails
+the turn. A worker response that misses its acknowledgement deadline is fenced
+before a failure receipt and remains pending for another answer attempt. An
+answer already claimed by the ACP callback waits until the response frame is
+flushed to the peer's input sink; a write failure returns a failed receipt.
+The scheduler actor enqueues the response and applies the resulting receipt
+when its worker-completion message arrives, so a slow peer does not hold up
+tracker ticks, other issue updates, or shutdown. The terminal client waits for
+the authoritative receipt without a total HTTP timeout; it bounds connection
+establishment separately. Web and desktop invalidate an in-flight detail refresh
+when a local operator answer is accepted, keeping answered controls removed.
+The gateway also fences its queued command when its HTTP delivery deadline
+expires or the handler closes. Once the run loop claims a command, the gateway
+waits for the scheduler result instead of returning a premature timeout.
+Only requests accepted into the scheduler's live pending set emit waiting
+activity. Web and desktop retain selected form choices across live refreshes
+while the same request remains pending.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

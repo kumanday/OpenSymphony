@@ -25,6 +25,7 @@ for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
+        assert message["params"]["clientCapabilities"]["elicitation"] == {"form": {}}
         if profile == "setup_retry" and not os.path.exists(".opensymphony/setup-failed"):
             open(".opensymphony/setup-failed", "w").close()
             sys.exit(8)
@@ -102,6 +103,24 @@ for line in sys.stdin:
             pending = message["id"]
             send({"id": "permission", "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t", "title": "Permission"}, "options": []}})
             continue
+        if profile == "operator_roundtrip":
+            assert request("session/request_permission", {"toolCall":{"toolCallId":"tool-1","title":"Run tests"},
+                "options":[{"optionId":"allow-opaque","name":"Allow once","kind":"allow_once"},
+                           {"optionId":"deny-opaque","name":"Deny once","kind":"reject_once"}]}) == \
+                {"outcome":{"outcome":"selected","optionId":"allow-opaque"}}
+            assert request("elicitation/create", {"mode":"form","message":"Choose region","requestedSchema":{
+                "type":"object","required":["region"],"properties":{"region":{"type":"string",
+                    "title":"Region?","oneOf":[{"const":"west","title":"West"}]}}}}) == \
+                {"action":"accept","content":{"region":"west"}}
+            with open("acp-operator-roundtrip.json.tmp", "w") as output:
+                json.dump({"permission":"allow-opaque","question":"west"}, output)
+            os.replace("acp-operator-roundtrip.json.tmp", "acp-operator-roundtrip.json")
+        if profile == "operator_early_finish":
+            send({"id":"early-question","method":"elicitation/create","params":{"sessionId":session,
+                "mode":"form","message":"Choose region","requestedSchema":{"type":"object",
+                "required":["region"],"properties":{"region":{"type":"string","enum":["west"]}}}}})
+            send({"id":message["id"],"result":{"stopReason":"end_turn"}})
+            continue
         if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue
@@ -114,6 +133,8 @@ for line in sys.stdin:
     elif method is None and message.get("id") == "permission":
         assert message["result"]["outcome"]["outcome"] == "cancelled"
         send({"id": pending, "result": {"stopReason": "cancelled"}})
+    elif method is None and message.get("id") == "early-question":
+        assert message["result"]["action"] == "cancel"
     elif method == "session/cancel":
         send({"id": pending, "result": {"stopReason": "cancelled"}})
     else:

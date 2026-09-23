@@ -10,6 +10,7 @@ import type {
   ActionDispatch,
   ActionReceipt,
   ApprovalRequest,
+  OperatorInteraction,
   PlanningSessionSummary,
   RunStatus,
   ReleaseReason,
@@ -38,6 +39,7 @@ export {
   binaryFramesAdvertised,
   encodeBinaryFrame,
   decodeBinaryFrame,
+  operatorBinding,
 } from "./transports.js";
 export type { TauriChannel, TauriRuntime } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
@@ -95,6 +97,7 @@ export interface GatewayTransport {
   runFiles(runId: string): Promise<ChangedFileEntry[]>;
   runDiffs(runId: string, filePath?: string): Promise<FileDiffPage>;
   runApprovals(runId: string): Promise<ApprovalRequest[]>;
+  runInputs(runId: string): Promise<OperatorInteraction[]>;
   runValidation(runId: string): Promise<RunValidationSummary>;
   terminalSnapshot(runId: string, terminalId: string, cursor?: number): Promise<TerminalSnapshot>;
   terminalSearch(runId: string, terminalId: string, query: string): Promise<TerminalSearchResult>;
@@ -131,7 +134,7 @@ export interface ActionCapableTransport extends GatewayTransport {
   rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt>;
   commentRun(runId: string, text: string): Promise<ActionReceipt>;
   createFollowup(runId: string, payload: unknown): Promise<ActionReceipt>;
-  approvalDecision(approvalId: string, decision: "approved" | "rejected", explanation?: string): Promise<ActionReceipt>;
+  approvalDecision(approvalId: string, decision: "approved" | "rejected", explanation?: string, interaction?: OperatorInteraction, optionId?: string): Promise<ActionReceipt>;
   openWorkspace(runId: string): Promise<ActionReceipt>;
   debugRun(runId: string): Promise<ActionReceipt>;
 }
@@ -188,6 +191,7 @@ export type {
   ActionDispatch,
   ActionReceipt,
   ApprovalRequest,
+  OperatorInteraction,
   PlanningSessionSummary,
   RunStatus,
   ReleaseReason,

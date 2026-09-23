@@ -50,6 +50,10 @@ impl HostServices {
 
     pub(super) fn capabilities(&self) -> ClientCapabilities {
         ClientCapabilities::default()
+            .elicitation(
+                agent_client_protocol::schema::v1::ElicitationCapabilities::new()
+                    .form(agent_client_protocol::schema::v1::ElicitationFormCapabilities::new()),
+            )
             .fs(FileSystemCapabilities::default()
                 .read_text_file(self.read_files)
                 .write_text_file(self.write_files))
@@ -76,6 +80,35 @@ pub(super) struct CallbackSender {
     bytes: Arc<Semaphore>,
 }
 impl CallbackSender {
+    fn reserve(
+        &self,
+        method: &str,
+        params: &Value,
+        id_bytes: usize,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), Error> {
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::internal_error())?;
+        let size = serde_json::to_vec(params).map_err(Error::from)?.len() + id_bytes + method.len();
+        let bytes = self
+            .bytes
+            .clone()
+            .try_acquire_many_owned(u32::try_from(size).map_err(|_| Error::internal_error())?)
+            .map_err(|_| Error::internal_error())?;
+        Ok((permit, bytes))
+    }
+
+    pub fn reserve_operator(
+        &self,
+        method: &str,
+        params: &Value,
+        rpc_id: &str,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), Error> {
+        self.reserve(method, params, rpc_id.len())
+    }
+
     /// Quiesce callbacks without installing another active epoch.
     pub async fn end_turn(&self, timeout: Duration) -> Result<(), ClientError> {
         let (tx, rx) = oneshot::channel();
@@ -114,21 +147,10 @@ impl CallbackSender {
         params: Value,
         responder: Responder,
     ) -> Result<(), Error> {
-        let permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::internal_error())?;
-        let size = serde_json::to_vec(&params).map_err(Error::from)?.len()
-            + serde_json::to_vec(responder.id())
-                .map_err(Error::from)?
-                .len()
-            + method.len();
-        let bytes = self
-            .bytes
-            .clone()
-            .try_acquire_many_owned(u32::try_from(size).map_err(|_| Error::internal_error())?)
-            .map_err(|_| Error::internal_error())?;
+        let id_bytes = serde_json::to_vec(responder.id())
+            .map_err(Error::from)?
+            .len();
+        let (permit, bytes) = self.reserve(&method, &params, id_bytes)?;
         self.tx
             .try_send(ServiceCommand::Callback(Box::new(Callback {
                 method,
@@ -959,6 +981,33 @@ async fn run_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_callbacks_share_the_pending_callback_budget() {
+        let (tx, _rx) = mpsc::channel(1);
+        let sender = CallbackSender {
+            tx,
+            permits: Arc::new(Semaphore::new(1)),
+            bytes: Arc::new(Semaphore::new(1024)),
+        };
+        let first = sender
+            .reserve_operator("session/request_permission", &json!({}), "0")
+            .expect("first callback reservation");
+        assert!(
+            sender
+                .reserve_operator("session/request_permission", &json!({}), "1")
+                .is_err(),
+            "a pending operator callback consumes the shared callback permit"
+        );
+        drop(first);
+        assert!(
+            sender
+                .reserve_operator("session/request_permission", &json!({}), "1")
+                .is_ok(),
+            "completion releases the callback permit"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn callbacks_keep_original_workspace_after_root_path_replacement() {

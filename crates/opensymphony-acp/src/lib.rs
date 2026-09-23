@@ -21,7 +21,6 @@ use agent_client_protocol::{
         v1::{
             AuthMethod, AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest,
             InitializeResponse, LoadSessionRequest, NewSessionRequest, PromptRequest,
-            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             ResumeSessionRequest, TextContent,
         },
     },
@@ -45,10 +44,14 @@ use tracing::instrument::WithSubscriber;
 mod atomic_file;
 mod durable;
 mod host;
+mod operator;
 mod projection;
 mod services;
 mod session_config;
 pub use host::*;
+pub use operator::{
+    AcpOperatorDeliveryFence, AcpOperatorEvent, AcpOperatorReply, AcpOperatorRequest,
+};
 pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
@@ -65,6 +68,7 @@ mod windows_path;
 #[cfg(windows)]
 mod windows_process;
 
+use crate::opensymphony_gateway_schema::approval::OperatorAnswer;
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
     environment_variable_names_equal, has_environment_name_collision, insert_environment_value,
@@ -260,8 +264,21 @@ pub struct RunResult {
 /// Retaining the SDK's exact encoding also rejects unreserved SDK-generated responses.
 #[derive(Default)]
 struct CallbackOutput {
-    frames: VecDeque<(String, bool)>,
+    frames: VecDeque<(String, bool, Option<oneshot::Sender<bool>>)>,
     bytes: usize,
+}
+
+fn reserve_and_enqueue_operator_response<T>(
+    output: &Mutex<CallbackOutput>,
+    frame: String,
+    limits: &ClientLimits,
+    acknowledgement: &mut Option<oneshot::Sender<bool>>,
+    enqueue: impl FnOnce() -> T,
+) -> Option<T> {
+    let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
+    output
+        .admit_with_ack(frame, limits, false, acknowledgement)
+        .then(enqueue)
 }
 
 impl CallbackOutput {
@@ -275,6 +292,16 @@ impl CallbackOutput {
         limits: &ClientLimits,
         opaque_payload: bool,
     ) -> bool {
+        self.admit_with_ack(frame, limits, opaque_payload, &mut None)
+    }
+
+    fn admit_with_ack(
+        &mut self,
+        frame: String,
+        limits: &ClientLimits,
+        opaque_payload: bool,
+        acknowledgement: &mut Option<oneshot::Sender<bool>>,
+    ) -> bool {
         let bytes = frame.len() + 1; // LinesCodec adds LF.
         if frame.len() > limits.frame_bytes
             || self.frames.len() >= limits.callback_frames
@@ -283,20 +310,39 @@ impl CallbackOutput {
             return false;
         }
         self.bytes += bytes;
-        self.frames.push_back((frame, opaque_payload));
+        self.frames
+            .push_back((frame, opaque_payload, acknowledgement.take()));
         true
     }
 
     fn matches_front(&self, frame: &str) -> bool {
         self.frames
             .front()
-            .is_some_and(|(expected, _)| expected == frame)
+            .is_some_and(|(expected, _, _)| expected == frame)
     }
 
     fn flushed(&mut self) {
-        if let Some((frame, _)) = self.frames.pop_front() {
+        if let Some((frame, _, acknowledgement)) = self.frames.pop_front() {
             self.bytes -= frame.len() + 1;
+            if let Some(acknowledgement) = acknowledgement {
+                let _ = acknowledgement.send(true);
+            }
         }
+    }
+
+    fn fail_all(&mut self) {
+        while let Some((_, _, acknowledgement)) = self.frames.pop_front() {
+            if let Some(acknowledgement) = acknowledgement {
+                let _ = acknowledgement.send(false);
+            }
+        }
+        self.bytes = 0;
+    }
+}
+
+impl Drop for CallbackOutput {
+    fn drop(&mut self) {
+        self.fail_all();
     }
 }
 
@@ -971,6 +1017,11 @@ async fn run_connection(
     let service_run = service_actor.run();
     tokio::pin!(service_run);
     let configuration = Arc::new(Mutex::new(SessionConfiguration::default()));
+    let operator_router = driver
+        .as_ref()
+        .map(|driver| driver.operator_router.clone())
+        .unwrap_or_else(|| Arc::new(Mutex::new(None)));
+    let permission_policy = profile.permissions.mode;
     let input = FramedRead::new(stdout, LinesCodec::new_with_max_length(limits.frame_bytes));
     let incoming = input.map({
         let queued = queued.clone();
@@ -1014,17 +1065,35 @@ async fn run_connection(
             async move {
                 if line.len() > limits.frame_bytes {
                     resource_failure.store(true, Ordering::Release);
+                    callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .fail_all();
                     return Err(io_failure());
                 }
-                let mut value: Value = serde_json::from_str(&line).map_err(|_| io_failure())?;
+                let mut value: Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        callback_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .fail_all();
+                        return Err(io_failure());
+                    }
+                };
                 let is_response = value.get("method").is_none();
                 if is_response {
                     let output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                     if !output.matches_front(&line) {
                         // Unreserved SDK errors cannot bypass callback admission.
+                        drop(output);
+                        callback_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .fail_all();
                         return Err(io_failure());
                     }
-                    if output.frames.front().is_some_and(|(_, opaque)| *opaque) {
+                    if output.frames.front().is_some_and(|(_, opaque, _)| *opaque) {
                         for field in ["/result/content", "/result/output"] {
                             if let Some(content) = value.pointer_mut(field) {
                                 *content = json!("[redacted]");
@@ -1036,7 +1105,17 @@ async fn run_connection(
                     submitted.store(true, Ordering::Release);
                 }
                 capture(&capture_state, "outgoing", value);
-                output.send(line).await.map_err(|_| io_failure())?;
+                if !matches!(
+                    tokio::time::timeout(limits.callback_timeout, output.send(line)).await,
+                    Ok(Ok(()))
+                ) {
+                    resource_failure.store(true, Ordering::Release);
+                    callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .fail_all();
+                    return Err(io_failure());
+                }
                 if is_response {
                     callback_output
                         .lock()
@@ -1058,6 +1137,7 @@ async fn run_connection(
             let redactor = capture_state.clone();
             let configuration = configuration.clone();
             let service_sender = service_sender.clone();
+            let operator_router = operator_router.clone();
             async move |message: Dispatch, _cx| {
                 queued
                     .lock()
@@ -1083,27 +1163,167 @@ async fn run_connection(
                                     fatal.cancel();
                                 });
                         }
-                        let response = if request.method == "session/request_permission" {
-                            match serde_json::from_value::<RequestPermissionRequest>(request.params)
-                            {
-                                Ok(request)
-                                    if active_session
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .as_deref()
-                                        == Some(request.session_id.0.as_ref()) =>
-                                {
-                                    // No operator policy is advertised in this slice.
-                                    serde_json::to_value(RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Cancelled,
-                                    ))
-                                    .map_err(agent_client_protocol::Error::from)
+                        let operator_method = matches!(request.method.as_str(),
+                            "session/request_permission" | "elicitation/create");
+                        if operator_method {
+                            let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            let rpc_id = serde_json::to_value(responder.id())?;
+                            // Reserve against the private peer ID's encoded size, not the
+                            // public opaque interaction token shown to operators.
+                            let private_rpc_id = rpc_id.to_string();
+                            let mut safe_params = request.params.clone();
+                            redactor.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut safe_params, false);
+                            let interaction = session.as_deref().ok_or_else(agent_client_protocol::Error::invalid_params)
+                                .and_then(|session| operator::parse_interaction(&request.method, &safe_params, rpc_id.clone(), session, limits.callback_timeout));
+                            // Reject an option ID that changed during redaction; never send
+                            // an altered opaque ID back to the peer or expose a secret.
+                            let interaction = interaction.and_then(|safe| {
+                                let original = operator::parse_interaction(&request.method, &request.params, rpc_id, &safe.session_id, limits.callback_timeout)?;
+                                if !operator::same_binding_ids(&safe, &original) {
+                                    return Err(agent_client_protocol::Error::invalid_params());
                                 }
-                                _ => Err(agent_client_protocol::Error::invalid_params()),
+                                Ok(safe)
+                            });
+                            let interaction = match interaction {
+                                Ok(interaction) => interaction,
+                                Err(_) => {
+                                    // A malformed or unbound callback never reaches an
+                                    // operator. Return the protocol's cancellation outcome
+                                    // so the peer can finish its current turn safely.
+                                    let response = Ok(if request.method == "elicitation/create" {
+                                        json!({"action":"cancel"})
+                                    } else {
+                                        json!({"outcome":{"outcome":"cancelled"}})
+                                    });
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
+                            let route = operator_router.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            // An automatic allow/deny is still a callback decision and
+                            // must obey the same active-turn epoch as routed requests.
+                            // The prompt response revokes this epoch in ordered dispatch
+                            // before an adjacent late callback can run.
+                            let (sender, epoch) = match route {
+                                Some((sender, epoch)) if !epoch.is_cancelled() => (sender, epoch),
+                                _ => {
+                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
+                            if let Some(answer) = operator::automatic_answer(permission_policy, &interaction) {
+                                let response = Ok(operator::response_for(&interaction, answer));
+                                let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                if !output.admit(frame, &limits) {
+                                    resource_failure.store(true, Ordering::Release);
+                                    fatal.cancel();
+                                    return Err(agent_client_protocol::Error::internal_error());
+                                }
+                                return responder.respond_with_result(response);
                             }
-                        } else {
-                            Err(agent_client_protocol::Error::method_not_found())
-                        };
+                            let reservation = match service_sender.reserve_operator(
+                                &request.method,
+                                &request.params,
+                                &private_rpc_id,
+                            ) {
+                                Ok(reservation) => reservation,
+                                Err(_) => {
+                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
+                            if let Some(sender) = sender {
+                                let (reply, receive) = oneshot::channel();
+                                if sender.try_send(AcpOperatorEvent::Opened(Box::new(AcpOperatorRequest { interaction: interaction.clone(), reply }))).is_ok() {
+                                    let callback_output = callback_output.clone();
+                                    let resource_failure = resource_failure.clone();
+                                    let fatal = fatal.clone();
+                                    let limits = limits.clone();
+                                    tokio::spawn(async move {
+                                        let _reservation = reservation;
+                                        let (answer, reply) = tokio::select! {
+                                            biased;
+                                            _ = epoch.cancelled() => (OperatorAnswer::Cancel, None),
+                                            result = receive => result.map(|reply: AcpOperatorReply| (reply.answer.clone(), Some(reply))).unwrap_or((OperatorAnswer::Cancel, None)),
+                                            _ = tokio::time::sleep(limits.callback_timeout) => (OperatorAnswer::Cancel, None),
+                                        };
+                                        let (answer, mut acknowledgement) = match reply {
+                                            Some(reply) if reply.delivery.claim() => (answer, Some(reply.acknowledgement)),
+                                            Some(reply) => {
+                                                let _ = reply.acknowledgement.send(false);
+                                                (OperatorAnswer::Cancel, None)
+                                            }
+                                            None => (answer, None),
+                                        };
+                                        let response = Ok(operator::response_for(&interaction, answer));
+                                        let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
+                                        let delivered = frame.ok().and_then(|frame| {
+                                            reserve_and_enqueue_operator_response(&callback_output, frame, &limits, &mut acknowledgement, || responder.respond_with_result(response))
+                                        });
+                                        let Some(delivered) = delivered else {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                            if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(false); }
+                                            return;
+                                        };
+                                        if delivered.is_err() {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                            callback_output.lock().unwrap_or_else(|e| e.into_inner()).fail_all();
+                                            return;
+                                        }
+                                        // The worker may be processing a burst of Opened
+                                        // events while callbacks expire. A full channel must
+                                        // not discard the only closure for an accepted
+                                        // interaction; bound the wait and fail the turn if
+                                        // the worker stops draining it.
+                                        if tokio::time::timeout(
+                                            limits.cancel_timeout,
+                                            sender.send(AcpOperatorEvent::Closed(interaction.request_id)),
+                                        ).await.is_err() {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                        }
+                                    });
+                                    return Ok(());
+                                }
+                            }
+                            // A permission with no operator route fails visibly. A form
+                            // can safely return protocol cancellation so direct clients
+                            // can continue without an interactive operator.
+                            if request.method == "session/request_permission" {
+                                fatal.cancel();
+                            }
+                            let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                            let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                            let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                            if output.admit(frame, &limits) {
+                                return responder.respond_with_result(response);
+                            }
+                            return Err(agent_client_protocol::Error::internal_error());
+                        }
+                        let response = Err(agent_client_protocol::Error::method_not_found());
                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(
                             responder.id().clone(),
                             response.clone(),
@@ -1309,6 +1529,10 @@ async fn run_connection(
                     && let Err(error) = service_sender.begin_turn(one_turn_epoch.clone(), limits.setup_timeout).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
+                }
+                if driver.is_none() {
+                    *operator_router.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((None, one_turn_epoch.clone()));
                 }
                 if driver.is_some()
                     && let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
@@ -1638,6 +1862,97 @@ mod tests {
                 ..limits
             }
         ));
+    }
+
+    #[test]
+    fn concurrent_operator_reservations_keep_sdk_enqueue_order() {
+        let output = Arc::new(Mutex::new(CallbackOutput::default()));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let limits = ClientLimits::default();
+        let (entered, first_enqueuing) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let first = {
+            let output = Arc::clone(&output);
+            let sent = Arc::clone(&sent);
+            let limits = limits.clone();
+            std::thread::spawn(move || {
+                reserve_and_enqueue_operator_response(
+                    &output,
+                    "first".into(),
+                    &limits,
+                    &mut None,
+                    || {
+                        entered.send(()).expect("first entered SDK enqueue");
+                        released.recv().expect("release first enqueue");
+                        sent.lock().expect("sent frames").push("first");
+                    },
+                )
+            })
+        };
+        first_enqueuing
+            .recv()
+            .expect("first has reserved its frame");
+        assert!(
+            output.try_lock().is_err(),
+            "reservation must stay locked through SDK enqueue"
+        );
+        let second = {
+            let output = Arc::clone(&output);
+            let sent = Arc::clone(&sent);
+            let limits = limits.clone();
+            std::thread::spawn(move || {
+                reserve_and_enqueue_operator_response(
+                    &output,
+                    "second".into(),
+                    &limits,
+                    &mut None,
+                    || {
+                        sent.lock().expect("sent frames").push("second");
+                    },
+                )
+            })
+        };
+        release.send(()).expect("release first enqueue");
+        first
+            .join()
+            .expect("first task")
+            .expect("first reservation");
+        second
+            .join()
+            .expect("second task")
+            .expect("second reservation");
+        assert_eq!(*sent.lock().expect("sent frames"), ["first", "second"]);
+        assert_eq!(
+            output
+                .lock()
+                .expect("reservations")
+                .frames
+                .iter()
+                .map(|(frame, _, _)| frame.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+    }
+
+    #[test]
+    fn operator_acknowledgement_tracks_flush_or_sink_failure() {
+        let mut output = CallbackOutput::default();
+        let limits = ClientLimits::default();
+        let (success, mut flushed) = oneshot::channel();
+        let mut success = Some(success);
+        assert!(output.admit_with_ack("first".into(), &limits, false, &mut success));
+        assert!(success.is_none());
+        assert!(
+            flushed.try_recv().is_err(),
+            "SDK enqueue is not transport delivery"
+        );
+        output.flushed();
+        assert!(flushed.try_recv().expect("flush acknowledgement"));
+
+        let (failure, mut failed) = oneshot::channel();
+        assert!(output.admit_with_ack("second".into(), &limits, false, &mut Some(failure)));
+        output.fail_all();
+        assert!(!failed.try_recv().expect("write failure acknowledgement"));
     }
 
     #[test]

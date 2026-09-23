@@ -1,5 +1,7 @@
 mod acp;
-pub use acp::{AcpAuth, AcpConfig, AcpProfile, AcpSessionConfig};
+pub use acp::{
+    AcpAuth, AcpConfig, AcpPermissionConfig, AcpPermissionPolicy, AcpProfile, AcpSessionConfig,
+};
 mod error;
 mod loader;
 mod model;

@@ -310,6 +310,12 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     ).then((response) => response.approvals ?? []);
   }
 
+  runInputs(runId: string): ReturnType<GatewayTransport["runInputs"]> {
+    return this.invokeOrHttp<{ inputs?: Awaited<ReturnType<GatewayTransport["runInputs"]>> }>(
+      "run_inputs", { runId }, async () => ({ inputs: await this.inner.runInputs(runId) }),
+    ).then((response) => response.inputs ?? []);
+  }
+
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
     return this.invokeOrHttp("run_validation", { runId }, () => this.inner.runValidation(runId));
   }
@@ -370,8 +376,10 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: import("@opensymphony/gateway-schema").OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
-    return this.actionInner.approvalDecision(approvalId, decision, explanation);
+    return this.actionInner.approvalDecision(approvalId, decision, explanation, interaction, optionId);
   }
 
   openWorkspace(runId: string): Promise<ActionReceipt> {

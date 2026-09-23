@@ -654,6 +654,38 @@ adjacent response/update pair is dispatched, and saturate callback output while
 a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
+The native ACP peer also verifies `elicitation/create` form accept, decline and
+cancel responses, private large numeric peer RPC IDs with generated public
+binding tokens, disabled Cursor methods, and form-only
+capability advertisement. The production scheduler/gateway fixture routes a
+permission and a choice form through HTTP action receipts to the blocked peer.
+It uses a five-minute tracker interval and processes both callbacks through
+worker-update wakeups without another tracker tick.
+An un-routed native form receives protocol cancellation without failing its
+turn, and a delayed worker-consume regression verifies that a timed-out
+operator answer cannot reach the ACP callback after its failure receipt.
+The scheduler retains a live request when the backend response queue is full or
+an unconsumed answer expires, allowing a new submission. An output-reservation
+test verifies that an operator answer is acknowledged only after the ACP input
+sink flushes its response frame, and sink failure fails every queued receipt.
+An early-finish native peer verifies that a completed prompt wakes the
+scheduler and clears its pending request even if callback closure loses the
+race, with tracker polling set to five minutes.
+The peer writes its round-trip completion marker by atomic replacement after
+closing the JSON file, so marker existence means the payload is readable.
+Gateway timeout and handler-drop tests verify that delayed commands cannot
+cross the scheduler application fence; a claimed command waits for its actual
+acknowledgement. A concurrent reservation test holds one ACP SDK enqueue while
+another callback responds and verifies output reservation and enqueue order.
+The run-loop wake regression queues a callback notification and an operator
+command during a selected tick, verifies that tick completes, and then drains
+both queued events. A delayed ACP flush regression verifies that the actor can
+tick, process a worker wake, and receive shutdown while the acknowledgement is
+pending; the scheduler rejects a duplicate response and applies the eventual
+receipt through its own completion path. A malformed permission callback produces no waiting event;
+the routed production requests do. The shared web/desktop test retains two
+form selections after refresh, submits both answers, and drops a refresh that
+fetched the answered request before the successful submission.
 Native Unix tests replace the bound workspace root after service creation and
 verify file reads, atomic writes, and new terminal cwd remain on the original
 directory inode. They also swap a pinned terminal directory for an external
@@ -706,7 +738,14 @@ Callback integration covers cancellation followed by a fresh turn on the same
 process, stale terminal rejection, live configuration and secret-safe host-policy/
 MCP grant compatibility checks. Normal-completion tests send adjacent late file
 and terminal callbacks, verify rejection while idle and process reaping before
-completion, then start a fresh callback epoch. Pre-prompt tests reject file and
+completion, then start a fresh callback epoch. A permission-policy peer checks
+that `allow_once` selects the offered option during a turn and cancels a
+permission request adjacent to the prompt result, both with and without an
+operator route. A saturated two-slot operator event channel test holds two
+`Opened` events until both peer callbacks time out, then requires both matching
+`Closed` events to arrive while the prompt remains active. Scheduler tests
+verify that closure removes the pending interaction and resumes the idle clock.
+Pre-prompt tests reject file and
 terminal requests after session binding. File and terminal-output tests verify
 exact wire contents with structural redaction in retained history and evidence.
 Configuration tests check preparation-frame attribution on success, cancellation

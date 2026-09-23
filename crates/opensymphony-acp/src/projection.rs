@@ -279,18 +279,6 @@ impl RuntimeProjection {
 
     fn project(&mut self, generation: u64, frame: &SourceFrame) -> Option<RuntimeUpdate> {
         let method = frame.payload.get("method")?.as_str()?;
-        if method == "session/request_permission" {
-            return Some(RuntimeUpdate {
-                sequence: frame.sequence,
-                generation,
-                observed_at: frame.observed_at,
-                kind: "waiting_for_input".into(),
-                summary: Some(
-                    "ACP agent requested permission; operator responses are unavailable".into(),
-                ),
-                payload: json!({"reason":"permission_request", "operator_responses":false}),
-            });
-        }
         if method != "session/update" {
             return None;
         }
@@ -451,7 +439,7 @@ pub fn run_capability(
         history_replay: caps["loadSession"].as_bool() == Some(true),
         model_selection: state.model_selection,
         cancellation: true,
-        operator_responses: false,
+        operator_responses: true,
     }
 }
 
@@ -758,6 +746,24 @@ mod tests {
         frame.observed_at =
             chrono::DateTime::from_timestamp_millis(observed_ms).expect("fixture timestamp");
         event
+    }
+
+    #[test]
+    fn raw_operator_callbacks_do_not_claim_an_unrouted_wait() {
+        let mut projection = RuntimeProjection::default();
+        for (sequence, method) in [(1, "session/request_permission"), (2, "elicitation/create")] {
+            let update = projection.apply(
+                &callback_event(
+                    sequence,
+                    "incoming",
+                    json!({
+                        "id":sequence,"method":method,"params":{"sessionId":"s","secret":"private"}
+                    }),
+                ),
+                "run",
+            );
+            assert!(update.is_none(), "only accepted routed requests may wait");
+        }
     }
 
     #[test]

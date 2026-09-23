@@ -1,8 +1,8 @@
 //! Production worker wiring. ACP wire types and protocol ownership stay in opensymphony_acp.
 use super::*;
 use crate::opensymphony_acp::{
-    ClientLimits, HostServices, LaunchContext, RetentionPolicy, RuntimeProjection, SessionControl,
-    SessionEvent, SessionHandle, SessionHost, SessionLaunch,
+    AcpOperatorEvent, ClientLimits, HostServices, LaunchContext, RetentionPolicy,
+    RuntimeProjection, SessionControl, SessionEvent, SessionHandle, SessionHost, SessionLaunch,
 };
 use crate::opensymphony_workspace::{AcpProcessState, AcpSessionIdentity, AcpSessionStatus};
 use tokio_util::sync::CancellationToken;
@@ -17,6 +17,13 @@ pub(super) struct ActiveSession {
     pub issue_id: IssueId,
     pub issue_identifier: IssueIdentifier,
     pub run_id: String,
+    pub operator_responses: mpsc::Sender<OperatorResponseCommand>,
+}
+pub(super) struct OperatorResponseCommand {
+    pub request_id: String,
+    pub answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    pub acknowledgement: oneshot::Sender<bool>,
+    pub delivery: crate::opensymphony_acp::AcpOperatorDeliveryFence,
 }
 pub(super) type ActiveSessions = Arc<Mutex<HashMap<String, ActiveSession>>>;
 
@@ -327,6 +334,7 @@ pub(super) async fn run_issue(
     host: &SessionHost,
     active: &ActiveSessions,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
+    operator_update_notify: &Notify,
     launch: &mut Option<oneshot::Sender<LaunchReport>>,
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
@@ -346,6 +354,7 @@ pub(super) async fn run_issue(
         host,
         active,
         updates,
+        operator_update_notify,
         launch,
         environment,
         excluded_environment,
@@ -583,6 +592,7 @@ async fn try_run(
     host: &SessionHost,
     active: &ActiveSessions,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
+    operator_update_notify: &Notify,
     launch: &mut Option<oneshot::Sender<LaunchReport>>,
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
@@ -727,6 +737,9 @@ async fn try_run(
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let prompt_finished = CancellationToken::new();
     let _finish_on_drop = prompt_finished.clone().drop_guard();
+    let (operator_requests_tx, mut operator_requests_rx) = mpsc::channel(32);
+    let (operator_responses_tx, mut operator_responses_rx) = mpsc::channel(32);
+    let mut operator_waiters = HashMap::new();
     let active_session = ActiveSession {
         handle: handle.clone(),
         cancellation: cancellation.clone(),
@@ -735,6 +748,7 @@ async fn try_run(
         issue_id: issue.id.clone(),
         issue_identifier: issue.identifier.clone(),
         run_id: manifest.run_id.clone(),
+        operator_responses: operator_responses_tx,
     };
     active
         .lock()
@@ -758,16 +772,48 @@ async fn try_run(
         .latest_cursor
         .unwrap_or((handle.generation, 0));
     let mut projection = RuntimeProjection::after(baseline);
-    let prompt = handle.prompt(
+    let prompt = handle.prompt_with_operator(
         manifest.run_id.clone(),
         manifest.attempt,
         prompt,
         cancellation.clone(),
+        Some(operator_requests_tx),
     );
     tokio::pin!(prompt);
+    let mut operator_requests_open = true;
+    let mut operator_responses_open = true;
     let result = loop {
         tokio::select! {
             result = &mut prompt => break result,
+            operator = operator_requests_rx.recv(), if operator_requests_open => match operator {
+                Some(AcpOperatorEvent::Opened(mut request)) => {
+                    request.interaction.run_id = manifest.run_id.clone();
+                    request.interaction.issue_id = issue.id.as_str().into();
+                    request.interaction.issue_identifier = issue.identifier.to_string();
+                    request.interaction.generation = handle.generation;
+                    let request_id = request.interaction.request_id.clone();
+                    if operator_waiters.insert(request_id.clone(), request.reply).is_some() {
+                        return Err("ACP callback repeated its request identity".into());
+                    }
+                    if updates.send(WorkerUpdate::OperatorRequest { worker_id: run.worker_id.clone(), interaction: request.interaction }).is_ok() {
+                        operator_update_notify.notify_one();
+                    }
+                }
+                Some(AcpOperatorEvent::Closed(request_id)) => {
+                    operator_waiters.remove(&request_id);
+                    if updates.send(WorkerUpdate::OperatorClosed { worker_id: run.worker_id.clone(), request_id }).is_ok() {
+                        operator_update_notify.notify_one();
+                    }
+                }
+                // The owner drops this sender while cancelling a prompt that
+                // has not been submitted. Keep waiting for the prompt's
+                // terminal result so its cancellation evidence wins the race.
+                None => operator_requests_open = false,
+            },
+            response = operator_responses_rx.recv(), if operator_responses_open => match response {
+                Some(response) => forward_operator_response(response, &mut operator_waiters),
+                None => operator_responses_open = false,
+            },
             event = receiver.recv() => match event {
                 Ok(SessionEvent::Gap { .. }) => return Err("ACP source stream lost an oversized frame; submission remains fenced".into()),
                 Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates),
@@ -870,11 +916,61 @@ fn project_event(
     }
 }
 
+fn forward_operator_response(
+    response: OperatorResponseCommand,
+    waiters: &mut HashMap<String, oneshot::Sender<crate::opensymphony_acp::AcpOperatorReply>>,
+) {
+    if response.delivery.is_cancelled() {
+        let _ = response.acknowledgement.send(false);
+        return;
+    }
+    let reply = crate::opensymphony_acp::AcpOperatorReply {
+        answer: response.answer,
+        acknowledgement: response.acknowledgement,
+        delivery: response.delivery,
+    };
+    if let Some(waiter) = waiters.remove(&response.request_id) {
+        if let Err(reply) = waiter.send(reply) {
+            let _ = reply.acknowledgement.send(false);
+        }
+    } else {
+        let _ = reply.acknowledgement.send(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+
+    #[tokio::test]
+    async fn expired_operator_ack_fences_delayed_worker_consume() {
+        let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
+        let (acknowledgement, mut received) = oneshot::channel();
+        let response = OperatorResponseCommand {
+            request_id: "queued-request".into(),
+            answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer::Cancel,
+            acknowledgement,
+            delivery: delivery.clone(),
+        };
+        let (waiter, mut callback) = oneshot::channel();
+        let mut waiters = HashMap::from([("queued-request".into(), waiter)]);
+
+        assert!(
+            timeout(Duration::from_millis(10), &mut received)
+                .await
+                .is_err()
+        );
+        assert!(delivery.cancel(), "failure receipt wins the delivery fence");
+        forward_operator_response(response, &mut waiters);
+        assert!(!received.await.expect("negative acknowledgement"));
+        assert!(waiters.contains_key("queued-request"));
+        assert!(
+            callback.try_recv().is_err(),
+            "operator answer never reaches ACP"
+        );
+    }
 
     #[test]
     fn credential_scope_uses_platform_environment_name_rules() {

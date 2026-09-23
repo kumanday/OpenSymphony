@@ -338,13 +338,13 @@ impl HarnessCapability {
             runtime_contract_version: Some("acp-v1".into()),
             actions: HarnessActionCapability {
                 start_run: true, send_user_message: false, retry: true, cancel: true,
-                pause: false, resume: false, approve: false, reject: false, comment: false,
+                pause: false, resume: false, approve: true, reject: true, comment: false,
             },
             event_streams: HarnessEventStreamCapability {
                 runtime_events: true, terminal_frames: false, replay_from_cursor: false,
                 raw_payload_refs: true, delivery_modes: vec!["json_rpc_notifications".into()],
             },
-            approvals: HarnessApprovalCapability { tool_approval: false, human_decision: false, policy_metadata: false },
+            approvals: HarnessApprovalCapability { tool_approval: true, human_decision: true, policy_metadata: false },
             model_settings: HarnessModelSettingsCapability {
                 api_compatible_settings: false, subscription_credentials: false,
                 per_run_overrides: true, credential_reference_kinds: vec!["env".into()],
@@ -357,8 +357,8 @@ impl HarnessCapability {
             history: HarnessHistoryCapability {
                 fetch_history: false, reconcile_after_ready: false, reconnect_and_replay: false, preserve_unknown_events: true,
             },
-            notes: vec!["ACP v1 host-owned stdio sessions; profile preflight and negotiated run support are separate from adapter availability.".into()],
-            feature_gaps: vec!["Operator responses require the operator-request routing implementation.".into(), "Context restoration requires negotiated session/load or session/resume support; uncertain prompt delivery remains fenced.".into()],
+            notes: vec!["ACP v1 host-owned stdio sessions; profile preflight and negotiated run support are separate from adapter availability.".into(), "Operator responses support offered permission options and bounded required choice forms (string and string-array enums).".into()],
+            feature_gaps: vec!["Free-text, numeric, optional, constrained, request-scoped and URL elicitation are unavailable; unsupported requests are cancelled.".into(), "Cursor vendor methods require version-tested registration in COE-613.".into(), "Context restoration requires negotiated session/load or session/resume support; uncertain prompt delivery remains fenced.".into()],
         }
     }
 

@@ -1,7 +1,9 @@
 use opensymphony::opensymphony_acp::{
     AcpProfile, ClientError, ClientLimits, LaunchContext, run_turn,
 };
-use opensymphony::opensymphony_workflow::{AcpAuth, WorkflowDefinition};
+use opensymphony::opensymphony_workflow::{
+    AcpAuth, AcpPermissionConfig, AcpPermissionPolicy, WorkflowDefinition,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -25,6 +27,11 @@ fn profile(mode: &str) -> AcpProfile {
         required_capabilities: vec![],
         extensions: vec![],
         session: Default::default(),
+        // These transport tests use a standalone client without an operator
+        // route; deny keeps their legacy permission callback deterministic.
+        permissions: AcpPermissionConfig {
+            mode: AcpPermissionPolicy::Deny,
+        },
     }
 }
 fn context(root: &Path) -> LaunchContext {
@@ -51,6 +58,45 @@ fn limits() -> ClientLimits {
         reap_timeout: Duration::from_secs(2),
         ..ClientLimits::default()
     }
+}
+
+#[tokio::test]
+async fn acp_operator_policy_without_response_path_fails_visibly() {
+    let root = tempfile::tempdir().expect("temp");
+    let mut config = profile("complete");
+    config.permissions.mode = AcpPermissionPolicy::Operator;
+    let run = run_turn(
+        &config,
+        context(root.path()),
+        "requires operator".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(matches!(
+        run.outcome,
+        Err(ClientError::Protocol { submitted: true })
+    ));
+    assert!(run.process_reaped);
+}
+
+#[tokio::test]
+async fn standard_form_without_operator_route_is_cancelled_without_failing_turn() {
+    let root = tempfile::tempdir().expect("temp");
+    let run = run_turn(
+        &profile("form_no_route"),
+        context(root.path()),
+        "form fallback".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(run.outcome.expect("protocol cancellation").succeeded());
+    assert!(run.process_reaped);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1181,7 +1227,8 @@ fn acp_adapter_exposes_execution_and_explicit_gaps() {
             && capability.actions.start_run
             && capability.cancellation.acknowledges_cancel
     );
-    assert!(!capability.actions.approve && !capability.pause_resume.resume);
+    assert!(capability.actions.approve && capability.approvals.human_decision);
+    assert!(!capability.pause_resume.resume);
     assert!(!capability.feature_gaps.is_empty());
 }
 

@@ -66,7 +66,7 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, Command},
-    sync::{Mutex as AsyncMutex, mpsc, oneshot},
+    sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot},
     task::JoinHandle,
     time::{timeout, timeout_at},
 };
@@ -421,6 +421,8 @@ pub(super) enum CliWorkerError {
     Join(#[from] tokio::task::JoinError),
     #[error("worker interrupt failed: {0}")]
     InterruptFailed(String),
+    #[error("ACP operator response is retryable: {0}")]
+    OperatorResponseRetryable(String),
 }
 
 #[derive(Debug)]
@@ -505,6 +507,7 @@ pub(super) struct RuntimeWorkerBackend {
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
+    operator_update_notify: Arc<Notify>,
     tasks: HashMap<String, ActiveWorkerTask>,
     worker_issue_ids: HashMap<String, String>,
 }
@@ -5636,6 +5639,7 @@ impl RuntimeWorkerBackend {
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
+            operator_update_notify: Arc::new(Notify::new()),
             tasks: HashMap::new(),
             worker_issue_ids: HashMap::new(),
         }
@@ -5644,6 +5648,10 @@ impl RuntimeWorkerBackend {
     pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
         self.checkout_credential_envs = variables;
         self
+    }
+
+    pub(super) fn operator_update_notify(&self) -> Arc<Notify> {
+        self.operator_update_notify.clone()
     }
 
     pub(super) fn with_integration_instructions(
@@ -5734,6 +5742,7 @@ impl RuntimeWorkerBackend {
         let openhands_conversation_store = self.openhands_conversation_store.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
+        let operator_update_notify = self.operator_update_notify.clone();
         let worker_id = request.run.worker_id.clone();
         let issue_identifier = issue.identifier.to_string();
         self.worker_issue_ids
@@ -7012,6 +7021,7 @@ impl RuntimeWorkerBackend {
                     &acp_host,
                     &acp_active,
                     &updates_tx,
+                    &operator_update_notify,
                     &mut launch_tx,
                     worker_environment,
                     checkout_credential_envs,
@@ -7032,6 +7042,7 @@ impl RuntimeWorkerBackend {
                     worker_id: finished_worker_id.clone(),
                     outcome,
                 });
+                operator_update_notify.notify_one();
                 return;
             }
             if !matches!(
@@ -10322,6 +10333,78 @@ impl WorkerBackend for RuntimeWorkerBackend {
         }
 
         Ok(updates)
+    }
+
+    async fn respond_operator_request(
+        &mut self,
+        worker_id: &crate::opensymphony_domain::WorkerId,
+        request_id: &str,
+        answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    ) -> Result<bool, Self::Error> {
+        self.begin_operator_response(worker_id, request_id, answer)
+            .await?
+            .wait()
+            .await
+            .map_err(CliWorkerError::OperatorResponseRetryable)
+    }
+
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &crate::opensymphony_domain::WorkerId,
+        request_id: &str,
+        answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    ) -> Result<crate::opensymphony_orchestrator::OperatorResponseDelivery, Self::Error> {
+        let sender = self
+            .acp_active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(worker_id.as_str())
+            .filter(|session| session.run_id == format!("run-{worker_id}"))
+            .map(|session| session.operator_responses.clone());
+        let Some(sender) = sender else {
+            return Ok(
+                crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async {
+                    Ok(false)
+                }),
+            );
+        };
+        let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
+        let (acknowledgement, received) = oneshot::channel();
+        match sender.try_send(acp::OperatorResponseCommand {
+            request_id: request_id.into(),
+            answer,
+            acknowledgement,
+            delivery: delivery.clone(),
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(CliWorkerError::OperatorResponseRetryable(
+                    "worker response queue is full".into(),
+                ));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Ok(
+                    crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async {
+                        Ok(false)
+                    }),
+                );
+            }
+        }
+        Ok(
+            crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async move {
+                tokio::pin!(received);
+                match timeout(Duration::from_secs(5), &mut received).await {
+                Ok(result) => Ok(result.unwrap_or(false)),
+                Err(_) if delivery.cancel() => Err(
+                    "worker did not consume the queued answer before its acknowledgement deadline"
+                        .into(),
+                ),
+                // Delivery already crossed the atomic fence. Wait for its real
+                // acknowledgement instead of publishing a false failure receipt.
+                Err(_) => Ok(received.await.unwrap_or(false)),
+            }
+            }),
+        )
     }
 
     async fn abort_worker(
@@ -17394,6 +17477,8 @@ exit 64
             "crash",
             "setup_retry",
             "permission",
+            "operator_roundtrip",
+            "operator_early_finish",
             "corrupt",
             "configured",
             "slow_model_hang",
@@ -17481,6 +17566,357 @@ exit 64
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("ACP worker did not finish")
+    }
+
+    struct OperatorTracker(TrackerIssue);
+
+    impl TrackerBackend for OperatorTracker {
+        type Error = io::Error;
+
+        async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
+            Ok(vec![self.0.clone()])
+        }
+
+        async fn terminal_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn issue_states_by_ids(
+            &mut self,
+            ids: &[String],
+        ) -> Result<Vec<crate::opensymphony_domain::TrackerIssueStateSnapshot>, Self::Error>
+        {
+            Ok(ids
+                .iter()
+                .filter(|id| *id == &self.0.id)
+                .map(|_| crate::opensymphony_domain::TrackerIssueStateSnapshot {
+                    id: self.0.id.clone(),
+                    identifier: self.0.identifier.clone(),
+                    state: crate::opensymphony_domain::TrackerIssueState {
+                        id: "state-active".into(),
+                        name: self.0.state.clone(),
+                        tracker_type: "started".into(),
+                        kind: TrackerIssueStateKind::Started,
+                    },
+                    project_id: None,
+                    project_slug: None,
+                    project_identity_known: false,
+                    labels: Vec::new(),
+                    is_parent: false,
+                    updated_at: chrono::Utc::now(),
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn acp_production_scheduler_gateway_to_native_rpc_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("integration runtime")
+                    .block_on(acp_production_round_trip_inner())
+            })
+            .expect("integration thread")
+            .join()
+            .expect("integration result");
+    }
+
+    async fn acp_production_round_trip_inner() {
+        use crate::opensymphony_control::{AgentServerStatus, MemoryServerStatus, SnapshotStore};
+        use crate::opensymphony_gateway::{GatewayServer, OperatorCommand};
+        use crate::opensymphony_gateway_schema::{
+            action::{ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget},
+            approval::{OperatorAnswer, OperatorInteraction, OperatorInteractionKind},
+            envelope::EntityKind,
+            version::SchemaVersion,
+        };
+        use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig};
+
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        Arc::make_mut(&mut backend.workflow)
+            .config
+            .polling
+            .interval_ms = 300_000;
+        let workflow = backend.workflow.clone();
+        let workspace = RuntimeWorkspaceBackend::new(manager.clone(), &workflow);
+        let mut config = SchedulerConfig::from_workflow(&workflow).expect("config");
+        config.routing.harness_profile = Some("operator_roundtrip".into());
+        config.routing.model = None;
+        config.routing.model_from_env = false;
+        config.stall_timeout_ms = None;
+        let mut tracker_issue = sample_tracker_issue(&sample_issue());
+        tracker_issue.project_slug = Some("sample-project".into());
+        let operator_update_notify = backend.operator_update_notify();
+        let mut scheduler =
+            Scheduler::new(OperatorTracker(tracker_issue), workspace, backend, config);
+        let mut observed_at = now_timestamp().as_u64();
+        let agent_status = || AgentServerStatus {
+            reachable: true,
+            base_url: String::new(),
+            conversation_count: 0,
+            status_line: "ACP local stdio".into(),
+        };
+        let terminal_states = HashSet::from(["done".to_owned()]);
+        let project = |snapshot: &crate::opensymphony_domain::OrchestratorSnapshot| {
+            super::super::snapshot::map_snapshot(
+                snapshot,
+                &manager.config().root,
+                &terminal_states,
+                agent_status(),
+                MemoryServerStatus::default(),
+                &VecDeque::new(),
+            )
+        };
+        let store = SnapshotStore::new(project(&scheduler.snapshot(TimestampMs::new(observed_at))));
+        let (commands_tx, mut commands_rx) = mpsc::channel::<OperatorCommand>(8);
+        let gateway = GatewayServer::new(store.clone()).with_operator_commands(commands_tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("gateway bind");
+        let address = listener.local_addr().expect("gateway address");
+        let server = tokio::spawn(async move { gateway.serve(listener).await.expect("gateway") });
+        let client = reqwest::Client::new();
+
+        observed_at += 1000;
+        let dispatched = scheduler
+            .tick(TimestampMs::new(observed_at))
+            .await
+            .expect("initial tracker dispatch");
+        store.publish(project(&dispatched)).await;
+
+        for (kind, action_kind, answer_fields) in [
+            (
+                OperatorInteractionKind::Permission,
+                ActionKind::ApprovalDecision,
+                serde_json::json!({"decision":"approved","option_id":"allow-opaque"}),
+            ),
+            (
+                OperatorInteractionKind::Question,
+                ActionKind::InputResponse,
+                serde_json::json!({"outcome":"answered","answers":[{"question_id":"region","selected_option_ids":["west"]}]}),
+            ),
+        ] {
+            let interaction: OperatorInteraction = {
+                let mut found = None;
+                let mut last = String::new();
+                for _ in 0..100 {
+                    timeout(Duration::from_secs(5), operator_update_notify.notified())
+                        .await
+                        .expect("native ACP callback wakes scheduler without tracker polling");
+                    observed_at += 1000;
+                    let snapshot = scheduler
+                        .drain_worker_updates(TimestampMs::new(observed_at))
+                        .await
+                        .expect("operator update drain");
+                    last = format!(
+                        "health={:?} issues={:?} pending={:?}",
+                        snapshot.daemon.health,
+                        snapshot
+                            .issues
+                            .iter()
+                            .map(|issue| (
+                                &issue.issue.identifier,
+                                &issue.runtime.state,
+                                &issue.last_worker_outcome
+                            ))
+                            .collect::<Vec<_>>(),
+                        snapshot
+                            .operator_interactions
+                            .iter()
+                            .map(|item| item.kind)
+                            .collect::<Vec<_>>()
+                    );
+                    store.publish(project(&snapshot)).await;
+                    found = snapshot
+                        .operator_interactions
+                        .into_iter()
+                        .find(|item| item.kind == kind);
+                    if found.is_some() {
+                        assert!(
+                            snapshot.issues.iter().any(|issue| {
+                                issue.conversation.as_ref().is_some_and(|conversation| {
+                                    conversation
+                                        .recent_activity
+                                        .iter()
+                                        .any(|event| event.kind == "acp.waiting_for_input")
+                                })
+                            }),
+                            "accepted routed callback records waiting activity"
+                        );
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| panic!("native peer request reached scheduler: {last}"))
+            };
+            let route = if kind == OperatorInteractionKind::Question {
+                "inputs"
+            } else {
+                "approvals"
+            };
+            let page: serde_json::Value = client
+                .get(format!("http://{address}/api/v1/runs/COE-284/{route}"))
+                .send()
+                .await
+                .expect("gateway read")
+                .json()
+                .await
+                .expect("page");
+            assert!(
+                page[route]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            );
+
+            let mut stale = interaction.clone();
+            stale.generation += 1;
+            assert!(
+                scheduler
+                    .respond_operator_request(&stale, OperatorAnswer::Cancel)
+                    .await
+                    .is_err()
+            );
+            let mut payload = serde_json::json!({"request_id":interaction.request_id,"run_id":interaction.run_id,
+                "issue_id":interaction.issue_id,"session_id":interaction.session_id,
+                "generation":interaction.generation,"rpc_id":interaction.rpc_id});
+            payload
+                .as_object_mut()
+                .expect("object")
+                .extend(answer_fields.as_object().expect("answer").clone());
+            let action = ActionDispatch {
+                schema_version: SchemaVersion::v1(),
+                correlation_id: format!("operator-integration-{}", interaction.request_id),
+                action_kind,
+                target_entity: ActionTarget {
+                    entity_kind: EntityKind::Run,
+                    entity_id: "COE-284".into(),
+                },
+                payload: Some(payload),
+                idempotency_key: None,
+            };
+            let response = tokio::spawn({
+                let client = client.clone();
+                let url = format!("http://{address}/api/v1/actions/dispatch");
+                async move { client.post(url).json(&action).send().await }
+            });
+            let command = timeout(Duration::from_secs(5), commands_rx.recv())
+                .await
+                .expect("gateway command timeout")
+                .expect("command");
+            assert_eq!(command.interaction, interaction);
+            let delivered = scheduler
+                .respond_operator_request(&command.interaction, command.answer)
+                .await;
+            command.reply.send(delivered).expect("gateway reply");
+            let receipt: ActionReceipt = response
+                .await
+                .expect("response task")
+                .expect("http response")
+                .json()
+                .await
+                .expect("receipt");
+            assert_eq!(receipt.status, ActionStatus::Accepted, "{receipt:?}");
+            assert!(
+                scheduler
+                    .respond_operator_request(&interaction, OperatorAnswer::Cancel)
+                    .await
+                    .is_err(),
+                "accepted request cannot be replayed"
+            );
+        }
+        let workspace = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspace")
+            .remove(0)
+            .0;
+        let marker = workspace
+            .workspace_path()
+            .join("acp-operator-roundtrip.json");
+        timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("native peer completed all three callbacks");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(marker).expect("marker"))
+                .expect("json"),
+            serde_json::json!({"permission":"allow-opaque","question":"west"})
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn acp_prompt_finish_wakes_scheduler_even_when_callback_close_loses_race() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("integration runtime")
+                    .block_on(acp_prompt_finish_wake_inner())
+            })
+            .expect("integration thread")
+            .join()
+            .expect("integration result");
+    }
+
+    async fn acp_prompt_finish_wake_inner() {
+        use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig};
+
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        Arc::make_mut(&mut backend.workflow)
+            .config
+            .polling
+            .interval_ms = 300_000;
+        let workflow = backend.workflow.clone();
+        let workspace = RuntimeWorkspaceBackend::new(manager, &workflow);
+        let mut config = SchedulerConfig::from_workflow(&workflow).expect("config");
+        config.routing.harness_profile = Some("operator_early_finish".into());
+        config.routing.model = None;
+        config.routing.model_from_env = false;
+        let notify = backend.operator_update_notify();
+        let mut scheduler = Scheduler::new(
+            OperatorTracker(sample_tracker_issue(&sample_issue())),
+            workspace,
+            backend,
+            config,
+        );
+        let mut observed_at = now_timestamp().as_u64();
+        scheduler
+            .tick(TimestampMs::new(observed_at))
+            .await
+            .expect("dispatch ACP worker");
+        for _ in 0..10 {
+            timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("ACP completion wakes scheduler without tracker tick");
+            observed_at += 1_000;
+            let snapshot = scheduler
+                .drain_worker_updates(TimestampMs::new(observed_at))
+                .await
+                .expect("drain ACP result");
+            if snapshot
+                .issues
+                .iter()
+                .any(|issue| issue.last_worker_outcome.is_some())
+            {
+                assert!(
+                    snapshot.operator_interactions.is_empty(),
+                    "finished prompt clears its outstanding callback"
+                );
+                return;
+            }
+        }
+        panic!("ACP completion was not published after callback close race");
     }
 
     #[tokio::test]
@@ -19038,9 +19474,11 @@ exit 64
             .await
             .expect("retained interrupt");
         assert!(acknowledgement.accepted);
+        let retained_outcome = acp_test_finished(&mut backend).await;
         assert_eq!(
-            acp_test_finished(&mut backend).await.outcome,
-            WorkerOutcomeKind::Cancelled
+            retained_outcome.outcome,
+            WorkerOutcomeKind::Cancelled,
+            "{retained_outcome:?}"
         );
         assert_eq!(
             fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
@@ -19301,7 +19739,7 @@ exit 64
     }
 
     #[tokio::test]
-    async fn acp_worker_retries_pre_submission_failure_and_reports_permission_wait() {
+    async fn acp_worker_retries_pre_submission_failure_without_false_permission_wait() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
         let root = manager.config().root.clone();
@@ -19351,7 +19789,10 @@ exit 64
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(waiting, "permission waiting state reaches the scheduler");
+        assert!(
+            !waiting,
+            "malformed permission must not claim a routed wait"
+        );
         assert_eq!(
             finished.expect("finished").outcome,
             WorkerOutcomeKind::Cancelled

@@ -69,6 +69,7 @@ pub(super) fn map_snapshot(
                     terminal_states,
                     generated_at,
                     snapshot.hierarchy.get(issue.issue.id.as_str()),
+                    &snapshot.operator_interactions,
                 )
             })
             .collect(),
@@ -100,6 +101,7 @@ fn map_issue(
     terminal_states: &HashSet<String>,
     generated_at: DateTime<Utc>,
     hierarchy: Option<&crate::opensymphony_domain::HierarchyStateSnapshot>,
+    operator_interactions: &[crate::opensymphony_gateway_schema::approval::OperatorInteraction],
 ) -> IssueSnapshot {
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
@@ -243,6 +245,11 @@ fn map_issue(
     });
 
     IssueSnapshot {
+        operator_interactions: operator_interactions
+            .iter()
+            .filter(|request| request.issue_id == issue.issue.id.as_str())
+            .cloned()
+            .collect(),
         harness_capability: issue
             .conversation
             .as_ref()

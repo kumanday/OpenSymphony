@@ -62,7 +62,7 @@ while True:
         assert caps.get('fs', {}).get('readTextFile', False) == enabled, caps
         assert caps.get('fs', {}).get('writeTextFile', False) == enabled, caps
         assert not caps.get('auth', {}).get('terminal')
-        assert not caps.get('elicitation')
+        assert caps.get('elicitation') == {'form': {}}
         respond(message, {'protocolVersion': 1, 'agentCapabilities': {'mcpCapabilities': {'http': mode == 'mcp'}}})
     elif method == 'session/new':
         assert message['params']['cwd'] == os.getcwd()

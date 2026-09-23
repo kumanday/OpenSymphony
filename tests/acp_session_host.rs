@@ -1,3 +1,7 @@
+use opensymphony::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
+};
+use opensymphony::opensymphony_workflow::AcpPermissionPolicy;
 use opensymphony::{opensymphony_acp::*, opensymphony_workspace::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -91,6 +95,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
         workspace,
         identity,
         profile: AcpProfile {
+            permissions: Default::default(),
             command: "python3".into(),
             args: vec![
                 format!(
@@ -128,6 +133,259 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
         .prompt(run.into(), 1, text.into(), CancellationToken::new())
         .await
         .expect("prompt")
+}
+
+#[tokio::test]
+async fn session_prompt_without_operator_route_cancels_form_and_completes() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-612-NO-ROUTE", "none").await)
+        .await
+        .expect("open");
+    assert!(
+        prompt(&handle, "run-no-route", "form-no-route")
+            .await
+            .succeeded()
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn automatic_permission_policy_is_fenced_by_prompt_epoch() {
+    for routed in [false, true] {
+        let root = tempfile::tempdir().expect("temp");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = launch(root.path(), "PERMISSION-EPOCH", "none").await;
+        request.profile.permissions.mode = AcpPermissionPolicy::AllowOnce;
+        let handle = host.open(request).await.expect("open");
+        let report = if routed {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            let report = handle
+                .prompt_with_operator(
+                    "policy-route".into(),
+                    1,
+                    "permission-epoch".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt");
+            assert!(rx.try_recv().is_err(), "automatic decisions must not route");
+            report
+        } else {
+            prompt(&handle, "policy-direct", "permission-epoch").await
+        };
+        assert!(report.succeeded());
+        let marker = root.path().join("PERMISSION-EPOCH/permission-epoch.json");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("peer observed both permission decisions");
+        let decisions: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marker).expect("marker")).expect("decisions");
+        assert_eq!(
+            decisions["active"],
+            serde_json::json!({"outcome":{"outcome":"selected","optionId":"allow-opaque"}})
+        );
+        assert_eq!(
+            decisions["late"],
+            serde_json::json!({"outcome":{"outcome":"cancelled"}})
+        );
+        retire(&handle).await;
+    }
+}
+
+#[tokio::test]
+async fn saturated_operator_event_channel_delivers_callback_closures() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CLOSE-SATURATION", "none").await;
+    request.limits.callback_timeout = Duration::from_millis(100);
+    request.limits.prompt_timeout = Duration::from_secs(8);
+    let handle = host.open(request).await.expect("open");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let prompt = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .prompt_with_operator(
+                    "close-saturation".into(),
+                    1,
+                    "operator-close-saturation".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt")
+        }
+    });
+    let workspace = root.path().join("CLOSE-SATURATION");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !workspace.join("operator-close-timed-out").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer observed both timeout cancellations");
+    assert!(
+        !prompt.is_finished(),
+        "prompt remains active during cleanup"
+    );
+    assert_eq!(rx.len(), 2, "both Opened events saturate the channel");
+    let mut opened = BTreeSet::new();
+    let mut closed = BTreeSet::new();
+    for _ in 0..4 {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("every callback closure must arrive")
+            .expect("operator event");
+        match event {
+            AcpOperatorEvent::Opened(request) => {
+                opened.insert(request.interaction.request_id);
+            }
+            AcpOperatorEvent::Closed(request_id) => {
+                closed.insert(request_id);
+            }
+        }
+    }
+    assert_eq!(opened.len(), 2);
+    assert_eq!(closed, opened);
+    std::fs::write(workspace.join("release-operator-close-prompt"), b"").expect("release peer");
+    assert!(prompt.await.expect("prompt task").succeeded());
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn native_peer_operator_permission_and_form_question_round_trip() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-612", "none").await)
+        .await
+        .expect("open");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let prompt = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .prompt_with_operator(
+                    "run-612".into(),
+                    1,
+                    "operator-roundtrip".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt")
+        }
+    });
+    let mut observed = Vec::new();
+    while observed.len() < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("operator request timeout")
+            .expect("operator request");
+        let AcpOperatorEvent::Opened(request) = event else {
+            continue;
+        };
+        assert!(uuid::Uuid::parse_str(&request.interaction.rpc_id).is_ok());
+        assert!(!request.interaction.rpc_id.contains("9007199254740993"));
+        observed.push(request.interaction.kind);
+        let answer = match request.interaction.kind {
+            OperatorInteractionKind::Permission => OperatorAnswer::Permission {
+                option_id: "allow-opaque".into(),
+            },
+            OperatorInteractionKind::Question => OperatorAnswer::Question {
+                answers: vec![OperatorQuestionAnswer {
+                    question_id: "region".into(),
+                    selected_option_ids: vec!["west".into()],
+                }],
+            },
+            OperatorInteractionKind::PlanApproval => panic!("vendor plan callback is not enabled"),
+        };
+        let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+        assert!(
+            request
+                .reply
+                .send(AcpOperatorReply {
+                    answer,
+                    acknowledgement,
+                    delivery: AcpOperatorDeliveryFence::default(),
+                })
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), delivered)
+                .await
+                .expect("callback acknowledgement")
+                .expect("acknowledgement")
+        );
+    }
+    let report = tokio::time::timeout(Duration::from_secs(5), prompt)
+        .await
+        .expect("native prompt timeout")
+        .expect("task");
+    assert!(report.succeeded());
+    assert!(
+        run_capability(&handle.inspect().await.expect("run capability").state).operator_responses
+    );
+    assert_eq!(
+        observed,
+        vec![
+            OperatorInteractionKind::Permission,
+            OperatorInteractionKind::Question
+        ]
+    );
+    for (run, text, answer) in [
+        ("run-decline", "operator-decline", OperatorAnswer::Decline),
+        ("run-cancel", "operator-cancel", OperatorAnswer::Cancel),
+    ] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let request = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .prompt_with_operator(
+                        run.into(),
+                        1,
+                        text.into(),
+                        CancellationToken::new(),
+                        Some(tx),
+                    )
+                    .await
+                    .expect("form outcome prompt")
+            }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("form outcome timeout")
+            .expect("form outcome event");
+        let AcpOperatorEvent::Opened(interaction) = event else {
+            panic!("expected form request");
+        };
+        assert_eq!(
+            interaction.interaction.kind,
+            OperatorInteractionKind::Question
+        );
+        let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+        assert!(
+            interaction
+                .reply
+                .send(AcpOperatorReply {
+                    answer,
+                    acknowledgement,
+                    delivery: AcpOperatorDeliveryFence::default(),
+                })
+                .is_ok()
+        );
+        assert!(delivered.await.expect("form acknowledgement"));
+        assert!(request.await.expect("form task").succeeded());
+    }
+    retire(&handle).await;
 }
 
 #[tokio::test]

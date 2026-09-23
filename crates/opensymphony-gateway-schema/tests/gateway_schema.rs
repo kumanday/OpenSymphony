@@ -687,6 +687,7 @@ fn terminal_snapshot_roundtrips() {
 #[test]
 fn approval_request_roundtrips() {
     let req = ApprovalRequest {
+        operator_interaction: None,
         schema_version: SchemaVersion::v1(),
         approval_id: "apr-1".into(),
         run_id: "run-1".into(),
@@ -810,7 +811,13 @@ fn harness_capability_roundtrips_available_and_future_adapters() {
     assert_eq!(back.len(), 4);
     assert_eq!(back[3].kind, "acp");
     assert!(back[3].available && back[3].actions.start_run);
-    assert!(!back[3].approvals.human_decision);
+    assert!(back[3].approvals.human_decision && back[3].actions.approve);
+    assert!(
+        back[3]
+            .notes
+            .iter()
+            .any(|note| note.contains("choice forms"))
+    );
     assert!(back[0].available);
     assert_eq!(back[1].kind, "codex_app_server");
     assert_eq!(back[1].transport.protocol, "json_rpc_2_0");

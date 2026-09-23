@@ -35,8 +35,8 @@ use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_memory::MemoryVisibility;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
-    IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
-    TrackerBackend, WorkerBackend, WorkspaceBackend,
+    IssueStateCategory, OperatorResponseDelivery, OrchestratorSnapshot, Scheduler, SchedulerConfig,
+    SchedulerError, TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
@@ -67,6 +67,78 @@ use self::{
 };
 
 const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
+
+enum RunWake {
+    Shutdown,
+    Server(Result<io::Result<()>, tokio::task::JoinError>),
+    OperatorCommand(Box<crate::opensymphony_gateway::OperatorCommand>),
+    OperatorUpdate,
+    TrackerTick,
+}
+
+struct OperatorDeliveryCompleted {
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    delivered: Result<bool, String>,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+fn spawn_operator_delivery_completion(
+    delivery: OperatorResponseDelivery,
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    delivered_tx: tokio::sync::mpsc::Sender<OperatorDeliveryCompleted>,
+    notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let completed = OperatorDeliveryCompleted {
+            interaction,
+            delivered: delivery.wait().await,
+            reply,
+        };
+        if delivered_tx.send(completed).await.is_ok() {
+            notify.notify_one();
+        }
+    })
+}
+
+async fn start_shutdown_listener() -> tokio::task::JoinHandle<io::Result<()>> {
+    use std::future::Future;
+
+    let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let signal = tokio::signal::ctrl_c();
+        tokio::pin!(signal);
+        let mut armed = Some(armed_tx);
+        std::future::poll_fn(|cx| {
+            let result = signal.as_mut().poll(cx);
+            if let Some(armed) = armed.take() {
+                let _ = armed.send(());
+            }
+            result
+        })
+        .await
+    });
+    let _ = armed_rx.await;
+    task
+}
+
+async fn next_run_wake(
+    shutdown_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    server_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    operator_commands_rx: &mut tokio::sync::mpsc::Receiver<
+        crate::opensymphony_gateway::OperatorCommand,
+    >,
+    operator_update_notify: &tokio::sync::Notify,
+    ticker: &mut tokio::time::Interval,
+) -> RunWake {
+    tokio::select! {
+        _ = shutdown_task => RunWake::Shutdown,
+        result = server_task => RunWake::Server(result),
+        Some(command) = operator_commands_rx.recv() => RunWake::OperatorCommand(Box::new(command)),
+        _ = operator_update_notify.notified() => RunWake::OperatorUpdate,
+        _ = ticker.tick() => RunWake::TrackerTick,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MemoryServerBindState {
@@ -1160,6 +1232,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .map(checkout_credential_environment_variables)
             .unwrap_or_default(),
     );
+    let operator_update_notify = worker.operator_update_notify();
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
     scheduler_config.repository_routing = runtime.repository_routing.clone();
@@ -1212,8 +1285,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     } else {
         None
     };
+    let (operator_commands_tx, mut operator_commands_rx) = tokio::sync::mpsc::channel(64);
+    let (operator_deliveries_tx, mut operator_deliveries_rx) = tokio::sync::mpsc::channel(64);
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
+            .with_operator_commands(operator_commands_tx)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
             .with_memory_config(server_memory_config)
             .with_harness_profiles(acp_profiles)
@@ -1228,45 +1304,19 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             )
             .with_terminal_states(terminal_state_set(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
+    // Keep SIGINT armed while bootstrap and scheduler mutations await. A
+    // short-lived ctrl_c future inside select can miss a signal during a tick.
+    let mut shutdown_task = start_shutdown_listener().await;
     let mut gateway_action_cursor = 0;
 
-    let bootstrap_snapshot = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("received shutdown signal");
+    let bootstrap_snapshot = match scheduler.bootstrap(now_timestamp()).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
             server_task.abort();
+            shutdown_task.abort();
             shutdown_memory_server(&mut memory_server).await?;
-            if let Some(mut supervisor) = supervisor {
-                let _ = supervisor.stop();
-            }
-            return Ok(());
+            return Err(RunCommandError::SchedulerConfig(error));
         }
-        result = &mut server_task => {
-            match result {
-                Ok(Ok(())) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    if let Some(mut supervisor) = supervisor {
-                        let _ = supervisor.stop();
-                    }
-                    return Ok(());
-                }
-                Ok(Err(error)) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(error));
-                }
-                Err(error) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
-                }
-            }
-        }
-        result = scheduler.bootstrap(now_timestamp()) => match result {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                server_task.abort();
-                shutdown_memory_server(&mut memory_server).await?;
-                return Err(RunCommandError::SchedulerConfig(error));
-            }
-        },
     };
     let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     let recovered_completed_parent_captures = scheduler.completed_subtree_cleanup_identifiers();
@@ -1302,39 +1352,108 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+        // Only wait for the next event inside select. Scheduler mutations can
+        // await after changing state and must run to completion once started.
+        let wake = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut operator_commands_rx,
+            &operator_update_notify,
+            &mut ticker,
+        )
+        .await;
+        match wake {
+            RunWake::Shutdown => {
                 info!("received shutdown signal");
                 break;
             }
-            result = &mut server_task => {
-                match result {
-                    Ok(Ok(())) => break,
-                    Ok(Err(error)) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(error));
+            RunWake::Server(result) => match result {
+                Ok(Ok(())) => break,
+                Ok(Err(error)) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(error));
+                }
+                Err(error) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                }
+            },
+            RunWake::OperatorCommand(command) => {
+                if !command.delivery.claim() {
+                    let _ = command
+                        .reply
+                        .send(Err("operator response delivery timed out".into()));
+                    continue;
+                }
+                let crate::opensymphony_gateway::OperatorCommand {
+                    interaction,
+                    answer,
+                    reply,
+                    ..
+                } = *command;
+                match scheduler
+                    .begin_operator_response(&interaction, answer)
+                    .await
+                {
+                    Ok(delivery) => {
+                        spawn_operator_delivery_completion(
+                            delivery,
+                            interaction,
+                            reply,
+                            operator_deliveries_tx.clone(),
+                            operator_update_notify.clone(),
+                        );
                     }
                     Err(error) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                        let _ = reply.send(Err(error));
                     }
                 }
             }
-            result = async {
-                ticker.tick().await;
+            RunWake::OperatorUpdate => {
+                while let Ok(completed) = operator_deliveries_rx.try_recv() {
+                    let result = scheduler
+                        .complete_operator_response(&completed.interaction, completed.delivered);
+                    let _ = completed.reply.send(result);
+                }
+                let observed_at = now_timestamp();
+                let snapshot = match scheduler.drain_worker_updates(observed_at).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        warn!(%error, "operator worker update failed");
+                        push_recent_event(
+                            &mut recent_events,
+                            RecentEventKind::Warning,
+                            None,
+                            format!("operator worker update failed: {error}"),
+                            Utc::now(),
+                        );
+                        scheduler.snapshot(observed_at)
+                    }
+                };
+                store
+                    .publish(map_snapshot(
+                        &snapshot,
+                        runtime.workflow.config.workspace.root.as_path(),
+                        &terminal_state_set(&runtime.workflow),
+                        current_agent_server_status(&mut supervisor, agent_server_base_url),
+                        current_memory_server_status(memory_server.as_ref()),
+                        &recent_events,
+                    ))
+                    .await;
+            }
+            RunWake::TrackerTick => {
                 let observed_at = now_timestamp();
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
                     &mut gateway_action_cursor,
                     observed_at,
-                ).await {
+                )
+                .await
+                {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, result)
-            } => {
-                let (observed_at, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1354,22 +1473,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             ),
                             Utc::now(),
                         );
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, agent_server_base_url),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                         if !auto_capture_candidates.is_empty() {
                             // Parent completion and its exact commit evidence
                             // can become durable in this scheduler tick. Load
                             // bindings afterward so capture does not use the
                             // pre-finalization controller snapshot.
-                            let capture_bindings = super::memory::load_all_terminal_capture_bindings(
-                                &runtime.workflow.config.workspace.root,
-                            );
+                            let capture_bindings =
+                                super::memory::load_all_terminal_capture_bindings(
+                                    &runtime.workflow.config.workspace.root,
+                                );
                             let auto_capture_result = match capture_bindings {
                                 Ok(capture_bindings) => {
                                     super::memory::auto_capture_terminal(
@@ -1431,7 +1553,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                     recent_events: &mut recent_events,
                                     store: &store,
                                 },
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                     Err(error) => {
@@ -1444,14 +1567,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             Utc::now(),
                         );
                         let snapshot = scheduler.snapshot(observed_at);
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, agent_server_base_url),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                     }
                 }
             }
@@ -1459,6 +1584,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     server_task.abort();
+    shutdown_task.abort();
     shutdown_memory_server(&mut memory_server).await?;
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
@@ -2083,6 +2209,253 @@ pub(super) fn now_timestamp() -> TimestampMs {
 mod tests {
     use super::*;
     use crate::opensymphony_memory::MemoryError;
+
+    #[tokio::test]
+    async fn pending_operator_flush_allows_worker_wake_and_shutdown() {
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(1);
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let now = Utc::now();
+        let interaction = OperatorInteraction {
+            request_id: "delayed-flush".into(),
+            run_id: "run-worker".into(),
+            issue_id: "issue".into(),
+            issue_identifier: "COE-612".into(),
+            session_id: "session".into(),
+            generation: 1,
+            rpc_id: "opaque-token".into(),
+            kind: OperatorInteractionKind::Permission,
+            title: "Permission".into(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        let (acknowledge, acknowledgement) = tokio::sync::oneshot::channel();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let delivery = OperatorResponseDelivery::new(async move {
+            acknowledgement.await.expect("worker flush acknowledgement")
+        });
+        let delivery_task = spawn_operator_delivery_completion(
+            delivery,
+            interaction.clone(),
+            reply,
+            delivered_tx,
+            notify.clone(),
+        );
+        notify.notify_one(); // an unrelated worker update arrives during the flush
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("worker wake remains responsive"),
+            RunWake::OperatorUpdate
+        ));
+        assert!(delivered_rx.try_recv().is_err());
+        shutdown_tx.send(()).expect("signal shutdown");
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("shutdown remains responsive"),
+            RunWake::Shutdown
+        ));
+        acknowledge.send(Ok(true)).expect("release flush");
+        delivery_task.await.expect("delivery completion task");
+        let completed = delivered_rx.recv().await.expect("actor completion message");
+        assert_eq!(completed.interaction, interaction);
+        assert_eq!(completed.delivered, Ok(true));
+        completed.reply.send(Ok(())).expect("gateway receipt");
+        received
+            .await
+            .expect("authoritative receipt")
+            .expect("accepted");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_tracker_tick_completes_before_queued_operator_wakes() {
+        use crate::opensymphony_gateway::OperatorCommand;
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = Arc::new(tokio::sync::Notify::new());
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let mut shutdown_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let (tick_entered_tx, tick_entered_rx) = tokio::sync::oneshot::channel();
+        let (tick_release_tx, tick_release_rx) = tokio::sync::oneshot::channel();
+        let signal = operator_notify.clone();
+        let queued_wakes = tokio::spawn(async move {
+            tick_entered_rx.await.expect("tick entered");
+            signal.notify_one();
+            let now = Utc::now();
+            let (reply, _received) = tokio::sync::oneshot::channel();
+            commands_tx
+                .send(OperatorCommand {
+                    interaction: OperatorInteraction {
+                        request_id: "request".into(),
+                        run_id: "run".into(),
+                        issue_id: "issue".into(),
+                        issue_identifier: "COE-612".into(),
+                        session_id: "session".into(),
+                        generation: 1,
+                        rpc_id: "0".into(),
+                        kind: OperatorInteractionKind::Permission,
+                        title: "Permission".into(),
+                        options: Vec::new(),
+                        questions: Vec::new(),
+                        plan: None,
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(1),
+                    },
+                    answer: OperatorAnswer::Cancel,
+                    reply,
+                    delivery: crate::opensymphony_gateway::OperatorCommandFence::default(),
+                })
+                .await
+                .expect("queue operator command");
+            tick_release_tx.send(()).expect("release tick");
+        });
+        let selected_tick = async {
+            tick_entered_tx.send(()).expect("start tick");
+            tick_release_rx.await.expect("tick release");
+        };
+        selected_tick.await;
+        queued_wakes.await.expect("queued wakes");
+
+        let first = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        let second = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        assert!(matches!(
+            &first,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert!(matches!(
+            &second,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert_ne!(
+            matches!(&first, RunWake::OperatorCommand(_)),
+            matches!(&second, RunWake::OperatorCommand(_)),
+            "both queued event types remain available after the tick"
+        );
+        server_task.abort();
+        shutdown_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_queued_during_tick_wakes_after_tick_completes() {
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = tokio::sync::Notify::new();
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        // Model a long scheduler mutation: the signal listener must remain
+        // armed while the selected tick is in progress.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let queue_shutdown = tokio::spawn(async move {
+            shutdown_tx.send(()).expect("queue shutdown");
+            release_tx.send(()).expect("release tick");
+        });
+        release_rx.await.expect("tick completed");
+        queue_shutdown.await.expect("queued signal");
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::Shutdown
+        ));
+        server_task.abort();
+    }
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
