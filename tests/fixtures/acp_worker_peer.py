@@ -112,8 +112,9 @@ for line in sys.stdin:
                 "type":"object","required":["region"],"properties":{"region":{"type":"string",
                     "title":"Region?","oneOf":[{"const":"west","title":"West"}]}}}}) == \
                 {"action":"accept","content":{"region":"west"}}
-            with open("acp-operator-roundtrip.json", "w") as output:
+            with open("acp-operator-roundtrip.json.tmp", "w") as output:
                 json.dump({"permission":"allow-opaque","question":"west"}, output)
+            os.replace("acp-operator-roundtrip.json.tmp", "acp-operator-roundtrip.json")
         if profile == "operator_early_finish":
             send({"id":"early-question","method":"elicitation/create","params":{"sessionId":session,
                 "mode":"form","message":"Choose region","requestedSchema":{"type":"object",
