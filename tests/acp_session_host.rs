@@ -1,3 +1,6 @@
+use opensymphony::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
+};
 use opensymphony::{opensymphony_acp::*, opensymphony_workspace::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -91,6 +94,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
         workspace,
         identity,
         profile: AcpProfile {
+            permissions: Default::default(),
             command: "python3".into(),
             args: vec![
                 format!(
@@ -128,6 +132,85 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
         .prompt(run.into(), 1, text.into(), CancellationToken::new())
         .await
         .expect("prompt")
+}
+
+#[tokio::test]
+async fn native_peer_operator_permission_question_and_plan_round_trip() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-612", "none").await)
+        .await
+        .expect("open");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let prompt = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .prompt_with_operator(
+                    "run-612".into(),
+                    1,
+                    "operator-roundtrip".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt")
+        }
+    });
+    let mut observed = Vec::new();
+    while observed.len() < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("operator request timeout")
+            .expect("operator request");
+        let AcpOperatorEvent::Opened(request) = event else {
+            continue;
+        };
+        observed.push(request.interaction.kind);
+        let answer = match request.interaction.kind {
+            OperatorInteractionKind::Permission => OperatorAnswer::Permission {
+                option_id: "allow-opaque".into(),
+            },
+            OperatorInteractionKind::Question => OperatorAnswer::Question {
+                answers: vec![OperatorQuestionAnswer {
+                    question_id: "region".into(),
+                    selected_option_ids: vec!["west".into()],
+                }],
+            },
+            OperatorInteractionKind::PlanApproval => OperatorAnswer::Plan { accepted: true },
+        };
+        let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+        assert!(
+            request
+                .reply
+                .send(AcpOperatorReply {
+                    answer,
+                    acknowledgement
+                })
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), delivered)
+                .await
+                .expect("callback acknowledgement")
+                .expect("acknowledgement")
+        );
+    }
+    let report = tokio::time::timeout(Duration::from_secs(5), prompt)
+        .await
+        .expect("native prompt timeout")
+        .expect("task");
+    assert!(report.succeeded());
+    assert_eq!(
+        observed,
+        vec![
+            OperatorInteractionKind::Permission,
+            OperatorInteractionKind::Question,
+            OperatorInteractionKind::PlanApproval
+        ]
+    );
+    retire(&handle).await;
 }
 
 #[tokio::test]

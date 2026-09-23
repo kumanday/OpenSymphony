@@ -18,12 +18,24 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  OperatorInteraction,
   ConnectionProfile,
 } from "@opensymphony/gateway-schema";
 import { pageCursorFirst } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
 import { GatewayRequestError, authErrorCodeForStatus } from "./errors.js";
+
+export function operatorBinding(interaction: OperatorInteraction) {
+  return {
+    request_id: interaction.request_id,
+    run_id: interaction.run_id,
+    issue_id: interaction.issue_id,
+    session_id: interaction.session_id,
+    generation: interaction.generation,
+    rpc_id: interaction.rpc_id,
+  };
+}
 
 /** Best-effort parse of a response body as JSON; returns the raw string on failure. */
 function tryParseJson(raw: string): unknown {
@@ -138,6 +150,13 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
       `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/approvals`,
     ) as { approvals?: ApprovalRequest[] };
     return response.approvals ?? [];
+  }
+
+  async runInputs(runId: string): Promise<OperatorInteraction[]> {
+    const response = await this.fetchJson(
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/inputs`,
+    ) as { inputs?: OperatorInteraction[] };
+    return response.inputs ?? [];
   }
 
   async runValidation(runId: string): Promise<RunValidationSummary> {
@@ -446,14 +465,18 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `approval-${approvalId}-${crypto.randomUUID()}`,
       action_kind: "approval_decision",
-      target_entity: { entity_kind: "approval", entity_id: approvalId },
-      payload: { decision, explanation },
-      idempotency_key: `approval-${approvalId}-${decision}`,
+      target_entity: interaction
+        ? { entity_kind: "run", entity_id: interaction.issue_identifier }
+        : { entity_kind: "approval", entity_id: approvalId },
+      payload: interaction ? { decision, explanation, option_id: optionId, ...operatorBinding(interaction) } : { decision, explanation },
+      idempotency_key: interaction ? undefined : `approval-${approvalId}-${decision}`,
     });
   }
 
@@ -766,6 +789,13 @@ export class WebSocketTransport implements GatewayTransport {
       `/api/v1/runs/${encodeURIComponent(runId)}/approvals`,
     );
     return response.approvals ?? [];
+  }
+
+  async runInputs(runId: string): Promise<OperatorInteraction[]> {
+    const response = await this.get<{ inputs?: OperatorInteraction[] }>(
+      `/api/v1/runs/${encodeURIComponent(runId)}/inputs`,
+    );
+    return response.inputs ?? [];
   }
 
   async runValidation(runId: string): Promise<RunValidationSummary> {
@@ -1310,6 +1340,12 @@ export class TauriChannelTransport implements GatewayTransport {
     return this.invoke<{ approvals: ApprovalRequest[] }>("run_approvals", {
       run_id: runId,
     }).then((r) => r.approvals ?? []);
+  }
+
+  async runInputs(runId: string): Promise<OperatorInteraction[]> {
+    return this.invoke<{ inputs: OperatorInteraction[] }>("run_inputs", {
+      run_id: runId,
+    }).then((r) => r.inputs ?? []);
   }
 
   async runValidation(runId: string): Promise<RunValidationSummary> {

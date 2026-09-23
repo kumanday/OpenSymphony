@@ -1,7 +1,9 @@
 use opensymphony::opensymphony_acp::{
     AcpProfile, ClientError, ClientLimits, LaunchContext, run_turn,
 };
-use opensymphony::opensymphony_workflow::{AcpAuth, WorkflowDefinition};
+use opensymphony::opensymphony_workflow::{
+    AcpAuth, AcpPermissionConfig, AcpPermissionPolicy, WorkflowDefinition,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -25,6 +27,11 @@ fn profile(mode: &str) -> AcpProfile {
         required_capabilities: vec![],
         extensions: vec![],
         session: Default::default(),
+        // These transport tests use a standalone client without an operator
+        // route; deny keeps their legacy permission callback deterministic.
+        permissions: AcpPermissionConfig {
+            mode: AcpPermissionPolicy::Deny,
+        },
     }
 }
 fn context(root: &Path) -> LaunchContext {
@@ -51,6 +58,28 @@ fn limits() -> ClientLimits {
         reap_timeout: Duration::from_secs(2),
         ..ClientLimits::default()
     }
+}
+
+#[tokio::test]
+async fn acp_operator_policy_without_response_path_fails_visibly() {
+    let root = tempfile::tempdir().expect("temp");
+    let mut config = profile("complete");
+    config.permissions.mode = AcpPermissionPolicy::Operator;
+    let run = run_turn(
+        &config,
+        context(root.path()),
+        "requires operator".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(matches!(
+        run.outcome,
+        Err(ClientError::Protocol { submitted: true })
+    ));
+    assert!(run.process_reaped);
 }
 
 #[tokio::test(flavor = "current_thread")]

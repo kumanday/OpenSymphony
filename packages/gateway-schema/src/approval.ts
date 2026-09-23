@@ -16,6 +16,26 @@ export type ApprovalStatus =
   | "passed"
   | "failed";
 
+export interface OperatorOption { id: string; label: string; kind: string }
+export interface OperatorQuestion { id: string; prompt: string; options: OperatorOption[]; allow_multiple: boolean }
+export interface OperatorQuestionAnswer { question_id: string; selected_option_ids: string[] }
+export interface OperatorInteraction {
+  request_id: string;
+  run_id: string;
+  issue_id: string;
+  issue_identifier: string;
+  session_id: string;
+  generation: number;
+  rpc_id: string | number;
+  kind: "permission" | "question" | "plan_approval";
+  title: string;
+  options: OperatorOption[];
+  questions: OperatorQuestion[];
+  plan?: string;
+  requested_at: string;
+  expires_at: string;
+}
+
 /** Actor that requested or approved an action. */
 export interface ApprovalActor {
   actor_id: string;
@@ -51,6 +71,7 @@ export interface ApprovalRequest {
   title: string;
   description: string;
   proposed_action?: unknown;
+  operator_interaction?: OperatorInteraction;
   /** Actor who requested the approval. */
   actor?: ApprovalActor;
   /** Target context (file, command, issue, run) for the request. */

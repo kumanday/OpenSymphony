@@ -87,6 +87,9 @@ pub struct ControlPlaneMetricsSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlPlaneIssueSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_interactions:
+        Vec<crate::opensymphony_gateway_schema::approval::OperatorInteraction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_capability:
         Option<crate::opensymphony_gateway_schema::capability::HarnessRunCapability>,

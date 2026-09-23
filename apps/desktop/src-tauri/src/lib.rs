@@ -82,6 +82,7 @@ pub fn run() {
             commands::run_diffs,
             commands::run_validation,
             commands::run_approvals,
+            commands::run_inputs,
             commands::run_events,
             commands::terminal_snapshot,
             commands::get_connection_profiles,

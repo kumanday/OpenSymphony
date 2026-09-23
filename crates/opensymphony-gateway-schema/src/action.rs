@@ -90,6 +90,8 @@ pub enum ActionKind {
     TransitionIssue,
     CreateFollowup,
     ApprovalDecision,
+    InputResponse,
+    PlanDecision,
     PublishPlan,
     /// Create or update a Linear project milestone.
     TaskGraphMilestone,
@@ -119,6 +121,8 @@ impl std::fmt::Display for ActionKind {
             ActionKind::TransitionIssue => "transition_issue",
             ActionKind::CreateFollowup => "create_followup",
             ActionKind::ApprovalDecision => "approval_decision",
+            ActionKind::InputResponse => "input_response",
+            ActionKind::PlanDecision => "plan_decision",
             ActionKind::PublishPlan => "publish_plan",
             ActionKind::TaskGraphMilestone => "task_graph_milestone",
             ActionKind::TaskGraphIssue => "task_graph_issue",
@@ -185,6 +189,9 @@ impl ActionKind {
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::StateTransition,
             ],
+            ActionKind::InputResponse | ActionKind::PlanDecision => {
+                vec![ExpectedFollowup::ActionCompletion]
+            }
             ActionKind::PublishPlan => vec![
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::JournalUpdate,

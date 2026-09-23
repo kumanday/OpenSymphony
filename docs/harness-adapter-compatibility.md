@@ -150,10 +150,9 @@ only recognized successful reasons complete the worker successfully. The
 known-secret matcher redacts that reason before it reaches durable state or a
 worker summary, independently of source-frame redaction.
 
-Operator responses, writer transfer and IDE presentation follow the
+Writer transfer and IDE presentation follow the
 [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission
-requests produce a scheduler-visible waiting event and receive the protocol
-cancellation response until operator handling is available. Unknown stop reasons
+requests now use a live scheduler-owned operator response path. Unknown stop reasons
 and refusals stop automatic retry; uncertain submission or cancellation fences
 cleanup until execution risk is reconciled.
 
@@ -164,7 +163,8 @@ cleanup until execution risk is reconciled.
 | `terminal/*` | Opt-in; create/output/wait/kill/release, connection-local random IDs, immutable host environment, contained cwd, bounded UTF-8 output. |
 | Session configuration | Advertised select options and grouped values; explicit model/mode choices; legacy modes; ordered updates. |
 | MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
-| Permission | Cancelled response until operator routing is implemented. |
+| Permission | Offered opaque choices, `operator`/`deny`/`allow_once` policy, deadline and cancellation. |
+| Structured question and plan | `cursor/ask_question` choices and `cursor/create_plan` approval through gateway inputs and approvals. |
 | Interactive auth and elicitation | Not advertised. |
 
 The production worker enables file and terminal callbacks for its verified

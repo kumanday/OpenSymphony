@@ -45,6 +45,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 120_000,
         },
         issues: vec![IssueSnapshot {
+            operator_interactions: Vec::new(),
             harness_capability: None,
             identifier: "COE-255".to_owned(),
             title: "Observability and FrankenTUI".to_owned(),

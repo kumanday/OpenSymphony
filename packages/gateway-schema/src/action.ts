@@ -14,6 +14,8 @@ export type ActionKind =
   | "transition_issue"
   | "create_followup"
   | "approval_decision"
+  | "input_response"
+  | "plan_decision"
   | "publish_plan"
   | "task_graph_milestone"
   | "task_graph_issue"

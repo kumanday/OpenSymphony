@@ -1,8 +1,8 @@
 //! Production worker wiring. ACP wire types and protocol ownership stay in opensymphony_acp.
 use super::*;
 use crate::opensymphony_acp::{
-    ClientLimits, HostServices, LaunchContext, RetentionPolicy, RuntimeProjection, SessionControl,
-    SessionEvent, SessionHandle, SessionHost, SessionLaunch,
+    AcpOperatorEvent, ClientLimits, HostServices, LaunchContext, RetentionPolicy,
+    RuntimeProjection, SessionControl, SessionEvent, SessionHandle, SessionHost, SessionLaunch,
 };
 use crate::opensymphony_workspace::{AcpProcessState, AcpSessionIdentity, AcpSessionStatus};
 use tokio_util::sync::CancellationToken;
@@ -17,6 +17,12 @@ pub(super) struct ActiveSession {
     pub issue_id: IssueId,
     pub issue_identifier: IssueIdentifier,
     pub run_id: String,
+    pub operator_responses: mpsc::Sender<OperatorResponseCommand>,
+}
+pub(super) struct OperatorResponseCommand {
+    pub request_id: String,
+    pub answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    pub acknowledgement: oneshot::Sender<bool>,
 }
 pub(super) type ActiveSessions = Arc<Mutex<HashMap<String, ActiveSession>>>;
 
@@ -727,6 +733,9 @@ async fn try_run(
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let prompt_finished = CancellationToken::new();
     let _finish_on_drop = prompt_finished.clone().drop_guard();
+    let (operator_requests_tx, mut operator_requests_rx) = mpsc::channel(32);
+    let (operator_responses_tx, mut operator_responses_rx) = mpsc::channel(32);
+    let mut operator_waiters = HashMap::new();
     let active_session = ActiveSession {
         handle: handle.clone(),
         cancellation: cancellation.clone(),
@@ -735,6 +744,7 @@ async fn try_run(
         issue_id: issue.id.clone(),
         issue_identifier: issue.identifier.clone(),
         run_id: manifest.run_id.clone(),
+        operator_responses: operator_responses_tx,
     };
     active
         .lock()
@@ -758,16 +768,43 @@ async fn try_run(
         .latest_cursor
         .unwrap_or((handle.generation, 0));
     let mut projection = RuntimeProjection::after(baseline);
-    let prompt = handle.prompt(
+    let prompt = handle.prompt_with_operator(
         manifest.run_id.clone(),
         manifest.attempt,
         prompt,
         cancellation.clone(),
+        Some(operator_requests_tx),
     );
     tokio::pin!(prompt);
     let result = loop {
         tokio::select! {
             result = &mut prompt => break result,
+            operator = operator_requests_rx.recv() => match operator {
+                Some(AcpOperatorEvent::Opened(mut request)) => {
+                    request.interaction.run_id = manifest.run_id.clone();
+                    request.interaction.issue_id = issue.id.as_str().into();
+                    request.interaction.issue_identifier = issue.identifier.to_string();
+                    request.interaction.generation = handle.generation;
+                    let request_id = request.interaction.request_id.clone();
+                    if operator_waiters.insert(request_id.clone(), request.reply).is_some() {
+                        return Err("ACP callback repeated its request identity".into());
+                    }
+                    let _ = updates.send(WorkerUpdate::OperatorRequest { worker_id: run.worker_id.clone(), interaction: request.interaction });
+                }
+                Some(AcpOperatorEvent::Closed(request_id)) => {
+                    operator_waiters.remove(&request_id);
+                    let _ = updates.send(WorkerUpdate::OperatorClosed { worker_id: run.worker_id.clone(), request_id });
+                }
+                None => return Err("ACP operator request channel closed during prompt".into()),
+            },
+            response = operator_responses_rx.recv() => if let Some(response) = response {
+                let reply = crate::opensymphony_acp::AcpOperatorReply {
+                    answer: response.answer, acknowledgement: response.acknowledgement,
+                };
+                if let Some(waiter) = operator_waiters.remove(&response.request_id) {
+                    if let Err(reply) = waiter.send(reply) { let _ = reply.acknowledgement.send(false); }
+                } else { let _ = reply.acknowledgement.send(false); }
+            },
             event = receiver.recv() => match event {
                 Ok(SessionEvent::Gap { .. }) => return Err("ACP source stream lost an oversized frame; submission remains fenced".into()),
                 Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates),

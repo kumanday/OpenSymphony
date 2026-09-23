@@ -1212,8 +1212,10 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     } else {
         None
     };
+    let (operator_commands_tx, mut operator_commands_rx) = tokio::sync::mpsc::channel(64);
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
+            .with_operator_commands(operator_commands_tx)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
             .with_memory_config(server_memory_config)
             .with_harness_profiles(acp_profiles)
@@ -1329,7 +1331,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     &mut gateway_action_cursor,
                     observed_at,
                 ).await {
-                    Ok(()) => scheduler.tick(observed_at).await,
+                    Ok(()) => {
+                        while let Ok(command) = operator_commands_rx.try_recv() {
+                            let result = scheduler.respond_operator_request(&command.interaction, command.answer).await;
+                            let _ = command.reply.send(result);
+                        }
+                        scheduler.tick(observed_at).await
+                    },
                     Err(error) => Err(error),
                 };
                 (observed_at, result)

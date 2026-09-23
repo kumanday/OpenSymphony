@@ -17,6 +17,11 @@ The control-plane issue snapshot may carry an optional sanitized operator
 projection for repository, parent, lease, repair, memory, containment,
 provider, verification, and cleanup facts. Missing facts remain unknown. No
 client infers completion, permission, or workspace confinement from absence.
+An ACP run may also publish ephemeral, bound operator interactions. The
+orchestrator actor owns pending decisions; gateway clients submit a response
+command, and the active ACP worker returns it to the original RPC responder.
+Pending interactions are discarded on completion, cancellation, expiry, or
+restart and cannot be reconstructed from stored evidence.
 
 ## 2. Layered design
 

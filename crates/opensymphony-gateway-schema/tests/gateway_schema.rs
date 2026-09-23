@@ -687,6 +687,7 @@ fn terminal_snapshot_roundtrips() {
 #[test]
 fn approval_request_roundtrips() {
     let req = ApprovalRequest {
+        operator_interaction: None,
         schema_version: SchemaVersion::v1(),
         approval_id: "apr-1".into(),
         run_id: "run-1".into(),

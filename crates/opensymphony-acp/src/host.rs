@@ -373,6 +373,18 @@ impl SessionHandle {
         prompt: String,
         cancellation: CancellationToken,
     ) -> Result<TurnReport, HostError> {
+        self.prompt_with_operator(run_id, attempt, prompt, cancellation, None)
+            .await
+    }
+
+    pub async fn prompt_with_operator(
+        &self,
+        run_id: String,
+        attempt: u32,
+        prompt: String,
+        cancellation: CancellationToken,
+        operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
+    ) -> Result<TurnReport, HostError> {
         let (reply, receive) = oneshot::channel();
         self.commands
             .try_send(Command::Prompt {
@@ -381,6 +393,7 @@ impl SessionHandle {
                 attempt,
                 prompt,
                 cancellation,
+                operator_requests,
                 reply,
             })
             .map_err(channel_error)?;
@@ -423,6 +436,7 @@ enum Command {
         attempt: u32,
         prompt: String,
         cancellation: CancellationToken,
+        operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
         reply: oneshot::Sender<Result<TurnReport, HostError>>,
     },
 }
@@ -662,6 +676,7 @@ async fn start(
         idle_since: tokio::time::Instant::now(),
         retire_reply: None,
         reset_reason: None,
+        operator_router: Arc::new(Mutex::new(None)),
     };
     tokio::spawn(async move {
         let result = super::run_connection(
@@ -753,6 +768,7 @@ struct PreparingPrompt {
     cancellation: CancellationToken,
     forced: CancellationToken,
     callback_epoch: CancellationToken,
+    operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
     reply: oneshot::Sender<Result<TurnReport, HostError>>,
 }
 
@@ -767,6 +783,7 @@ pub(super) struct SessionDriver {
     idle_since: tokio::time::Instant,
     retire_reply: Option<oneshot::Sender<Result<ControlResult, HostError>>>,
     reset_reason: Option<String>,
+    pub(super) operator_router: super::operator::OperatorRouter,
 }
 impl SessionDriver {
     pub(super) async fn launched(&mut self, pid: Option<u32>) -> Result<(), ClientError> {
@@ -943,6 +960,8 @@ impl SessionDriver {
                         let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
                         return Err(error);
                     }
+                    *self.operator_router.lock().unwrap_or_else(|e| e.into_inner()) =
+                        pending.operator_requests.map(|sender| (sender, pending.callback_epoch.clone()));
                     active = Some(ActivePrompt {
                         result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
                         reply: pending.reply, cancellation: pending.forced,
@@ -980,7 +999,7 @@ impl SessionDriver {
                         continue;
                     };
                     match command {
-                        Command::Prompt { generation, run_id, attempt, prompt, cancellation, reply } => {
+                        Command::Prompt { generation, run_id, attempt, prompt, cancellation, operator_requests, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
                             if active.is_some() || preparing.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }
                             if prompt.len() > limits.frame_bytes / 6 || run_id.is_empty() || run_id.len() > 1024 { let _ = reply.send(Err(HostError::ResourceLimit)); continue; }
@@ -1009,7 +1028,7 @@ impl SessionDriver {
                                         }) => result.map_err(|_| ClientError::SetupTimeout)?,
                                     }
                                 }),
-                                run_id, attempt, prompt, cancellation, forced, callback_epoch, reply,
+                                run_id, attempt, prompt, cancellation, forced, callback_epoch, operator_requests, reply,
                             });
                             self.publish(true);
                         }

@@ -87,6 +87,10 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.runApprovals(runId);
   }
 
+  runInputs(runId: string): ReturnType<GatewayTransport["runInputs"]> {
+    return this.inner.runInputs(runId);
+  }
+
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
     return this.inner.runValidation(runId);
   }
@@ -147,8 +151,10 @@ class BrowserTransport implements BrowserTransportAdapter {
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: import("@opensymphony/gateway-schema").OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
-    return this.inner.approvalDecision(approvalId, decision, explanation);
+    return this.inner.approvalDecision(approvalId, decision, explanation, interaction, optionId);
   }
 
   openWorkspace(runId: string): Promise<ActionReceipt> {

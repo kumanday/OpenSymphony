@@ -21,7 +21,6 @@ use agent_client_protocol::{
         v1::{
             AuthMethod, AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest,
             InitializeResponse, LoadSessionRequest, NewSessionRequest, PromptRequest,
-            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             ResumeSessionRequest, TextContent,
         },
     },
@@ -45,10 +44,12 @@ use tracing::instrument::WithSubscriber;
 mod atomic_file;
 mod durable;
 mod host;
+mod operator;
 mod projection;
 mod services;
 mod session_config;
 pub use host::*;
+pub use operator::{AcpOperatorEvent, AcpOperatorReply, AcpOperatorRequest};
 pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
@@ -65,6 +66,7 @@ mod windows_path;
 #[cfg(windows)]
 mod windows_process;
 
+use crate::opensymphony_gateway_schema::approval::OperatorAnswer;
 pub use crate::opensymphony_workflow::AcpProfile;
 use crate::opensymphony_workspace::{
     environment_variable_names_equal, has_environment_name_collision, insert_environment_value,
@@ -971,6 +973,11 @@ async fn run_connection(
     let service_run = service_actor.run();
     tokio::pin!(service_run);
     let configuration = Arc::new(Mutex::new(SessionConfiguration::default()));
+    let operator_router = driver
+        .as_ref()
+        .map(|driver| driver.operator_router.clone())
+        .unwrap_or_else(|| Arc::new(Mutex::new(None)));
+    let permission_policy = profile.permissions.mode;
     let input = FramedRead::new(stdout, LinesCodec::new_with_max_length(limits.frame_bytes));
     let incoming = input.map({
         let queued = queued.clone();
@@ -1058,6 +1065,7 @@ async fn run_connection(
             let redactor = capture_state.clone();
             let configuration = configuration.clone();
             let service_sender = service_sender.clone();
+            let operator_router = operator_router.clone();
             async move |message: Dispatch, _cx| {
                 queued
                     .lock()
@@ -1083,27 +1091,103 @@ async fn run_connection(
                                     fatal.cancel();
                                 });
                         }
-                        let response = if request.method == "session/request_permission" {
-                            match serde_json::from_value::<RequestPermissionRequest>(request.params)
-                            {
-                                Ok(request)
-                                    if active_session
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .as_deref()
-                                        == Some(request.session_id.0.as_ref()) =>
-                                {
-                                    // No operator policy is advertised in this slice.
-                                    serde_json::to_value(RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Cancelled,
-                                    ))
-                                    .map_err(agent_client_protocol::Error::from)
+                        let operator_method = matches!(request.method.as_str(),
+                            "session/request_permission" | "cursor/ask_question" | "cursor/create_plan");
+                        if operator_method {
+                            let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            let rpc_id = serde_json::to_value(responder.id())?;
+                            let mut safe_params = request.params.clone();
+                            redactor.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut safe_params, false);
+                            let interaction = session.as_deref().ok_or_else(agent_client_protocol::Error::invalid_params)
+                                .and_then(|session| operator::parse_interaction(&request.method, &safe_params, rpc_id.clone(), session, limits.callback_timeout));
+                            // Reject an option ID that changed during redaction; never send
+                            // an altered opaque ID back to the peer or expose a secret.
+                            let interaction = interaction.and_then(|safe| {
+                                let original = operator::parse_interaction(&request.method, &request.params, rpc_id, &safe.session_id, limits.callback_timeout)?;
+                                if safe.options.iter().map(|o| &o.id).ne(original.options.iter().map(|o| &o.id))
+                                    || safe.questions.iter().map(|q| (&q.id, q.options.iter().map(|o| &o.id).collect::<Vec<_>>()))
+                                        .ne(original.questions.iter().map(|q| (&q.id, q.options.iter().map(|o| &o.id).collect::<Vec<_>>()))) {
+                                    return Err(agent_client_protocol::Error::invalid_params());
                                 }
-                                _ => Err(agent_client_protocol::Error::invalid_params()),
+                                Ok(safe)
+                            });
+                            let interaction = match interaction {
+                                Ok(interaction) => interaction,
+                                Err(_) => {
+                                    // A malformed or unbound callback never reaches an
+                                    // operator. Return the protocol's cancellation outcome
+                                    // so the peer can finish its current turn safely.
+                                    let response = Ok(json!({"outcome":{"outcome":"cancelled"}}));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
+                            if let Some(answer) = operator::automatic_answer(permission_policy, &interaction) {
+                                let response = Ok(operator::response_for(&interaction, answer));
+                                let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                    resource_failure.store(true, Ordering::Release);
+                                    fatal.cancel();
+                                    return Err(agent_client_protocol::Error::internal_error());
+                                }
+                                return responder.respond_with_result(response);
                             }
-                        } else {
-                            Err(agent_client_protocol::Error::method_not_found())
-                        };
+                            let route = operator_router.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            if let Some((sender, epoch)) = route {
+                                if epoch.is_cancelled() {
+                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                                let (reply, receive) = oneshot::channel();
+                                if sender.try_send(AcpOperatorEvent::Opened(Box::new(AcpOperatorRequest { interaction: interaction.clone(), reply }))).is_ok() {
+                                    let callback_output = callback_output.clone();
+                                    let resource_failure = resource_failure.clone();
+                                    let fatal = fatal.clone();
+                                    let limits = limits.clone();
+                                    tokio::spawn(async move {
+                                        let (answer, acknowledgement) = tokio::select! {
+                                            biased;
+                                            _ = epoch.cancelled() => (OperatorAnswer::Cancel, None),
+                                            result = receive => result.map(|reply: AcpOperatorReply| (reply.answer, Some(reply.acknowledgement))).unwrap_or((OperatorAnswer::Cancel, None)),
+                                            _ = tokio::time::sleep(limits.callback_timeout) => (OperatorAnswer::Cancel, None),
+                                        };
+                                        let response = Ok(operator::response_for(&interaction, answer));
+                                        let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
+                                        if frame.ok().is_none_or(|frame| !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits)) {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                            if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(false); }
+                                            return;
+                                        }
+                                        let delivered = responder.respond_with_result(response).is_ok();
+                                        if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(delivered); }
+                                        let _ = sender.try_send(AcpOperatorEvent::Closed(interaction.request_id));
+                                    });
+                                    return Ok(());
+                                }
+                            }
+                            // An operator-mode profile without a live response path is a
+                            // failed run, never an implicit approval or infinite wait.
+                            fatal.cancel();
+                            let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                            let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                            if callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                return responder.respond_with_result(response);
+                            }
+                            return Err(agent_client_protocol::Error::internal_error());
+                        }
+                        let response = Err(agent_client_protocol::Error::method_not_found());
                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(
                             responder.id().clone(),
                             response.clone(),

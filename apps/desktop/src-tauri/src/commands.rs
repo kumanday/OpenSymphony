@@ -1379,6 +1379,19 @@ pub async fn run_approvals(
     .await
 }
 
+/// Get structured operator input requests.
+#[command]
+pub async fn run_inputs(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}/inputs", urlencoding::encode(&run_id)),
+    )
+    .await
+}
+
 /// Get run events with cursor support.
 #[command]
 pub async fn run_events(
@@ -1544,6 +1557,7 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
             HarnessCapability::codex_app_server_local(),
             HarnessCapability::rust_native_future(),
         ],
+        harness_profiles: Vec::new(),
         features: vec![
             GatewayFeatureCapability {
                 feature: "task_graph".to_string(),

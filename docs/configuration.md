@@ -948,7 +948,17 @@ acp:
         AGENT_API_KEY: OPERATOR_AGENT_API_KEY
       auth:
         method_id: agent_login
+      permissions:
+        mode: operator
 ```
+
+`permissions.mode` defaults to `operator`, which waits for a live operator
+response. `deny` selects an offered `reject_once` option; `allow_once` selects
+an offered `allow_once` option for trusted unattended profiles. If the agent
+does not offer the configured kind, the callback is cancelled. Neither policy
+invents an option ID or grants lasting access. Operator-mode runs require an
+attached response path and use the callback deadline configured by the ACP
+client limits.
 
 Central configuration migration transfers `routing.harness_profile` and the full
 `acp.profiles` map from the legacy workflow before rewriting its prompt body.
@@ -1050,8 +1060,9 @@ named `opensymphony-memory` with the issued Authorization header. Resolved value
 stay out of the profile. Every stdio MCP argument value is structurally masked
 in captured requests; credential option values in separate and equals forms,
 including generic header values, are also redacted from echoed events and
-stderr. The peer receives the exact host-supplied attachment. Operator
-responses and extensions remain separate slices.
+stderr. The peer receives the exact host-supplied attachment. ACP operator
+responses use the scheduler-owned pending request path; arbitrary vendor
+extensions remain separately gated.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,

@@ -138,6 +138,18 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'operator-roundtrip':
+            permission = callback('session/request_permission', {'toolCall': {'toolCallId': 'tool-1', 'title': 'Run tests'},
+                'options': [{'optionId': 'allow-opaque', 'name': 'Allow once', 'kind': 'allow_once'},
+                            {'optionId': 'deny-opaque', 'name': 'Deny once', 'kind': 'reject_once'}]})
+            assert permission == {'outcome': {'outcome': 'selected', 'optionId': 'allow-opaque'}}, permission
+            question = callback('cursor/ask_question', {'title': 'Choose region', 'questions': [
+                {'id': 'region', 'prompt': 'Region?', 'options': [{'id': 'east', 'label': 'East'}, {'id': 'west', 'label': 'West'}]}]})
+            assert question == {'outcome': {'outcome': 'answered', 'answers': [{'questionId': 'region', 'selectedOptionIds': ['west']}]}}, question
+            plan = callback('cursor/create_plan', {'name': 'Release', 'plan': 'Run checks and deploy'})
+            assert plan == {'outcome': {'outcome': 'accepted'}}, plan
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'file-privacy':
             content = callback('fs/read_text_file', {'path': os.path.join(os.getcwd(), 'private-file')})['content']
             assert content == 'opaque_workspace_payload_610'

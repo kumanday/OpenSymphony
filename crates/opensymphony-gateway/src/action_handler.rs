@@ -145,6 +145,10 @@ impl ActionHandler {
             .map_or_else(PermissionResult::local, |checker| checker.check(action))
     }
 
+    pub fn permission_for_action(&self, action: &ActionDispatch) -> PermissionResult {
+        self.permission_for(action)
+    }
+
     /// Core dispatch logic without idempotency locking.
     async fn dispatch_unlocked(
         &self,
@@ -178,6 +182,9 @@ impl ActionHandler {
             ActionKind::TransitionIssue => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::CreateFollowup => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::ApprovalDecision => validate_generic(&action, issue.as_ref(), &action_id),
+            ActionKind::InputResponse | ActionKind::PlanDecision => {
+                validate_generic(&action, issue.as_ref(), &action_id)
+            }
             ActionKind::PublishPlan => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::TaskGraphMilestone => validate_task_graph(&action, &action_id),
             ActionKind::TaskGraphIssue => validate_task_graph(&action, &action_id),
@@ -486,11 +493,9 @@ fn validate_resume(
 /// Generic action validation for actions that do not require runtime state gating.
 ///
 /// Actions validated here (`OpenWorkspace`, `Debug`, `TransitionIssue`, `CreateFollowup`,
-/// `ApprovalDecision`, `PublishPlan`) are inherently safe because they operate on the
-/// issue tracker, planning layer, or local UI rather than the active harness runtime.
-/// They do not mutate scheduler state and are therefore accepted for any valid issue
-/// snapshot. If a future action needs runtime state gating, it should be promoted from
-/// `validate_generic` to a dedicated validator (e.g., `validate_pause`, `validate_resume`).
+/// `ApprovalDecision`, `InputResponse`, `PlanDecision`, `PublishPlan`) have no
+/// intrinsic runtime-state requirement here. The ACP operator path performs its
+/// live request/answer validation and worker delivery before this audit receipt.
 fn validate_generic(
     action: &ActionDispatch,
     issue: Option<&ControlPlaneIssueSnapshot>,

@@ -22,6 +22,7 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  OperatorInteraction,
   AuthErrorCode,
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
@@ -40,6 +41,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   private mockRunFiles: Map<string, ChangedFileEntry[]> = new Map();
   private mockRunDiffs: Map<string, FileDiffPage> = new Map();
   private mockRunApprovals: Map<string, ApprovalRequest[]> = new Map();
+  private mockRunInputs: Map<string, OperatorInteraction[]> = new Map();
   private mockRunValidation: Map<string, RunValidationSummary> = new Map();
   private mockTerminalSnapshot: Map<string, TerminalSnapshot>;
   private mockEvents: GatewayEnvelope[] = [];
@@ -271,6 +273,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
 
   async runApprovals(runId: string): Promise<ApprovalRequest[]> {
     return this.mockRunApprovals.get(runId) ?? [];
+  }
+
+  async runInputs(runId: string): Promise<OperatorInteraction[]> {
+    return this.mockRunInputs.get(runId) ?? [];
   }
 
   async runValidation(runId: string): Promise<RunValidationSummary> {
@@ -544,14 +550,16 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `approval-${approvalId}-${crypto.randomUUID()}`,
       action_kind: "approval_decision",
-      target_entity: { entity_kind: "approval", entity_id: approvalId },
-      payload: { decision, explanation },
-      idempotency_key: `approval-${approvalId}-${decision}`,
+      target_entity: { entity_kind: "run", entity_id: interaction?.issue_id ?? approvalId },
+      payload: interaction ? { decision, explanation, option_id: optionId, request_id: interaction.request_id, run_id: interaction.run_id, issue_id: interaction.issue_id, session_id: interaction.session_id, generation: interaction.generation, rpc_id: interaction.rpc_id } : { decision, explanation },
+      idempotency_key: interaction ? undefined : `approval-${approvalId}-${decision}`,
     });
   }
 
@@ -629,6 +637,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   /** Set mock approvals for a run. */
   setRunApprovals(runId: string, approvals: ApprovalRequest[]): void {
     this.mockRunApprovals.set(runId, approvals);
+  }
+
+  setRunInputs(runId: string, inputs: OperatorInteraction[]): void {
+    this.mockRunInputs.set(runId, inputs);
   }
 
   /** Set mock validation summary for a run. */

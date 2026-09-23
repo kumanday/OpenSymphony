@@ -56,6 +56,9 @@ import type {
   RunDetail,
   RunEventPage,
   TaskGraphSnapshot,
+  ApprovalRequest,
+  OperatorInteraction,
+  ActionDispatch,
 } from "@opensymphony/gateway-schema";
 import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 
@@ -915,6 +918,48 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-graph-hero-panel h2")?.textContent).toBe("Graph Surface");
     expect((root.querySelector("[data-testid='workspace-lower-columns']") as HTMLElement).style.getPropertyValue("--os-left-column")).toBe("52%");
 
+    await handle.destroy();
+  });
+
+  it("submits bound ACP permission and structured question answers from Run Detail", async () => {
+    const transport = buildTransport() as MockGatewayTransport;
+    const dispatch = jest.spyOn(transport, "dispatchAction");
+    const binding: OperatorInteraction = {
+      request_id: "operator-1", run_id: "run-worker-1", issue_id: "issue-1", issue_identifier: "COE-449",
+      session_id: "session-1", generation: 2, rpc_id: 0, kind: "permission", title: "Run tests",
+      options: [{ id: "allow-once", label: "Allow once", kind: "allow_once" }], questions: [],
+      requested_at: "2026-09-23T00:00:00Z", expires_at: "2026-09-23T00:05:00Z",
+    };
+    const approval: ApprovalRequest = {
+      schema_version: schemaVersionV1(), approval_id: binding.request_id, run_id: binding.run_id,
+      issue_id: binding.issue_id, kind: "tool_use", title: binding.title, description: "Run tests",
+      operator_interaction: binding, requested_at: binding.requested_at, expires_at: binding.expires_at,
+      status: "pending", correlation_id: binding.request_id,
+    };
+    const question: OperatorInteraction = { ...binding, request_id: "operator-2", kind: "question", title: "Choose region",
+      options: [], questions: [{ id: "region", prompt: "Region?", allow_multiple: false,
+        options: [{ id: "west", label: "West", kind: "choice" }] }] };
+    transport.setRunApprovals("desktop-alpha", [approval]);
+    transport.setRunInputs("desktop-alpha", [question]);
+    transport.setRunApprovals("COE-449", [approval]);
+    transport.setRunInputs("COE-449", [question]);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({ root, mode: "desktop", transport });
+    await flushUntil(() => root.querySelector("[data-testid='operator-permission-option']") !== null);
+    (root.querySelector("[data-testid='operator-permission-option']") as HTMLButtonElement).click();
+    await flushUntil(() => dispatch.mock.calls.length === 1);
+    const permissionAction = dispatch.mock.calls[0]?.[0] as ActionDispatch;
+    expect(permissionAction.action_kind).toBe("approval_decision");
+    expect(permissionAction.target_entity.entity_id).toBe("COE-449");
+    expect(permissionAction.payload).toMatchObject({ request_id: "operator-1", generation: 2, rpc_id: 0, option_id: "allow-once" });
+    expect(permissionAction.idempotency_key).toBeUndefined();
+    await flushUntil(() => root.querySelector("[data-testid='operator-input-answer']") !== null);
+    (root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).click();
+    (root.querySelector("[data-testid='operator-input-answer']") as HTMLButtonElement).click();
+    await flushUntil(() => dispatch.mock.calls.length === 2);
+    expect(dispatch.mock.calls[1]?.[0]).toMatchObject({ action_kind: "input_response",
+      payload: { request_id: "operator-2", outcome: "answered", answers: [{ question_id: "region", selected_option_ids: ["west"] }] } });
     await handle.destroy();
   });
 

@@ -57,6 +57,7 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                 .iter()
                 .enumerate()
                 .map(|(index, identifier)| IssueSnapshot {
+                    operator_interactions: Vec::new(),
                     harness_capability: None,
                     identifier: identifier.clone(),
                     title: format!("Issue {identifier}"),
@@ -122,6 +123,7 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
         .iter()
         .enumerate()
         .map(|(index, identifier)| IssueSnapshot {
+            operator_interactions: Vec::new(),
             harness_capability: None,
             identifier: (*identifier).to_owned(),
             title: format!("Issue {index}"),

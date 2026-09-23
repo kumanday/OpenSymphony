@@ -1,4 +1,4 @@
-import type { ApprovalRequest } from "@opensymphony/gateway-schema";
+import type { ApprovalRequest, OperatorInteraction } from "@opensymphony/gateway-schema";
 import { escapeHtml, escapeAttr } from "./html.js";
 
 /** Decision a user can make on an approval request. */
@@ -25,7 +25,17 @@ export function renderApprovalList(
         ? `<div class="os-approval-actor" data-testid="approval-actor">${escapeHtml(approval.actor.display_name ?? approval.actor.actor_id)} (${escapeHtml(approval.actor.actor_kind)})</div>`
         : "";
       // Only render decision buttons when there is a handler AND the approval is still pending.
-      const explain = opts?.onDecide && approval.status === "pending"
+      const operator = approval.operator_interaction;
+      const operatorChoices = operator && opts?.onDecide && approval.status === "pending"
+        ? operator.kind === "permission"
+          ? `<div class="os-approval-options">${operator.options.map((option) => {
+              const decision = ["allow_once", "allow_always"].includes(option.kind) ? "approved"
+                : ["reject_once", "reject_always"].includes(option.kind) ? "rejected" : "";
+              return decision ? `<button data-testid="operator-permission-option" data-approval-id="${escapeAttr(approval.approval_id)}" data-option-id="${escapeAttr(option.id)}" data-decision="${decision}">${escapeHtml(option.label)}</button>` : "";
+            }).join("")}<button data-testid="operator-permission-cancel" data-approval-id="${escapeAttr(approval.approval_id)}">Cancel</button></div>`
+          : `<div class="os-approval-options"><button data-testid="operator-plan-approve" data-approval-id="${escapeAttr(approval.approval_id)}">Approve plan</button><button data-testid="operator-plan-reject" data-approval-id="${escapeAttr(approval.approval_id)}">Reject plan</button><button data-testid="operator-plan-cancel" data-approval-id="${escapeAttr(approval.approval_id)}">Cancel</button></div>`
+        : "";
+      const explain = !operator && opts?.onDecide && approval.status === "pending"
         ? `<div class="os-approval-explain">
             <input type="text" class="os-approval-explanation" data-testid="approval-explanation" placeholder="Explain your decision (optional)" />
             <button class="os-approve-button" data-testid="approve-button" data-approval-id="${escapeAttr(approval.approval_id)}">Approve</button>
@@ -38,11 +48,26 @@ export function renderApprovalList(
         ${actor}
         ${target}
         ${risk}
+        ${operatorChoices}
         ${explain}
       </div>`;
     })
     .join("");
   return `<div class="os-approval-list" data-testid="approval-list">${items}</div>`;
+}
+
+/** Render bounded, offered multiple-choice ACP questions without a free-text field. */
+export function renderOperatorInputs(inputs: OperatorInteraction[]): string {
+  return inputs.filter((input) => input.kind === "question").map((input) => `
+    <form class="os-operator-input" data-testid="operator-input" data-request-id="${escapeAttr(input.request_id)}">
+      <div class="os-approval-title">${escapeHtml(input.title)}</div>
+      ${input.questions.map((question) => `<fieldset data-question-id="${escapeAttr(question.id)}"><legend>${escapeHtml(question.prompt)}</legend>
+        ${question.options.map((option) => `<label><input type="${question.allow_multiple ? "checkbox" : "radio"}" name="${escapeAttr(input.request_id + ":" + question.id)}" value="${escapeAttr(option.id)}" />${escapeHtml(option.label)}</label>`).join("")}
+      </fieldset>`).join("")}
+      <button type="button" data-testid="operator-input-answer">Answer</button>
+      <button type="button" data-testid="operator-input-decline">Decline</button>
+      <button type="button" data-testid="operator-input-cancel">Cancel</button>
+    </form>`).join("");
 }
 
 function renderTargetContext(ctx: ApprovalRequest["target_context"]): string {
