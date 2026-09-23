@@ -114,6 +114,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
             ..ClientLimits::default()
         },
         require_persistence: false,
+        expected_session_id: None,
     }
 }
 async fn retire(handle: &SessionHandle) {

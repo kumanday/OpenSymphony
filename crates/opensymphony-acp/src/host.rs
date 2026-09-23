@@ -69,6 +69,9 @@ pub struct SessionLaunch {
     pub context: LaunchContext,
     pub limits: ClientLimits,
     pub require_persistence: bool,
+    /// A parent continuation may refresh its process credentials only while
+    /// retaining this already-authoritative ACP session binding.
+    pub expected_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -493,6 +496,10 @@ impl SessionHost {
                         let _ = reply.send(result);
                     }
                     HostCommand::Open { mut launch, reply } => {
+                        if launch.expected_session_id.is_some() && !launch.require_persistence {
+                            let _ = reply.send(Err(HostError::PersistenceUnsupported));
+                            continue;
+                        }
                         let key = launch.workspace.issue_id().to_owned();
                         let fingerprint = profile_fingerprint(
                             &launch.profile,
@@ -602,9 +609,13 @@ async fn start(
     {
         return Err(HostError::IdentityMismatch);
     }
-    let durable = Durability::open(launch.manager, launch.workspace, launch.identity)
-        .await
-        .map_err(HostError::from)?;
+    let durable = if let Some(expected) = launch.expected_session_id {
+        Durability::open_bound_parent(launch.manager, launch.workspace, launch.identity, expected)
+            .await
+    } else {
+        Durability::open(launch.manager, launch.workspace, launch.identity).await
+    }
+    .map_err(HostError::from)?;
     let identity = durable.state().identity.clone();
     let (commands, receive) = mpsc::channel(16);
     let (events, _) = broadcast::channel(
@@ -1112,8 +1123,14 @@ async fn prompt_rpc(
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
         .filter(|reason| !reason.is_empty() && reason.len() <= 1024)
-        .ok_or(ClientError::Protocol { submitted: true })?
-        .to_owned();
+        .ok_or(ClientError::Protocol { submitted: true })?;
+    // The captured response is redacted independently. The terminal report is
+    // also persisted and projected into scheduler status, so apply the same
+    // known-secret matcher before it crosses that boundary.
+    let stop_reason = capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .redact_stop_reason(stop_reason);
     // A prompt response establishes delivery and a terminal peer observation.
     // The worker decides which bounded reasons count as success or cancellation.
     services.end_turn(limits.setup_timeout).await?;

@@ -988,6 +988,12 @@ before archiving its manifest. Interrupted or failed launches execute
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check
 without launching another peer.
+For an authoritative parent continuation, a process or grant revision archives
+the retired owner while preserving the bound manifest and session ID. The
+replacement claims the new fingerprint under the exclusive owner lock and
+restores that ID through negotiated load or resume. Unsupported or missing
+restoration fails before prompt submission; a scope change requiring a fresh
+conversation is rejected before retirement.
 An ACP session that has not seeded its workflow prompt receives the full
 workflow prompt on the next attempt, even when `session/load` restores the peer
 session ID. A seeded session receives continuation guidance after a new run

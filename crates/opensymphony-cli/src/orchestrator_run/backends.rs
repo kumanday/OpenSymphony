@@ -6437,14 +6437,35 @@ impl RuntimeWorkerBackend {
             } else {
                 false
             };
+            if !route.dry_run && parent_execution.is_some() && prior_acp.is_some() {
+                if expected_parent_conversation_id.is_none() {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        "parent ACP continuation is missing its authoritative conversation binding",
+                    );
+                    return;
+                }
+                if memory_grant_requires_fresh_conversation {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        "parent ACP memory authorization requires a fresh conversation; refusing to replace its authoritative session",
+                    );
+                    return;
+                }
+            }
             if !route.dry_run
                 && prior_acp.is_some()
                 && (switching_harness
                     || memory_grant_requires_fresh_conversation
                     || acp_identity_changed)
             {
-                if let Err(error) =
-                    acp::retire_and_archive(&workspace_manager, &ensured.handle, &acp_host).await
+                if let Err(error) = acp::retire_and_archive(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &acp_host,
+                    parent_execution.is_some(),
+                )
+                .await
                 {
                     report_launch_failure(&mut launch_tx, error);
                     return;
@@ -17378,6 +17399,8 @@ exit 64
             "slow_model_hang",
             "unprompted_retry",
             "future_stop",
+            "parent_unique",
+            "secret_stop",
         ] {
             let profile = serde_json::from_value(serde_json::json!({
                 "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
@@ -17392,6 +17415,14 @@ exit 64
             .expect("configured profile")
             .session
             .model = Some("profile-model".into());
+        workflow
+            .extensions
+            .acp
+            .profiles
+            .get_mut("secret_stop")
+            .expect("secret stop profile")
+            .env_refs
+            .insert("AUDIT_TOKEN".into(), "ACP_TEST_AUDIT_TOKEN".into());
         workflow
             .extensions
             .acp
@@ -17492,6 +17523,48 @@ exit 64
             .expect("run manifest");
         assert_eq!(run.status, RunStatus::Failed);
         assert!(run.harness_stopped);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_worker_redacts_credential_from_unknown_stop_reason_and_summary() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let secret = "dummy-acp-audit-credential-611";
+        backend
+            .worker_env
+            .insert("ACP_TEST_AUDIT_TOKEN".into(), secret.into());
+        backend
+            .start_worker(acp_test_request(&manager.config().root, "secret_stop", 1))
+            .await
+            .expect("ACP launch");
+        let outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Detached);
+        assert!(outcome.harness_stopped);
+        let summary = outcome.summary.expect("worker summary");
+        assert!(summary.contains("vendor_error_[redacted]"), "{summary}");
+        assert!(!summary.contains(secret));
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let durable = fs::read_to_string(handle.conversation_manifest_path()).expect("manifest");
+        assert!(!durable.contains(secret));
+        assert!(durable.contains("vendor_error_[redacted]"));
+        let run = manager
+            .load_run_manifest(&handle)
+            .await
+            .expect("run")
+            .expect("run manifest");
+        assert!(
+            !serde_json::to_string(&run)
+                .expect("run JSON")
+                .contains(secret)
+        );
         acp::retire(&manager, &handle, backend.acp_host.as_ref())
             .await
             .expect("retire");
@@ -18237,6 +18310,101 @@ exit 64
                     .expect("retire");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn acp_parent_refreshes_managed_memory_without_replacing_bound_session() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let mut request = acp_test_request(&manager.config().root, "parent_unique", 1);
+        request
+            .issue
+            .sub_issues
+            .push(crate::opensymphony_domain::IssueRef {
+                id: IssueId::new("child-id").expect("child id"),
+                identifier: IssueIdentifier::new("COE-CHILD").expect("child identifier"),
+                state: "Done".into(),
+            });
+        let parent = manager
+            .prepare_parent_execution_root(&issue_descriptor(&request.issue), 1, Vec::new())
+            .await
+            .expect("parent root");
+        let workspace = parent.handle;
+        request.workspace.path = workspace.workspace_path().to_path_buf();
+        request.workspace.workspace_key =
+            WorkspaceKey::new(workspace.workspace_key()).expect("parent key");
+        request.run.workspace_path = workspace.workspace_path().to_path_buf();
+        let first = backend
+            .start_worker(request.clone())
+            .await
+            .expect("first launch");
+        let bound_id = first.conversation.conversation_id.to_string();
+        let _ = acp_test_finished(&mut backend).await;
+        let first_owner = manager
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("conversation")
+            .acp
+            .expect("ACP state");
+
+        let mut continuation = request;
+        continuation.run = RunAttempt::new(
+            WorkerId::new("acp-parent-continuation").expect("worker"),
+            continuation.issue.id.clone(),
+            continuation.issue.identifier.clone(),
+            workspace.workspace_path().to_path_buf(),
+            TimestampMs::new(2),
+            Some(RetryAttempt::new(2).expect("retry")),
+            8,
+        );
+        continuation.expected_parent_conversation_id = Some(bound_id.clone());
+        let second = backend
+            .start_worker(continuation)
+            .await
+            .expect("parent continuation launch");
+        assert_eq!(second.conversation.conversation_id.to_string(), bound_id);
+        let _ = acp_test_finished(&mut backend).await;
+        let calls =
+            fs::read_to_string(workspace.workspace_path().join("acp-session-methods.jsonl"))
+                .expect("peer session calls")
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("call"))
+                .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2, "one new session and one restore: {calls:?}");
+        assert_eq!(calls[0]["method"], "session/new");
+        assert_eq!(calls[1]["method"], "session/load");
+        assert_eq!(calls[1]["session"], bound_id);
+        assert!(
+            fs::read_dir(workspace.metadata_dir())
+                .expect("metadata")
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("acp-retired-")),
+            "rotated parent owner should retain an audit snapshot"
+        );
+        let retained = manager
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("conversation")
+            .acp
+            .expect("ACP state");
+        assert_ne!(retained.owner_id, first_owner.owner_id);
+        assert_ne!(
+            retained.identity.credential_scope,
+            first_owner.identity.credential_scope
+        );
+        assert_eq!(retained.session_id.as_deref(), Some(bound_id.as_str()));
+        assert_eq!(
+            retained.recovery,
+            crate::opensymphony_workspace::AcpRecovery::RestoredLoad
+        );
+        acp::retire(&manager, &workspace, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     #[tokio::test]

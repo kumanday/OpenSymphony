@@ -990,11 +990,18 @@ prompt remains uncertain and blocks automatic retry and workspace removal.
 Recovered finished turns reconcile only the matching run ID and attempt; a
 prepared later run receives its own scoped memory environment and prompt.
 An unfamiliar but nonempty bounded ACP `stopReason` is preserved as a finished
-peer response and reported as an unsuccessful, non-retryable outcome. It does
-not become an uncertain submission merely because the reason is new.
+peer response and reported as an unsuccessful, non-retryable outcome. Known
+credential values in the reason are redacted before durable storage and worker
+status projection. The reason does not become an uncertain submission merely
+because it is new.
 The bound model includes a profile's `session.model` when no routing override is
 set. Changes to managed memory run ID, attempt or project set rotate the retained
 ACP process so child environment and memory evidence remain scoped to the run.
+For an authoritative parent continuation, that rotation archives the old owner
+but keeps the conversation manifest and session ID. The new process must
+negotiate load or resume; an unavailable restore fails before another prompt
+instead of creating a different parent session. A grant change that requires a
+fresh conversation is rejected before parent retirement.
 After a revoked memory grant requires a fresh owner, the revocation marker clears
 when that owner reports a successful launch; failed setup leaves it in place.
 ACP prompt guidance reads the managed worker overlay, not inherited shell scope.

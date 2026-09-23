@@ -501,6 +501,9 @@ cleanup. A submitted prompt is never replayed on restart. Tool patches merge by
 call identity with bounded state; replay frames do not contribute usage. Optional
 usage remains absent when the peer does not report it. Raw redacted source frames
 stay on the owner separately from the normalized scheduler event stream.
+For a bound parent continuation, a changed run-scoped grant rotates the process
+while retaining the authoritative session ID. The replacement must negotiate
+load or resume; it cannot create a new parent session after a failed restore.
 
 Durable ACP identity and submission/outcome markers live in the existing
 conversation manifest, with additive ACP identity in its runtime envelope.

@@ -393,6 +393,18 @@ struct Capture {
 }
 
 impl Capture {
+    fn redact_stop_reason(&self, reason: &str) -> String {
+        let redacted = self.secrets.redact(reason);
+        if redacted.len() > 1024 || redacted.chars().any(char::is_control) {
+            // Replacement can expand a bounded peer value beyond durable
+            // metadata limits. Preserve terminal evidence without persisting
+            // a partial replacement or protocol control text.
+            "[redacted]".into()
+        } else {
+            redacted
+        }
+    }
+
     fn redact(&self, value: &mut Value, diagnostic: bool) {
         match value {
             Value::String(s) => {
@@ -1370,7 +1382,9 @@ async fn run_connection(
                 phase_error = rpc_failure("session/prompt", error, &capture_state, submitted.load(Ordering::Acquire));
             })?;
             let stop_reason = result.get("stopReason").and_then(Value::as_str)
-                .ok_or_else(agent_client_protocol::Error::invalid_params)?.to_owned();
+                .ok_or_else(agent_client_protocol::Error::invalid_params)?;
+            let stop_reason = capture_state.lock().unwrap_or_else(|error| error.into_inner())
+                .redact_stop_reason(stop_reason);
             if let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
                 phase_error = Some(error);
                 return Err(agent_client_protocol::Error::internal_error());
@@ -1540,6 +1554,23 @@ mod tests {
         assert_eq!(result.len(), 16 * 1024 * 1024 + "[redacted]".len());
         assert!(SecretRedactor::new(vec!["x".repeat(1024 * 1024 + 1)]).is_err());
         assert!(SecretRedactor::new((0..1025).map(|i| format!("secret-{i}")).collect()).is_err());
+    }
+
+    #[test]
+    fn terminal_reason_redaction_remains_durable_when_replacement_expands() {
+        let capture = Capture {
+            frames: Vec::new(),
+            sequence: 0,
+            truncated: false,
+            max: 0,
+            bytes: 0,
+            max_bytes: 0,
+            publisher: None,
+            secrets: SecretRedactor::new(vec!["x".into()]).expect("matcher"),
+        };
+        assert_eq!(capture.redact_stop_reason("vendor_x"), "vendor_[redacted]");
+        assert_eq!(capture.redact_stop_reason(&"x".repeat(1024)), "[redacted]");
+        assert_eq!(capture.redact_stop_reason("vendor\nreason"), "[redacted]");
     }
 
     #[test]

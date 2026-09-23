@@ -209,6 +209,7 @@ pub(super) async fn retire_and_archive(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     host: &SessionHost,
+    preserve_manifest: bool,
 ) -> Result<(), String> {
     retire(manager, workspace, Some(host)).await?;
     let manifest = manager
@@ -227,6 +228,9 @@ pub(super) async fn retire_and_archive(
         .write_json_artifact_atomically(workspace, &path, &manifest)
         .await
         .map_err(|e| e.to_string())?;
+    if preserve_manifest {
+        return Ok(());
+    }
     let path = manager
         .validate_workspace_owned_path(workspace, &workspace.conversation_manifest_path())
         .await
@@ -666,7 +670,11 @@ async fn try_run(
                 services,
             },
             limits,
-            require_persistence: false,
+            require_persistence: manifest.parent_runtime_envelope.is_some(),
+            expected_session_id: manifest
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.clone()),
         })
         .await
         .map_err(|e| e.to_string())?;

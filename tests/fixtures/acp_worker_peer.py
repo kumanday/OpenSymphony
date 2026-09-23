@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+import uuid
 
 profile = sys.argv[1]
 session = "session-" + profile
@@ -33,6 +34,10 @@ for line in sys.stdin:
         send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True, "mcpCapabilities": {"http": True}}}})
     elif method in ("session/new", "session/load"):
         assert message["params"]["cwd"] == os.getcwd()
+        if profile == "parent_unique":
+            session = "session-" + uuid.uuid4().hex if method == "session/new" else message["params"]["sessionId"]
+            with open("acp-session-methods.jsonl", "a") as output:
+                output.write(json.dumps({"method": method, "session": session}) + "\n")
         session_mcp = message["params"].get("mcpServers", [])
         if os.environ.get("OPENSYMPHONY_MEMORY_ENDPOINT"):
             assert len(session_mcp) == 1 and session_mcp[0]["type"] == "http"
@@ -100,7 +105,11 @@ for line in sys.stdin:
         if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue
-        stop_reason = "future_stop_reason" if profile == "future_stop" else "end_turn"
+        stop_reason = (
+            "future_stop_reason" if profile == "future_stop" else
+            "vendor_error_" + os.environ["AUDIT_TOKEN"] if profile == "secret_stop" else
+            "end_turn"
+        )
         send({"id": message["id"], "result": {"stopReason": stop_reason, "usage": {"inputTokens": 4, "outputTokens": 2, "totalTokens": 6}}})
     elif method is None and message.get("id") == "permission":
         assert message["result"]["outcome"]["outcome"] == "cancelled"

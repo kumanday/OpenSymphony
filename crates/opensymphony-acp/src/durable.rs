@@ -97,7 +97,23 @@ impl Durability {
         workspace: WorkspaceHandle,
         identity: AcpSessionIdentity,
     ) -> Result<Self, DurabilityError> {
-        Self::claim(manager, workspace, identity, true).await
+        Self::claim(manager, workspace, identity, true, None).await
+    }
+
+    pub(super) async fn open_bound_parent(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+        expected_session_id: String,
+    ) -> Result<Self, DurabilityError> {
+        Self::claim(
+            manager,
+            workspace,
+            identity,
+            true,
+            Some(expected_session_id),
+        )
+        .await
     }
 
     pub(super) async fn retire_persisted(
@@ -107,7 +123,7 @@ impl Durability {
     ) -> Result<(), DurabilityError> {
         // The claim verifies both the exclusive owner lock and process absence;
         // reserve no launch, so a cleanup crash cannot leave LaunchPending behind.
-        let _guard = Self::claim(manager, workspace, identity, false).await?;
+        let _guard = Self::claim(manager, workspace, identity, false, None).await?;
         Ok(())
     }
 
@@ -116,6 +132,7 @@ impl Durability {
         workspace: WorkspaceHandle,
         identity: AcpSessionIdentity,
         reserve_launch: bool,
+        expected_session_id: Option<String>,
     ) -> Result<Self, DurabilityError> {
         validate_identity(&identity)?;
         let issue = manager
@@ -198,9 +215,26 @@ impl Durability {
         {
             return Err(DurabilityError::Binding("issue"));
         }
-        if reserve_launch && let Some(run) = manager.load_run_manifest(&workspace).await? {
+        let run = if reserve_launch {
+            manager.load_run_manifest(&workspace).await?
+        } else {
+            None
+        };
+        if expected_session_id.is_some() && run.is_none() {
+            return Err(DurabilityError::Binding("parent run"));
+        }
+        if let Some(run) = run {
             if run.run_id != identity.run_id || run.attempt != identity.attempt {
                 return Err(DurabilityError::Binding("run identity"));
+            }
+            if let Some(expected) = expected_session_id.as_deref()
+                && run
+                    .parent_runtime_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.conversation_binding.as_deref())
+                    != Some(expected)
+            {
+                return Err(DurabilityError::Binding("parent conversation"));
             }
             if let Some(envelope) = run.parent_runtime_envelope {
                 if envelope.harness != "acp" || envelope.workspace_path != identity.workspace_path {
@@ -224,7 +258,21 @@ impl Durability {
             .acp
             .as_mut()
             .ok_or(DurabilityError::NativeManifest)?;
-        validate_binding(&state.identity, &identity)?;
+        if let Some(expected) = expected_session_id.as_deref() {
+            if state.session_id.as_deref() != Some(expected)
+                || manifest.conversation_id.as_str() != expected
+                || manifest
+                    .parent_runtime_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.conversation_binding.as_deref())
+                    != Some(expected)
+            {
+                return Err(DurabilityError::Binding("parent conversation"));
+            }
+            validate_static_binding(&state.identity, &identity)?;
+        } else {
+            validate_binding(&state.identity, &identity)?;
+        }
         if state.harness != "acp"
             || manifest.conversation_id != state.session_id.as_deref().unwrap_or_default()
         {
@@ -245,6 +293,13 @@ impl Durability {
             return Err(DurabilityError::Binding("connection generation"));
         }
         if reserve_launch {
+            if expected_session_id.is_some() {
+                // The old owner has stopped and the parent conversation is
+                // bound to this run. Rotate only the process/grant revision;
+                // preserve the session ID for negotiated load/resume.
+                state.identity.profile_fingerprint = identity.profile_fingerprint.clone();
+                state.identity.credential_scope = identity.credential_scope.clone();
+            }
             let new_run = state.identity.run_id != identity.run_id
                 || state.identity.attempt != identity.attempt;
             state.identity.generation = state
@@ -487,8 +542,8 @@ fn validate_binding(
     stored: &AcpSessionIdentity,
     requested: &AcpSessionIdentity,
 ) -> Result<(), DurabilityError> {
+    validate_static_binding(stored, requested)?;
     for (matches, name) in [
-        (stored.profile_id == requested.profile_id, "profile"),
         (
             stored.profile_fingerprint == requested.profile_fingerprint,
             "profile fingerprint",
@@ -497,6 +552,20 @@ fn validate_binding(
             stored.credential_scope == requested.credential_scope,
             "credential scope",
         ),
+    ] {
+        if !matches {
+            return Err(DurabilityError::Binding(name));
+        }
+    }
+    Ok(())
+}
+
+fn validate_static_binding(
+    stored: &AcpSessionIdentity,
+    requested: &AcpSessionIdentity,
+) -> Result<(), DurabilityError> {
+    for (matches, name) in [
+        (stored.profile_id == requested.profile_id, "profile"),
         (
             stored.workspace_path == requested.workspace_path,
             "workspace",
