@@ -741,7 +741,11 @@ and terminal callbacks, verify rejection while idle and process reaping before
 completion, then start a fresh callback epoch. A permission-policy peer checks
 that `allow_once` selects the offered option during a turn and cancels a
 permission request adjacent to the prompt result, both with and without an
-operator route. Pre-prompt tests reject file and
+operator route. A saturated two-slot operator event channel test holds two
+`Opened` events until both peer callbacks time out, then requires both matching
+`Closed` events to arrive while the prompt remains active. Scheduler tests
+verify that closure removes the pending interaction and resumes the idle clock.
+Pre-prompt tests reject file and
 terminal requests after session binding. File and terminal-output tests verify
 exact wire contents with structural redaction in retained history and evidence.
 Configuration tests check preparation-frame attribution on success, cancellation

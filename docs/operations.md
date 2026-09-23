@@ -1060,7 +1060,9 @@ and restart clear the live responder; operators must wait for a fresh request.
 Automatic `allow_once` and `deny` permission decisions require the same active
 turn and are cancelled when a peer asks after its prompt has completed.
 Callback arrivals and closures publish updated snapshots without waiting for
-the next tracker poll.
+the next tracker poll. Timed-out callbacks retain their closure notification
+through bounded channel backpressure, so pending requests clear when the worker
+drains the queue.
 An un-routed form request receives an ACP `cancel` response so a direct client
 turn can continue. An operator-policy permission request without a route fails
 the turn. A worker response that misses its acknowledgement deadline is fenced

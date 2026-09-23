@@ -538,7 +538,10 @@ cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses
 and updates are committed in SDK dispatch order before prompt completion. The
 prompt response revokes its callback epoch before an adjacent request is
-dispatched; automatic permission policy also requires that live epoch. No
+dispatched; automatic permission policy also requires that live epoch.
+Callback closures use a bounded channel wait so a burst of open requests cannot
+silently drop the expiry signal. A receiver that stops draining fails the turn;
+worker completion clears its pending interactions. No
 OpenHands server or client participates in this launch path.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->

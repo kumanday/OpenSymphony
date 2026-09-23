@@ -157,6 +157,24 @@ for line in sys.stdin:
                 json.dump({'active': active, 'late': late}, result_file)
             os.replace('permission-epoch.json.tmp', 'permission-epoch.json')
             continue
+        if text == 'operator-close-saturation':
+            request_ids = (201, 202)
+            for request_id in request_ids:
+                send({'id': request_id, 'method': 'session/request_permission', 'params': {
+                    'sessionId': session,
+                    'toolCall': {'toolCallId': f'tool-{request_id}', 'title': 'Run tests'},
+                    'options': [{'optionId': 'allow', 'name': 'Allow once', 'kind': 'allow_once'},
+                                {'optionId': 'deny', 'name': 'Deny once', 'kind': 'reject_once'}]}})
+            responses = [json.loads(sys.stdin.readline()) for _ in request_ids]
+            assert {response['id'] for response in responses} == set(request_ids), responses
+            assert all(response['result'] == {'outcome': {'outcome': 'cancelled'}}
+                       for response in responses), responses
+            open('operator-close-timed-out', 'w').close()
+            import time
+            while not os.path.exists('release-operator-close-prompt'):
+                time.sleep(0.01)
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'operator-roundtrip':
             serial = 9007199254740992
             assert callback('cursor/ask_question', {'questions': []}, error=True)['code'] == -32601

@@ -1293,7 +1293,18 @@ async fn run_connection(
                                             callback_output.lock().unwrap_or_else(|e| e.into_inner()).fail_all();
                                             return;
                                         }
-                                        let _ = sender.try_send(AcpOperatorEvent::Closed(interaction.request_id));
+                                        // The worker may be processing a burst of Opened
+                                        // events while callbacks expire. A full channel must
+                                        // not discard the only closure for an accepted
+                                        // interaction; bound the wait and fail the turn if
+                                        // the worker stops draining it.
+                                        if tokio::time::timeout(
+                                            limits.cancel_timeout,
+                                            sender.send(AcpOperatorEvent::Closed(interaction.request_id)),
+                                        ).await.is_err() {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                        }
                                     });
                                     return Ok(());
                                 }

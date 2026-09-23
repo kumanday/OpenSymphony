@@ -200,6 +200,66 @@ async fn automatic_permission_policy_is_fenced_by_prompt_epoch() {
 }
 
 #[tokio::test]
+async fn saturated_operator_event_channel_delivers_callback_closures() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CLOSE-SATURATION", "none").await;
+    request.limits.callback_timeout = Duration::from_millis(100);
+    request.limits.prompt_timeout = Duration::from_secs(8);
+    let handle = host.open(request).await.expect("open");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let prompt = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .prompt_with_operator(
+                    "close-saturation".into(),
+                    1,
+                    "operator-close-saturation".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt")
+        }
+    });
+    let workspace = root.path().join("CLOSE-SATURATION");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !workspace.join("operator-close-timed-out").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer observed both timeout cancellations");
+    assert!(
+        !prompt.is_finished(),
+        "prompt remains active during cleanup"
+    );
+    assert_eq!(rx.len(), 2, "both Opened events saturate the channel");
+    let mut opened = BTreeSet::new();
+    let mut closed = BTreeSet::new();
+    for _ in 0..4 {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("every callback closure must arrive")
+            .expect("operator event");
+        match event {
+            AcpOperatorEvent::Opened(request) => {
+                opened.insert(request.interaction.request_id);
+            }
+            AcpOperatorEvent::Closed(request_id) => {
+                closed.insert(request_id);
+            }
+        }
+    }
+    assert_eq!(opened.len(), 2);
+    assert_eq!(closed, opened);
+    std::fs::write(workspace.join("release-operator-close-prompt"), b"").expect("release peer");
+    assert!(prompt.await.expect("prompt task").succeeded());
+    retire(&handle).await;
+}
+
+#[tokio::test]
 async fn native_peer_operator_permission_and_form_question_round_trip() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");
