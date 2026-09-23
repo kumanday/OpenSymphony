@@ -1155,16 +1155,12 @@ pub(super) async fn requires_openhands_recovery(
     manager: &WorkspaceManager,
 ) -> Result<bool, RunCommandError> {
     for (workspace, _) in manager.list_all_workspaces().await? {
-        let Some(run) = manager.load_run_manifest(&workspace).await? else {
+        let Some(mut run) = manager.load_run_manifest(&workspace).await? else {
             continue;
         };
-        let Some(raw) = manager
-            .read_text_artifact(&workspace, &workspace.conversation_manifest_path())
-            .await?
+        let Some(conversation) =
+            recovered_conversation_manifest(manager, &workspace, Some(&mut run)).await?
         else {
-            continue;
-        };
-        let Ok(conversation) = acp::conversation_view(&raw) else {
             continue;
         };
         if recovered_harness_kind_from_manifest(&conversation) == "openhands_agent_server"
@@ -14733,6 +14729,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openhands_startup_recovers_only_bound_pending_ownership() {
+        for valid in [true, false] {
+            let temp = TempDir::new().expect("temp");
+            let root = temp.path().join("workspaces");
+            let workflow = sample_workflow(temp.path(), &root);
+            let manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager");
+            let issue = sample_issue();
+            let workspace = manager
+                .ensure(&issue_descriptor(&issue))
+                .await
+                .expect("workspace")
+                .handle;
+            let mut run = manager
+                .start_run(&workspace, &RunDescriptor::new("run-pending-openhands", 1))
+                .await
+                .expect("prepared run");
+            let envelope: TerminalRuntimeEnvelope = serde_json::from_value(serde_json::json!({
+                "repository_binding": {
+                    "alias": "main",
+                    "repository": {
+                        "id": "github:repository:repo",
+                        "safe_remote_fingerprint": "sha256:fingerprint"
+                    },
+                    "config_generation": "config",
+                    "inventory_generation": "inventory"
+                },
+                "config_generation": "config",
+                "inventory_generation": "inventory",
+                "policy_generation": "config",
+                "checkout_generation": "generation-1",
+                "checkout_path": workspace.workspace_path(),
+                "target_branch": "develop",
+                "target_commit": "commit",
+                "instruction": {
+                    "path": "AGENTS.md",
+                    "content_hash": "sha256:instructions",
+                    "source_commit": "commit",
+                    "source": "root",
+                    "native_discovery_paths": [],
+                    "native_discovery_hashes": {}
+                },
+                "harness": "openhands_agent_server",
+                "model_profile": "default",
+                "requested_execution_scope": "single_checkout",
+                "effective_containment": "trusted_host_process_cwd",
+                "cleanup_intent": "workspace_manager_owned"
+            }))
+            .expect("runtime envelope");
+            run.runtime_envelope = Some(envelope.clone());
+            manager
+                .write_run_manifest(&workspace, &run)
+                .await
+                .expect("run envelope");
+            let mut pending = sample_conversation_manifest("conv-pending-openhands");
+            pending.issue_id = issue.id.clone();
+            pending.identifier = issue.identifier.clone();
+            pending.workflow_prompt_seeded = false;
+            let mut pending_envelope = envelope;
+            pending_envelope.conversation_binding = Some(pending.conversation_id.to_string());
+            if !valid {
+                pending_envelope.target_commit = "different-commit".into();
+            }
+            pending.runtime_envelope = Some(pending_envelope);
+            manager
+                .write_json_artifact_atomically(
+                    &workspace,
+                    &pending_conversation_manifest_path(&workspace),
+                    &Some(&pending),
+                )
+                .await
+                .expect("pending ownership");
+
+            assert_eq!(
+                requires_openhands_recovery(&manager)
+                    .await
+                    .expect("preflight"),
+                valid
+            );
+            assert_eq!(
+                manager
+                    .read_text_artifact(&workspace, &workspace.conversation_manifest_path())
+                    .await
+                    .expect("conversation")
+                    .is_some(),
+                valid,
+                "only a matching pending owner is promoted"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn recover_workspaces_discovers_completed_nested_parent_roots() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workspace_root = tempdir.path().join("workspace-root");
@@ -17289,6 +17377,7 @@ exit 64
             "configured",
             "slow_model_hang",
             "unprompted_retry",
+            "future_stop",
         ] {
             let profile = serde_json::from_value(serde_json::json!({
                 "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
@@ -17364,6 +17453,51 @@ exit 64
     }
 
     #[tokio::test]
+    async fn acp_worker_records_future_stop_reason_without_uncertain_submission() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "future_stop", 1))
+            .await
+            .expect("ACP launch");
+        let outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Detached);
+        assert!(outcome.harness_stopped);
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let conversation = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("conversation")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(
+            conversation.status,
+            crate::opensymphony_workspace::AcpSessionStatus::Finished
+        );
+        assert_eq!(
+            conversation.stop_reason.as_deref(),
+            Some("future_stop_reason")
+        );
+        let run = manager
+            .load_run_manifest(&handle)
+            .await
+            .expect("run")
+            .expect("run manifest");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(run.harness_stopped);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
     async fn acp_worker_applies_route_model_and_host_services_before_prompt() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
@@ -17386,16 +17520,25 @@ exit 64
         let mut outcome = None;
         let mut command_started = None;
         let mut command_finished = None;
+        let mut filesystem_activity = 0;
         for _ in 0..200 {
             for update in backend.poll_updates().await.expect("updates") {
                 match update {
                     WorkerUpdate::RuntimeEvent {
                         event_kind,
+                        summary,
                         payload,
                         ..
                     } => match event_kind.as_deref() {
                         Some("acp.command_started") => command_started = payload,
                         Some("acp.command_finished") => command_finished = payload,
+                        Some("acp.callback_activity") => {
+                            assert!(payload.is_none());
+                            assert!(summary.as_deref().is_some_and(|summary| {
+                                summary.starts_with("ACP filesystem callback")
+                            }));
+                            filesystem_activity += 1;
+                        }
                         _ => {}
                     },
                     WorkerUpdate::Finished {
@@ -17412,6 +17555,10 @@ exit 64
         assert_eq!(
             outcome.expect("ACP worker outcome").outcome,
             WorkerOutcomeKind::Succeeded
+        );
+        assert_eq!(
+            filesystem_activity, 4,
+            "read and write request/response activity"
         );
         assert!(command_started.as_ref().is_some_and(|payload| {
             payload["command"]

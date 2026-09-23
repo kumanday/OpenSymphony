@@ -100,7 +100,8 @@ for line in sys.stdin:
         if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue
-        send({"id": message["id"], "result": {"stopReason": "end_turn", "usage": {"inputTokens": 4, "outputTokens": 2, "totalTokens": 6}}})
+        stop_reason = "future_stop_reason" if profile == "future_stop" else "end_turn"
+        send({"id": message["id"], "result": {"stopReason": stop_reason, "usage": {"inputTokens": 4, "outputTokens": 2, "totalTokens": 6}}})
     elif method is None and message.get("id") == "permission":
         assert message["result"]["outcome"]["outcome"] == "cancelled"
         send({"id": pending, "result": {"stopReason": "cancelled"}})

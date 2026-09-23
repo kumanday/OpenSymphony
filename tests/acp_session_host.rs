@@ -130,6 +130,26 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
 }
 
 #[tokio::test]
+async fn future_stop_reason_is_durable_terminal_evidence() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-1", "none").await)
+        .await
+        .expect("open");
+    let report = prompt(&handle, "future-run", "unknown-stop").await;
+    assert_eq!(report.stop_reason, "future_stop_reason");
+    assert!(!report.succeeded());
+    let snapshot = handle.inspect().await.expect("inspect");
+    assert_eq!(snapshot.state.status, AcpSessionStatus::Finished);
+    assert_eq!(
+        snapshot.state.stop_reason.as_deref(),
+        Some("future_stop_reason")
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
 async fn retained_owner_reuses_one_process_across_attempts_and_releasing_subscribers() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");

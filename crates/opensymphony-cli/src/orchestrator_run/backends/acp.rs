@@ -850,13 +850,14 @@ fn project_event(
         }
     }
     if let Some(update) = projection.apply(event, run_id) {
+        let payload = (!update.payload.is_null()).then_some(update.payload);
         let _ = updates.send(WorkerUpdate::RuntimeEvent {
             worker_id: worker_id.clone(),
             observed_at: datetime_to_timestamp_ms(update.observed_at),
             event_id: Some(format!("acp-{}-{}", update.generation, update.sequence)),
             event_kind: Some(format!("acp.{}", update.kind)),
             summary: update.summary,
-            payload: Some(update.payload),
+            payload,
         });
     }
 }

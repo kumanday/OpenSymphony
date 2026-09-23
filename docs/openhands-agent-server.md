@@ -138,6 +138,10 @@ barrier before its primary manifest is written, its pending ownership record
 is cleared only after remote retirement succeeds or equivalent superseded
 evidence is durable; if both operations fail, the pending record remains for
 restart recovery and later cleanup.
+When the configured harness changes, daemon startup applies the same
+run/envelope binding checks to pending OpenHands ownership before deciding
+whether to initialize the OpenHands client and managed server. A valid pending
+owner is promoted for recovery; stale or incompatible ownership is ignored.
 
 ## 6. Conversation model
 

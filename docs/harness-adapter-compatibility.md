@@ -143,6 +143,10 @@ Unrecognized `session/update` variants still emit a bounded, redacted generic
 activity record so an active peer remains visible to the scheduler. Subscriber
 lag replays the retained source tail when it covers the current run's processed
 cursor; only a current gap fences automatic completion.
+Filesystem callback requests and responses emit constant-summary, payload-free
+activity records, keeping stall detection current without exposing file data.
+An unfamiliar bounded prompt stop reason remains terminal peer evidence while
+only recognized successful reasons complete the worker successfully.
 
 Operator responses, writer transfer and IDE presentation follow the
 [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission

@@ -16,12 +16,8 @@ pub struct RuntimeUpdate {
 }
 
 pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<String, Value>> {
-    if payload.get("method").is_some()
-        || !matches!(
-            payload.pointer("/result/stopReason")?.as_str()?,
-            "end_turn" | "max_tokens" | "max_turn_requests" | "cancelled" | "refusal"
-        )
-    {
+    let reason = payload.pointer("/result/stopReason")?.as_str()?;
+    if payload.get("method").is_some() || reason.is_empty() || reason.len() > 1024 {
         return None;
     }
     let usage = payload.pointer("/result/usage")?.as_object()?;
@@ -52,6 +48,7 @@ pub struct RuntimeProjection {
     terminal_creates: BTreeMap<String, (String, Option<String>)>,
     terminal_waits: BTreeMap<String, String>,
     completed_terminals: BTreeSet<String>,
+    filesystem_callbacks: BTreeSet<String>,
 }
 
 impl RuntimeProjection {
@@ -88,10 +85,15 @@ impl RuntimeProjection {
             if frame.payload["method"] == "session/prompt" {
                 self.prompt_request = frame.payload.get("id").cloned();
             }
-            return self.project_terminal_response(*generation, frame);
+            return self
+                .project_filesystem_response(*generation, frame)
+                .or_else(|| self.project_terminal_response(*generation, frame));
         }
         if frame.direction != "incoming" {
             return None;
+        }
+        if let Some(activity) = self.project_filesystem_request(*generation, frame) {
+            return Some(activity);
         }
         if self.record_terminal_request(frame) {
             return None;
@@ -117,6 +119,47 @@ impl RuntimeProjection {
             });
         }
         self.project(*generation, frame)
+    }
+
+    fn project_filesystem_request(
+        &mut self,
+        generation: u64,
+        frame: &SourceFrame,
+    ) -> Option<RuntimeUpdate> {
+        let method = frame.payload.get("method")?.as_str()?;
+        if !matches!(method, "fs/read_text_file" | "fs/write_text_file") {
+            return None;
+        }
+        if let Some(id) = frame
+            .payload
+            .get("id")
+            .and_then(rpc_id)
+            .filter(|id| id.len() <= 256)
+        {
+            if self.filesystem_callbacks.len() >= 1024 {
+                self.filesystem_callbacks.pop_first();
+            }
+            self.filesystem_callbacks.insert(id);
+        }
+        Some(filesystem_activity(
+            generation,
+            frame,
+            "ACP filesystem callback requested",
+        ))
+    }
+
+    fn project_filesystem_response(
+        &mut self,
+        generation: u64,
+        frame: &SourceFrame,
+    ) -> Option<RuntimeUpdate> {
+        if frame.payload.get("method").is_some() {
+            return None;
+        }
+        let id = frame.payload.get("id").and_then(rpc_id)?;
+        self.filesystem_callbacks
+            .remove(&id)
+            .then(|| filesystem_activity(generation, frame, "ACP filesystem callback completed"))
     }
 
     fn record_terminal_request(&mut self, frame: &SourceFrame) -> bool {
@@ -328,6 +371,17 @@ impl RuntimeProjection {
             summary,
             payload: update,
         })
+    }
+}
+
+fn filesystem_activity(generation: u64, frame: &SourceFrame, summary: &str) -> RuntimeUpdate {
+    RuntimeUpdate {
+        sequence: frame.sequence,
+        generation,
+        observed_at: frame.observed_at,
+        kind: "callback_activity".into(),
+        summary: Some(summary.into()),
+        payload: Value::Null,
     }
 }
 
@@ -769,6 +823,72 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[test]
+    fn filesystem_callbacks_project_payload_free_scheduler_activity() {
+        let mut projection = RuntimeProjection::default();
+        for (request_sequence, method) in [(1, "fs/read_text_file"), (3, "fs/write_text_file")] {
+            let request = callback_event(
+                request_sequence,
+                "incoming",
+                json!({"id":request_sequence,"method":method,"params":{"path":"/private/file","content":"private payload"}}),
+            );
+            let activity = projection.apply(&request, "run").expect("callback request");
+            assert_eq!(activity.kind, "callback_activity");
+            assert_eq!(
+                activity.summary.as_deref(),
+                Some("ACP filesystem callback requested")
+            );
+            assert!(activity.payload.is_null());
+            let response = callback_event(
+                request_sequence + 1,
+                "outgoing",
+                json!({"id":request_sequence,"result":{"content":"private payload"}}),
+            );
+            let activity = projection
+                .apply(&response, "run")
+                .expect("callback response");
+            assert_eq!(activity.kind, "callback_activity");
+            assert_eq!(
+                activity.summary.as_deref(),
+                Some("ACP filesystem callback completed")
+            );
+            assert!(activity.payload.is_null());
+        }
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        5,
+                        "outgoing",
+                        json!({"id":1,"result":{"content":"private payload"}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        let oversized_id = "x".repeat(1024);
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        6,
+                        "incoming",
+                        json!({"id":oversized_id,"method":"fs/read_text_file"})
+                    ),
+                    "run"
+                )
+                .is_some()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(7, "outgoing", json!({"id":oversized_id,"result":{}})),
+                    "run"
+                )
+                .is_none()
+        );
+    }
     #[test]
     fn prompt_usage_preserves_absence_and_ignores_replayed_responses() {
         let mut projection = RuntimeProjection::default();
@@ -791,6 +911,11 @@ mod tests {
             *replay = true;
         }
         assert!(projection.apply(&response, "run").is_none());
+        let future_usage = reported_turn_usage(
+            &json!({"result":{"stopReason":"future_stop_reason","usage":{"inputTokens":3}}}),
+        )
+        .expect("future terminal usage");
+        assert_eq!(future_usage["inputTokens"], 3);
     }
 
     #[test]

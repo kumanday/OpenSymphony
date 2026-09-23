@@ -1111,21 +1111,11 @@ async fn prompt_rpc(
     let stop_reason = result
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
-        .filter(|reason| reason.len() <= 1024)
+        .filter(|reason| !reason.is_empty() && reason.len() <= 1024)
         .ok_or(ClientError::Protocol { submitted: true })?
         .to_owned();
-    // Unknown reasons do not establish the tested stop contract.
-    if ![
-        "end_turn",
-        "max_tokens",
-        "max_turn_requests",
-        "refusal",
-        "cancelled",
-    ]
-    .contains(&stop_reason.as_str())
-    {
-        return Err(ClientError::Protocol { submitted: true });
-    }
+    // A prompt response establishes delivery and a terminal peer observation.
+    // The worker decides which bounded reasons count as success or cancellation.
     services.end_turn(limits.setup_timeout).await?;
     Ok(TurnReport {
         cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",

@@ -989,6 +989,9 @@ A known terminal prompt is reconciled without sending it again; a possibly submi
 prompt remains uncertain and blocks automatic retry and workspace removal.
 Recovered finished turns reconcile only the matching run ID and attempt; a
 prepared later run receives its own scoped memory environment and prompt.
+An unfamiliar but nonempty bounded ACP `stopReason` is preserved as a finished
+peer response and reported as an unsuccessful, non-retryable outcome. It does
+not become an uncertain submission merely because the reason is new.
 The bound model includes a profile's `session.model` when no routing override is
 set. Changes to managed memory run ID, attempt or project set rotate the retained
 ACP process so child environment and memory evidence remain scoped to the run.
@@ -1006,6 +1009,8 @@ the interrupt path handles an operator or scheduler stop request.
 Unknown, redacted `session/update` variants produce bounded generic scheduler
 activity. After a subscriber lag, the worker replays retained source frames when
 they cover every frame after its processed cursor; an actual gap fences the run.
+Supported filesystem callback requests and their responses produce payload-free
+scheduler activity without recording file paths or contents.
 An ACP session restored through `session/load` receives the full workflow prompt
 when its durable state has never seeded that prompt. A seeded session receives
 continuation guidance even when the new run's claim has reset its status to

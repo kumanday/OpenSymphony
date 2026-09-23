@@ -957,6 +957,10 @@ tagged as replay through the load response; subsequent live frames keep their
 own sequence and run binding. A finished nonpersistent session resets to a fresh
 agent with an explicit full-context requirement. Its old transcript remains
 inspection evidence. Unsupported required persistence rejects setup.
+When a configured harness changes after a crash, startup checks the same
+run/envelope-bound pending OpenHands ownership artifact used by workspace
+recovery before deciding whether the OpenHands client and local server are
+needed. Incompatible pending ownership is not promoted.
 
 On Unix, owner takeover also requires the prior process group to be absent.
 A crash between the durable launch reservation and process-ID checkpoint leaves
