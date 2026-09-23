@@ -80,8 +80,16 @@ async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
     assert_eq!(evidence["profile"], "first");
     assert_eq!(evidence["memory_project"], "project-test");
     assert_eq!(evidence["memory_token_present"], true);
+    let first_prompt: Value = serde_json::from_str(
+        std::fs::read_to_string(workspace.join("acp-prompts.jsonl"))
+            .expect("prompt history")
+            .lines()
+            .next()
+            .expect("first prompt"),
+    )
+    .expect("prompt record");
     assert!(
-        evidence["prompt"]
+        first_prompt["prompt"]
             .as_str()
             .expect("prompt")
             .contains("Run the scheduler")

@@ -968,6 +968,10 @@ old owner before archiving its manifest. Interrupted or failed launches execute
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check
 without launching another peer.
+When cancellation closes the owner before prompt submission, scheduler stop
+observation checks the durable record for the exact owner, generation, run and
+workspace. Only a stopped process with `ready` or `finished` state counts as
+stopped; submitted or uncertain state keeps cleanup fenced.
 
 
 Filesystem callbacks require absolute paths in the bound workspace and reject

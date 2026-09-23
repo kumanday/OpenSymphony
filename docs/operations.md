@@ -983,9 +983,10 @@ terminal prompt is reconciled without sending it again; a possibly submitted
 prompt remains uncertain and blocks automatic retry and workspace removal.
 Cleanup after a known-finished owner loss acquires the durable owner lock and
 verifies the prior process is absent before recording its stop. Setup failures
-before submission permit scheduler retry. Cancellation is accepted
-only after the owner observes a stopped prompt; losing the local peer alone does
-not establish that delegated execution stopped.
+before submission permit scheduler retry. Cancellation is accepted after
+matching live or durable stopped-state observation. If the owner closes during
+pre-submission cancellation, the scheduler verifies matching durable identity,
+stopped process state and a `ready` or `finished` status before acknowledging.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

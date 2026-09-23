@@ -12,10 +12,74 @@ pub(super) const KIND: &str = "acp";
 pub(super) struct ActiveSession {
     pub handle: SessionHandle,
     pub cancellation: CancellationToken,
+    pub workspace: WorkspaceHandle,
     pub issue_id: IssueId,
     pub run_id: String,
 }
 pub(super) type ActiveSessions = Arc<Mutex<HashMap<String, ActiveSession>>>;
+
+pub(super) enum StopObservation {
+    Pending,
+    Stopped(Option<String>),
+    Uncertain,
+}
+
+/// A pre-submission cancellation can close the owner after it has persisted a
+/// stopped process. In that case the live control channel is gone, so use only
+/// the durable record for this exact owner and generation as stop evidence.
+pub(super) async fn observe_stop(
+    session: &ActiveSession,
+    manager: &WorkspaceManager,
+) -> Result<StopObservation, CliWorkerError> {
+    match session.handle.inspect().await {
+        Ok(snapshot) => {
+            if snapshot.state.status == AcpSessionStatus::Uncertain {
+                return Ok(StopObservation::Uncertain);
+            }
+            if snapshot.state.status == AcpSessionStatus::Finished
+                || (snapshot.state.status == AcpSessionStatus::Ready
+                    && snapshot.retirement_eligible)
+            {
+                return Ok(StopObservation::Stopped(snapshot.state.stop_reason));
+            }
+            Ok(StopObservation::Pending)
+        }
+        Err(crate::opensymphony_acp::HostError::Unavailable) => {
+            let manifest = manager
+                .load_conversation_manifest(&session.workspace)
+                .await
+                .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?
+                .ok_or_else(|| {
+                    CliWorkerError::InterruptFailed("ACP durable stop evidence is missing".into())
+                })?;
+            let state = manifest.acp.ok_or_else(|| {
+                CliWorkerError::InterruptFailed("ACP durable stop evidence is missing".into())
+            })?;
+            if manifest.issue_id != session.workspace.issue_id()
+                || state.owner_id != session.handle.owner_id
+                || state.identity.generation != session.handle.generation
+                || state.identity.run_id != session.run_id
+                || state.identity.workspace_path != session.workspace.workspace_path()
+            {
+                return Err(CliWorkerError::InterruptFailed(
+                    "ACP durable stop identity mismatch".into(),
+                ));
+            }
+            if state.process != AcpProcessState::Stopped {
+                return Ok(StopObservation::Pending);
+            }
+            match state.status {
+                AcpSessionStatus::Ready | AcpSessionStatus::Finished => {
+                    Ok(StopObservation::Stopped(state.stop_reason))
+                }
+                AcpSessionStatus::Submitted | AcpSessionStatus::Uncertain => {
+                    Ok(StopObservation::Uncertain)
+                }
+            }
+        }
+        Err(error) => Err(CliWorkerError::InterruptFailed(error.to_string())),
+    }
+}
 
 pub(super) fn new_host() -> SessionHost {
     SessionHost::new(RetentionPolicy {
@@ -126,6 +190,7 @@ pub(super) async fn retire_and_archive(
 
 pub(super) async fn interrupt(
     active: &ActiveSessions,
+    manager: &WorkspaceManager,
     command: &crate::opensymphony_domain::HarnessInterruptCommand,
 ) -> Result<WorkerInterruptAcknowledgement, CliWorkerError> {
     let session = active
@@ -148,12 +213,8 @@ pub(super) async fn interrupt(
             "ACP interrupt run identity mismatch".into(),
         ));
     }
-    let ActiveSession {
-        handle,
-        cancellation,
-        ..
-    } = session;
-    let snapshot = handle
+    let snapshot = session
+        .handle
         .inspect()
         .await
         .map_err(|e| CliWorkerError::InterruptFailed(e.to_string()))?;
@@ -162,22 +223,17 @@ pub(super) async fn interrupt(
             "ACP interrupt session identity mismatch".into(),
         ));
     }
-    cancellation.cancel();
+    session.cancellation.cancel();
     let stopped = timeout(Duration::from_secs(15), async {
         loop {
-            let snapshot = handle
-                .inspect()
-                .await
-                .map_err(|e| CliWorkerError::InterruptFailed(e.to_string()))?;
-            match snapshot.state.status {
-                AcpSessionStatus::Finished => return Ok(snapshot.state.stop_reason),
-                AcpSessionStatus::Ready => return Ok(Some("cancelled_before_submission".into())),
-                AcpSessionStatus::Uncertain => {
+            match observe_stop(&session, manager).await? {
+                StopObservation::Stopped(reason) => return Ok(reason),
+                StopObservation::Uncertain => {
                     return Err(CliWorkerError::InterruptFailed(
                         "ACP cancellation outcome is uncertain; cleanup remains fenced".into(),
                     ));
                 }
-                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+                StopObservation::Pending => tokio::time::sleep(Duration::from_millis(20)).await,
             }
         }
     })
@@ -538,6 +594,7 @@ async fn try_run(
         ActiveSession {
             handle: handle.clone(),
             cancellation: cancellation.clone(),
+            workspace: workspace.clone(),
             issue_id: issue.id.clone(),
             run_id: manifest.run_id.clone(),
         },

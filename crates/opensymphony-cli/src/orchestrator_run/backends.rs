@@ -10116,13 +10116,19 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     .remove(&worker_id);
                 let (kind, harness_stopped) = if let Some(session) = acp_session {
                     session.cancellation.cancel();
-                    let stopped = session.handle.inspect().await.is_ok_and(|snapshot| {
-                        matches!(
-                            snapshot.state.status,
-                            crate::opensymphony_workspace::AcpSessionStatus::Ready
-                                | crate::opensymphony_workspace::AcpSessionStatus::Finished
-                        )
-                    });
+                    let stopped = timeout(Duration::from_secs(15), async {
+                        loop {
+                            match acp::observe_stop(&session, &self.workspace_manager).await {
+                                Ok(acp::StopObservation::Stopped(_)) => return true,
+                                Ok(acp::StopObservation::Pending) => {
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                }
+                                Ok(acp::StopObservation::Uncertain) | Err(_) => return false,
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(false);
                     (
                         if stopped {
                             WorkerOutcomeKind::Failed
@@ -10164,34 +10170,21 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .unwrap_or_else(|e| e.into_inner())
             .get(worker_id.as_str())
             .cloned();
-        if let Some(acp::ActiveSession {
-            handle,
-            cancellation,
-            ..
-        }) = acp_session
-        {
-            cancellation.cancel();
+        if let Some(session) = acp_session {
+            session.cancellation.cancel();
             timeout(Duration::from_secs(15), async {
                 loop {
-                    let snapshot = handle
-                        .inspect()
-                        .await
-                        .map_err(|e| CliWorkerError::InterruptFailed(e.to_string()))?;
-                    if matches!(
-                        snapshot.state.status,
-                        crate::opensymphony_workspace::AcpSessionStatus::Finished
-                            | crate::opensymphony_workspace::AcpSessionStatus::Ready
-                    ) {
-                        return Ok::<_, CliWorkerError>(());
+                    match acp::observe_stop(&session, &self.workspace_manager).await? {
+                        acp::StopObservation::Stopped(_) => return Ok::<_, CliWorkerError>(()),
+                        acp::StopObservation::Uncertain => {
+                            return Err(CliWorkerError::InterruptFailed(
+                                "ACP abort remains uncertain".into(),
+                            ));
+                        }
+                        acp::StopObservation::Pending => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
                     }
-                    if snapshot.state.status
-                        == crate::opensymphony_workspace::AcpSessionStatus::Uncertain
-                    {
-                        return Err(CliWorkerError::InterruptFailed(
-                            "ACP abort remains uncertain".into(),
-                        ));
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await
@@ -10269,7 +10262,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         command: crate::opensymphony_domain::HarnessInterruptCommand,
     ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
         if command.harness_kind == acp::KIND {
-            return acp::interrupt(&self.acp_active, &command).await;
+            return acp::interrupt(&self.acp_active, &self.workspace_manager, &command).await;
         }
         if command.harness_kind == CODEX_APP_SERVER_KIND {
             return send_codex_stdio_interrupt(&self.codex_interrupts, &command).await;
@@ -17522,7 +17515,18 @@ exit 64
             .start_worker(acp_test_request(&root, "hang", 2))
             .await
             .expect("next hang");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+                    .is_ok_and(|prompts| prompts.lines().count() == 2)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second prompt submitted");
         backend
             .abort_worker(
                 &WorkerId::new("acp-worker-2").expect("worker"),
@@ -17587,12 +17591,12 @@ exit 64
             .abort();
         timeout(Duration::from_secs(5), async {
             loop {
-                let snapshot = session.handle.inspect().await.expect("owner");
                 if session.cancellation.is_cancelled()
                     && matches!(
-                        snapshot.state.status,
-                        crate::opensymphony_workspace::AcpSessionStatus::Ready
-                            | crate::opensymphony_workspace::AcpSessionStatus::Finished
+                        acp::observe_stop(&session, &manager)
+                            .await
+                            .expect("stop observation"),
+                        acp::StopObservation::Stopped(_)
                     )
                 {
                     break;
