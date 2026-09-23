@@ -317,12 +317,14 @@ the command whose result should count as final verification. At completion the
 runtime requires a regular file no larger than 64 KiB, checks its run, attempt,
 hierarchy generation, command root, and exact repository commit map, and
 reopens the checkouts at those commits. The selected command must match start
-and completion events observed from the Codex or OpenHands runtime. Those
+and completion events observed from the Codex, OpenHands, or ACP runtime. Those
 events, rather than fields supplied by the parent, provide the orchestrator's
-deadline, working directory, exit result, bounded output, foreground-process
-ownership, and teardown receipt. A reported working directory maps only to the
-parent root or an exact verified checkout path, and the selector must name that
-observed root. Missing, stale, unobserved, late, or still-active evidence
+deadline, working directory, exit result, foreground-process ownership, and
+teardown receipt. Codex and OpenHands command events also supply bounded output;
+ACP terminal callbacks supply the observed command and exit code. A reported
+working directory maps only to the parent root or an exact verified checkout path,
+and the selector must name that observed root. Missing, stale, unobserved, late,
+or still-active evidence
 converts a generic successful harness turn into a failed parent attempt.
 An acknowledged interrupt counts as foreground-process teardown only after the
 harness has reconciled a stopped state. It does not release separately named
@@ -962,8 +964,9 @@ host execution provides filesystem/process access; it is not a sandbox.
 The production worker persists `harness-route.json` before ACP owner reservation,
 including profile and model identity. The owner also persists verified terminal
 or parent runtime envelopes; worker finish copies the owner-updated conversation
-binding back into the run record. Profile changes and harness switches retire the
-old owner before archiving its manifest. Interrupted or failed launches execute
+binding back into the run record. A profile switch, a change to effective profile
+configuration or credential scope, or a harness switch retires the old owner
+before archiving its manifest. Interrupted or failed launches execute
 `after_run` only when the harness is known stopped. Uncertain work retains its
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check

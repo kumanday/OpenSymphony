@@ -9659,6 +9659,45 @@ fn observe_parent_command_event(
     let Some(payload) = payload else {
         return Ok(());
     };
+    if kind == "acp.command_started" {
+        if let (Some(command_id), Some(command)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload.get("command").and_then(serde_json::Value::as_str),
+        ) {
+            let cwd = payload.get("cwd").and_then(serde_json::Value::as_str);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                command,
+                root,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind == "acp.command_finished" {
+        if let (Some(command_id), Some(exit_code)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                None,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
     if kind == "codex.item/started" || kind == "codex.item/completed" {
         let params = payload.get("params").unwrap_or(payload);
         let item = params.get("item").unwrap_or(params);
@@ -9953,7 +9992,7 @@ mod tests {
     }
 
     #[test]
-    fn openhands_command_events_supply_exit_and_teardown_receipts() {
+    fn runtime_command_events_supply_parent_verification_receipts() {
         let mut controller = ParentIntegrationController::new(
             IssueId::new("parent-command-events").expect("parent id"),
             1,
@@ -10063,6 +10102,49 @@ mod tests {
                 && resource.status
                     == crate::opensymphony_orchestrator::ParentResourceStatus::Released
         }));
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(30),
+            Some("acp-1-2"),
+            Some("acp.command_started"),
+            Some(&serde_json::json!({"command_id":"terminal-1","command":"cargo test","cwd":"/parent/repositories/one"})),
+        )
+        .expect("ACP command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(40),
+            Some("acp-1-4"),
+            Some("acp.command_finished"),
+            Some(&serde_json::json!({"command_id":"terminal-1","exit_code":0})),
+        )
+        .expect("ACP command finish");
+        let evidence = crate::opensymphony_domain::ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".into(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".into(),
+            command_hash: crate::opensymphony_orchestrator::parent_command_identity("cargo test"),
+            root: "checkout-one".into(),
+            repair_repository_id: None,
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt_id, &evidence)
+                .expect("ACP verification evidence")
+        );
     }
 
     #[test]

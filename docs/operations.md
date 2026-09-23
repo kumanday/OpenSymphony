@@ -981,6 +981,10 @@ executable or missing credential reference is reported without exposing its valu
 Retained profile identity survives a default-profile change on restart. A known
 terminal prompt is reconciled without sending it again; a possibly submitted
 prompt remains uncertain and blocks automatic retry and workspace removal.
+Recovered finished turns reconcile only the matching run ID and attempt; a
+prepared later run receives its own scoped memory environment and prompt.
+An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
+outcome on recovery.
 Cleanup after a known-finished owner loss acquires the durable owner lock and
 verifies the prior process is absent before recording its stop. Setup failures
 before submission permit scheduler retry. Cancellation is accepted after

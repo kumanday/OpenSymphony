@@ -973,7 +973,9 @@ a newly prepared attempt submits its own prompt. ACP-only execution
 does not start an OpenHands server. Production retains at most 128 ACP sessions;
 the scheduler continues to enforce `agent.max_concurrent_agents`. Select a
 different profile only after the retained session can retire safely; uncertain
-submissions remain fenced.
+submissions remain fenced. The same profile ID starts a fresh owner when its
+effective command, arguments, session options, host services, or resolved
+credential scope changes.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated
@@ -987,7 +989,10 @@ before launch, while POSIX preserves case-distinct variables.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
 Profile preflight evaluates the resolved worker environment, including Linear
-client-credentials overrides, with the same precedence used at launch.
+client-credentials overrides, with the same precedence used at launch. References
+to checkout-only credential variables are unavailable to ACP profiles, including
+when an ambient value happens to exist. Unrelated non-UTF-8 ambient variables
+are ignored when assembling the launch environment.
 The selected authentication method must be an advertised agent-handled method;
 terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.

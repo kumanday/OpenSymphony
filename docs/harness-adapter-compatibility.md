@@ -123,8 +123,9 @@ recovery and terminal cleanup use the shared worker and scheduler boundaries.
 
 `/api/v1/capabilities` separates generic adapter support (`harnesses`) from
 configured profile preflight readiness (`harness_profiles`). Preflight checks
-profile shape, executable availability and environment references. Executable
-lookup honors profile-mapped `PATH` values and requires absolute search directories
+profile shape, executable availability and environment references, including
+checkout-only credential exclusions. Executable lookup honors profile-mapped
+`PATH` values and requires absolute search directories
 because no issue cwd is available during preflight. It does not
 claim agent authentication or session negotiation succeeded. Run details expose
 `harness_capability` only after negotiation, including the selected profile,
@@ -162,7 +163,9 @@ attachment. An explicit `routing.model` selection takes precedence over the
 profile's `session.model` and is validated against negotiated options before
 prompt submission. Run capability projection reports the negotiated selectable
 model option, while profile preflight uses the same resolved worker environment
-as launch.
+as launch. ACP terminal callback create and completion responses project bounded
+command receipts for parent final verification; only successful create responses
+and observed exit codes count.
 
 Windows callback operations pin path ancestors through use and reject reparse
 points, including junctions, through no-follow handles. Callback epoch handoff shares the setup

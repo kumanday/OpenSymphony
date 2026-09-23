@@ -1,5 +1,5 @@
 //! Scheduler projection of the redacted source stream; wire evidence stays on the owner.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
@@ -49,6 +49,9 @@ pub struct RuntimeProjection {
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
     prompt_request: Option<Value>,
+    terminal_creates: BTreeMap<String, (String, Option<String>)>,
+    terminal_waits: BTreeMap<String, String>,
+    completed_terminals: BTreeSet<String>,
 }
 
 impl RuntimeProjection {
@@ -74,9 +77,12 @@ impl RuntimeProjection {
             if frame.payload["method"] == "session/prompt" {
                 self.prompt_request = frame.payload.get("id").cloned();
             }
-            return None;
+            return self.project_terminal_response(*generation, frame);
         }
         if frame.direction != "incoming" {
+            return None;
+        }
+        if self.record_terminal_request(frame) {
             return None;
         }
         if frame.payload.get("method").is_none()
@@ -100,6 +106,104 @@ impl RuntimeProjection {
             });
         }
         self.project(*generation, frame)
+    }
+
+    fn record_terminal_request(&mut self, frame: &SourceFrame) -> bool {
+        let Some(method) = frame.payload.get("method").and_then(Value::as_str) else {
+            return false;
+        };
+        if !matches!(
+            method,
+            "terminal/create" | "terminal/wait_for_exit" | "terminal/output"
+        ) {
+            return false;
+        }
+        let Some(id) = frame.payload.get("id").and_then(rpc_id) else {
+            return true;
+        };
+        if method == "terminal/create" {
+            let Some(command) = frame
+                .payload
+                .pointer("/params/command")
+                .and_then(Value::as_str)
+            else {
+                return true;
+            };
+            let args = match frame.payload.pointer("/params/args") {
+                Some(Value::Array(args)) => args.as_slice(),
+                None => &[],
+                _ => return true,
+            };
+            let Some(command) = terminal_command(command, args) else {
+                return true;
+            };
+            let cwd = frame
+                .payload
+                .pointer("/params/cwd")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if self.terminal_creates.len() >= 1024 {
+                self.terminal_creates.pop_first();
+            }
+            self.terminal_creates.insert(id, (command, cwd));
+        } else if let Some(terminal_id) = frame
+            .payload
+            .pointer("/params/terminalId")
+            .and_then(Value::as_str)
+        {
+            if self.terminal_waits.len() >= 1024 {
+                self.terminal_waits.pop_first();
+            }
+            self.terminal_waits.insert(id, terminal_id.to_owned());
+        }
+        true
+    }
+
+    fn project_terminal_response(
+        &mut self,
+        generation: u64,
+        frame: &SourceFrame,
+    ) -> Option<RuntimeUpdate> {
+        if frame.payload.get("method").is_some() {
+            return None;
+        }
+        let id = frame.payload.get("id").and_then(rpc_id)?;
+        if let Some((command, cwd)) = self.terminal_creates.remove(&id) {
+            let terminal_id = frame
+                .payload
+                .pointer("/result/terminalId")
+                .and_then(Value::as_str)?;
+            return Some(RuntimeUpdate {
+                sequence: frame.sequence,
+                generation,
+                observed_at: frame.observed_at,
+                kind: "command_started".into(),
+                summary: Some("ACP terminal started".into()),
+                payload: json!({"command_id":terminal_id,"command":command,"cwd":cwd}),
+            });
+        }
+        let terminal_id = self.terminal_waits.remove(&id)?;
+        if self.completed_terminals.contains(&terminal_id) {
+            return None;
+        }
+        let exit_code = frame
+            .payload
+            .pointer("/result/exitCode")
+            .or_else(|| frame.payload.pointer("/result/exitStatus/exitCode"))
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())?;
+        if self.completed_terminals.len() >= 1024 {
+            self.completed_terminals.pop_first();
+        }
+        self.completed_terminals.insert(terminal_id.clone());
+        Some(RuntimeUpdate {
+            sequence: frame.sequence,
+            generation,
+            observed_at: frame.observed_at,
+            kind: "command_finished".into(),
+            summary: Some("ACP terminal finished".into()),
+            payload: json!({"command_id":terminal_id,"exit_code":exit_code}),
+        })
     }
 
     fn project(&mut self, generation: u64, frame: &SourceFrame) -> Option<RuntimeUpdate> {
@@ -194,6 +298,35 @@ impl RuntimeProjection {
     }
 }
 
+fn rpc_id(value: &Value) -> Option<String> {
+    (value.is_string() || value.is_number())
+        .then(|| serde_json::to_string(value).ok())
+        .flatten()
+}
+
+fn terminal_command(command: &str, args: &[Value]) -> Option<String> {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(command.to_owned());
+    for arg in args {
+        parts.push(arg.as_str()?.to_owned());
+    }
+    let rendered = parts
+        .iter()
+        .map(|part| {
+            if part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:=@".contains(&byte))
+            {
+                part.clone()
+            } else {
+                format!("'{}'", part.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (rendered.len() <= 8192).then_some(rendered)
+}
+
 pub fn run_capability(
     state: &crate::opensymphony_workspace::AcpSessionState,
 ) -> crate::opensymphony_gateway_schema::capability::HarnessRunCapability {
@@ -221,6 +354,7 @@ pub fn run_capability(
 pub fn profile_capabilities(
     config: &crate::opensymphony_workflow::AcpConfig,
     worker_environment: &BTreeMap<String, String>,
+    excluded_environment: &BTreeSet<String>,
 ) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
     let mut environment = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
@@ -232,12 +366,13 @@ pub fn profile_capabilities(
             value.clone(),
         );
     }
-    profile_capabilities_with_environment(config, &environment)
+    profile_capabilities_with_environment(config, &environment, excluded_environment)
 }
 
 fn profile_capabilities_with_environment(
     config: &crate::opensymphony_workflow::AcpConfig,
     environment: &BTreeMap<String, String>,
+    excluded_environment: &BTreeSet<String>,
 ) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
     use crate::opensymphony_workspace::{
         environment_variable_names_equal, has_environment_name_collision,
@@ -247,6 +382,11 @@ fn profile_capabilities_with_environment(
             .iter()
             .find(|(key, _)| environment_variable_names_equal(key, name))
             .map(|(_, value)| value)
+    };
+    let excluded = |name: &str| {
+        excluded_environment
+            .iter()
+            .any(|key| environment_variable_names_equal(key, name))
     };
     config
         .profiles
@@ -284,6 +424,12 @@ fn profile_capabilities_with_environment(
                 || has_environment_name_collision(profile.env_refs.keys().map(String::as_str))
             {
                 Some("invalid_profile")
+            } else if profile
+                .env_refs
+                .iter()
+                .any(|(target, source)| excluded(target) || excluded(source))
+            {
+                Some("credential_reference_excluded")
             } else if profile.env_refs.values().any(|name| {
                 value(name).is_none_or(|value| value.is_empty() || value.contains('\0'))
             }) {
@@ -355,11 +501,14 @@ mod tests {
                 temp.path().to_string_lossy().into_owned(),
             ),
         ]);
-        assert!(profile_capabilities_with_environment(&config, &environment)[0].preflight_ready);
+        assert!(
+            profile_capabilities_with_environment(&config, &environment, &BTreeSet::new())[0]
+                .preflight_ready
+        );
         let profile = config.profiles.get_mut("profile").expect("profile");
         profile.env_refs.insert("PATH".into(), "MISSING".into());
         assert_eq!(
-            profile_capabilities_with_environment(&config, &environment)[0]
+            profile_capabilities_with_environment(&config, &environment, &BTreeSet::new())[0]
                 .unavailable_reason
                 .as_deref(),
             Some("credential_reference_unavailable")
@@ -369,7 +518,7 @@ mod tests {
         let environment =
             BTreeMap::from([("PATH".into(), temp.path().to_string_lossy().into_owned())]);
         assert_eq!(
-            profile_capabilities_with_environment(&config, &environment)[0]
+            profile_capabilities_with_environment(&config, &environment, &BTreeSet::new())[0]
                 .unavailable_reason
                 .as_deref(),
             Some("executable_unavailable")
@@ -389,13 +538,42 @@ mod tests {
         }))
         .expect("profile");
         assert_eq!(
-            profile_capabilities(&config, &BTreeMap::new())[0]
+            profile_capabilities(&config, &BTreeMap::new(), &BTreeSet::new())[0]
                 .unavailable_reason
                 .as_deref(),
             Some("credential_reference_unavailable")
         );
         let overlay = BTreeMap::from([(source.into(), "resolved-worker-token".into())]);
-        assert!(profile_capabilities(&config, &overlay)[0].preflight_ready);
+        assert!(profile_capabilities(&config, &overlay, &BTreeSet::new())[0].preflight_ready);
+    }
+
+    #[test]
+    fn profile_preflight_rejects_excluded_checkout_credential_mapping() {
+        let config: crate::opensymphony_workflow::AcpConfig = serde_json::from_value(json!({
+            "profiles": {
+                "profile": {
+                    "command": std::env::current_exe().expect("test executable"),
+                    "env_refs": {"ACP_AUTH": "GITHUB_TOKEN"}
+                }
+            }
+        }))
+        .expect("profile");
+        let overlay = BTreeMap::from([("GITHUB_TOKEN".into(), "checkout-only".into())]);
+        assert!(profile_capabilities(&config, &overlay, &BTreeSet::new())[0].preflight_ready);
+        let excluded = BTreeSet::from(["GITHUB_TOKEN".into()]);
+        let capability = &profile_capabilities(&config, &overlay, &excluded)[0];
+        assert!(!capability.preflight_ready);
+        assert_eq!(
+            capability.unavailable_reason.as_deref(),
+            Some("credential_reference_excluded")
+        );
+        let excluded_target = BTreeSet::from(["ACP_AUTH".into()]);
+        assert_eq!(
+            profile_capabilities(&config, &overlay, &excluded_target)[0]
+                .unavailable_reason
+                .as_deref(),
+            Some("credential_reference_excluded")
+        );
     }
 
     fn event(sequence: u64, replay: bool, update: Value) -> SessionEvent {
@@ -410,6 +588,116 @@ mod tests {
                 payload: json!({"method":"session/update","params":{"update":update}}),
             },
         }
+    }
+
+    fn callback_event(sequence: u64, direction: &str, payload: Value) -> SessionEvent {
+        SessionEvent::Source {
+            generation: 1,
+            run_id: "run".into(),
+            replay: false,
+            frame: SourceFrame {
+                sequence,
+                direction: direction.into(),
+                observed_at: chrono::Utc::now(),
+                payload,
+            },
+        }
+    }
+
+    #[test]
+    fn terminal_callback_responses_project_completed_command_once() {
+        let mut projection = RuntimeProjection::default();
+        let create = callback_event(
+            1,
+            "incoming",
+            json!({"id":1,"method":"terminal/create","params":{"command":"cargo","args":["test"],"cwd":"/workspace/repositories/one"}}),
+        );
+        assert!(projection.apply(&create, "run").is_none());
+        let started = projection
+            .apply(
+                &callback_event(
+                    2,
+                    "outgoing",
+                    json!({"id":1,"result":{"terminalId":"terminal-1"}}),
+                ),
+                "run",
+            )
+            .expect("command start");
+        assert_eq!(started.kind, "command_started");
+        assert_eq!(started.payload["command"], "cargo test");
+        assert_eq!(started.payload["cwd"], "/workspace/repositories/one");
+        assert!(projection.apply(&create, "run").is_none());
+
+        assert!(projection.apply(&callback_event(3, "incoming", json!({"id":2,"method":"terminal/wait_for_exit","params":{"terminalId":"terminal-1"}})), "run").is_none());
+        let finished = projection
+            .apply(
+                &callback_event(4, "outgoing", json!({"id":2,"result":{"exitCode":0}})),
+                "run",
+            )
+            .expect("command finish");
+        assert_eq!(finished.kind, "command_finished");
+        assert_eq!(
+            finished.payload,
+            json!({"command_id":"terminal-1","exit_code":0})
+        );
+
+        assert!(projection.apply(&callback_event(5, "incoming", json!({"id":3,"method":"terminal/output","params":{"terminalId":"terminal-1"}})), "run").is_none());
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        6,
+                        "outgoing",
+                        json!({"id":3,"result":{"exitStatus":{"exitCode":0}}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        7,
+                        "incoming",
+                        json!({"id":4,"method":"terminal/create","params":{"command":"false"}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(8, "outgoing", json!({"id":4,"error":{"code":-32603}})),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        9,
+                        "incoming",
+                        json!({"id":5,"method":"terminal/create","params":{"command":"true"}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        10,
+                        "outgoing",
+                        json!({"id":5,"result":{"terminalId":"terminal-2"}})
+                    ),
+                    "run"
+                )
+                .is_some()
+        );
     }
     #[test]
     fn prompt_usage_preserves_absence_and_ignores_replayed_responses() {

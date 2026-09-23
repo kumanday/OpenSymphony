@@ -52,6 +52,14 @@ pub use host::*;
 pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
+
+pub(crate) fn launch_profile_fingerprint(
+    profile: &AcpProfile,
+    services: &HostServices,
+    limits: &ClientLimits,
+) -> Result<String, String> {
+    durable::profile_fingerprint(profile, services, limits).map_err(|error| error.to_string())
+}
 #[cfg(windows)]
 mod windows_path;
 #[cfg(windows)]

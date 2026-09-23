@@ -319,7 +319,7 @@ pub(super) async fn run_issue(
                 true,
                 format!("ACP turn stopped: {reason}"),
             ),
-            "cancelled" => (
+            "cancelled" | "cancelled_before_prompt" => (
                 WorkerOutcomeKind::Cancelled,
                 RunStatus::Cancelled,
                 true,
@@ -425,6 +425,95 @@ pub(super) async fn run_issue(
     outcome
 }
 
+pub(super) fn launch_environment(
+    ambient: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    overlay: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut environment = ambient
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect::<BTreeMap<_, _>>();
+    for (name, value) in overlay {
+        crate::opensymphony_workspace::insert_environment_value(
+            &mut environment,
+            name.clone(),
+            value.clone(),
+        );
+    }
+    environment
+}
+
+pub(super) struct EffectiveLaunchIdentity {
+    pub profile: crate::opensymphony_acp::AcpProfile,
+    pub services: HostServices,
+    pub profile_fingerprint: String,
+    pub credential_scope: String,
+}
+
+pub(super) fn effective_launch_identity(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workflow: &ResolvedWorkflow,
+    worker_environment: &BTreeMap<String, String>,
+    environment: &BTreeMap<String, String>,
+    limits: &ClientLimits,
+) -> Result<EffectiveLaunchIdentity, String> {
+    let profile_id = route
+        .harness_profile
+        .as_ref()
+        .ok_or("ACP route has no profile identity")?;
+    let mut profile = workflow
+        .extensions
+        .acp
+        .profiles
+        .get(profile_id)
+        .cloned()
+        .ok_or("persisted ACP profile is unavailable")?;
+    if let Some(model) = &route.model {
+        profile.session.model = Some(model.clone());
+    }
+    profile.validate().map_err(|error| error.to_string())?;
+    let mut services = HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..HostServices::default()
+    };
+    if let Some(endpoint) = worker_environment.get("OPENSYMPHONY_MEMORY_ENDPOINT") {
+        services.attach_scoped_memory(
+            endpoint,
+            worker_environment
+                .get("OPENSYMPHONY_MEMORY_TOKEN")
+                .map(String::as_str)
+                .filter(|token| !token.is_empty()),
+        );
+    }
+    let profile_fingerprint =
+        crate::opensymphony_acp::launch_profile_fingerprint(&profile, &services, limits)?;
+    // Fingerprint resolved credential scope without persisting credentials or environment.
+    use sha2::{Digest, Sha256};
+    let mut scope = Sha256::new();
+    for name in profile.env_refs.values().map(String::as_str).chain([
+        "OPENSYMPHONY_MEMORY_TOKEN",
+        "OPENSYMPHONY_MEMORY_ENDPOINT",
+        "OPENSYMPHONY_MEMORY_PROJECT",
+        "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
+        "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES",
+    ]) {
+        if let Some(value) = environment.get(name) {
+            scope.update(name.as_bytes());
+            scope.update([0]);
+            scope.update(value.as_bytes());
+            scope.update([0]);
+        }
+    }
+    Ok(EffectiveLaunchIdentity {
+        profile,
+        services,
+        profile_fingerprint,
+        credential_scope: format!("{:x}", scope.finalize()),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn try_run(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
@@ -466,58 +555,19 @@ async fn try_run(
                 .unwrap_or_else(|| "unsupported".into()));
         }
     }
-    let mut services = HostServices {
-        read_files: true,
-        write_files: true,
-        terminals: true,
-        ..HostServices::default()
-    };
-    if let Some(endpoint) = environment.get("OPENSYMPHONY_MEMORY_ENDPOINT") {
-        services.attach_scoped_memory(
-            endpoint,
-            environment
-                .get("OPENSYMPHONY_MEMORY_TOKEN")
-                .map(String::as_str)
-                .filter(|token| !token.is_empty()),
-        );
-    }
-    let mut inherited = env::vars().collect::<BTreeMap<_, _>>();
-    for (name, value) in environment {
-        crate::opensymphony_workspace::insert_environment_value(&mut inherited, name, value);
-    }
-    let environment = inherited;
+    let worker_environment = environment;
+    let environment = launch_environment(env::vars_os(), &worker_environment);
+    let limits = ClientLimits::default();
+    let EffectiveLaunchIdentity {
+        profile,
+        services,
+        profile_fingerprint,
+        credential_scope,
+    } = effective_launch_identity(route, workflow, &worker_environment, &environment, &limits)?;
     let profile_id = route
         .harness_profile
         .as_ref()
         .ok_or("ACP route has no profile identity")?;
-    let mut profile = workflow
-        .extensions
-        .acp
-        .profiles
-        .get(profile_id)
-        .cloned()
-        .ok_or("persisted ACP profile is unavailable")?;
-    if let Some(model) = &route.model {
-        profile.session.model = Some(model.clone());
-    }
-    profile.validate().map_err(|error| error.to_string())?;
-    // Fingerprint resolved credential scope without persisting credentials or environment.
-    use sha2::{Digest, Sha256};
-    let mut scope = Sha256::new();
-    for name in profile.env_refs.values().map(String::as_str).chain([
-        "OPENSYMPHONY_MEMORY_TOKEN",
-        "OPENSYMPHONY_MEMORY_ENDPOINT",
-        "OPENSYMPHONY_MEMORY_PROJECT",
-        "OPENSYMPHONY_MEMORY_EXECUTION_REPO",
-        "OPENSYMPHONY_MEMORY_AUTHORIZED_REPOSITORIES",
-    ]) {
-        if let Some(value) = environment.get(name) {
-            scope.update(name.as_bytes());
-            scope.update([0]);
-            scope.update(value.as_bytes());
-            scope.update([0]);
-        }
-    }
     manager
         .write_json_artifact_atomically(
             workspace,
@@ -533,8 +583,8 @@ async fn try_run(
             workspace: workspace.clone(),
             identity: AcpSessionIdentity {
                 profile_id: profile_id.clone(),
-                profile_fingerprint: String::new(),
-                credential_scope: format!("{:x}", scope.finalize()),
+                profile_fingerprint,
+                credential_scope,
                 workspace_path: workspace.workspace_path().to_path_buf(),
                 repository_binding: run.repository_binding.clone(),
                 checkout_generation: workspace.checkout_generation().map(str::to_owned),
@@ -563,7 +613,7 @@ async fn try_run(
                 excluded_environment,
                 services,
             },
-            limits: ClientLimits::default(),
+            limits,
             require_persistence: false,
         })
         .await
@@ -739,5 +789,29 @@ fn project_event(
             summary: update.summary,
             payload: Some(update.payload),
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn launch_environment_skips_unrelated_non_utf8_ambient_values() {
+        let ambient = [
+            ("GOOD".into(), "ambient".into()),
+            ("BAD".into(), std::ffi::OsString::from_vec(vec![0xff])),
+            (std::ffi::OsString::from_vec(vec![0xfe]), "value".into()),
+        ];
+        let overlay = BTreeMap::from([
+            ("GOOD".into(), "worker".into()),
+            ("SCOPED".into(), "token".into()),
+        ]);
+        let environment = launch_environment(ambient, &overlay);
+        assert_eq!(environment.get("GOOD").map(String::as_str), Some("worker"));
+        assert_eq!(environment.get("SCOPED").map(String::as_str), Some("token"));
+        assert!(!environment.contains_key("BAD"));
+        assert_eq!(environment.len(), 2);
     }
 }

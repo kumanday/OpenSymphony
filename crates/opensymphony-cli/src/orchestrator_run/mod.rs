@@ -1140,6 +1140,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let acp_profiles = crate::opensymphony_acp::profile_capabilities(
         &runtime.workflow.extensions.acp,
         &linear_worker_env,
+        &backends::runtime_checkout_credential_envs(&runtime),
     );
 
     let worker = RuntimeWorkerBackend::new_with_client(
