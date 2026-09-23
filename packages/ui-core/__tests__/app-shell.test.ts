@@ -926,7 +926,7 @@ describe("OpenSymphonyApp mount", () => {
     const dispatch = jest.spyOn(transport, "dispatchAction");
     const binding: OperatorInteraction = {
       request_id: "operator-1", run_id: "run-worker-1", issue_id: "issue-1", issue_identifier: "COE-449",
-      session_id: "session-1", generation: 2, rpc_id: 0, kind: "permission", title: "Run tests",
+      session_id: "session-1", generation: 2, rpc_id: "0", kind: "permission", title: "Run tests",
       options: [{ id: "allow-once", label: "Allow once", kind: "allow_once" }], questions: [],
       requested_at: "2026-09-23T00:00:00Z", expires_at: "2026-09-23T00:05:00Z",
     };
@@ -952,7 +952,7 @@ describe("OpenSymphonyApp mount", () => {
     const permissionAction = dispatch.mock.calls[0]?.[0] as ActionDispatch;
     expect(permissionAction.action_kind).toBe("approval_decision");
     expect(permissionAction.target_entity.entity_id).toBe("COE-449");
-    expect(permissionAction.payload).toMatchObject({ request_id: "operator-1", generation: 2, rpc_id: 0, option_id: "allow-once" });
+    expect(permissionAction.payload).toMatchObject({ request_id: "operator-1", generation: 2, rpc_id: "0", option_id: "allow-once" });
     expect(permissionAction.idempotency_key).toBeUndefined();
     await flushUntil(() => root.querySelector("[data-testid='operator-input-answer']") !== null);
     (root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).click();

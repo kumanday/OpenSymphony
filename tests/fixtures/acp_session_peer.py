@@ -59,7 +59,7 @@ def callback(method, params, error=False):
     response = json.loads(sys.stdin.readline())
     assert response['id'] == serial, response
     assert ('error' in response) == error, response
-    return response.get('result')
+    return response.get('error') if error else response.get('result')
 
 
 with open("launches", "a") as log:
@@ -79,6 +79,7 @@ for line in sys.stdin:
     with open("methods", "a") as log:
         log.write(method + "\n")
     if method == "initialize":
+        assert message['params']['clientCapabilities']['elicitation'] == {'form': {}}
         caps = {"loadSession": persistence == "load"}
         if persistence == "resume":
             caps["sessionCapabilities"] = {"resume": {}}
@@ -139,15 +140,31 @@ for line in sys.stdin:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
         if text == 'operator-roundtrip':
+            serial = 9007199254740992
+            assert callback('cursor/ask_question', {'questions': []}, error=True)['code'] == -32601
+            assert callback('cursor/create_plan', {'plan': 'Ship'}, error=True)['code'] == -32601
+            rejected_form = callback('elicitation/create', {'mode': 'form', 'message': 'Enter API key',
+                'requestedSchema': {'type': 'object', 'required': ['key'], 'properties': {
+                    'key': {'type': 'string', 'enum': ['example']}}}})
+            assert rejected_form == {'action': 'cancel'}, rejected_form
+            rejected_url = callback('elicitation/create', {'mode': 'url', 'message': 'Open sign-in',
+                'elicitationId': 'login', 'url': 'https://example.com/sign-in'})
+            assert rejected_url == {'action': 'cancel'}, rejected_url
             permission = callback('session/request_permission', {'toolCall': {'toolCallId': 'tool-1', 'title': 'Run tests'},
                 'options': [{'optionId': 'allow-opaque', 'name': 'Allow once', 'kind': 'allow_once'},
                             {'optionId': 'deny-opaque', 'name': 'Deny once', 'kind': 'reject_once'}]})
             assert permission == {'outcome': {'outcome': 'selected', 'optionId': 'allow-opaque'}}, permission
-            question = callback('cursor/ask_question', {'title': 'Choose region', 'questions': [
-                {'id': 'region', 'prompt': 'Region?', 'options': [{'id': 'east', 'label': 'East'}, {'id': 'west', 'label': 'West'}]}]})
-            assert question == {'outcome': {'outcome': 'answered', 'answers': [{'questionId': 'region', 'selectedOptionIds': ['west']}]}}, question
-            plan = callback('cursor/create_plan', {'name': 'Release', 'plan': 'Run checks and deploy'})
-            assert plan == {'outcome': {'outcome': 'accepted'}}, plan
+            question = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region', 'requestedSchema': {
+                'type': 'object', 'required': ['region'], 'properties': {'region': {'type': 'string',
+                    'title': 'Region?', 'oneOf': [{'const': 'east', 'title': 'East'}, {'const': 'west', 'title': 'West'}]}}}})
+            assert question == {'action': 'accept', 'content': {'region': 'west'}}, question
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
+        if text in ('operator-decline', 'operator-cancel'):
+            question = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region', 'requestedSchema': {
+                'type': 'object', 'required': ['region'], 'properties': {'region': {'type': 'string',
+                    'enum': ['east', 'west']}}}})
+            assert question == {'action': 'decline' if text == 'operator-decline' else 'cancel'}, question
             send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
             continue
         if text == 'file-privacy':

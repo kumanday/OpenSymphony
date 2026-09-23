@@ -25,6 +25,7 @@ for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
+        assert message["params"]["clientCapabilities"]["elicitation"] == {"form": {}}
         if profile == "setup_retry" and not os.path.exists(".opensymphony/setup-failed"):
             open(".opensymphony/setup-failed", "w").close()
             sys.exit(8)
@@ -107,13 +108,12 @@ for line in sys.stdin:
                 "options":[{"optionId":"allow-opaque","name":"Allow once","kind":"allow_once"},
                            {"optionId":"deny-opaque","name":"Deny once","kind":"reject_once"}]}) == \
                 {"outcome":{"outcome":"selected","optionId":"allow-opaque"}}
-            assert request("cursor/ask_question", {"title":"Choose region","questions":[
-                {"id":"region","prompt":"Region?","options":[{"id":"west","label":"West"}]}]}) == \
-                {"outcome":{"outcome":"answered","answers":[{"questionId":"region","selectedOptionIds":["west"]}]}}
-            assert request("cursor/create_plan", {"name":"Release","plan":"Run checks and deploy"}) == \
-                {"outcome":{"outcome":"accepted"}}
+            assert request("elicitation/create", {"mode":"form","message":"Choose region","requestedSchema":{
+                "type":"object","required":["region"],"properties":{"region":{"type":"string",
+                    "title":"Region?","oneOf":[{"const":"west","title":"West"}]}}}}) == \
+                {"action":"accept","content":{"region":"west"}}
             with open("acp-operator-roundtrip.json", "w") as output:
-                json.dump({"permission":"allow-opaque","question":"west","plan":"accepted"}, output)
+                json.dump({"permission":"allow-opaque","question":"west"}, output)
         if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue

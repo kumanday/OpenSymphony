@@ -13,7 +13,8 @@ pub struct OperatorInteraction {
     pub issue_identifier: String,
     pub session_id: String,
     pub generation: u64,
-    pub rpc_id: serde_json::Value,
+    /// Lossless JSON encoding of the original RPC ID; clients echo this as an opaque string.
+    pub rpc_id: String,
     pub kind: OperatorInteractionKind,
     pub title: String,
     pub options: Vec<OperatorOption>,

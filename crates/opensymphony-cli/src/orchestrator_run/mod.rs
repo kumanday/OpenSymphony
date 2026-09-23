@@ -1322,6 +1322,21 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     }
                 }
             }
+            Some(command) = operator_commands_rx.recv() => {
+                let result = scheduler
+                    .respond_operator_request(&command.interaction, command.answer)
+                    .await;
+                let _ = command.reply.send(result);
+                let snapshot = scheduler.snapshot(now_timestamp());
+                store.publish(map_snapshot(
+                    &snapshot,
+                    runtime.workflow.config.workspace.root.as_path(),
+                    &terminal_state_set(&runtime.workflow),
+                    current_agent_server_status(&mut supervisor, agent_server_base_url),
+                    current_memory_server_status(memory_server.as_ref()),
+                    &recent_events,
+                )).await;
+            }
             result = async {
                 ticker.tick().await;
                 let observed_at = now_timestamp();
@@ -1331,13 +1346,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     &mut gateway_action_cursor,
                     observed_at,
                 ).await {
-                    Ok(()) => {
-                        while let Ok(command) = operator_commands_rx.try_recv() {
-                            let result = scheduler.respond_operator_request(&command.interaction, command.answer).await;
-                            let _ = command.reply.send(result);
-                        }
-                        scheduler.tick(observed_at).await
-                    },
+                    Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
                 (observed_at, result)

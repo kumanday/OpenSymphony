@@ -9,7 +9,7 @@ import { renderApprovalList, renderOperatorInputs, type ApprovalDecision } from 
 
 const operator: OperatorInteraction = {
   request_id: "req-1", run_id: "run-1", issue_id: "issue-1", issue_identifier: "COE-612",
-  session_id: "session-1", generation: 1, rpc_id: 0, kind: "permission", title: "Use tool",
+  session_id: "session-1", generation: 1, rpc_id: "0", kind: "permission", title: "Use tool",
   options: [{ id: "allow-once", label: "Allow once", kind: "allow_once" },
     { id: "deny-once", label: "Deny", kind: "reject_once" }], questions: [],
   requested_at: "2026-09-23T00:00:00Z", expires_at: "2026-09-23T00:05:00Z",

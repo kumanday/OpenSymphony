@@ -17639,11 +17639,6 @@ exit 64
                 ActionKind::InputResponse,
                 serde_json::json!({"outcome":"answered","answers":[{"question_id":"region","selected_option_ids":["west"]}]}),
             ),
-            (
-                OperatorInteractionKind::PlanApproval,
-                ActionKind::PlanDecision,
-                serde_json::json!({"decision":"approved"}),
-            ),
         ] {
             let interaction: OperatorInteraction = {
                 let mut found = None;
@@ -17778,7 +17773,7 @@ exit 64
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(marker).expect("marker"))
                 .expect("json"),
-            serde_json::json!({"permission":"allow-opaque","question":"west","plan":"accepted"})
+            serde_json::json!({"permission":"allow-opaque","question":"west"})
         );
         server.abort();
     }

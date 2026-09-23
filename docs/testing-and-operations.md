@@ -654,6 +654,10 @@ adjacent response/update pair is dispatched, and saturate callback output while
 a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
+The native ACP peer also verifies `elicitation/create` form accept, decline and
+cancel responses, large numeric RPC IDs, disabled Cursor methods, and form-only
+capability advertisement. The production scheduler/gateway fixture routes a
+permission and a choice form through HTTP action receipts to the blocked peer.
 Native Unix tests replace the bound workspace root after service creation and
 verify file reads, atomic writes, and new terminal cwd remain on the original
 directory inode. They also swap a pinned terminal directory for an external

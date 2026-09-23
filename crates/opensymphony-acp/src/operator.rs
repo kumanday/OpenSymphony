@@ -4,7 +4,10 @@ use crate::opensymphony_gateway_schema::approval::{
     OperatorAnswer, OperatorInteraction, OperatorInteractionKind, OperatorOption, OperatorQuestion,
 };
 use crate::opensymphony_workflow::AcpPermissionPolicy;
-use agent_client_protocol::schema::v1::RequestPermissionRequest;
+use agent_client_protocol::schema::v1::{
+    CreateElicitationRequest, ElicitationMode, ElicitationPropertySchema, ElicitationScope,
+    MultiSelectItems, RequestPermissionRequest,
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use std::collections::HashSet;
 
@@ -89,109 +92,117 @@ pub(super) fn parse_interaction(
                 None,
             )
         }
-        "cursor/ask_question" => {
-            let raw = params.as_object().ok_or_else(invalid)?;
-            if raw.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+        "elicitation/create" => {
+            let request: CreateElicitationRequest =
+                serde_json::from_value(params.clone()).map_err(|_| invalid())?;
+            let ElicitationMode::Form(form) = request.mode else {
+                return Err(invalid()); // URL elicitation needs an out-of-band consent flow.
+            };
+            let ElicitationScope::Session(scope) = form.scope else {
+                return Err(invalid());
+            };
+            if scope.session_id.0.as_ref() != session_id
+                || form.requested_schema.properties.is_empty()
+                || form.requested_schema.properties.len() > 8
+            {
                 return Err(invalid());
             }
-            let questions_raw = raw
-                .get("questions")
-                .and_then(Value::as_array)
-                .ok_or_else(invalid)?;
-            if questions_raw.is_empty() || questions_raw.len() > 8 {
+            let required = form.requested_schema.required.ok_or_else(invalid)?;
+            if required.len() != form.requested_schema.properties.len()
+                || required.iter().collect::<HashSet<_>>().len() != required.len()
+                || required
+                    .iter()
+                    .any(|id| !form.requested_schema.properties.contains_key(id))
+            {
                 return Err(invalid());
             }
-            let mut questions = Vec::with_capacity(questions_raw.len());
-            let mut question_ids = HashSet::new();
-            for raw in questions_raw {
-                let id = raw.get("id").and_then(Value::as_str).ok_or_else(invalid)?;
-                let prompt = raw
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid)?;
-                let choices = raw
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .ok_or_else(invalid)?;
-                if !bounded(id, 128)
-                    || !bounded(prompt, 2048)
-                    || !no_secret_prompt(prompt)
-                    || !question_ids.insert(id)
+            let mut questions = Vec::new();
+            for (id, property) in form.requested_schema.properties {
+                let (prompt, choices, allow_multiple) = match property {
+                    ElicitationPropertySchema::String(field) => {
+                        if field.min_length.is_some()
+                            || field.max_length.is_some()
+                            || field.pattern.is_some()
+                            || field.format.is_some()
+                        {
+                            return Err(invalid());
+                        }
+                        let choices = match (field.enum_values, field.one_of) {
+                            (Some(values), None) => values
+                                .into_iter()
+                                .map(|value| (value.clone(), value))
+                                .collect(),
+                            (None, Some(values)) => values
+                                .into_iter()
+                                .map(|option| (option.value, option.title))
+                                .collect(),
+                            _ => return Err(invalid()),
+                        };
+                        (field.title.unwrap_or_else(|| id.clone()), choices, false)
+                    }
+                    ElicitationPropertySchema::Array(field) => {
+                        if field.min_items.is_some() || field.max_items.is_some() {
+                            return Err(invalid());
+                        }
+                        let choices = match field.items {
+                            MultiSelectItems::String(items) => items
+                                .values
+                                .into_iter()
+                                .map(|value| (value.clone(), value))
+                                .collect(),
+                            MultiSelectItems::Titled(items) => items
+                                .options
+                                .into_iter()
+                                .map(|option| (option.value, option.title))
+                                .collect(),
+                            _ => return Err(invalid()),
+                        };
+                        (field.title.unwrap_or_else(|| id.clone()), choices, true)
+                    }
+                    _ => return Err(invalid()),
+                };
+                let choices: Vec<(String, String)> = choices;
+                if !bounded(&id, 128)
+                    || !bounded(&prompt, 2048)
+                    || !no_secret_prompt(&id)
+                    || !no_secret_prompt(&prompt)
                     || choices.is_empty()
                     || choices.len() > 32
+                    || choices
+                        .iter()
+                        .map(|(id, _)| id)
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != choices.len()
+                    || choices.iter().any(|(id, label)| {
+                        !bounded(id, 128)
+                            || !bounded(label, 1024)
+                            || !no_secret_prompt(id)
+                            || !no_secret_prompt(label)
+                    })
                 {
                     return Err(invalid());
                 }
-                let mut option_ids = HashSet::new();
-                let mut options = Vec::with_capacity(choices.len());
-                for choice in choices {
-                    let id = choice
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?;
-                    let label = choice
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?;
-                    if !bounded(id, 128)
-                        || !bounded(label, 1024)
-                        || !no_secret_prompt(label)
-                        || !option_ids.insert(id)
-                    {
-                        return Err(invalid());
-                    }
-                    options.push(OperatorOption {
-                        id: id.into(),
-                        label: label.into(),
-                        kind: "choice".into(),
-                    });
-                }
                 questions.push(OperatorQuestion {
-                    id: id.into(),
-                    prompt: prompt.into(),
-                    options,
-                    allow_multiple: raw
-                        .get("allowMultiple")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    id,
+                    prompt,
+                    options: choices
+                        .into_iter()
+                        .map(|(id, label)| OperatorOption {
+                            id,
+                            label,
+                            kind: "choice".into(),
+                        })
+                        .collect(),
+                    allow_multiple,
                 });
             }
-            let title = raw
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("ACP question")
-                .to_owned();
             (
                 OperatorInteractionKind::Question,
-                title,
+                request.message,
                 Vec::new(),
                 questions,
                 None,
-            )
-        }
-        "cursor/create_plan" => {
-            let raw = params.as_object().ok_or_else(invalid)?;
-            if raw.get("sessionId").and_then(Value::as_str) != Some(session_id) {
-                return Err(invalid());
-            }
-            let plan = raw
-                .get("plan")
-                .and_then(Value::as_str)
-                .ok_or_else(invalid)?;
-            if !bounded(plan, 32 * 1024) || !no_secret_prompt(plan) {
-                return Err(invalid());
-            }
-            let title = raw
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("ACP plan approval")
-                .to_owned();
-            (
-                OperatorInteractionKind::PlanApproval,
-                title,
-                Vec::new(),
-                Vec::new(),
-                Some(plan.to_owned()),
             )
         }
         _ => return Err(agent_client_protocol::Error::method_not_found()),
@@ -220,7 +231,7 @@ pub(super) fn parse_interaction(
         issue_identifier: String::new(),
         session_id: session_id.into(),
         generation: 0,
-        rpc_id,
+        rpc_id: serde_json::to_string(&rpc_id).map_err(|_| invalid())?,
         kind,
         title,
         options,
@@ -292,16 +303,29 @@ pub(super) fn response_for(interaction: &OperatorInteraction, answer: OperatorAn
                                     })
                             })
                 });
-            if valid {
-                json!({"outcome": {"outcome": "answered", "answers": answers.iter().map(|answer| json!({"questionId": answer.question_id, "selectedOptionIds": answer.selected_option_ids})).collect::<Vec<_>>()}})
-            } else {
-                json!({"outcome": {"outcome": "cancelled"}})
+            if !valid {
+                return json!({"action": "cancel"});
             }
+            let content = answers
+                .into_iter()
+                .map(|answer| {
+                    let multiple = interaction.questions.iter().any(|question| {
+                        question.id == answer.question_id && question.allow_multiple
+                    });
+                    let value = if multiple {
+                        json!(answer.selected_option_ids)
+                    } else {
+                        json!(answer.selected_option_ids[0])
+                    };
+                    (answer.question_id, value)
+                })
+                .collect::<serde_json::Map<String, Value>>();
+            json!({"action": "accept", "content": content})
         }
         (OperatorInteractionKind::Question, OperatorAnswer::Decline) => {
-            json!({"outcome": {"outcome": "skipped"}})
+            json!({"action": "decline"})
         }
-        (OperatorInteractionKind::Question, _) => json!({"outcome": {"outcome": "cancelled"}}),
+        (OperatorInteractionKind::Question, _) => json!({"action": "cancel"}),
         (OperatorInteractionKind::PlanApproval, OperatorAnswer::Plan { accepted: true }) => {
             json!({"outcome": {"outcome": "accepted"}})
         }
@@ -331,7 +355,20 @@ mod tests {
             Duration::from_secs(30),
         )
         .expect("permission");
-        assert_eq!(interaction.rpc_id, json!(0));
+        assert_eq!(interaction.rpc_id, "0");
+        let large_id = parse_interaction(
+            "session/request_permission",
+            &request,
+            json!(9_007_199_254_740_993_u64),
+            "session-1",
+            Duration::from_secs(30),
+        )
+        .expect("large numeric RPC ID");
+        assert_eq!(large_id.rpc_id, "9007199254740993");
+        assert_eq!(
+            serde_json::to_value(&large_id).expect("public binding")["rpc_id"],
+            "9007199254740993"
+        );
         assert_eq!(
             response_for(
                 &interaction,
@@ -384,11 +421,13 @@ mod tests {
 
     #[test]
     fn structured_questions_accept_only_offered_complete_answers() {
-        let request = json!({"sessionId":"s","title":"Choose deployment","questions":[
-            {"id":"region","prompt":"Region?","options":[{"id":"east","label":"East"},{"id":"west","label":"West"}]},
-            {"id":"checks","prompt":"Checks?","allowMultiple":true,"options":[{"id":"lint","label":"Lint"},{"id":"test","label":"Test"}]}]});
+        let request = json!({"sessionId":"s","mode":"form","message":"Choose deployment","requestedSchema":{
+        "type":"object","required":["region","checks"],"properties":{
+            "region":{"type":"string","title":"Region?","oneOf":[{"const":"east","title":"East"},{"const":"west","title":"West"}]},
+            "checks":{"type":"array","title":"Checks?","items":{"type":"string","enum":["lint","test"]}}
+        }}});
         let interaction = parse_interaction(
-            "cursor/ask_question",
+            "elicitation/create",
             &request,
             json!("rpc-2"),
             "s",
@@ -408,8 +447,8 @@ mod tests {
             ],
         };
         assert_eq!(
-            response_for(&interaction, answer)["outcome"]["outcome"],
-            "answered"
+            response_for(&interaction, answer),
+            json!({"action":"accept","content":{"region":"west","checks":["lint","test"]}})
         );
         let bad = OperatorAnswer::Question {
             answers: vec![
@@ -423,26 +462,27 @@ mod tests {
                 },
             ],
         };
+        assert_eq!(response_for(&interaction, bad)["action"], "cancel");
         assert_eq!(
-            response_for(&interaction, bad)["outcome"]["outcome"],
-            "cancelled"
-        );
-        assert_eq!(
-            response_for(&interaction, OperatorAnswer::Decline)["outcome"]["outcome"],
-            "skipped"
+            response_for(&interaction, OperatorAnswer::Decline)["action"],
+            "decline"
         );
     }
 
     #[test]
     fn plan_response_and_sensitive_question_boundary() {
-        let interaction = parse_interaction(
-            "cursor/create_plan",
-            &json!({"sessionId":"s","name":"Ship","plan":"Run smoke tests"}),
+        let mut interaction = parse_interaction(
+            "session/request_permission",
+            &json!({"sessionId":"s","toolCall":{"toolCallId":"t","title":"Ship"},
+                "options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"}]}),
             json!(7),
             "s",
             Duration::from_secs(30),
         )
-        .expect("plan");
+        .expect("typed interaction");
+        interaction.kind = OperatorInteractionKind::PlanApproval;
+        interaction.options.clear();
+        interaction.plan = Some("Run smoke tests".into());
         assert_eq!(
             response_for(&interaction, OperatorAnswer::Plan { accepted: true })["outcome"]["outcome"],
             "accepted"
@@ -451,6 +491,75 @@ mod tests {
             response_for(&interaction, OperatorAnswer::Cancel)["outcome"]["outcome"],
             "cancelled"
         );
-        assert!(parse_interaction("cursor/ask_question", &json!({"sessionId":"s","questions":[{"id":"x","prompt":"Enter API key","options":[{"id":"a","label":"A"}]}]}), json!(8), "s", Duration::from_secs(30)).is_err());
+        assert!(parse_interaction("elicitation/create", &json!({"sessionId":"s","mode":"form","message":"Enter API key","requestedSchema":{"type":"object","required":["key"],"properties":{"key":{"type":"string","enum":["a"]}}}}), json!(8), "s", Duration::from_secs(30)).is_err());
+        assert!(parse_interaction("elicitation/create", &json!({"sessionId":"s","mode":"url","url":"https://example.com","elicitationId":"e"}), json!(8), "s", Duration::from_secs(30)).is_err());
+        assert!(
+            parse_interaction(
+                "cursor/create_plan",
+                &json!({"sessionId":"s","plan":"Ship"}),
+                json!(9),
+                "s",
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_interaction(
+                "cursor/ask_question",
+                &json!({"sessionId":"s","questions":[]}),
+                json!(10),
+                "s",
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn form_schema_rejects_free_text_optional_and_unsupported_constraints() {
+        let base = json!({"sessionId":"s","mode":"form","message":"Choose a region",
+            "requestedSchema":{"type":"object","required":["region"],"properties":{
+                "region":{"type":"string","enum":["east","west"]}}}});
+        for property in [
+            json!({"type":"string"}),
+            json!({"type":"number"}),
+            json!({"type":"string","enum":["east","west"],"pattern":"^east$"}),
+            json!({"type":"string","enum":["east","east"]}),
+        ] {
+            let mut request = base.clone();
+            request["requestedSchema"]["properties"]["region"] = property;
+            assert!(
+                parse_interaction(
+                    "elicitation/create",
+                    &request,
+                    json!(0),
+                    "s",
+                    Duration::from_secs(30)
+                )
+                .is_err()
+            );
+        }
+        let mut optional = base.clone();
+        optional["requestedSchema"]["required"] = json!([]);
+        assert!(
+            parse_interaction(
+                "elicitation/create",
+                &optional,
+                json!(0),
+                "s",
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_interaction(
+                "elicitation/create",
+                &base,
+                json!(0),
+                "other",
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
     }
 }

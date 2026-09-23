@@ -85,6 +85,7 @@ pub struct TuiState {
     pub status_line: String,
     operator_request_index: usize,
     operator_question_index: usize,
+    operator_option_page: usize,
     operator_answers: HashMap<String, Vec<Vec<String>>>,
     workspace_status: HashMap<String, WorkspaceStatusEntry>,
     selected_changed_file: usize,
@@ -105,6 +106,7 @@ impl Default for TuiState {
             status_line: "connecting to control plane".to_owned(),
             operator_request_index: 0,
             operator_question_index: 0,
+            operator_option_page: 0,
             operator_answers: HashMap::new(),
             workspace_status: HashMap::new(),
             selected_changed_file: 0,
@@ -704,6 +706,10 @@ impl TuiState {
 
         match self.selected_issue() {
             Some(issue) => {
+                if lines.len() < max_rows {
+                    let operator_budget = max_rows.saturating_sub(lines.len()).min(8);
+                    lines.extend(self.operator_lines(width, operator_budget));
+                }
                 let id_style = Style::new().fg(CYAN).bold();
                 let deps = dependency_summary(
                     self.latest_snapshot
@@ -803,10 +809,6 @@ impl TuiState {
                     }
                 }
 
-                if lines.len() < max_rows {
-                    let operator_budget = max_rows.saturating_sub(lines.len()).min(8);
-                    lines.extend(self.operator_lines(width, operator_budget));
-                }
                 if lines.len() < max_rows {
                     lines.push(Line::from(Span::styled(
                         "-".repeat(width.min(40)),
@@ -1599,14 +1601,35 @@ impl TuiState {
             ),
             Style::new().fg(YELLOW).bold(),
         ))];
+        const OPTIONS_PER_PAGE: usize = 4;
         match request.kind {
             OperatorInteractionKind::Permission => {
-                rows.extend(request.options.iter().enumerate().map(|(index, option)| {
-                    Line::from(fit(
-                        &format!("{} {} ({})", index + 1, option.label, option.kind),
-                        width,
-                    ))
-                }));
+                let page = self
+                    .operator_option_page
+                    .min(request.options.len().saturating_sub(1) / OPTIONS_PER_PAGE);
+                let pages = request.options.len().div_ceil(OPTIONS_PER_PAGE);
+                rows.push(Line::from(fit(
+                    &format!(
+                        "Options {}/{} [, previous; . next; 1-4 select]",
+                        page + 1,
+                        pages
+                    ),
+                    width,
+                )));
+                rows.extend(
+                    request
+                        .options
+                        .iter()
+                        .skip(page * OPTIONS_PER_PAGE)
+                        .take(OPTIONS_PER_PAGE)
+                        .enumerate()
+                        .map(|(index, option)| {
+                            Line::from(fit(
+                                &format!("{} {} ({})", index + 1, option.label, option.kind),
+                                width,
+                            ))
+                        }),
+                );
             }
             OperatorInteractionKind::Question => {
                 if let Some(question) = request
@@ -1628,21 +1651,43 @@ impl TuiState {
                             .and_then(|answers| {
                                 answers.get(self.operator_question_index % request.questions.len())
                             });
-                    rows.extend(question.options.iter().enumerate().map(|(index, option)| {
-                        Line::from(fit(
-                            &format!(
-                                "{} [{}] {}",
-                                index + 1,
-                                if selected.is_some_and(|selected| selected.contains(&option.id)) {
-                                    "x"
-                                } else {
-                                    " "
-                                },
-                                option.label
-                            ),
-                            width,
-                        ))
-                    }));
+                    let page = self
+                        .operator_option_page
+                        .min(question.options.len().saturating_sub(1) / OPTIONS_PER_PAGE);
+                    let pages = question.options.len().div_ceil(OPTIONS_PER_PAGE);
+                    rows.push(Line::from(fit(
+                        &format!(
+                            "Options {}/{} [, previous; . next; 1-4 select]",
+                            page + 1,
+                            pages
+                        ),
+                        width,
+                    )));
+                    rows.extend(
+                        question
+                            .options
+                            .iter()
+                            .skip(page * OPTIONS_PER_PAGE)
+                            .take(OPTIONS_PER_PAGE)
+                            .enumerate()
+                            .map(|(index, option)| {
+                                Line::from(fit(
+                                    &format!(
+                                        "{} [{}] {}",
+                                        index + 1,
+                                        if selected
+                                            .is_some_and(|selected| selected.contains(&option.id))
+                                        {
+                                            "x"
+                                        } else {
+                                            " "
+                                        },
+                                        option.label
+                                    ),
+                                    width,
+                                ))
+                            }),
+                    );
                 }
             }
             OperatorInteractionKind::PlanApproval => {
@@ -2272,6 +2317,8 @@ enum AppMessage {
     NextOperator,
     NextQuestion,
     PreviousQuestion,
+    NextOptionPage,
+    PreviousOptionPage,
     SelectOperatorOption(usize),
     SubmitOperator,
     ApproveOperator,
@@ -2294,7 +2341,9 @@ impl From<Event> for AppMessage {
                 KeyCode::Char('o') => AppMessage::NextOperator,
                 KeyCode::Char(']') => AppMessage::NextQuestion,
                 KeyCode::Char('[') => AppMessage::PreviousQuestion,
-                KeyCode::Char(digit @ '1'..='9') => {
+                KeyCode::Char('.') => AppMessage::NextOptionPage,
+                KeyCode::Char(',') => AppMessage::PreviousOptionPage,
+                KeyCode::Char(digit @ '1'..='4') => {
                     AppMessage::SelectOperatorOption(digit as usize - '1' as usize)
                 }
                 KeyCode::Char('s') => AppMessage::SubmitOperator,
@@ -2407,9 +2456,26 @@ impl OperatorApp {
     }
 
     fn choose_operator_option(&mut self, index: usize) {
+        const OPTIONS_PER_PAGE: usize = 4;
+        if index >= OPTIONS_PER_PAGE {
+            return;
+        }
         let Some(request) = self.state.selected_operator().cloned() else {
             return;
         };
+        let option_count = match request.kind {
+            OperatorInteractionKind::Permission => request.options.len(),
+            OperatorInteractionKind::Question => request
+                .questions
+                .get(self.state.operator_question_index % request.questions.len().max(1))
+                .map_or(0, |question| question.options.len()),
+            OperatorInteractionKind::PlanApproval => 0,
+        };
+        let page = self
+            .state
+            .operator_option_page
+            .min(option_count.saturating_sub(1) / OPTIONS_PER_PAGE);
+        let index = page * OPTIONS_PER_PAGE + index;
         match request.kind {
             OperatorInteractionKind::Permission => {
                 let Some(option) = request.options.get(index) else {
@@ -3265,14 +3331,23 @@ impl Model for OperatorApp {
                 self.state.operator_request_index =
                     self.state.operator_request_index.saturating_add(1);
                 self.state.operator_question_index = 0;
+                self.state.operator_option_page = 0;
             }
             AppMessage::NextQuestion => {
                 self.state.operator_question_index =
                     self.state.operator_question_index.saturating_add(1);
+                self.state.operator_option_page = 0;
             }
             AppMessage::PreviousQuestion => {
                 self.state.operator_question_index =
                     self.state.operator_question_index.saturating_sub(1);
+                self.state.operator_option_page = 0;
+            }
+            AppMessage::NextOptionPage => {
+                self.state.operator_option_page = self.state.operator_option_page.saturating_add(1)
+            }
+            AppMessage::PreviousOptionPage => {
+                self.state.operator_option_page = self.state.operator_option_page.saturating_sub(1)
             }
             AppMessage::SelectOperatorOption(index) => self.choose_operator_option(index),
             AppMessage::SubmitOperator => self.operator_decision('s'),
@@ -5020,7 +5095,7 @@ mod tests {
             issue_identifier: "COE-255".into(),
             session_id: "session-tui".into(),
             generation: 7,
-            rpc_id: serde_json::json!(0),
+            rpc_id: "0".into(),
             kind,
             title: request_id.into(),
             options,
@@ -5032,11 +5107,13 @@ mod tests {
         let permission = make(
             "permission",
             OperatorInteractionKind::Permission,
-            vec![OperatorOption {
-                id: "opaque-allow".into(),
-                label: "Allow once".into(),
-                kind: "allow_once".into(),
-            }],
+            (0..13)
+                .map(|index| OperatorOption {
+                    id: format!("opaque-allow-{index}"),
+                    label: format!("Allow option {index}"),
+                    kind: "allow_once".into(),
+                })
+                .collect(),
             Vec::new(),
         );
         let question = make(
@@ -5046,11 +5123,13 @@ mod tests {
             vec![OperatorQuestion {
                 id: "region".into(),
                 prompt: "Region?".into(),
-                options: vec![OperatorOption {
-                    id: "west".into(),
-                    label: "West".into(),
-                    kind: "choice".into(),
-                }],
+                options: (0..13)
+                    .map(|index| OperatorOption {
+                        id: format!("west-{index}"),
+                        label: format!("Region {index}"),
+                        kind: "choice".into(),
+                    })
+                    .collect(),
                 allow_multiple: false,
             }],
         );
@@ -5083,15 +5162,25 @@ mod tests {
         app.operator_url = Some(base_url);
         app.state
             .reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
-        app.choose_operator_option(0);
+        app.update(AppMessage::NextOptionPage);
+        app.update(AppMessage::NextOptionPage);
+        let visible = app
+            .state
+            .operator_lines(80, 8)
+            .into_iter()
+            .map(|line| line.to_plain_text())
+            .collect::<Vec<_>>();
+        assert!(visible.iter().any(|line| line.contains("Options 3/4")));
+        assert!(visible.iter().any(|line| line.contains("Allow option 11")));
+        app.choose_operator_option(3);
         let command = tokio::time::timeout(Duration::from_secs(3), commands_rx.recv())
             .await
             .expect("terminal permission timeout")
             .expect("terminal permission command");
         assert!(
-            matches!(command.answer, OperatorAnswer::Permission { ref option_id } if option_id == "opaque-allow")
+            matches!(command.answer, OperatorAnswer::Permission { ref option_id } if option_id == "opaque-allow-11")
         );
-        assert_eq!(command.interaction.rpc_id, serde_json::json!(0));
+        assert_eq!(command.interaction.rpc_id, "0");
         command.reply.send(Ok(())).expect("permission receipt");
         for _ in 0..30 {
             app.update(AppMessage::Tick);
@@ -5102,8 +5191,17 @@ mod tests {
         }
         assert_eq!(app.state.status_line, "ACP operator response accepted");
 
-        app.state.operator_request_index = 1;
-        app.choose_operator_option(0);
+        app.update(AppMessage::NextOperator);
+        app.update(AppMessage::NextOptionPage);
+        app.update(AppMessage::NextOptionPage);
+        let visible = app
+            .state
+            .operator_lines(80, 8)
+            .into_iter()
+            .map(|line| line.to_plain_text())
+            .collect::<Vec<_>>();
+        assert!(visible.iter().any(|line| line.contains("Region 11")));
+        app.choose_operator_option(3);
         app.operator_decision('s');
         let command = tokio::time::timeout(Duration::from_secs(3), commands_rx.recv())
             .await
@@ -5112,7 +5210,7 @@ mod tests {
         assert!(
             matches!(command.answer, OperatorAnswer::Question { ref answers }
             if answers.len() == 1 && answers[0].question_id == "region"
-                && answers[0].selected_option_ids == ["west"])
+                && answers[0].selected_option_ids == ["west-11"])
         );
         command.reply.send(Ok(())).expect("question receipt");
         for _ in 0..30 {

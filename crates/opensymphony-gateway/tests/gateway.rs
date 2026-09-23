@@ -5467,7 +5467,7 @@ async fn acp_operator_routes_live_permission_question_and_plan_responses() {
         issue_identifier: "COE-255".into(),
         session_id: "session-612".into(),
         generation: 3,
-        rpc_id: serde_json::json!(0),
+        rpc_id: "0".into(),
         kind,
         title: id.into(),
         options,

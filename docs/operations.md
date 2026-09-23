@@ -1037,17 +1037,23 @@ Scheduled ACP interrupts identify the active worker by issue ID and issue
 identifier, then verify its current owner, generation, run and conversation
 before cancellation.
 
-ACP permission, structured question, and plan callbacks appear as pending
-interactions for the selected run. Web and desktop Run Detail panels use the
-offered permission option IDs, multiple-choice question controls, and plan
-approval controls. FrankenTUI shows the selected request in Issue Detail:
-`o` cycles requests, `1`–`9` selects an offered option, `[` and `]` cycle
-questions, `s` submits complete question answers, `y`/`n` decides a plan,
-and `x` cancels. Question `n` declines. The gateway exposes permissions and
-plans at `/api/v1/runs/{run_id}/approvals`, questions at
+ACP permission and standard `elicitation/create` choice-form requests appear as
+pending interactions for the selected run. Form capability advertises only the
+form mode; URL elicitation is disabled. The supported form schema has one to
+eight required string enum or string-array enum fields, with at most 32 offered
+choices per field. Unsupported constraints, free-text fields, URL mode, and
+secret prompts are rejected without exposing them in public snapshots. Web and
+desktop Run Detail panels use offered permission option IDs and multiple-choice
+form controls. Plan approval controls are typed for a registered extension;
+Cursor method registration is handled separately. FrankenTUI shows a pending
+request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
+through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
+questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
+The gateway exposes permissions and plans at `/api/v1/runs/{run_id}/approvals`, questions at
 `/api/v1/runs/{run_id}/inputs`, and accepts bound responses through
 `/api/v1/actions/dispatch`. A response must carry the live request, run,
-issue, session, generation, and RPC IDs; stale, duplicate, expired, and
+issue, session, generation, and RPC IDs. The public RPC ID is a lossless JSON
+encoding echoed as an opaque string by clients; stale, duplicate, expired, and
 invalid option/answer submissions are rejected. A waiting interaction pauses
 stall detection only until its deadline. Disconnect, cancellation, completion,
 and restart clear the live responder; operators must wait for a fresh request.

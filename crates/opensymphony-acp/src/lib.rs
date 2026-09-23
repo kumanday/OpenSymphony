@@ -1092,7 +1092,7 @@ async fn run_connection(
                                 });
                         }
                         let operator_method = matches!(request.method.as_str(),
-                            "session/request_permission" | "cursor/ask_question" | "cursor/create_plan");
+                            "session/request_permission" | "elicitation/create");
                         if operator_method {
                             let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let rpc_id = serde_json::to_value(responder.id())?;
@@ -1117,7 +1117,11 @@ async fn run_connection(
                                     // A malformed or unbound callback never reaches an
                                     // operator. Return the protocol's cancellation outcome
                                     // so the peer can finish its current turn safely.
-                                    let response = Ok(json!({"outcome":{"outcome":"cancelled"}}));
+                                    let response = Ok(if request.method == "elicitation/create" {
+                                        json!({"action":"cancel"})
+                                    } else {
+                                        json!({"outcome":{"outcome":"cancelled"}})
+                                    });
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                                     if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
                                         resource_failure.store(true, Ordering::Release);
@@ -1137,6 +1141,23 @@ async fn run_connection(
                                 }
                                 return responder.respond_with_result(response);
                             }
+                            let reservation = match service_sender.reserve_operator(
+                                &request.method,
+                                &request.params,
+                                &interaction.rpc_id,
+                            ) {
+                                Ok(reservation) => reservation,
+                                Err(_) => {
+                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
                             let route = operator_router.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             if let Some((sender, epoch)) = route {
                                 if epoch.is_cancelled() {
@@ -1156,6 +1177,7 @@ async fn run_connection(
                                     let fatal = fatal.clone();
                                     let limits = limits.clone();
                                     tokio::spawn(async move {
+                                        let _reservation = reservation;
                                         let (answer, acknowledgement) = tokio::select! {
                                             biased;
                                             _ = epoch.cancelled() => (OperatorAnswer::Cancel, None),

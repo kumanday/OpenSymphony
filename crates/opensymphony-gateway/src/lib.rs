@@ -3034,7 +3034,8 @@ fn operator_action(
             != payload
                 .get("generation")
                 .and_then(serde_json::Value::as_u64)
-        || payload.get("rpc_id") != Some(&request.rpc_id)
+        || payload.get("rpc_id").and_then(serde_json::Value::as_str)
+            != Some(request.rpc_id.as_str())
         || request.expires_at <= Utc::now()
     {
         return Err("operator request binding is stale or expired".into());

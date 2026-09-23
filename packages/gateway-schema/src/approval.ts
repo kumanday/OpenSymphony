@@ -26,7 +26,8 @@ export interface OperatorInteraction {
   issue_identifier: string;
   session_id: string;
   generation: number;
-  rpc_id: string | number;
+  /** Lossless JSON encoding of the original RPC ID. Echo as an opaque string. */
+  rpc_id: string;
   kind: "permission" | "question" | "plan_approval";
   title: string;
   options: OperatorOption[];

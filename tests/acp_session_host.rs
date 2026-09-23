@@ -135,7 +135,7 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
 }
 
 #[tokio::test]
-async fn native_peer_operator_permission_question_and_plan_round_trip() {
+async fn native_peer_operator_permission_and_form_question_round_trip() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");
     let handle = host
@@ -159,7 +159,7 @@ async fn native_peer_operator_permission_question_and_plan_round_trip() {
         }
     });
     let mut observed = Vec::new();
-    while observed.len() < 3 {
+    while observed.len() < 2 {
         let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("operator request timeout")
@@ -167,6 +167,14 @@ async fn native_peer_operator_permission_question_and_plan_round_trip() {
         let AcpOperatorEvent::Opened(request) = event else {
             continue;
         };
+        assert!(
+            request
+                .interaction
+                .rpc_id
+                .parse::<u64>()
+                .expect("numeric RPC ID")
+                > 9_007_199_254_740_992
+        );
         observed.push(request.interaction.kind);
         let answer = match request.interaction.kind {
             OperatorInteractionKind::Permission => OperatorAnswer::Permission {
@@ -178,7 +186,7 @@ async fn native_peer_operator_permission_question_and_plan_round_trip() {
                     selected_option_ids: vec!["west".into()],
                 }],
             },
-            OperatorInteractionKind::PlanApproval => OperatorAnswer::Plan { accepted: true },
+            OperatorInteractionKind::PlanApproval => panic!("vendor plan callback is not enabled"),
         };
         let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
         assert!(
@@ -206,10 +214,53 @@ async fn native_peer_operator_permission_question_and_plan_round_trip() {
         observed,
         vec![
             OperatorInteractionKind::Permission,
-            OperatorInteractionKind::Question,
-            OperatorInteractionKind::PlanApproval
+            OperatorInteractionKind::Question
         ]
     );
+    for (run, text, answer) in [
+        ("run-decline", "operator-decline", OperatorAnswer::Decline),
+        ("run-cancel", "operator-cancel", OperatorAnswer::Cancel),
+    ] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let request = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .prompt_with_operator(
+                        run.into(),
+                        1,
+                        text.into(),
+                        CancellationToken::new(),
+                        Some(tx),
+                    )
+                    .await
+                    .expect("form outcome prompt")
+            }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("form outcome timeout")
+            .expect("form outcome event");
+        let AcpOperatorEvent::Opened(interaction) = event else {
+            panic!("expected form request");
+        };
+        assert_eq!(
+            interaction.interaction.kind,
+            OperatorInteractionKind::Question
+        );
+        let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+        assert!(
+            interaction
+                .reply
+                .send(AcpOperatorReply {
+                    answer,
+                    acknowledgement,
+                })
+                .is_ok()
+        );
+        assert!(delivered.await.expect("form acknowledgement"));
+        assert!(request.await.expect("form task").succeeded());
+    }
     retire(&handle).await;
 }
 
