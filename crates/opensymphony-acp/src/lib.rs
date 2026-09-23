@@ -268,6 +268,16 @@ struct CallbackOutput {
     bytes: usize,
 }
 
+fn reserve_and_enqueue_operator_response<T>(
+    output: &Mutex<CallbackOutput>,
+    frame: String,
+    limits: &ClientLimits,
+    enqueue: impl FnOnce() -> T,
+) -> Option<T> {
+    let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
+    output.admit(frame, limits).then(enqueue)
+}
+
 impl CallbackOutput {
     fn admit(&mut self, frame: String, limits: &ClientLimits) -> bool {
         self.admit_with_opaque_payload(frame, limits, false)
@@ -1123,7 +1133,8 @@ async fn run_connection(
                                         json!({"outcome":{"outcome":"cancelled"}})
                                     });
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
                                         resource_failure.store(true, Ordering::Release);
                                         fatal.cancel();
                                         return Err(agent_client_protocol::Error::internal_error());
@@ -1134,7 +1145,8 @@ async fn run_connection(
                             if let Some(answer) = operator::automatic_answer(permission_policy, &interaction) {
                                 let response = Ok(operator::response_for(&interaction, answer));
                                 let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                                if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                if !output.admit(frame, &limits) {
                                     resource_failure.store(true, Ordering::Release);
                                     fatal.cancel();
                                     return Err(agent_client_protocol::Error::internal_error());
@@ -1150,7 +1162,8 @@ async fn run_connection(
                                 Err(_) => {
                                     let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
                                         resource_failure.store(true, Ordering::Release);
                                         fatal.cancel();
                                         return Err(agent_client_protocol::Error::internal_error());
@@ -1163,7 +1176,8 @@ async fn run_connection(
                                 if epoch.is_cancelled() {
                                     let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                                    if !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
                                         resource_failure.store(true, Ordering::Release);
                                         fatal.cancel();
                                         return Err(agent_client_protocol::Error::internal_error());
@@ -1191,13 +1205,16 @@ async fn run_connection(
                                         };
                                         let response = Ok(operator::response_for(&interaction, answer));
                                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
-                                        if frame.ok().is_none_or(|frame| !callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits)) {
+                                        let delivered = frame.ok().and_then(|frame| {
+                                            reserve_and_enqueue_operator_response(&callback_output, frame, &limits, || responder.respond_with_result(response))
+                                        });
+                                        let Some(delivered) = delivered else {
                                             resource_failure.store(true, Ordering::Release);
                                             fatal.cancel();
                                             if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(false); }
                                             return;
-                                        }
-                                        let delivered = responder.respond_with_result(response).is_ok();
+                                        };
+                                        let delivered = delivered.is_ok();
                                         if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(delivered && claimed); }
                                         let _ = sender.try_send(AcpOperatorEvent::Closed(interaction.request_id));
                                     });
@@ -1212,7 +1229,8 @@ async fn run_connection(
                             }
                             let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
                             let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                            if callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {
+                            let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                            if output.admit(frame, &limits) {
                                 return responder.respond_with_result(response);
                             }
                             return Err(agent_client_protocol::Error::internal_error());
@@ -1752,6 +1770,64 @@ mod tests {
                 ..limits
             }
         ));
+    }
+
+    #[test]
+    fn concurrent_operator_reservations_keep_sdk_enqueue_order() {
+        let output = Arc::new(Mutex::new(CallbackOutput::default()));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let limits = ClientLimits::default();
+        let (entered, first_enqueuing) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let first = {
+            let output = Arc::clone(&output);
+            let sent = Arc::clone(&sent);
+            let limits = limits.clone();
+            std::thread::spawn(move || {
+                reserve_and_enqueue_operator_response(&output, "first".into(), &limits, || {
+                    entered.send(()).expect("first entered SDK enqueue");
+                    released.recv().expect("release first enqueue");
+                    sent.lock().expect("sent frames").push("first");
+                })
+            })
+        };
+        first_enqueuing
+            .recv()
+            .expect("first has reserved its frame");
+        assert!(
+            output.try_lock().is_err(),
+            "reservation must stay locked through SDK enqueue"
+        );
+        let second = {
+            let output = Arc::clone(&output);
+            let sent = Arc::clone(&sent);
+            let limits = limits.clone();
+            std::thread::spawn(move || {
+                reserve_and_enqueue_operator_response(&output, "second".into(), &limits, || {
+                    sent.lock().expect("sent frames").push("second");
+                })
+            })
+        };
+        release.send(()).expect("release first enqueue");
+        first
+            .join()
+            .expect("first task")
+            .expect("first reservation");
+        second
+            .join()
+            .expect("second task")
+            .expect("second reservation");
+        assert_eq!(*sent.lock().expect("sent frames"), ["first", "second"]);
+        assert_eq!(
+            output
+                .lock()
+                .expect("reservations")
+                .frames
+                .iter()
+                .map(|(frame, _)| frame.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
     }
 
     #[test]

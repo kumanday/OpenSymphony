@@ -1353,6 +1353,12 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 }
             },
             RunWake::OperatorCommand(command) => {
+                if !command.delivery.claim() {
+                    let _ = command
+                        .reply
+                        .send(Err("operator response delivery timed out".into()));
+                    continue;
+                }
                 let result = scheduler
                     .respond_operator_request(&command.interaction, command.answer)
                     .await;
@@ -2217,6 +2223,7 @@ mod tests {
                     },
                     answer: OperatorAnswer::Cancel,
                     reply,
+                    delivery: crate::opensymphony_gateway::OperatorCommandFence::default(),
                 })
                 .await
                 .expect("queue operator command");

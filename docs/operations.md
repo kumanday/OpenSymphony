@@ -1064,6 +1064,9 @@ turn can continue. An operator-policy permission request without a route fails
 the turn. A worker response that misses its acknowledgement deadline is fenced
 before a failure receipt; an answer already claimed by the ACP callback waits
 for its actual delivery acknowledgement.
+The gateway also fences its queued command when its HTTP delivery deadline
+expires or the handler closes. Once the run loop claims a command, the gateway
+waits for the scheduler result instead of returning a premature timeout.
 Only requests accepted into the scheduler's live pending set emit waiting
 activity. Web and desktop retain selected form choices across live refreshes
 while the same request remains pending.

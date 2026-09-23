@@ -663,6 +663,10 @@ worker-update wakeups without another tracker tick.
 An un-routed native form receives protocol cancellation without failing its
 turn, and a delayed worker-consume regression verifies that a timed-out
 operator answer cannot reach the ACP callback after its failure receipt.
+Gateway timeout and handler-drop tests verify that delayed commands cannot
+cross the scheduler application fence; a claimed command waits for its actual
+acknowledgement. A concurrent reservation test holds one ACP SDK enqueue while
+another callback responds and verifies output reservation and enqueue order.
 The run-loop wake regression queues a callback notification and an operator
 command during a selected tick, verifies that tick completes, and then drains
 both queued events. A malformed permission callback produces no waiting event;

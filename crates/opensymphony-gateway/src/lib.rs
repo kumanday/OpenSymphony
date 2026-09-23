@@ -4,7 +4,10 @@ use std::{
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -293,6 +296,36 @@ pub struct OperatorCommand {
     pub interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
     pub answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
     pub reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    pub delivery: OperatorCommandFence,
+}
+
+/// The gateway's failure receipt and the run loop's scheduler mutation race
+/// through this fence. A queued command can never be applied after cancellation.
+#[derive(Clone, Default)]
+pub struct OperatorCommandFence(Arc<AtomicU8>);
+
+impl OperatorCommandFence {
+    pub fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+struct OperatorCommandReceiptGuard(OperatorCommandFence);
+
+impl Drop for OperatorCommandReceiptGuard {
+    fn drop(&mut self) {
+        // An HTTP handler can disappear before its explicit deadline when the
+        // client disconnects. Only a run-loop claim can outrun this cancel.
+        self.0.cancel();
+    }
 }
 
 pub struct GatewayState {
@@ -2898,6 +2931,21 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
+async fn await_operator_delivery(
+    received: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    delivery: &OperatorCommandFence,
+    deadline: Duration,
+) -> Result<Result<(), String>, ()> {
+    tokio::pin!(received);
+    match tokio::time::timeout(deadline, &mut received).await {
+        Ok(result) => result.map_err(|_| ()),
+        Err(_) if delivery.cancel() => Err(()),
+        // The run loop has already claimed the command. Its result is now
+        // authoritative; a timeout must not report failure before application.
+        Err(_) => received.await.map_err(|_| ()),
+    }
+}
+
 /// POST /api/v1/actions/dispatch
 ///
 /// Validates the action against the current snapshot state, publishes an audit
@@ -2939,29 +2987,30 @@ async fn dispatch_action(
             let receipt = reject("operator response path is unavailable".into());
             return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
         };
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
         let (reply, received) = tokio::sync::oneshot::channel();
         if commands
-            .send(OperatorCommand {
+            .try_send(OperatorCommand {
                 interaction,
                 answer,
                 reply,
+                delivery: receipt_guard.0.clone(),
             })
-            .await
             .is_err()
         {
             let receipt = reject("operator response path is unavailable".into());
             return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
         }
-        match tokio::time::timeout(Duration::from_secs(30), received).await {
-            Ok(Ok(Ok(()))) => {
+        match await_operator_delivery(received, &receipt_guard.0, Duration::from_secs(30)).await {
+            Ok(Ok(())) => {
                 let receipt = state.action_handler.dispatch(action, &envelope).await;
                 return (StatusCode::OK, Json(receipt));
             }
-            Ok(Ok(Err(error))) => {
+            Ok(Err(error)) => {
                 let receipt = reject(error);
                 return (StatusCode::CONFLICT, Json(receipt));
             }
-            _ => {
+            Err(()) => {
                 let receipt = reject("operator response delivery timed out".into());
                 return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
             }
@@ -6061,6 +6110,85 @@ mod tests {
         EventActor, EventKind, StreamErrorType,
     };
     use crate::opensymphony_memory::MemoryRepositorySource;
+
+    #[tokio::test]
+    async fn timed_out_gateway_command_cannot_apply_after_delayed_consume() {
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let now = Utc::now();
+        let delivery = OperatorCommandFence::default();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let (commands, mut queued) = tokio::sync::mpsc::channel(1);
+        assert!(
+            commands
+                .try_send(OperatorCommand {
+                    interaction: OperatorInteraction {
+                        request_id: "queued".into(),
+                        run_id: "run".into(),
+                        issue_id: "issue".into(),
+                        issue_identifier: "COE-612".into(),
+                        session_id: "session".into(),
+                        generation: 1,
+                        rpc_id: "1".into(),
+                        kind: OperatorInteractionKind::Permission,
+                        title: "Permission".into(),
+                        options: Vec::new(),
+                        questions: Vec::new(),
+                        plan: None,
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(1),
+                    },
+                    answer: OperatorAnswer::Cancel,
+                    reply,
+                    delivery: delivery.clone(),
+                })
+                .is_ok(),
+            "queue before busy scheduler tick"
+        );
+
+        assert!(
+            await_operator_delivery(received, &delivery, Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+        let command = queued.recv().await.expect("delayed command");
+        assert!(
+            !command.delivery.claim(),
+            "a 503 fences scheduler application"
+        );
+        assert!(
+            command.reply.send(Ok(())).is_err(),
+            "failure receipt already closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_waits_for_ack_after_scheduler_claims_command() {
+        let delivery = OperatorCommandFence::default();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(delivery.claim());
+        let send = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            reply.send(Ok(())).expect("acknowledge claimed command");
+        });
+        assert!(
+            await_operator_delivery(received, &delivery, Duration::from_millis(1))
+                .await
+                .expect("claim waits for actual ack")
+                .is_ok()
+        );
+        send.await.expect("ack task");
+    }
+
+    #[test]
+    fn dropped_gateway_receipt_cancels_unclaimed_command() {
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
+        let delayed_command = receipt_guard.0.clone();
+        drop(receipt_guard);
+        assert!(!delayed_command.claim());
+    }
 
     #[test]
     fn completed_tasks_sort_puts_undated_rows_last_in_both_directions() {
