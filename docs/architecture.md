@@ -541,9 +541,15 @@ disabled until an authenticated pinned callback is captured. Outbound operation 
 through the gateway's operator action, binds the current run in the scheduler,
 and resolves the registered method and session inside the retained owner. The
 public run capability supplies its attempt binding; the host bounds concurrent
-requests and the gateway journals each accepted operation's outcome.
+requests and the gateway journals each accepted operation's outcome. An outbound
+RPC retains its own ID and deadline after prompt completion so a back-to-back
+operation result is not discarded by the prompt callback epoch.
 Negotiated peer support and profile enablement are both required. Timeouts
-report an unknown outcome, and lifecycle state remains orchestrator-owned.
+report an unknown outcome, while the unresolved SDK waiter retains its permit
+until a peer response or connection closure. This caps pending replies at eight
+even across successive timeout batches. Known-secret redaction runs on the
+validated result before it can enter an operator receipt. Lifecycle state
+remains orchestrator-owned.
 Each retained prompt first retires the prior callback epoch through a bounded,
 cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses

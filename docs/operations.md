@@ -1099,6 +1099,12 @@ completion or failure for each accepted dispatch. Image notifications project a
 relative artifact candidate only when the reported file resolves within the
 issue workspace. Cursor profile registration remains disabled pending the
 pinned live callback evidence in [acp-extension-evidence.md](acp-extension-evidence.md).
+The outbound operation's response can complete after the prompt finishes;
+prompt completion does not cancel its separately bounded RPC wait. A deadline
+returns outcome unknown to the caller while keeping that unresolved SDK request
+inside the eight-operation limit until its reply or connection closure. Peer
+results are redacted with the session's known secrets before entering the public
+action receipt, including strings in `value` and `_meta`.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

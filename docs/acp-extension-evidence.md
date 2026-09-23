@@ -24,12 +24,17 @@ the handler is checked against the real envelope.
 
 ## Deterministic contract evidence
 
-`tests/fixtures/acp_session_peer.py` simulates documented Cursor callback
+`tests/fixtures/acp_session_peer.py` contains documented Cursor callback
 envelopes, including a malformed request, request ID `0`, a todo notification,
-and an unknown request. `tests/acp_session_host.rs` verifies operator routing,
-the documented question result shape, and that notifications receive no RPC
-response. The fixture echo peer advertises an explicit capability and verifies
+and an unknown request. Cursor handler unit tests verify the documented
+question result shape; the host fixture is held until live qualification.
+The fixture echo peer advertises an explicit capability and verifies
 the owner-supplied session ID, permitted `_meta`, structured result, invalid
 arguments, and a timeout that reports outcome unknown without retry. These
 fixtures establish OpenSymphony behavior; they do not substitute for the live
 Cursor callback qualification above.
+The echo peer writes its result and prompt completion back-to-back; a 24-trial
+regression verifies that prompt completion does not discard a correlated
+operation response. A synthetic credential echoed in the result value and
+metadata is redacted before the public operation result; successive timed-out
+batches remain inside the eight unresolved-request limit.

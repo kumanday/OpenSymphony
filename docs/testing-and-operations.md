@@ -661,12 +661,19 @@ capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
 The extension peer verifies a registered outbound request has the host-bound
 session ID and permitted `_meta`, returns a structured result, and rejects
-unregistered methods, stale runs, and unexpected argument keys. A Cursor-shaped
-fixture sends request ID `0` and checks the documented `answered` result,
-then sends a todo notification and unknown request; only requests receive
-responses. A pinned real Cursor CLI probe is required before claiming vendor
+unregistered methods, stale runs, and unexpected argument keys. The peer sends
+the operation result immediately before prompt completion; a repeated host
+regression verifies all correlated results survive that ordering. Cursor-shaped
+unit tests cover request ID `0`, the documented `answered` result, todo
+notification projection, and unknown request behavior. The Cursor host fixture
+remains ignored while workflow registration is held. A pinned real Cursor CLI
+probe is required before claiming vendor
 compatibility: record CLI version, redacted envelopes, authentication state,
 and the observed callback response separately from deterministic fixture tests.
+The host integration suite also checks that a peer-echoed environment credential
+is redacted in both the result value and metadata, and that a second batch of
+operations cannot bypass the eight pending-reply limit after the first batch
+times out.
 The current redacted probe and its authentication boundary are recorded in
 [ACP extension qualification evidence](acp-extension-evidence.md).
 It uses a five-minute tracker interval and processes both callbacks through

@@ -296,10 +296,13 @@ for line in sys.stdin:
         if mode == 'extension_echo_timeout':
             open('extension-request-count', 'a').write('1\n')
             continue
+        if mode == 'extension_echo_secret':
+            secret = os.environ['ACCESS_TOKEN']
+            send({'id': message['id'], 'result': {'value': secret, '_meta': {'traceparent': secret}}})
+            send({'id': extension_prompt, 'result': {'stopReason': 'end_turn'}})
+            extension_prompt = None
+            continue
         send({'id': message['id'], 'result': {'value': 'hello', '_meta': {'traceparent': 'trace-echo'}}})
-        # Keep the turn live until the client has consumed the operation result.
-        import time
-        time.sleep(0.05)
         send({'id': extension_prompt, 'result': {'stopReason': 'end_turn'}})
         extension_prompt = None
     elif method == "session/cancel":

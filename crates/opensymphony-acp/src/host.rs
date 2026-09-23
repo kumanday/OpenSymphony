@@ -1074,17 +1074,29 @@ impl SessionDriver {
                             };
                             let request = connection.send_request(request);
                             let timeout = Duration::from_millis(descriptor.deadline_ms);
-                            let epoch = self.operator_router.lock().unwrap_or_else(|e| e.into_inner())
-                                .as_ref().map(|(_, epoch)| epoch.clone());
+                            let capture = capture.clone();
                             tokio::spawn(async move {
                                 let _operation_permit = operation_permit;
-                                let result = tokio::select! {
-                                    result = tokio::time::timeout(timeout, request.block_task()) => match result {
-                                        Ok(Ok(value)) if super::extensions::validate_echo_result(&value) => Ok(value),
-                                        Ok(_) => Err(HostError::Client(ClientError::OperationFailed.to_string())),
-                                        Err(_) => Err(HostError::Client(ClientError::OperationTimeoutUnknown.to_string())),
+                                // The outbound RPC has its own ID and deadline. Prompt
+                                // completion may be decoded before the SDK wakes this
+                                // request waiter, so ending the prompt must not discard
+                                // an already-sent, correlated operation response.
+                                // Keep the future and its permit after a caller deadline:
+                                // dropping the SDK waiter sends cancellation but leaves its
+                                // pending-reply entry until the peer responds or disconnects.
+                                let response = request.block_task();
+                                tokio::pin!(response);
+                                let result = match tokio::time::timeout(timeout, &mut response).await {
+                                    Ok(Ok(mut value)) if super::extensions::validate_echo_result(&value) => {
+                                        capture.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut value, false);
+                                        Ok(value)
                                     },
-                                    _ = async { if let Some(epoch) = epoch { epoch.cancelled().await } else { std::future::pending().await } } => Err(HostError::Client("ACP operation turn ended; outcome is unknown".into())),
+                                    Ok(_) => Err(HostError::Client(ClientError::OperationFailed.to_string())),
+                                    Err(_) => {
+                                        let _ = reply.send(Err(HostError::Client(ClientError::OperationTimeoutUnknown.to_string())));
+                                        let _ = response.await;
+                                        return;
+                                    },
                                 };
                                 let _ = reply.send(result);
                             });

@@ -210,6 +210,117 @@ async fn registered_outbound_operation_binds_session_and_preserves_metadata() {
 }
 
 #[tokio::test]
+async fn outbound_response_preceding_prompt_completion_is_never_lost() {
+    // The peer writes the operation result and prompt completion back-to-back.
+    // Repetition catches scheduling differences between SDK waiter delivery
+    // and the retained host's prompt-completion branch.
+    for trial in 0..24 {
+        let root = tempfile::tempdir().expect("temp");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = launch(root.path(), "EXTENSION-RACE", "extension_echo").await;
+        request.profile.extensions.push("fixture_echo@1".into());
+        let handle = host.open(request).await.expect("open");
+        let prompt_handle = handle.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_handle
+                .prompt(
+                    "echo-race-run".into(),
+                    1,
+                    "extension-echo".into(),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("EXTENSION-RACE/extension-ready").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("peer ready");
+        let result = handle
+            .operation(
+                "echo-race-run".into(),
+                "fixture.echo".into(),
+                serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("trial {trial} lost correlated operation result: {error}")
+            });
+        assert_eq!(result["value"], "hello", "trial {trial}");
+        assert!(
+            prompt
+                .await
+                .expect("prompt task")
+                .expect("prompt")
+                .succeeded()
+        );
+        retire(&handle).await;
+    }
+}
+
+#[tokio::test]
+async fn outbound_operation_redacts_known_secrets_in_value_and_metadata() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-SECRET", "extension_echo_secret").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    request.context.environment.insert(
+        "ACCESS_TOKEN".into(),
+        "synthetic-operation-secret-613".into(),
+    );
+    let handle = host.open(request).await.expect("open");
+    let prompt_handle = handle.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_handle
+            .prompt(
+                "echo-secret-run".into(),
+                1,
+                "extension-echo".into(),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root
+            .path()
+            .join("EXTENSION-SECRET/extension-ready")
+            .exists()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    let result = handle
+        .operation(
+            "echo-secret-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+        .await
+        .expect("registered operation");
+    assert_eq!(
+        result,
+        serde_json::json!({"value":"[redacted]","_meta":{"traceparent":"[redacted]"}})
+    );
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("result")
+            .contains("synthetic-operation-secret-613")
+    );
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
 async fn outbound_operation_timeout_reports_unknown_without_retry() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");
@@ -315,6 +426,27 @@ async fn outbound_operation_inflight_limit_rejects_ninth_request() {
         std::fs::read_to_string(root.path().join("EXTENSION-LIMIT/extension-request-count"))
             .expect("request marker");
     assert_eq!(count.lines().count(), 8);
+    let later = join_all((0..8).map(|_| {
+        handle.operation(
+            "echo-limit-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+    }))
+    .await;
+    assert!(
+        later
+            .iter()
+            .all(|result| matches!(result, Err(HostError::ResourceLimit)))
+    );
+    let count =
+        std::fs::read_to_string(root.path().join("EXTENSION-LIMIT/extension-request-count"))
+            .expect("request marker");
+    assert_eq!(
+        count.lines().count(),
+        8,
+        "timed-out SDK replies still consume permits"
+    );
     cancellation.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(3), prompt)
         .await
