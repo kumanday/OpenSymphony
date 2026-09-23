@@ -845,6 +845,7 @@ are covered by the same archive operation.
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
 
 ## Source refs
 
@@ -1012,5 +1013,6 @@ are covered by the same archive operation.
 - COE-567
 - COE-608
 - COE-609
+- COE-610
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

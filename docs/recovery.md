@@ -14,6 +14,7 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 - COE-556 contributed: PR #239: COE-556: Add bottom-up subtree cleanup and recovery (merge `bc471f8`)
 - COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
 - COE-609 contributed: PR #243: feat(acp): retain host-owned sessions with durable recovery (merge `5b67134`)
+- COE-610 contributed: PR #242: feat(acp): implement host callbacks and session configuration (merge `cd683ea`)
 
 ## Important invariants
 
@@ -33,11 +34,13 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
 
 ## Source refs
 
 - COE-556
 - COE-608
 - COE-609
+- COE-610
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
