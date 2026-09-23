@@ -19338,9 +19338,11 @@ exit 64
             .await
             .expect("retained interrupt");
         assert!(acknowledgement.accepted);
+        let retained_outcome = acp_test_finished(&mut backend).await;
         assert_eq!(
-            acp_test_finished(&mut backend).await.outcome,
-            WorkerOutcomeKind::Cancelled
+            retained_outcome.outcome,
+            WorkerOutcomeKind::Cancelled,
+            "{retained_outcome:?}"
         );
         assert_eq!(
             fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))

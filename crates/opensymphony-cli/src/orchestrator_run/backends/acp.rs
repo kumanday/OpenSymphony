@@ -776,10 +776,12 @@ async fn try_run(
         Some(operator_requests_tx),
     );
     tokio::pin!(prompt);
+    let mut operator_requests_open = true;
+    let mut operator_responses_open = true;
     let result = loop {
         tokio::select! {
             result = &mut prompt => break result,
-            operator = operator_requests_rx.recv() => match operator {
+            operator = operator_requests_rx.recv(), if operator_requests_open => match operator {
                 Some(AcpOperatorEvent::Opened(mut request)) => {
                     request.interaction.run_id = manifest.run_id.clone();
                     request.interaction.issue_id = issue.id.as_str().into();
@@ -795,15 +797,21 @@ async fn try_run(
                     operator_waiters.remove(&request_id);
                     let _ = updates.send(WorkerUpdate::OperatorClosed { worker_id: run.worker_id.clone(), request_id });
                 }
-                None => return Err("ACP operator request channel closed during prompt".into()),
+                // The owner drops this sender while cancelling a prompt that
+                // has not been submitted. Keep waiting for the prompt's
+                // terminal result so its cancellation evidence wins the race.
+                None => operator_requests_open = false,
             },
-            response = operator_responses_rx.recv() => if let Some(response) = response {
-                let reply = crate::opensymphony_acp::AcpOperatorReply {
-                    answer: response.answer, acknowledgement: response.acknowledgement,
-                };
-                if let Some(waiter) = operator_waiters.remove(&response.request_id) {
-                    if let Err(reply) = waiter.send(reply) { let _ = reply.acknowledgement.send(false); }
-                } else { let _ = reply.acknowledgement.send(false); }
+            response = operator_responses_rx.recv(), if operator_responses_open => match response {
+                Some(response) => {
+                    let reply = crate::opensymphony_acp::AcpOperatorReply {
+                        answer: response.answer, acknowledgement: response.acknowledgement,
+                    };
+                    if let Some(waiter) = operator_waiters.remove(&response.request_id) {
+                        if let Err(reply) = waiter.send(reply) { let _ = reply.acknowledgement.send(false); }
+                    } else { let _ = reply.acknowledgement.send(false); }
+                }
+                None => operator_responses_open = false,
             },
             event = receiver.recv() => match event {
                 Ok(SessionEvent::Gap { .. }) => return Err("ACP source stream lost an oversized frame; submission remains fenced".into()),
