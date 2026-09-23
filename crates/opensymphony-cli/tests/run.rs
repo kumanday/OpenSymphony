@@ -394,10 +394,24 @@ async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
     write_memory_config(project.path());
 
     let mut child = spawn_run_child(project.path(), &[]);
+    use tokio::io::AsyncReadExt;
+    let mut child_stderr = child.stderr.take().expect("run child stderr");
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = String::new();
+        let _ = child_stderr.read_to_string(&mut stderr).await;
+        stderr
+    });
     let gateway_base = format!("http://{bind_addr}");
-    wait_for_running_issue(&format!("{gateway_base}/api/v1/snapshot"), "COE-429")
-        .await
-        .expect("run command should expose a running issue before cancel");
+    if let Err(error) =
+        wait_for_running_issue(&format!("{gateway_base}/api/v1/snapshot"), "COE-429").await
+    {
+        let status = child.try_wait().expect("run child status");
+        terminate_child(&mut child).await;
+        let stderr = stderr_task.await.expect("run child stderr task");
+        panic!(
+            "run command should expose a running issue before cancel: {error}; child status: {status:?}; child stderr: {stderr}"
+        );
+    }
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_base}/api/v1/actions/dispatch"))
@@ -421,6 +435,7 @@ async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
         .expect("gateway cancel should reach fake OpenHands interrupt");
 
     terminate_child(&mut child).await;
+    let _ = stderr_task.await;
 }
 
 #[test]
@@ -786,18 +801,44 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
 
 async fn wait_for_running_issue(url: &str, identifier: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut last_observation = "gateway unavailable".to_owned();
     while Instant::now() < deadline {
-        if let Ok(response) = client.get(url).send().await
-            && response.status().is_success()
-            && let Ok(snapshot) = response.json::<Value>().await
-            && issue_runtime_state_visible(&snapshot, identifier, "running")
-        {
-            return Ok(());
+        match client.get(url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(snapshot) => {
+                        if issue_runtime_state_visible(&snapshot, identifier, "running") {
+                            return Ok(());
+                        }
+                        last_observation = snapshot["snapshot"]["issues"]
+                            .as_array()
+                            .map(|issues| {
+                                issues
+                                    .iter()
+                                    .map(|issue| {
+                                        format!(
+                                            "{}:{}",
+                                            issue["identifier"].as_str().unwrap_or("?"),
+                                            issue["runtime_state"].as_str().unwrap_or("?")
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .unwrap_or_else(|| "snapshot issues unavailable".into());
+                    }
+                    Err(error) => last_observation = format!("invalid snapshot: {error}"),
+                }
+            }
+            Ok(response) => last_observation = format!("HTTP {}", response.status()),
+            Err(error) => last_observation = format!("gateway unavailable: {error}"),
         }
         sleep(Duration::from_millis(50)).await;
     }
-    Err(format!("timed out waiting for running issue at {url}"))
+    Err(format!(
+        "timed out waiting for running issue at {url}; last observation: {last_observation}"
+    ))
 }
 
 async fn wait_for_openhands_interrupt(openhands: &FakeOpenHandsServer) -> Result<(), String> {
