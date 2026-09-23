@@ -987,6 +987,9 @@ before submission permit scheduler retry. Cancellation is accepted after
 matching live or durable stopped-state observation. If the owner closes during
 pre-submission cancellation, the scheduler verifies matching durable identity,
 stopped process state and a `ready` or `finished` status before acknowledging.
+Scheduled ACP interrupts identify the active worker by issue ID and issue
+identifier, then verify its current owner, generation, run and conversation
+before cancellation.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

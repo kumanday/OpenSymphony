@@ -182,6 +182,7 @@ impl Durability {
                     },
                     session_id: None,
                     initialization: Value::Null,
+                    model_selection: false,
                     status: AcpSessionStatus::Ready,
                     stop_reason: None,
                     recovery: AcpRecovery::Fresh,
@@ -336,6 +337,7 @@ impl Durability {
         &mut self,
         session_id: String,
         initialization: Value,
+        model_selection: bool,
         recovery: AcpRecovery,
         reset_reason: Option<String>,
     ) -> Result<(), DurabilityError> {
@@ -350,10 +352,23 @@ impl Durability {
         let state = self.state_mut();
         state.session_id = Some(session_id);
         state.initialization = initialization;
+        state.model_selection = model_selection;
         state.recovery = recovery;
         state.status = AcpSessionStatus::Ready;
         state.stop_reason = None;
         self.persist().await
+    }
+
+    pub(super) async fn set_model_selection(
+        &mut self,
+        model_selection: bool,
+    ) -> Result<(), DurabilityError> {
+        self.require_quiescent()?;
+        if self.state().model_selection != model_selection {
+            self.state_mut().model_selection = model_selection;
+            self.persist().await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn submitted(
@@ -675,6 +690,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                false,
                 AcpRecovery::Fresh,
                 None,
             )
@@ -699,6 +715,7 @@ mod tests {
                 .ready(
                     "replacement".into(),
                     Value::Null,
+                    false,
                     AcpRecovery::Fresh,
                     Some("reset".into())
                 )
@@ -738,6 +755,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                false,
                 AcpRecovery::RestoredLoad,
                 None,
             )
@@ -872,7 +890,13 @@ mod tests {
         let before = std::fs::read(workspace.conversation_manifest_path()).expect("reservation");
         assert!(matches!(
             owner
-                .ready("bad\nsession".into(), Value::Null, AcpRecovery::Fresh, None)
+                .ready(
+                    "bad\nsession".into(),
+                    Value::Null,
+                    false,
+                    AcpRecovery::Fresh,
+                    None
+                )
                 .await,
             Err(DurabilityError::InvalidMetadata)
         ));
@@ -881,6 +905,7 @@ mod tests {
                 .ready(
                     "session".into(),
                     json!("x".repeat(MAX_MANIFEST_BYTES)),
+                    false,
                     AcpRecovery::Fresh,
                     None
                 )

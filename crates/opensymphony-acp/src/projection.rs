@@ -212,7 +212,7 @@ pub fn run_capability(
                 .pointer("/sessionCapabilities/resume")
                 .is_some_and(|v| !v.is_null()),
         history_replay: caps["loadSession"].as_bool() == Some(true),
-        model_selection: false,
+        model_selection: state.model_selection,
         cancellation: true,
         operator_responses: false,
     }
@@ -220,10 +220,18 @@ pub fn run_capability(
 
 pub fn profile_capabilities(
     config: &crate::opensymphony_workflow::AcpConfig,
+    worker_environment: &BTreeMap<String, String>,
 ) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
-    let environment = std::env::vars_os()
+    let mut environment = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    for (name, value) in worker_environment {
+        crate::opensymphony_workspace::insert_environment_value(
+            &mut environment,
+            name.clone(),
+            value.clone(),
+        );
+    }
     profile_capabilities_with_environment(config, &environment)
 }
 
@@ -366,6 +374,28 @@ mod tests {
                 .as_deref(),
             Some("executable_unavailable")
         );
+    }
+
+    #[test]
+    fn profile_preflight_includes_resolved_worker_environment() {
+        let source = "OPENSYMPHONY_ACP_PREFLIGHT_OVERLAY_ONLY_TEST";
+        let config: crate::opensymphony_workflow::AcpConfig = serde_json::from_value(json!({
+            "profiles": {
+                "profile": {
+                    "command": std::env::current_exe().expect("test executable"),
+                    "env_refs": {"LINEAR_API_KEY": source}
+                }
+            }
+        }))
+        .expect("profile");
+        assert_eq!(
+            profile_capabilities(&config, &BTreeMap::new())[0]
+                .unavailable_reason
+                .as_deref(),
+            Some("credential_reference_unavailable")
+        );
+        let overlay = BTreeMap::from([(source.into(), "resolved-worker-token".into())]);
+        assert!(profile_capabilities(&config, &overlay)[0].preflight_ready);
     }
 
     fn event(sequence: u64, replay: bool, update: Value) -> SessionEvent {

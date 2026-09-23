@@ -12,8 +12,10 @@ pub(super) const KIND: &str = "acp";
 pub(super) struct ActiveSession {
     pub handle: SessionHandle,
     pub cancellation: CancellationToken,
+    pub prompt_finished: CancellationToken,
     pub workspace: WorkspaceHandle,
     pub issue_id: IssueId,
+    pub issue_identifier: IssueIdentifier,
     pub run_id: String,
 }
 pub(super) type ActiveSessions = Arc<Mutex<HashMap<String, ActiveSession>>>;
@@ -36,9 +38,14 @@ pub(super) async fn observe_stop(
             if snapshot.state.status == AcpSessionStatus::Uncertain {
                 return Ok(StopObservation::Uncertain);
             }
-            if snapshot.state.status == AcpSessionStatus::Finished
-                || (snapshot.state.status == AcpSessionStatus::Ready
-                    && snapshot.retirement_eligible)
+            if (snapshot.state.status == AcpSessionStatus::Finished
+                && snapshot.state.identity.run_id == session.run_id)
+                || (session.prompt_finished.is_cancelled()
+                    && snapshot.retirement_eligible
+                    && matches!(
+                        snapshot.state.status,
+                        AcpSessionStatus::Ready | AcpSessionStatus::Finished
+                    ))
             {
                 return Ok(StopObservation::Stopped(snapshot.state.stop_reason));
             }
@@ -58,7 +65,10 @@ pub(super) async fn observe_stop(
             if manifest.issue_id != session.workspace.issue_id()
                 || state.owner_id != session.handle.owner_id
                 || state.identity.generation != session.handle.generation
-                || state.identity.run_id != session.run_id
+                || (matches!(
+                    state.status,
+                    AcpSessionStatus::Submitted | AcpSessionStatus::Uncertain
+                ) && state.identity.run_id != session.run_id)
                 || state.identity.workspace_path != session.workspace.workspace_path()
             {
                 return Err(CliWorkerError::InterruptFailed(
@@ -193,32 +203,39 @@ pub(super) async fn interrupt(
     manager: &WorkspaceManager,
     command: &crate::opensymphony_domain::HarnessInterruptCommand,
 ) -> Result<WorkerInterruptAcknowledgement, CliWorkerError> {
-    let session = active
-        .lock()
-        .map_err(|_| {
+    // Scheduler interrupt commands carry the issue identifier in `run_id`,
+    // whereas active ACP sessions are keyed by generated worker IDs.
+    let session = {
+        let active = active.lock().map_err(|_| {
             CliWorkerError::InterruptFailed("ACP active-session registry unavailable".into())
-        })?
-        .get(
-            command
-                .run_id
-                .strip_prefix("run-")
-                .unwrap_or(&command.run_id),
-        )
-        .cloned()
-        .ok_or_else(|| {
+        })?;
+        let mut matching = active.values().filter(|session| {
+            session.issue_id == command.issue_id
+                && session.issue_identifier.as_str() == command.run_id
+        });
+        let session = matching.next().cloned().ok_or_else(|| {
             CliWorkerError::InterruptFailed("ACP worker has no active session".into())
         })?;
-    if session.issue_id != command.issue_id || session.run_id != command.run_id {
-        return Err(CliWorkerError::InterruptFailed(
-            "ACP interrupt run identity mismatch".into(),
-        ));
-    }
+        if matching.next().is_some() {
+            return Err(CliWorkerError::InterruptFailed(
+                "ACP interrupt matches multiple active sessions".into(),
+            ));
+        }
+        session
+    };
     let snapshot = session
         .handle
         .inspect()
         .await
         .map_err(|e| CliWorkerError::InterruptFailed(e.to_string()))?;
-    if snapshot.state.session_id.as_deref() != Some(command.conversation_id.as_str()) {
+    if snapshot.state.session_id.as_deref() != Some(command.conversation_id.as_str())
+        || (matches!(
+            snapshot.state.status,
+            AcpSessionStatus::Submitted | AcpSessionStatus::Uncertain
+        ) && snapshot.state.identity.run_id != session.run_id)
+        || snapshot.state.owner_id != session.handle.owner_id
+        || snapshot.state.identity.generation != session.handle.generation
+    {
         return Err(CliWorkerError::InterruptFailed(
             "ACP interrupt session identity mismatch".into(),
         ));
@@ -439,7 +456,10 @@ async fn try_run(
         ) {
             return Err("ACP prior submission is uncertain; refusing automatic replay".into());
         }
-        if previous.status == AcpSessionStatus::Finished {
+        if previous.status == AcpSessionStatus::Finished
+            && previous.identity.run_id == manifest.run_id
+            && previous.identity.attempt == manifest.attempt
+        {
             return Ok(previous
                 .stop_reason
                 .clone()
@@ -584,21 +604,25 @@ async fn try_run(
     let view = conversation_view(&raw).map_err(|e| e.to_string())?;
     let mut metadata = conversation_metadata_from_manifest(&view);
     metadata.stream_state = RuntimeStreamState::Ready;
-    metadata.harness_capability = Some(Box::new(crate::opensymphony_acp::run_capability(
-        &snapshot.state,
-    )));
+    let mut capability = crate::opensymphony_acp::run_capability(&snapshot.state);
+    metadata.harness_capability = Some(Box::new(capability.clone()));
     let cancellation = CancellationToken::new();
     let _cancel_on_drop = cancellation.clone().drop_guard();
-    active.lock().unwrap_or_else(|e| e.into_inner()).insert(
-        run.worker_id.to_string(),
-        ActiveSession {
-            handle: handle.clone(),
-            cancellation: cancellation.clone(),
-            workspace: workspace.clone(),
-            issue_id: issue.id.clone(),
-            run_id: manifest.run_id.clone(),
-        },
-    );
+    let prompt_finished = CancellationToken::new();
+    let _finish_on_drop = prompt_finished.clone().drop_guard();
+    let active_session = ActiveSession {
+        handle: handle.clone(),
+        cancellation: cancellation.clone(),
+        prompt_finished: prompt_finished.clone(),
+        workspace: workspace.clone(),
+        issue_id: issue.id.clone(),
+        issue_identifier: issue.identifier.clone(),
+        run_id: manifest.run_id.clone(),
+    };
+    active
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run.worker_id.to_string(), active_session.clone());
     if let Some(sender) = launch.take() {
         let _ = sender.send(LaunchReport::Conversation {
             conversation: Box::new(metadata),
@@ -619,11 +643,11 @@ async fn try_run(
             result = &mut prompt => break result,
             event = receiver.recv() => match event {
                 Ok(SessionEvent::Gap { .. }) => return Err("ACP source stream lost an oversized frame; submission remains fenced".into()),
-                Ok(event) => project_event(&event, &mut projection, &manifest.run_id, &run.worker_id, updates),
+                Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let history = handle.source_history();
                     if history.truncated { return Err("ACP worker source stream exceeded retention; submission remains fenced".into()); }
-                    for event in history.events { project_event(&event, &mut projection, &manifest.run_id, &run.worker_id, updates); }
+                    for event in history.events { project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates); }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break Err(crate::opensymphony_acp::HostError::Unavailable),
             }
@@ -638,6 +662,7 @@ async fn try_run(
             Ok(event) => project_event(
                 &event,
                 &mut projection,
+                &mut capability,
                 &manifest.run_id,
                 &run.worker_id,
                 updates,
@@ -651,6 +676,7 @@ async fn try_run(
                     project_event(
                         &event,
                         &mut projection,
+                        &mut capability,
                         &manifest.run_id,
                         &run.worker_id,
                         updates,
@@ -660,16 +686,24 @@ async fn try_run(
             Err(_) => break,
         }
     }
-    if result.is_err()
-        && cancellation.is_cancelled()
-        && handle.inspect().await.is_ok_and(|snapshot| {
-            matches!(
-                snapshot.state.status,
-                AcpSessionStatus::Ready | AcpSessionStatus::Finished
-            )
+    prompt_finished.cancel();
+    if result.is_err() && cancellation.is_cancelled() {
+        let stopped = timeout(Duration::from_secs(15), async {
+            loop {
+                match observe_stop(&active_session, manager).await {
+                    Ok(StopObservation::Stopped(_)) => return true,
+                    Ok(StopObservation::Pending) => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Ok(StopObservation::Uncertain) | Err(_) => return false,
+                }
+            }
         })
-    {
-        return Ok("cancelled".into());
+        .await
+        .unwrap_or(false);
+        if stopped {
+            return Ok("cancelled".into());
+        }
     }
     result
         .map(|report| report.stop_reason)
@@ -679,10 +713,23 @@ async fn try_run(
 fn project_event(
     event: &SessionEvent,
     projection: &mut RuntimeProjection,
+    capability: &mut crate::opensymphony_gateway_schema::capability::HarnessRunCapability,
     run_id: &str,
     worker_id: &crate::opensymphony_domain::WorkerId,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
 ) {
+    if let SessionEvent::State { snapshot } = event
+        && snapshot.state.identity.run_id == run_id
+    {
+        let negotiated = crate::opensymphony_acp::run_capability(&snapshot.state);
+        if *capability != negotiated {
+            *capability = negotiated.clone();
+            let _ = updates.send(WorkerUpdate::HarnessCapabilityUpdate {
+                worker_id: worker_id.clone(),
+                capability: negotiated,
+            });
+        }
+    }
     if let Some(update) = projection.apply(event, run_id) {
         let _ = updates.send(WorkerUpdate::RuntimeEvent {
             worker_id: worker_id.clone(),

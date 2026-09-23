@@ -967,7 +967,9 @@ support. The caller supplies a non-secret credential/grant revision and the
 scheduler's exact workspace identity; changes prevent session reuse.
 Production `opensymphony run` selects this profile through the scheduler and
 persists the effective route under the workspace metadata directory. Recovery
-uses that route even when the current default profile differs. ACP-only execution
+uses that route even when the current default profile differs. A finished ACP
+turn reconciles a recovered run only when its durable run ID and attempt match;
+a newly prepared attempt submits its own prompt. ACP-only execution
 does not start an OpenHands server. Production retains at most 128 ACP sessions;
 the scheduler continues to enforce `agent.max_concurrent_agents`. Select a
 different profile only after the retained session can retire safely; uncertain
@@ -984,6 +986,8 @@ distinct under host name rules; Windows rejects case-equivalent `env_refs` targe
 before launch, while POSIX preserves case-distinct variables.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
+Profile preflight evaluates the resolved worker environment, including Linear
+client-credentials overrides, with the same precedence used at launch.
 The selected authentication method must be an advertised agent-handled method;
 terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.
@@ -1016,6 +1020,9 @@ Unsupported explicit choices fail setup. Boolean options and legacy experimental
 model RPCs are not advertised. `routing.model` and its configured environment override select an ACP model ID
 and take precedence over `session.model`. OpenHands `routing.model_profile` is
 rejected for ACP.
+The negotiated run capability reports model selection when the bound ACP
+session advertises a selectable model option; it updates if that capability
+changes before a retained prompt.
 
 The host supplies `LaunchContext.services: HostServices`. Its `read_files`,
 `write_files`, and `terminals` flags default to false and enable only the matching

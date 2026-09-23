@@ -1137,6 +1137,10 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .as_ref()
         .map(|client| client.base_url())
         .unwrap_or("");
+    let acp_profiles = crate::opensymphony_acp::profile_capabilities(
+        &runtime.workflow.extensions.acp,
+        &linear_worker_env,
+    );
 
     let worker = RuntimeWorkerBackend::new_with_client(
         client.clone(),
@@ -1211,9 +1215,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
             .with_memory_config(server_memory_config)
-            .with_harness_profiles(crate::opensymphony_acp::profile_capabilities(
-                &runtime.workflow.extensions.acp,
-            ))
+            .with_harness_profiles(acp_profiles)
             .with_active_states(
                 runtime
                     .workflow

@@ -17082,6 +17082,7 @@ exit 64
             "permission",
             "corrupt",
             "configured",
+            "slow_model_hang",
         ] {
             let profile = serde_json::from_value(serde_json::json!({
                 "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
@@ -17094,6 +17095,14 @@ exit 64
             .profiles
             .get_mut("configured")
             .expect("configured profile")
+            .session
+            .model = Some("profile-model".into());
+        workflow
+            .extensions
+            .acp
+            .profiles
+            .get_mut("slow_model_hang")
+            .expect("slow model profile")
             .session
             .model = Some("profile-model".into());
         workflow.config.routing.harness = "acp".into();
@@ -17143,10 +17152,18 @@ exit 64
         let root = manager.config().root.clone();
         let mut request = acp_test_request(&root, "configured", 1);
         request.route.model = Some("route-model".into());
-        backend
+        let launch = backend
             .start_worker(request)
             .await
             .expect("configured launch");
+        assert!(
+            launch
+                .conversation
+                .harness_capability
+                .as_ref()
+                .expect("negotiated capability")
+                .model_selection
+        );
         assert_eq!(
             acp_test_finished(&mut backend).await.outcome,
             WorkerOutcomeKind::Succeeded
@@ -17169,14 +17186,15 @@ exit 64
             fs::read_to_string(handle.workspace_path().join("acp-callback.txt")).expect("file"),
             "configured worker"
         );
-        let first_owner = manager
+        let first_state = manager
             .load_conversation_manifest(&handle)
             .await
             .expect("manifest")
             .expect("manifest")
             .acp
-            .expect("ACP state")
-            .owner_id;
+            .expect("ACP state");
+        assert!(first_state.model_selection);
+        let first_owner = first_state.owner_id;
 
         backend
             .start_worker(acp_test_request(&root, "configured", 2))
@@ -17468,6 +17486,174 @@ exit 64
     }
 
     #[tokio::test]
+    async fn acp_recovery_does_not_complete_a_prepared_run_from_the_prior_turn() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let prior = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(
+            prior.status,
+            crate::opensymphony_workspace::AcpSessionStatus::Finished
+        );
+        assert_eq!(prior.identity.run_id, "run-acp-worker-1");
+        let prepared = manager
+            .start_run(&handle, &RunDescriptor::new("run-acp-worker-2", 2))
+            .await
+            .expect("prepare next run before daemon restart");
+        assert_eq!(prepared.status, RunStatus::Prepared);
+        let recovered = backend
+            .recover_worker(acp_test_request(&root, "first", 2))
+            .await
+            .expect("recover prepared run");
+        assert_eq!(
+            recovered
+                .conversation
+                .harness_capability
+                .as_ref()
+                .expect("ACP")
+                .profile_id,
+            "first"
+        );
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let prompts =
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts");
+        assert_eq!(
+            prompts.lines().count(),
+            2,
+            "new prepared run must submit its own prompt"
+        );
+        let current = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(current.identity.run_id, "run-acp-worker-2");
+        assert_eq!(current.identity.attempt, 2);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn acp_interrupt_waits_for_retained_pre_submission_cancellation() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        let first_request = acp_test_request(&root, "slow_model_hang", 1);
+        let first = backend
+            .start_worker(first_request.clone())
+            .await
+            .expect("first launch");
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        timeout(Duration::from_secs(5), async {
+            while !handle.workspace_path().join("acp-worker.json").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first prompt submitted");
+        backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: first_request.issue.identifier.to_string(),
+                issue_id: first_request.issue.id.clone(),
+                harness_kind: "acp".into(),
+                conversation_id: first.conversation.conversation_id,
+                turn_id: None,
+                reason: HarnessInterruptReason::OperatorCancel,
+                expected_next_state: HarnessInterruptExpectedNextState::Paused,
+            })
+            .await
+            .expect("first interrupt");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Cancelled
+        );
+
+        let next_request = acp_test_request(&root, "slow_model_hang", 2);
+        let next = backend
+            .start_worker(next_request.clone())
+            .await
+            .expect("retained launch");
+        timeout(Duration::from_secs(5), async {
+            while !handle.workspace_path().join("acp-config-waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retained configuration is preparing");
+        let before_cancel = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(before_cancel.identity.run_id, "run-acp-worker-1");
+        assert_eq!(
+            before_cancel.status,
+            crate::opensymphony_workspace::AcpSessionStatus::Finished
+        );
+        let acknowledgement = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: next_request.issue.identifier.to_string(),
+                issue_id: next_request.issue.id.clone(),
+                harness_kind: "acp".into(),
+                conversation_id: next.conversation.conversation_id,
+                turn_id: None,
+                reason: HarnessInterruptReason::OperatorCancel,
+                expected_next_state: HarnessInterruptExpectedNextState::Paused,
+            })
+            .await
+            .expect("retained interrupt");
+        assert!(acknowledgement.accepted);
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Cancelled
+        );
+        assert_eq!(
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+                .expect("prompts")
+                .lines()
+                .count(),
+            1,
+            "cancelled preparation must not submit the next prompt"
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
     async fn acp_worker_interrupt_abort_and_uncertain_cleanup_are_owner_fenced() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
@@ -17494,18 +17680,23 @@ exit 64
                 .await
                 .is_err()
         );
-        let acknowledgement = backend
+        let command = HarnessInterruptCommand {
+            run_id: request.issue.identifier.to_string(),
+            issue_id: request.issue.id.clone(),
+            harness_kind: "acp".into(),
+            conversation_id: launch.conversation.conversation_id,
+            turn_id: None,
+            reason: HarnessInterruptReason::OperatorCancel,
+            expected_next_state: HarnessInterruptExpectedNextState::Paused,
+        };
+        backend
             .interrupt_worker(HarnessInterruptCommand {
                 run_id: "run-acp-worker-1".into(),
-                issue_id: request.issue.id.clone(),
-                harness_kind: "acp".into(),
-                conversation_id: launch.conversation.conversation_id,
-                turn_id: None,
-                reason: HarnessInterruptReason::OperatorCancel,
-                expected_next_state: HarnessInterruptExpectedNextState::Paused,
+                ..command.clone()
             })
             .await
-            .expect("interrupt");
+            .expect_err("generated worker run ID is not the scheduler identity");
+        let acknowledgement = backend.interrupt_worker(command).await.expect("interrupt");
         assert!(acknowledgement.accepted);
         assert_eq!(
             acp_test_finished(&mut backend).await.outcome,

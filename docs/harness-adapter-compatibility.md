@@ -160,7 +160,9 @@ The production worker enables file and terminal callbacks for its verified
 issue workspace and supplies the active scoped memory grant as a host-owned MCP
 attachment. An explicit `routing.model` selection takes precedence over the
 profile's `session.model` and is validated against negotiated options before
-prompt submission.
+prompt submission. Run capability projection reports the negotiated selectable
+model option, while profile preflight uses the same resolved worker environment
+as launch.
 
 Windows callback operations pin path ancestors through use and reject reparse
 points, including junctions, through no-follow handles. Callback epoch handoff shares the setup

@@ -22,6 +22,14 @@ impl std::fmt::Debug for SessionConfiguration {
     }
 }
 impl SessionConfiguration {
+    pub(super) fn supports_model_selection(&self) -> bool {
+        self.options.iter().any(|option| {
+            option.get("category").and_then(Value::as_str) == Some("model")
+                && option.get("type").and_then(Value::as_str) == Some("select")
+                && option.get("options").and_then(Value::as_array).is_some()
+        })
+    }
+
     pub(super) fn initial(&mut self, session: &Value) {
         self.options = session
             .get("configOptions")

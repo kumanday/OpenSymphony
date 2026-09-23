@@ -301,6 +301,10 @@ pub enum WorkerUpdate {
         worker_id: WorkerId,
         conversation: ConversationMetadata,
     },
+    HarnessCapabilityUpdate {
+        worker_id: WorkerId,
+        capability: crate::opensymphony_gateway_schema::capability::HarnessRunCapability,
+    },
     TokenUsageUpdate {
         worker_id: WorkerId,
         input_tokens: u64,
@@ -6842,6 +6846,24 @@ where
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
+                        execution.update_conversation(conversation);
+                    }
+                }
+                WorkerUpdate::HarnessCapabilityUpdate {
+                    worker_id,
+                    capability,
+                } => {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id)
+                        && let Some(mut conversation) = execution.conversation().cloned()
+                    {
+                        conversation.harness_capability = Some(Box::new(capability));
                         execution.update_conversation(conversation);
                     }
                 }

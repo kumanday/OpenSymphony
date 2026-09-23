@@ -816,8 +816,18 @@ impl SessionDriver {
         } else {
             None
         };
+        let model_selection = configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .supports_model_selection();
         self.durable
-            .ready(session_id.0.to_string(), metadata, recovery, reset_reason)
+            .ready(
+                session_id.0.to_string(),
+                metadata,
+                model_selection,
+                recovery,
+                reset_reason,
+            )
             .await
             .map_err(|_| ClientError::Setup("durable session checkpoint failed".into()))?;
         self.publisher
@@ -849,6 +859,14 @@ impl SessionDriver {
                     if let Err(error) = result {
                         let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
                         return Err(error);
+                    }
+                    let model_selection = configuration
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .supports_model_selection();
+                    if self.durable.set_model_selection(model_selection).await.is_err() {
+                        let _ = pending.reply.send(Err(HostError::Persistence));
+                        return Err(ClientError::Setup("model capability checkpoint failed".into()));
                     }
                     if self.durable.submitted(pending.run_id.clone(), pending.attempt).await.is_err() {
                         let _ = pending.reply.send(Err(HostError::Persistence));

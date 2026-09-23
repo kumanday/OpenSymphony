@@ -2,12 +2,14 @@
 import json
 import os
 import sys
+import time
 
 profile = sys.argv[1]
 session = "session-" + profile
 pending = None
 selected_model = None
 session_mcp = []
+prompt_count = 0
 
 def send(value):
     print(json.dumps({"jsonrpc": "2.0", **value}), flush=True)
@@ -38,18 +40,23 @@ for line in sys.stdin:
             assert session_mcp[0]["url"] == os.environ["OPENSYMPHONY_MEMORY_ENDPOINT"]
             if token := os.environ.get("OPENSYMPHONY_MEMORY_TOKEN"):
                 assert session_mcp[0]["headers"] == [{"name": "Authorization", "value": "Bearer " + token}]
-        if profile == "configured":
+        if profile in ("configured", "slow_model_hang"):
             options = [{"id": "pick", "category": "model", "name": "Model", "type": "select", "currentValue": selected_model or "profile-model", "options": [{"value": value, "name": value} for value in ("profile-model", "route-model", "other-model")]}]
             send({"id": message["id"], "result": {"sessionId": session, "configOptions": options} if method == "session/new" else {"configOptions": options}})
         else:
             send({"id": message["id"], "result": {"sessionId": session} if method == "session/new" else {}})
     elif method == "session/set_config_option":
-        assert profile == "configured" and message["params"]["configId"] == "pick"
+        assert profile in ("configured", "slow_model_hang") and message["params"]["configId"] == "pick"
+        if profile == "slow_model_hang" and prompt_count:
+            open("acp-config-waiting", "w").close()
+            while not os.path.exists("acp-config-release"):
+                time.sleep(0.01)
         selected_model = message["params"]["value"]
         assert selected_model in ("profile-model", "route-model", "other-model")
         options = [{"id": "pick", "category": "model", "name": "Model", "type": "select", "currentValue": selected_model, "options": [{"value": value, "name": value} for value in ("profile-model", "route-model", "other-model")]}]
         send({"id": message["id"], "result": {"configOptions": options}})
     elif method == "session/prompt":
+        prompt_count += 1
         with open(".opensymphony/conversation.json") as source:
             assert json.load(source)["acp"]["status"] == "submitted"
         callback_roundtrip = False
@@ -80,7 +87,7 @@ for line in sys.stdin:
             pending = message["id"]
             send({"id": "permission", "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "t", "title": "Permission"}, "options": []}})
             continue
-        if profile == "hang":
+        if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue
         send({"id": message["id"], "result": {"stopReason": "end_turn", "usage": {"inputTokens": 4, "outputTokens": 2, "totalTokens": 6}}})

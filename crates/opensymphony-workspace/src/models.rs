@@ -1243,6 +1243,9 @@ pub struct AcpSessionState {
     pub session_id: Option<String>,
     /// Negotiated initialization metadata, redacted by the protocol client.
     pub initialization: serde_json::Value,
+    /// Whether this session advertised a selectable model configuration option.
+    #[serde(default)]
+    pub model_selection: bool,
     pub status: AcpSessionStatus,
     pub stop_reason: Option<String>,
     pub recovery: AcpRecovery,
