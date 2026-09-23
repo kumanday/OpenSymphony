@@ -16,6 +16,7 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 - COE-609 contributed: PR #243: feat(acp): retain host-owned sessions with durable recovery (merge `5b67134`)
 - COE-610 contributed: PR #242: feat(acp): implement host callbacks and session configuration (merge `cd683ea`)
 - COE-611 contributed: PR #245: COE-611: Route production workers through ACP profiles (merge `80e5ac3`)
+- COE-612 contributed: PR #246: Route ACP operator requests through scheduler and clients (merge `a6cd118`)
 
 ## Important invariants
 
@@ -37,6 +38,7 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
 - COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
 
 ## Source refs
 
@@ -45,5 +47,6 @@ last_memory_sync: 2026-09-13T11:59:04.642113+00:00
 - COE-609
 - COE-610
 - COE-611
+- COE-612
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

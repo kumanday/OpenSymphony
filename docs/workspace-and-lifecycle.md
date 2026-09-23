@@ -1103,6 +1103,7 @@ or MCP grants.
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
 - COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
 
 ## Source refs
 
@@ -1126,5 +1127,6 @@ or MCP grants.
 - COE-609
 - COE-610
 - COE-611
+- COE-612
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

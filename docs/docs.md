@@ -134,6 +134,7 @@ last_memory_sync: 2026-06-24T03:31:40.851743+00:00
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
 - COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
 - PR-197: Graph visualization command center and shared fixtures
 
 ## Source refs
@@ -239,6 +240,7 @@ last_memory_sync: 2026-06-24T03:31:40.851743+00:00
 - COE-609
 - COE-610
 - COE-611
+- COE-612
 - PR-197
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

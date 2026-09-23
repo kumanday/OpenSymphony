@@ -76,6 +76,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -106,8 +107,10 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:orchestrator
       - area:runtime
+      - area:ui
       - area:workspace
       linear_milestones:
       - 'M12.99: ACP Harness Runtime Adapter'
@@ -405,6 +408,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -481,6 +485,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -673,6 +678,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -751,6 +757,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -887,6 +894,7 @@ areas:
       - area:data-contracts
       - area:evidence
       - area:experiments
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -902,6 +910,7 @@ areas:
       - area:scheduler
       - area:task-packets
       - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -968,6 +977,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1373,6 +1383,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1509,6 +1520,7 @@ areas:
       - area:configuration
       - area:evidence
       - area:experiments
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -1524,6 +1536,7 @@ areas:
       - area:scheduler
       - area:task-packets
       - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -1546,6 +1559,7 @@ areas:
       - area:cli
       - area:configuration
       - area:experiments
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -1555,6 +1569,7 @@ areas:
       - area:runtime
       - area:scheduler
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -1619,6 +1634,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1787,6 +1803,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1817,6 +1834,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -1825,6 +1843,7 @@ areas:
       - area:review
       - area:runtime
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -2450,6 +2469,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2748,6 +2768,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2971,6 +2992,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -2980,6 +3002,7 @@ areas:
       - area:review
       - area:runtime
       - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -3045,6 +3068,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3093,6 +3117,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3103,6 +3128,7 @@ areas:
       - area:runner
       - area:runtime
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3122,6 +3148,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3132,6 +3159,7 @@ areas:
       - area:runtime
       - area:task-packets
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3151,11 +3179,13 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:orchestrator
       - area:provider
       - area:recovery
       - area:review
       - area:runtime
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3176,6 +3206,7 @@ areas:
       - area:configuration
       - area:evidence
       - area:experiments
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3191,6 +3222,7 @@ areas:
       - area:scheduler
       - area:task-packets
       - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -3258,6 +3290,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3288,9 +3321,11 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:orchestrator
       - area:recovery
       - area:runtime
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3354,6 +3389,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3404,10 +3440,12 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:orchestrator
       - area:recovery
       - area:review
       - area:runtime
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3472,6 +3510,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3502,6 +3541,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3511,6 +3551,7 @@ areas:
       - area:runner
       - area:runtime
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3667,6 +3708,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3698,6 +3740,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3707,6 +3750,7 @@ areas:
       - area:runtime
       - area:scheduler
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -3899,6 +3943,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3930,6 +3975,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -3939,6 +3985,7 @@ areas:
       - area:runtime
       - area:task-packets
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -4003,6 +4050,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4203,6 +4251,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4279,6 +4328,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4506,6 +4556,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -4514,6 +4565,7 @@ areas:
       - area:review
       - area:runtime
       - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
       - area:workspace-lifecycle
@@ -4579,6 +4631,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4669,6 +4722,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4700,6 +4754,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:gateway
       - area:harness
       - area:memory
       - area:orchestrator
@@ -4708,6 +4763,7 @@ areas:
       - area:review
       - area:runtime
       - area:testing
+      - area:ui
       - area:workspace
       - area:workspace-lifecycle
       linear_milestones:
@@ -4788,6 +4844,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
