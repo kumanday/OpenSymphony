@@ -1,6 +1,7 @@
 use opensymphony::opensymphony_gateway_schema::approval::{
     OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
 };
+use opensymphony::opensymphony_workflow::AcpPermissionPolicy;
 use opensymphony::{opensymphony_acp::*, opensymphony_workspace::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -148,6 +149,54 @@ async fn session_prompt_without_operator_route_cancels_form_and_completes() {
             .succeeded()
     );
     retire(&handle).await;
+}
+
+#[tokio::test]
+async fn automatic_permission_policy_is_fenced_by_prompt_epoch() {
+    for routed in [false, true] {
+        let root = tempfile::tempdir().expect("temp");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = launch(root.path(), "PERMISSION-EPOCH", "none").await;
+        request.profile.permissions.mode = AcpPermissionPolicy::AllowOnce;
+        let handle = host.open(request).await.expect("open");
+        let report = if routed {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            let report = handle
+                .prompt_with_operator(
+                    "policy-route".into(),
+                    1,
+                    "permission-epoch".into(),
+                    CancellationToken::new(),
+                    Some(tx),
+                )
+                .await
+                .expect("prompt");
+            assert!(rx.try_recv().is_err(), "automatic decisions must not route");
+            report
+        } else {
+            prompt(&handle, "policy-direct", "permission-epoch").await
+        };
+        assert!(report.succeeded());
+        let marker = root.path().join("PERMISSION-EPOCH/permission-epoch.json");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("peer observed both permission decisions");
+        let decisions: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marker).expect("marker")).expect("decisions");
+        assert_eq!(
+            decisions["active"],
+            serde_json::json!({"outcome":{"outcome":"selected","optionId":"allow-opaque"}})
+        );
+        assert_eq!(
+            decisions["late"],
+            serde_json::json!({"outcome":{"outcome":"cancelled"}})
+        );
+        retire(&handle).await;
+    }
 }
 
 #[tokio::test]

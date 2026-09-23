@@ -536,7 +536,10 @@ processes use the existing process-group or Windows Job Object supervisors.
 Each retained prompt first retires the prior callback epoch through a bounded,
 cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses
-and updates are committed in SDK dispatch order before prompt completion. No OpenHands server or client participates in this launch path.
+and updates are committed in SDK dispatch order before prompt completion. The
+prompt response revokes its callback epoch before an adjacent request is
+dispatched; automatic permission policy also requires that live epoch. No
+OpenHands server or client participates in this launch path.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

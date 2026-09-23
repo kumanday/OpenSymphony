@@ -961,7 +961,7 @@ impl SessionDriver {
                         return Err(error);
                     }
                     *self.operator_router.lock().unwrap_or_else(|e| e.into_inner()) =
-                        pending.operator_requests.map(|sender| (sender, pending.callback_epoch.clone()));
+                        Some((pending.operator_requests, pending.callback_epoch.clone()));
                     active = Some(ActivePrompt {
                         result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
                         reply: pending.reply, cancellation: pending.forced,

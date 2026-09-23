@@ -146,6 +146,17 @@ for line in sys.stdin:
             assert result == {'action': 'cancel'}, result
             send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
             continue
+        if text == 'permission-epoch':
+            params = {'toolCall': {'toolCallId': 'policy-tool', 'title': 'Run tests'},
+                      'options': [{'optionId': 'allow-opaque', 'name': 'Allow once', 'kind': 'allow_once'},
+                                  {'optionId': 'deny-opaque', 'name': 'Deny once', 'kind': 'reject_once'}]}
+            active = callback('session/request_permission', params)
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            late = callback('session/request_permission', params)
+            with open('permission-epoch.json.tmp', 'w') as result_file:
+                json.dump({'active': active, 'late': late}, result_file)
+            os.replace('permission-epoch.json.tmp', 'permission-epoch.json')
+            continue
         if text == 'operator-roundtrip':
             serial = 9007199254740992
             assert callback('cursor/ask_question', {'questions': []}, error=True)['code'] == -32601

@@ -1057,6 +1057,8 @@ original peer RPC ID privately; clients echo a generated public token. Stale,
 duplicate, expired, and invalid option/answer submissions are rejected. A waiting interaction pauses
 stall detection only until its deadline. Disconnect, cancellation, completion,
 and restart clear the live responder; operators must wait for a fresh request.
+Automatic `allow_once` and `deny` permission decisions require the same active
+turn and are cancelled when a peer asks after its prompt has completed.
 Callback arrivals and closures publish updated snapshots without waiting for
 the next tracker poll.
 An un-routed form request receives an ACP `cancel` response so a direct client

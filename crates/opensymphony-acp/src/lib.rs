@@ -1205,6 +1205,25 @@ async fn run_connection(
                                     return responder.respond_with_result(response);
                                 }
                             };
+                            let route = operator_router.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            // An automatic allow/deny is still a callback decision and
+                            // must obey the same active-turn epoch as routed requests.
+                            // The prompt response revokes this epoch in ordered dispatch
+                            // before an adjacent late callback can run.
+                            let (sender, epoch) = match route {
+                                Some((sender, epoch)) if !epoch.is_cancelled() => (sender, epoch),
+                                _ => {
+                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
+                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                                    if !output.admit(frame, &limits) {
+                                        resource_failure.store(true, Ordering::Release);
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::internal_error());
+                                    }
+                                    return responder.respond_with_result(response);
+                                }
+                            };
                             if let Some(answer) = operator::automatic_answer(permission_policy, &interaction) {
                                 let response = Ok(operator::response_for(&interaction, answer));
                                 let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
@@ -1234,19 +1253,7 @@ async fn run_connection(
                                     return responder.respond_with_result(response);
                                 }
                             };
-                            let route = operator_router.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                            if let Some((sender, epoch)) = route {
-                                if epoch.is_cancelled() {
-                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
-                                    let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
-                                    let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
-                                    if !output.admit(frame, &limits) {
-                                        resource_failure.store(true, Ordering::Release);
-                                        fatal.cancel();
-                                        return Err(agent_client_protocol::Error::internal_error());
-                                    }
-                                    return responder.respond_with_result(response);
-                                }
+                            if let Some(sender) = sender {
                                 let (reply, receive) = oneshot::channel();
                                 if sender.try_send(AcpOperatorEvent::Opened(Box::new(AcpOperatorRequest { interaction: interaction.clone(), reply }))).is_ok() {
                                     let callback_output = callback_output.clone();
@@ -1511,6 +1518,10 @@ async fn run_connection(
                     && let Err(error) = service_sender.begin_turn(one_turn_epoch.clone(), limits.setup_timeout).await {
                     phase_error = Some(error);
                     return Err(agent_client_protocol::Error::internal_error());
+                }
+                if driver.is_none() {
+                    *operator_router.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((None, one_turn_epoch.clone()));
                 }
                 if driver.is_some()
                     && let Err(error) = service_sender.end_turn(limits.setup_timeout).await {

@@ -54,7 +54,7 @@ pub enum AcpOperatorEvent {
 }
 
 pub(super) type OperatorRouter =
-    Arc<Mutex<Option<(mpsc::Sender<AcpOperatorEvent>, CancellationToken)>>>;
+    Arc<Mutex<Option<(Option<mpsc::Sender<AcpOperatorEvent>>, CancellationToken)>>>;
 
 fn bounded(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
