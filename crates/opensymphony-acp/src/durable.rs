@@ -77,12 +77,62 @@ impl Drop for Durability {
 }
 
 impl Durability {
+    pub(super) fn process_is_absent(&self) -> bool {
+        #[cfg(unix)]
+        {
+            verify_prior_process(self.state().process).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows owner-death recovery relies on closing the JobObject;
+            // that assumption does not prove a live owner's failed stop.
+            self.state().process == AcpProcessState::Stopped
+        }
+    }
+
     /// Zero generation is the trusted host's request to claim the latest record.
     /// A nonzero generation requires an exact match before reserving its successor.
     pub(super) async fn open(
         manager: WorkspaceManager,
         workspace: WorkspaceHandle,
         identity: AcpSessionIdentity,
+    ) -> Result<Self, DurabilityError> {
+        Self::claim(manager, workspace, identity, true, None).await
+    }
+
+    pub(super) async fn open_bound_parent(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+        expected_session_id: String,
+    ) -> Result<Self, DurabilityError> {
+        Self::claim(
+            manager,
+            workspace,
+            identity,
+            true,
+            Some(expected_session_id),
+        )
+        .await
+    }
+
+    pub(super) async fn retire_persisted(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+    ) -> Result<(), DurabilityError> {
+        // The claim verifies both the exclusive owner lock and process absence;
+        // reserve no launch, so a cleanup crash cannot leave LaunchPending behind.
+        let _guard = Self::claim(manager, workspace, identity, false, None).await?;
+        Ok(())
+    }
+
+    async fn claim(
+        manager: WorkspaceManager,
+        workspace: WorkspaceHandle,
+        identity: AcpSessionIdentity,
+        reserve_launch: bool,
+        expected_session_id: Option<String>,
     ) -> Result<Self, DurabilityError> {
         validate_identity(&identity)?;
         let issue = manager
@@ -149,8 +199,10 @@ impl Durability {
                     },
                     session_id: None,
                     initialization: Value::Null,
+                    model_selection: false,
                     status: AcpSessionStatus::Ready,
                     stop_reason: None,
+                    workflow_prompt_seeded: Some(false),
                     recovery: AcpRecovery::Fresh,
                     owner_id: String::new(),
                     process: AcpProcessState::Stopped,
@@ -163,9 +215,32 @@ impl Durability {
         {
             return Err(DurabilityError::Binding("issue"));
         }
-        if let Some(run) = manager.load_run_manifest(&workspace).await? {
+        let run = if reserve_launch {
+            manager.load_run_manifest(&workspace).await?
+        } else {
+            None
+        };
+        if expected_session_id.is_some() && run.is_none() {
+            return Err(DurabilityError::Binding("parent run"));
+        }
+        if let Some(run) = run {
             if run.run_id != identity.run_id || run.attempt != identity.attempt {
                 return Err(DurabilityError::Binding("run identity"));
+            }
+            if let Some(expected) = expected_session_id.as_deref()
+                && run
+                    .parent_runtime_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.conversation_binding.as_deref())
+                    != Some(expected)
+            {
+                return Err(DurabilityError::Binding("parent conversation"));
+            }
+            if let Some(envelope) = run.parent_runtime_envelope {
+                if envelope.harness != "acp" || envelope.workspace_path != identity.workspace_path {
+                    return Err(DurabilityError::Binding("parent runtime envelope"));
+                }
+                manifest.parent_runtime_envelope = Some(envelope);
             }
             if let Some(envelope) = run.runtime_envelope {
                 if envelope.harness != "acp"
@@ -183,7 +258,21 @@ impl Durability {
             .acp
             .as_mut()
             .ok_or(DurabilityError::NativeManifest)?;
-        validate_binding(&state.identity, &identity)?;
+        if let Some(expected) = expected_session_id.as_deref() {
+            if state.session_id.as_deref() != Some(expected)
+                || manifest.conversation_id.as_str() != expected
+                || manifest
+                    .parent_runtime_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.conversation_binding.as_deref())
+                    != Some(expected)
+            {
+                return Err(DurabilityError::Binding("parent conversation"));
+            }
+            validate_static_binding(&state.identity, &identity)?;
+        } else {
+            validate_binding(&state.identity, &identity)?;
+        }
         if state.harness != "acp"
             || manifest.conversation_id != state.session_id.as_deref().unwrap_or_default()
         {
@@ -196,18 +285,39 @@ impl Durability {
             return Err(DurabilityError::Uncertain);
         }
         verify_prior_process(state.process)?;
+        // Migrate before a new run clears the old terminal status and stop reason.
+        if state.workflow_prompt_seeded.is_none() {
+            state.workflow_prompt_seeded = Some(state.workflow_prompt_seeded());
+        }
         if identity.generation != 0 && identity.generation != state.identity.generation {
             return Err(DurabilityError::Binding("connection generation"));
         }
-        state.identity.generation = state
-            .identity
-            .generation
-            .checked_add(1)
-            .ok_or(DurabilityError::Binding("connection generation exhausted"))?;
-        state.identity.run_id = identity.run_id;
-        state.identity.attempt = identity.attempt;
-        state.owner_id = uuid::Uuid::new_v4().to_string();
-        state.process = AcpProcessState::LaunchPending;
+        if reserve_launch {
+            if expected_session_id.is_some() {
+                // The old owner has stopped and the parent conversation is
+                // bound to this run. Rotate only the process/grant revision;
+                // preserve the session ID for negotiated load/resume.
+                state.identity.profile_fingerprint = identity.profile_fingerprint.clone();
+                state.identity.credential_scope = identity.credential_scope.clone();
+            }
+            let new_run = state.identity.run_id != identity.run_id
+                || state.identity.attempt != identity.attempt;
+            state.identity.generation = state
+                .identity
+                .generation
+                .checked_add(1)
+                .ok_or(DurabilityError::Binding("connection generation exhausted"))?;
+            state.identity.run_id = identity.run_id;
+            state.identity.attempt = identity.attempt;
+            if new_run {
+                state.status = AcpSessionStatus::Ready;
+                state.stop_reason = None;
+            }
+            state.owner_id = uuid::Uuid::new_v4().to_string();
+            state.process = AcpProcessState::LaunchPending;
+        } else {
+            state.process = AcpProcessState::Stopped;
+        }
         let durable = Self {
             manager,
             workspace,
@@ -255,6 +365,11 @@ impl Durability {
             envelope.run_id.clone_from(&self.state().identity.run_id);
             envelope.attempt = self.state().identity.attempt;
         }
+        if let Some(envelope) = &mut manifest.parent_runtime_envelope {
+            envelope.conversation_binding = self.state().session_id.clone();
+            envelope.run_id.clone_from(&self.state().identity.run_id);
+            envelope.attempt = self.state().identity.attempt;
+        }
         self.manager
             .write_json_artifact_atomically(&self.workspace, &path, &manifest)
             .await?;
@@ -288,6 +403,7 @@ impl Durability {
         &mut self,
         session_id: String,
         initialization: Value,
+        model_selection: bool,
         recovery: AcpRecovery,
         reset_reason: Option<String>,
     ) -> Result<(), DurabilityError> {
@@ -302,10 +418,26 @@ impl Durability {
         let state = self.state_mut();
         state.session_id = Some(session_id);
         state.initialization = initialization;
+        state.model_selection = model_selection;
         state.recovery = recovery;
+        if recovery == AcpRecovery::Fresh {
+            state.workflow_prompt_seeded = Some(false);
+        }
         state.status = AcpSessionStatus::Ready;
         state.stop_reason = None;
         self.persist().await
+    }
+
+    pub(super) async fn set_model_selection(
+        &mut self,
+        model_selection: bool,
+    ) -> Result<(), DurabilityError> {
+        self.require_quiescent()?;
+        if self.state().model_selection != model_selection {
+            self.state_mut().model_selection = model_selection;
+            self.persist().await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn submitted(
@@ -332,6 +464,9 @@ impl Durability {
         self.manifest.fresh_conversation = false;
         let state = self.state_mut();
         state.status = AcpSessionStatus::Finished;
+        if stop_reason != "cancelled_before_prompt" {
+            state.workflow_prompt_seeded = Some(true);
+        }
         state.stop_reason = Some(stop_reason);
         self.persist().await
     }
@@ -407,8 +542,8 @@ fn validate_binding(
     stored: &AcpSessionIdentity,
     requested: &AcpSessionIdentity,
 ) -> Result<(), DurabilityError> {
+    validate_static_binding(stored, requested)?;
     for (matches, name) in [
-        (stored.profile_id == requested.profile_id, "profile"),
         (
             stored.profile_fingerprint == requested.profile_fingerprint,
             "profile fingerprint",
@@ -417,6 +552,20 @@ fn validate_binding(
             stored.credential_scope == requested.credential_scope,
             "credential scope",
         ),
+    ] {
+        if !matches {
+            return Err(DurabilityError::Binding(name));
+        }
+    }
+    Ok(())
+}
+
+fn validate_static_binding(
+    stored: &AcpSessionIdentity,
+    requested: &AcpSessionIdentity,
+) -> Result<(), DurabilityError> {
+    for (matches, name) in [
+        (stored.profile_id == requested.profile_id, "profile"),
         (
             stored.workspace_path == requested.workspace_path,
             "workspace",
@@ -538,10 +687,152 @@ mod tests {
         drop(second);
         let mut stale = input;
         stale.generation = 1;
-        assert!(matches!(
-            Durability::open(manager(root.path()), workspace, stale).await,
-            Err(DurabilityError::Binding("connection generation"))
-        ));
+        let stale_result = Durability::open(manager(root.path()), workspace, stale)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(
+                stale_result,
+                Err(DurabilityError::Binding("connection generation"))
+            ),
+            "{stale_result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_claim_clears_prior_terminal_outcome_before_launch() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let first_identity = identity(&workspace);
+        let mut first = Durability::open(
+            manager(root.path()),
+            workspace.clone(),
+            first_identity.clone(),
+        )
+        .await
+        .expect("first owner");
+        first
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready first turn");
+        first
+            .submitted(first_identity.run_id, first_identity.attempt)
+            .await
+            .expect("submit first turn");
+        first
+            .finished("end_turn".into())
+            .await
+            .expect("first terminal outcome");
+        first.stopped().await.expect("quiescent");
+        drop(first);
+
+        let mut next_identity = identity(&workspace);
+        next_identity.run_id = "run-2".into();
+        next_identity.attempt = 2;
+        let next = Durability::open(manager(root.path()), workspace.clone(), next_identity)
+            .await
+            .expect("next owner");
+        assert_eq!(next.state().process, AcpProcessState::LaunchPending);
+        assert_eq!(next.state().status, AcpSessionStatus::Ready);
+        assert_eq!(next.state().stop_reason, None);
+        assert!(next.state().workflow_prompt_seeded());
+        let persisted = manager(root.path())
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("manifest")
+            .acp
+            .expect("ACP state");
+        assert_eq!(persisted.identity.run_id, "run-2");
+        assert_eq!(persisted.identity.attempt, 2);
+        assert_eq!(persisted.status, AcpSessionStatus::Ready);
+        assert_eq!(persisted.stop_reason, None);
+        assert_eq!(persisted.workflow_prompt_seeded, Some(true));
+    }
+
+    #[tokio::test]
+    async fn legacy_finished_prompt_is_migrated_before_new_run_claim() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let input = identity(&workspace);
+        let mut first = Durability::open(manager(root.path()), workspace.clone(), input.clone())
+            .await
+            .expect("first owner");
+        first
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready");
+        first
+            .submitted(input.run_id, input.attempt)
+            .await
+            .expect("submitted");
+        first.finished("end_turn".into()).await.expect("finished");
+        first.stopped().await.expect("stopped");
+        drop(first);
+        let mut legacy = manager(root.path())
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("conversation");
+        legacy.acp.as_mut().expect("ACP").workflow_prompt_seeded = None;
+        manager(root.path())
+            .write_json_artifact_atomically(
+                &workspace,
+                &workspace.conversation_manifest_path(),
+                &legacy,
+            )
+            .await
+            .expect("legacy manifest");
+
+        let mut next = identity(&workspace);
+        next.run_id = "run-2".into();
+        next.attempt = 2;
+        let claimed = Durability::open(manager(root.path()), workspace, next)
+            .await
+            .expect("second owner");
+        assert_eq!(claimed.state().status, AcpSessionStatus::Ready);
+        assert_eq!(claimed.state().workflow_prompt_seeded, Some(true));
+    }
+
+    #[tokio::test]
+    async fn pre_prompt_cancellation_does_not_seed_workflow_context() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let input = identity(&workspace);
+        let mut owner = Durability::open(manager(root.path()), workspace, input.clone())
+            .await
+            .expect("owner");
+        owner
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready");
+        owner
+            .submitted(input.run_id, input.attempt)
+            .await
+            .expect("submitted");
+        owner
+            .finished("cancelled_before_prompt".into())
+            .await
+            .expect("cancelled");
+        assert!(!owner.state().workflow_prompt_seeded());
     }
 
     #[test]
@@ -570,10 +861,13 @@ mod tests {
             .expect("owner");
         assert_eq!(owner.state().process, AcpProcessState::LaunchPending);
         drop(owner);
-        assert!(matches!(
-            Durability::open(manager(root.path()), workspace, input).await,
-            Err(DurabilityError::ProcessUncertain)
-        ));
+        let result = Durability::open(manager(root.path()), workspace, input)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(result, Err(DurabilityError::ProcessUncertain)),
+            "{result:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -618,6 +912,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                false,
                 AcpRecovery::Fresh,
                 None,
             )
@@ -642,6 +937,7 @@ mod tests {
                 .ready(
                     "replacement".into(),
                     Value::Null,
+                    false,
                     AcpRecovery::Fresh,
                     Some("reset".into())
                 )
@@ -681,6 +977,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                false,
                 AcpRecovery::RestoredLoad,
                 None,
             )
@@ -696,9 +993,13 @@ mod tests {
             .expect("terminal evidence");
         restored.stopped().await.expect("supervised process reaped");
         drop(restored);
-        let mut reopened = Durability::open(manager(root.path()), workspace.clone(), input.clone())
-            .await
-            .expect("finished recovery");
+        let mut finished_identity = input.clone();
+        finished_identity.run_id = "run-3".into();
+        finished_identity.attempt = 3;
+        let mut reopened =
+            Durability::open(manager(root.path()), workspace.clone(), finished_identity)
+                .await
+                .expect("finished recovery");
         assert_eq!(reopened.state().status, AcpSessionStatus::Finished);
         assert_eq!(reopened.state().stop_reason.as_deref(), Some("end_turn"));
         reopened.uncertain().await.expect("explicit risk fence");
@@ -815,7 +1116,13 @@ mod tests {
         let before = std::fs::read(workspace.conversation_manifest_path()).expect("reservation");
         assert!(matches!(
             owner
-                .ready("bad\nsession".into(), Value::Null, AcpRecovery::Fresh, None)
+                .ready(
+                    "bad\nsession".into(),
+                    Value::Null,
+                    false,
+                    AcpRecovery::Fresh,
+                    None
+                )
                 .await,
             Err(DurabilityError::InvalidMetadata)
         ));
@@ -824,6 +1131,7 @@ mod tests {
                 .ready(
                     "session".into(),
                     json!("x".repeat(MAX_MANIFEST_BYTES)),
+                    false,
                     AcpRecovery::Fresh,
                     None
                 )

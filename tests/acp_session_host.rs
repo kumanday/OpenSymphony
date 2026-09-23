@@ -6,6 +6,47 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn retained_source_history_distinguishes_old_eviction_from_current_loss() {
+    let source = |sequence| SessionEvent::Source {
+        generation: 7,
+        run_id: "current-run".into(),
+        replay: false,
+        frame: SourceFrame {
+            sequence,
+            direction: "incoming".into(),
+            observed_at: chrono::Utc::now(),
+            payload: serde_json::json!({"method":"session/update"}),
+        },
+    };
+    let history = SourceHistory {
+        events: (129..=140).map(source).collect(),
+        truncated: true,
+        latest_cursor: Some((7, 140)),
+    };
+    assert!(
+        history.covers_since((7, 128)),
+        "ancient eviction is harmless"
+    );
+    assert!(
+        history.covers_since((7, 130)),
+        "processed frames may remain in history"
+    );
+    assert!(
+        !history.covers_since((7, 127)),
+        "missing current frame must fence"
+    );
+
+    let oversized_tail = SourceHistory {
+        latest_cursor: Some((7, 141)),
+        ..history
+    };
+    assert!(
+        !oversized_tail.covers_since((7, 140)),
+        "a dropped oversized frame must fence even without later frames"
+    );
+}
+
 async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
     let root = root.canonicalize().expect("root");
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {
@@ -73,6 +114,7 @@ async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
             ..ClientLimits::default()
         },
         require_persistence: false,
+        expected_session_id: None,
     }
 }
 async fn retire(handle: &SessionHandle) {
@@ -86,6 +128,26 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
         .prompt(run.into(), 1, text.into(), CancellationToken::new())
         .await
         .expect("prompt")
+}
+
+#[tokio::test]
+async fn future_stop_reason_is_durable_terminal_evidence() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-1", "none").await)
+        .await
+        .expect("open");
+    let report = prompt(&handle, "future-run", "unknown-stop").await;
+    assert_eq!(report.stop_reason, "future_stop_reason");
+    assert!(!report.succeeded());
+    let snapshot = handle.inspect().await.expect("inspect");
+    assert_eq!(snapshot.state.status, AcpSessionStatus::Finished);
+    assert_eq!(
+        snapshot.state.stop_reason.as_deref(),
+        Some("future_stop_reason")
+    );
+    retire(&handle).await;
 }
 
 #[tokio::test]
@@ -169,6 +231,57 @@ async fn concurrent_sessions_busy_prompt_fence_and_cancellation_keep_other_comma
     );
     retire(&a).await;
     retire(&b).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retained_turn_without_client_deadline_survives_five_minutes_of_virtual_time() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "LONG", "none").await;
+    request.limits.prompt_timeout = Duration::ZERO;
+    let handle = host.open(request).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let turn = tokio::spawn({
+        let handle = handle.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            handle
+                .prompt("long-run".into(), 1, "hang".into(), cancellation)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle
+                .source_history()
+                .events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::Source { frame, .. } if frame.payload["method"] == "session/prompt"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("prompt submitted");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(
+        !turn.is_finished(),
+        "retained turn must not hit a fixed client deadline"
+    );
+    tokio::time::resume();
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), turn)
+            .await
+            .expect("cancelled turn completes")
+            .expect("turn task")
+            .expect("cancelled prompt")
+            .cancellation_acknowledged
+    );
+    retire(&handle).await;
 }
 
 #[test]

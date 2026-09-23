@@ -519,6 +519,9 @@ pub enum RuntimeStreamState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_capability:
+        Option<Box<crate::opensymphony_gateway_schema::capability::HarnessRunCapability>>,
     pub conversation_id: ConversationId,
     pub server_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1162,6 +1165,7 @@ mod tests {
 
     fn conversation() -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(ConversationId::new("conv_1")),
             server_base_url: None,
             transport_target: None,

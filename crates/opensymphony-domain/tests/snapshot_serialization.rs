@@ -41,6 +41,7 @@ fn fixture() -> SnapshotEnvelope {
                 total_cost_micros: 250_000,
             },
             issues: vec![IssueSnapshot {
+                harness_capability: None,
                 identifier: "COE-269".to_owned(),
                 title: "Control-plane API and snapshot store".to_owned(),
                 tracker_state: "In Progress".to_owned(),

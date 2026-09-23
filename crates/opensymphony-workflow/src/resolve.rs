@@ -366,13 +366,13 @@ fn resolve_routing<E: Environment>(
 }
 
 fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
-    if value == "acp" || HarnessKind::parse(value).is_some() {
+    if HarnessKind::parse(value).is_some() {
         Ok(())
     } else {
         Err(WorkflowConfigError::InvalidField {
             field,
             message: format!(
-                "must be one of `{}`, `acp`",
+                "must be one of `{}`",
                 HarnessKind::supported_names().join("`, `")
             ),
         })

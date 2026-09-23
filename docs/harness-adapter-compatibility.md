@@ -114,15 +114,48 @@ Known gaps:
 - Hosted execution would need an isolation model before remote support is
   advertised.
 
-## ACP stdio client foundation
+## ACP stdio runtime
 
-`opensymphony_acp::run_turn` implements an SDK-backed ACP v1 stdio session through
-setup, one text prompt, ordered updates, cancellation, and supervised teardown.
-The executable client includes typed launch profiles and host-owned callbacks.
-ACP is not yet advertised as a runnable scheduler harness; production routing,
-negotiated public capabilities and operator
-responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+`acp` is an available local stdio adapter. `opensymphony run` selects a configured
+`routing.harness_profile` and executes through the retained `SessionHost` with
+ACP v1 JSON-RPC 2.0, UTF-8 and LF framing. Start, continuation, cancellation,
+recovery and terminal cleanup use the shared worker and scheduler boundaries.
 
+`/api/v1/capabilities` separates generic adapter support (`harnesses`) from
+configured profile preflight readiness (`harness_profiles`). Preflight checks
+profile shape, executable availability and environment references, including
+checkout-only credential exclusions. Executable lookup honors profile-mapped
+`PATH` values and requires absolute search directories
+because no issue cwd is available during preflight. It does not
+claim agent authentication or session negotiation succeeded. Run details expose
+`harness_capability` only after negotiation, including the selected profile,
+load/resume and history replay support. These DTOs are shared by Rust and
+TypeScript. Recovery projects the persisted negotiation without launching a peer
+or replaying a completed prompt. They contain no commands, arguments, resolved
+credentials or source
+protocol payloads. Runtime activity carries context occupancy and optional usage
+reported with prompt responses separately, with summaries for structural updates
+such as plans. Response observations retain reported counters without inferring
+delta accumulation into native aggregate totals. Missing counters stay absent
+and duplicate or load-replayed observations are suppressed. Numeric usage counters retain their meaning through source redaction;
+credential fields remain redacted.
+Unrecognized `session/update` variants still emit a bounded, redacted generic
+activity record so an active peer remains visible to the scheduler. Subscriber
+lag replays the retained source tail when it covers the current run's processed
+cursor; only a current gap fences automatic completion.
+Filesystem callback requests and responses emit constant-summary, payload-free
+activity records, keeping stall detection current without exposing file data.
+An unfamiliar bounded prompt stop reason remains terminal peer evidence while
+only recognized successful reasons complete the worker successfully. The
+known-secret matcher redacts that reason before it reaches durable state or a
+worker summary, independently of source-frame redaction.
+
+Operator responses, writer transfer and IDE presentation follow the
+[ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission
+requests produce a scheduler-visible waiting event and receive the protocol
+cancellation response until operator handling is available. Unknown stop reasons
+and refusals stop automatic retry; uncertain submission or cancellation fences
+cleanup until execution risk is reconciled.
 
 | ACP client surface | Implemented contract |
 | --- | --- |
@@ -133,6 +166,19 @@ responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-packa
 | MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
 | Permission | Cancelled response until operator routing is implemented. |
 | Interactive auth and elicitation | Not advertised. |
+
+The production worker enables file and terminal callbacks for its verified
+issue workspace and supplies the active scoped memory grant as a host-owned MCP
+attachment. An explicit `routing.model` selection takes precedence over the
+profile's `session.model` and is validated against negotiated options before
+prompt submission. Run capability projection reports the negotiated selectable
+model option, while profile preflight uses the same resolved worker environment
+as launch. ACP terminal callback create and completion responses project bounded
+command receipts for parent final verification; only successful create responses
+and observed exit codes count. Running `terminal/output` polls and successful
+responses with a null exit status emit constant-summary, payload-free activity
+so long commands keep the scheduler idle deadline current without exposing
+terminal output or recording a completion receipt.
 
 Windows callback operations pin path ancestors through use and reject reparse
 points, including junctions, through no-follow handles. Callback epoch handoff shares the setup

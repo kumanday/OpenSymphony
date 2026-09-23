@@ -53,6 +53,55 @@ fn limits() -> ClientLimits {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn acp_turn_without_client_deadline_survives_five_minutes_of_virtual_time() {
+    let root = tempfile::tempdir().expect("temp");
+    let (tx, mut updates) = tokio::sync::mpsc::channel(4);
+    let cancellation = CancellationToken::new();
+    let turn = tokio::spawn({
+        let cancellation = cancellation.clone();
+        let profile = profile("cancel");
+        let context = context(root.path());
+        async move {
+            run_turn(
+                &profile,
+                context,
+                "long running work".into(),
+                cancellation,
+                Some(tx),
+                ClientLimits {
+                    prompt_timeout: Duration::ZERO,
+                    ..limits()
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), updates.recv())
+        .await
+        .expect("peer update before clock advance")
+        .expect("peer update");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(
+        !turn.is_finished(),
+        "active turn must not hit a fixed client deadline"
+    );
+    tokio::time::resume();
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("cancelled turn completes")
+        .expect("turn task")
+        .expect("launch");
+    assert!(
+        result
+            .outcome
+            .expect("cancel acknowledged")
+            .cancellation_acknowledged
+    );
+}
+
 #[tokio::test]
 async fn acp_process_completes_ordered_callbacks_and_redacts_evidence() {
     let root = tempfile::tempdir().expect("temp");
@@ -430,6 +479,30 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         resolved.config.routing.harness_profile.as_deref(),
         Some("fake")
     );
+    let selected_model = WorkflowDefinition::parse(&source.replace(
+        "harness_profile: fake",
+        "harness_profile: fake\n  model: workflow-model",
+    ))
+    .expect("model selection");
+    assert_eq!(
+        selected_model
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow model")
+            .config
+            .routing
+            .model
+            .as_deref(),
+        Some("workflow-model")
+    );
+    let mut model_environment = env.clone();
+    model_environment.insert("OPENSYMPHONY_MODEL".into(), "environment-model".into());
+    let model = selected_model
+        .resolve(Path::new("/repo"), &model_environment)
+        .expect("environment model")
+        .config
+        .routing;
+    assert_eq!(model.model.as_deref(), Some("environment-model"));
+    assert!(model.model_from_env);
     for harness in ["acp", "openhands_agent_server", "codex_app_server"] {
         let mut overrides = env.clone();
         overrides.insert("OPENSYMPHONY_HARNESS".into(), harness.into());
@@ -462,7 +535,7 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         ("harness: acp", "harness: openhands_agent_server"),
         (
             "harness_profile: fake",
-            "harness_profile: fake\n  model: some-model",
+            "harness_profile: fake\n  model_profile: openhands-profile",
         ),
     ] {
         let workflow =
@@ -789,6 +862,35 @@ async fn acp_configured_environment_targets_follow_platform_name_rules() {
 }
 
 #[tokio::test]
+async fn acp_profile_cannot_map_unscoped_credential_into_memory_scope() {
+    let root = tempfile::tempdir().expect("temp");
+    for (target, source) in [
+        ("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "AGENT_TOKEN"),
+        ("AGENT_TOKEN", "OPENSYMPHONY_MEMORY_TOKEN"),
+    ] {
+        let mut config = profile("complete");
+        config.env_refs.insert(target.into(), source.into());
+        let mut launch = context(root.path());
+        launch
+            .environment
+            .insert("AGENT_TOKEN".into(), "unscoped-bearer".into());
+        launch
+            .environment
+            .insert("OPENSYMPHONY_MEMORY_TOKEN".into(), "managed-grant".into());
+        let result = run_turn(
+            &config,
+            launch,
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            limits(),
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::InvalidConfiguration(_))));
+    }
+}
+
+#[tokio::test]
 async fn acp_live_input_queue_bounds_bytes_and_releases_dispatched_charges() {
     let root = tempfile::tempdir().expect("temp");
     for (mode, succeeds) in [("evidence_flood", false), ("paced_queue", true)] {
@@ -1066,6 +1168,21 @@ async fn acp_env_reference_sources_are_retained_only_when_explicitly_targeted() 
                 .succeeded()
         );
     }
+}
+
+#[test]
+fn acp_adapter_exposes_execution_and_explicit_gaps() {
+    use opensymphony::opensymphony_domain::HarnessAdapter;
+    let adapter = opensymphony::opensymphony_acp::AcpAdapter;
+    assert_eq!(adapter.harness_kind(), "acp");
+    let capability = adapter.capabilities();
+    assert!(
+        capability.available
+            && capability.actions.start_run
+            && capability.cancellation.acknowledges_cancel
+    );
+    assert!(!capability.actions.approve && !capability.pause_resume.resume);
+    assert!(!capability.feature_gaps.is_empty());
 }
 
 fn services_profile(mode: &str) -> AcpProfile {

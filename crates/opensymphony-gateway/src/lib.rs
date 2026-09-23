@@ -299,6 +299,8 @@ pub struct GatewayState {
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     pub memory_config: Option<MemoryConfig>,
+    pub harness_profiles:
+        Arc<Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>>,
     /// Normalized (trimmed, lowercased) workflow active-state names. The task
     /// graph consults these to decide whether an Idle issue is actually
     /// dispatchable — the authoritative signal the scheduler itself uses —
@@ -328,6 +330,7 @@ impl Clone for GatewayState {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
@@ -597,6 +600,8 @@ pub struct GatewayServer {
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
+    harness_profiles:
+        Arc<Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>>,
     active_states: Arc<HashSet<String>>,
     terminal_states: Arc<HashSet<String>>,
     comparison_bases: WorkspaceComparisonBases,
@@ -613,6 +618,7 @@ impl Clone for GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             comparison_bases: self.comparison_bases.clone(),
@@ -671,6 +677,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            harness_profiles: Arc::new(Vec::new()),
             active_states: Arc::new(HashSet::new()),
             terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
@@ -692,11 +699,20 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            harness_profiles: Arc::new(Vec::new()),
             active_states: Arc::new(HashSet::new()),
             terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
+    }
+
+    pub fn with_harness_profiles(
+        mut self,
+        profiles: Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>,
+    ) -> Self {
+        self.harness_profiles = Arc::new(profiles);
+        self
     }
 
     /// Enable serving of the built web client from the given directory.
@@ -782,6 +798,7 @@ impl GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
@@ -1030,6 +1047,7 @@ fn recent_event_kind_to_snapshot_event_kind(
 
 fn build_capabilities() -> GatewayCapabilities {
     GatewayCapabilities {
+        harness_profiles: Vec::new(),
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").into(),
         supported_api_versions: vec!["1.0.0".into()],
@@ -1056,6 +1074,7 @@ fn build_capabilities() -> GatewayCapabilities {
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
             HarnessCapability::codex_app_server_local(),
+            HarnessCapability::acp(),
             HarnessCapability::rust_native_future(),
         ],
         features: vec![
@@ -1156,8 +1175,10 @@ fn build_capabilities() -> GatewayCapabilities {
     }
 }
 
-async fn capabilities() -> Json<GatewayCapabilities> {
-    Json(build_capabilities())
+async fn capabilities(State(state): State<GatewayState>) -> Json<GatewayCapabilities> {
+    let mut capabilities = build_capabilities();
+    capabilities.harness_profiles = state.harness_profiles.as_ref().clone();
+    Json(capabilities)
 }
 
 pub fn model_settings_for_llm_api_key(llm_api_key: Option<&str>) -> ModelSettingsResponse {
@@ -4615,6 +4636,7 @@ async fn get_run_detail(
             return (
                 StatusCode::NOT_FOUND,
                 Json(RunDetail {
+                    harness_capability: None,
                     schema_version: SchemaVersion::v1(),
                     run_id,
                     issue_id: String::new(),
@@ -4762,6 +4784,7 @@ async fn get_run_detail(
     (
         StatusCode::OK,
         Json(RunDetail {
+            harness_capability: issue.harness_capability.clone(),
             schema_version: SchemaVersion::v1(),
             run_id: issue.identifier.clone(),
             issue_id: issue.identifier.clone(),
@@ -4798,7 +4821,9 @@ async fn get_run_detail(
             // A Codex run carries a Codex thread id; report the harness so the
             // desktop opens the codex:// deep link instead of the OpenHands
             // workspace-copy fallback.
-            harness_type: if issue.codex_thread_id.is_some() {
+            harness_type: if issue.transport_target.as_deref() == Some("acp") {
+                Some("acp".into())
+            } else if issue.codex_thread_id.is_some() {
                 Some("codex_app_server".into())
             } else {
                 issue.server_base_url.as_ref().map(|_| "openhands".into())
@@ -6485,6 +6510,7 @@ exit 2
         flags: TestIssueFlags,
     ) -> ControlPlaneIssueSnapshot {
         ControlPlaneIssueSnapshot {
+            harness_capability: None,
             identifier: "COE-414".into(),
             title: "Test issue".into(),
             tracker_state: "in_progress".into(),

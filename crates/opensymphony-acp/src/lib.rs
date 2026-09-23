@@ -45,11 +45,21 @@ use tracing::instrument::WithSubscriber;
 mod atomic_file;
 mod durable;
 mod host;
+mod projection;
 mod services;
 mod session_config;
 pub use host::*;
+pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
+
+pub(crate) fn launch_profile_fingerprint(
+    profile: &AcpProfile,
+    services: &HostServices,
+    limits: &ClientLimits,
+) -> Result<String, String> {
+    durable::profile_fingerprint(profile, services, limits).map_err(|error| error.to_string())
+}
 #[cfg(windows)]
 mod windows_path;
 #[cfg(windows)]
@@ -68,7 +78,9 @@ pub const SDK_VERSION: &str = "2.2.0";
 pub const SCHEMA_VERSION: &str = "1.9.1";
 
 /// Host-owned launch inputs; neither cwd nor resolved secrets belong in a profile.
-/// `workspace_key` is the scheduler's sanitized checkout key (including repository suffixes).
+/// `workspace_key` is the sanitized final directory name; `workspace_root` is its
+/// immediate parent. The retained host also verifies the manager-owned handle,
+/// repository binding and generation for nested or generation-suffixed workspaces.
 pub struct LaunchContext {
     pub workspace_root: PathBuf,
     pub workspace_key: String,
@@ -98,6 +110,8 @@ pub struct ClientLimits {
     pub pending_callbacks: usize,
     pub callback_timeout: Duration,
     pub setup_timeout: Duration,
+    /// Client wall-clock bound for a turn. Zero disables this bound, allowing
+    /// the orchestrator's activity-based stall and abort policy to own liveness.
     pub prompt_timeout: Duration,
     pub cancel_timeout: Duration,
     pub reap_timeout: Duration,
@@ -124,6 +138,14 @@ impl Default for ClientLimits {
             cancel_timeout: Duration::from_secs(10),
             reap_timeout: Duration::from_secs(5),
         }
+    }
+}
+
+async fn wait_prompt_timeout(timeout: Duration) {
+    if timeout.is_zero() {
+        std::future::pending().await
+    } else {
+        tokio::time::sleep(timeout).await;
     }
 }
 
@@ -371,6 +393,18 @@ struct Capture {
 }
 
 impl Capture {
+    fn redact_stop_reason(&self, reason: &str) -> String {
+        let redacted = self.secrets.redact(reason);
+        if redacted.len() > 1024 || redacted.chars().any(char::is_control) {
+            // Replacement can expand a bounded peer value beyond durable
+            // metadata limits. Preserve terminal evidence without persisting
+            // a partial replacement or protocol control text.
+            "[redacted]".into()
+        } else {
+            redacted
+        }
+    }
+
     fn redact(&self, value: &mut Value, diagnostic: bool) {
         match value {
             Value::String(s) => {
@@ -409,6 +443,27 @@ impl Capture {
             _ => {}
         }
     }
+    fn redact_frame(&self, payload: &mut Value, diagnostic: bool) {
+        // These numeric counters are protocol usage, not credential tokens.
+        // The exception is limited to a recognized prompt response shape;
+        // arbitrary token-named fields and configuration still use full redaction.
+        let usage = projection::reported_turn_usage(payload);
+        self.redact(payload, diagnostic);
+        if let Some(usage) = usage
+            && let Some(target) = payload
+                .pointer_mut("/result/usage")
+                .and_then(Value::as_object_mut)
+        {
+            for (name, value) in usage {
+                if !self.secrets.contains_secret(&name)
+                    && !self.secrets.contains_secret(&value.to_string())
+                {
+                    target.insert(name, value);
+                }
+            }
+        }
+    }
+
     fn record(&mut self, direction: &str, mut payload: Value) {
         self.sequence += 1;
         if payload.get("method").and_then(Value::as_str) == Some("fs/write_text_file")
@@ -442,7 +497,7 @@ impl Capture {
         }
         if let Some(publisher) = &self.publisher {
             let mut source = payload.clone();
-            self.redact(&mut source, false);
+            self.redact_frame(&mut source, false);
             publisher.publish(SourceFrame {
                 sequence: self.sequence,
                 direction: direction.into(),
@@ -454,7 +509,7 @@ impl Capture {
             self.truncated = true;
             return;
         }
-        self.redact(&mut payload, true);
+        self.redact_frame(&mut payload, true);
         self.retain_frame(SourceFrame {
             sequence: self.sequence,
             direction: direction.into(),
@@ -478,6 +533,21 @@ impl Capture {
 }
 
 type SharedCapture = Arc<Mutex<Capture>>;
+
+/// Memory access belongs to the run-scoped worker overlay, never the daemon's
+/// ambient environment. This also protects terminal callbacks, which inherit
+/// the validated ACP child environment.
+pub(crate) fn is_reserved_memory_environment_name(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        name.to_ascii_uppercase()
+            .starts_with("OPENSYMPHONY_MEMORY_")
+    }
+    #[cfg(not(windows))]
+    {
+        name.starts_with("OPENSYMPHONY_MEMORY_")
+    }
+}
 
 fn capture(capture: &SharedCapture, direction: &str, payload: Value) {
     capture
@@ -542,7 +612,6 @@ fn validate_launch(
         || !(1..=128).contains(&limits.pending_callbacks)
         || [
             limits.setup_timeout,
-            limits.prompt_timeout,
             limits.cancel_timeout,
             limits.reap_timeout,
             limits.callback_timeout,
@@ -603,6 +672,13 @@ fn validate_launch(
         .collect::<BTreeMap<_, _>>();
     let mut secrets = Vec::new();
     for (target, source) in &profile.env_refs {
+        if is_reserved_memory_environment_name(target)
+            || is_reserved_memory_environment_name(source)
+        {
+            return Err(ClientError::InvalidConfiguration(
+                "env_refs cannot remap a run-scoped memory grant".into(),
+            ));
+        }
         if excluded(target) || excluded(source) {
             return Err(ClientError::InvalidConfiguration(
                 "env_refs cannot expose excluded checkout credentials".into(),
@@ -1298,7 +1374,7 @@ async fn run_connection(
                         }
                     }
                 },
-                _ = tokio::time::sleep(limits.prompt_timeout) => {
+                _ = wait_prompt_timeout(limits.prompt_timeout) => {
                     phase_error = Some(ClientError::PromptTimeout);
                     return Err(agent_client_protocol::Error::internal_error());
                 }
@@ -1306,7 +1382,9 @@ async fn run_connection(
                 phase_error = rpc_failure("session/prompt", error, &capture_state, submitted.load(Ordering::Acquire));
             })?;
             let stop_reason = result.get("stopReason").and_then(Value::as_str)
-                .ok_or_else(agent_client_protocol::Error::invalid_params)?.to_owned();
+                .ok_or_else(agent_client_protocol::Error::invalid_params)?;
+            let stop_reason = capture_state.lock().unwrap_or_else(|error| error.into_inner())
+                .redact_stop_reason(stop_reason);
             if let Err(error) = service_sender.end_turn(limits.setup_timeout).await {
                 phase_error = Some(error);
                 return Err(agent_client_protocol::Error::internal_error());
@@ -1444,6 +1522,17 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, max: usize) -> String
     }
 }
 
+/// ACP protocol and execution remain behind this adapter boundary.
+pub struct AcpAdapter;
+impl crate::opensymphony_domain::HarnessAdapter for AcpAdapter {
+    fn harness_kind(&self) -> &'static str {
+        "acp"
+    }
+    fn capabilities(&self) -> crate::opensymphony_gateway_schema::capability::HarnessCapability {
+        crate::opensymphony_gateway_schema::capability::HarnessCapability::acp()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1465,6 +1554,23 @@ mod tests {
         assert_eq!(result.len(), 16 * 1024 * 1024 + "[redacted]".len());
         assert!(SecretRedactor::new(vec!["x".repeat(1024 * 1024 + 1)]).is_err());
         assert!(SecretRedactor::new((0..1025).map(|i| format!("secret-{i}")).collect()).is_err());
+    }
+
+    #[test]
+    fn terminal_reason_redaction_remains_durable_when_replacement_expands() {
+        let capture = Capture {
+            frames: Vec::new(),
+            sequence: 0,
+            truncated: false,
+            max: 0,
+            bytes: 0,
+            max_bytes: 0,
+            publisher: None,
+            secrets: SecretRedactor::new(vec!["x".into()]).expect("matcher"),
+        };
+        assert_eq!(capture.redact_stop_reason("vendor_x"), "vendor_[redacted]");
+        assert_eq!(capture.redact_stop_reason(&"x".repeat(1024)), "[redacted]");
+        assert_eq!(capture.redact_stop_reason("vendor\nreason"), "[redacted]");
     }
 
     #[test]
@@ -1532,6 +1638,35 @@ mod tests {
                 ..limits
             }
         ));
+    }
+
+    #[test]
+    fn usage_counters_survive_frame_redaction_without_exempting_credentials() {
+        let capture = Capture {
+            frames: Vec::new(),
+            sequence: 0,
+            truncated: false,
+            max: 10,
+            bytes: 0,
+            max_bytes: 1024,
+            publisher: None,
+            secrets: SecretRedactor::new(vec!["987654".into()]).expect("matcher"),
+        };
+        for diagnostic in [false, true] {
+            let mut response = json!({"id": 1, "result": {"stopReason": "end_turn", "usage": {
+                "inputTokens": 4, "outputTokens": 2, "thoughtTokens": 987654,
+                "cachedReadTokens": "credential", "apiToken": "secret"
+            }}});
+            capture.redact_frame(&mut response, diagnostic);
+            assert_eq!(response["result"]["usage"]["inputTokens"], 4);
+            assert_eq!(response["result"]["usage"]["outputTokens"], 2);
+            for key in ["thoughtTokens", "cachedReadTokens", "apiToken"] {
+                assert_eq!(response["result"]["usage"][key], "[redacted]");
+            }
+            let mut unrelated = json!({"method": "_vendor/private", "params": {"inputTokens": 4}});
+            capture.redact_frame(&mut unrelated, diagnostic);
+            assert_eq!(unrelated["params"]["inputTokens"], "[redacted]");
+        }
     }
 
     #[test]

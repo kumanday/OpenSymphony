@@ -317,12 +317,14 @@ the command whose result should count as final verification. At completion the
 runtime requires a regular file no larger than 64 KiB, checks its run, attempt,
 hierarchy generation, command root, and exact repository commit map, and
 reopens the checkouts at those commits. The selected command must match start
-and completion events observed from the Codex or OpenHands runtime. Those
+and completion events observed from the Codex, OpenHands, or ACP runtime. Those
 events, rather than fields supplied by the parent, provide the orchestrator's
-deadline, working directory, exit result, bounded output, foreground-process
-ownership, and teardown receipt. A reported working directory maps only to the
-parent root or an exact verified checkout path, and the selector must name that
-observed root. Missing, stale, unobserved, late, or still-active evidence
+deadline, working directory, exit result, foreground-process ownership, and
+teardown receipt. Codex and OpenHands command events also supply bounded output;
+ACP terminal callbacks supply the observed command and exit code. A reported
+working directory maps only to the parent root or an exact verified checkout path,
+and the selector must name that observed root. Missing, stale, unobserved, late,
+or still-active evidence
 converts a generic successful harness turn into a failed parent attempt.
 An acknowledged interrupt counts as foreground-process teardown only after the
 harness has reconciled a stopped state. It does not release separately named
@@ -925,6 +927,10 @@ rejected before spawn. Profiles cannot supply a cwd. The host supplies an explic
 environment with scoped memory grants and checkout credential exclusions. The
 client clears ambient inheritance and rejects profile references that would
 reintroduce excluded credentials.
+Production routing removes ambient and workflow `OPENSYMPHONY_MEMORY_*` values
+before adding the current run's managed grant. Profile environment mappings
+cannot read from or write into this reserved namespace; terminal callbacks inherit the same
+scoped environment as the ACP child.
 
 `SessionHost` retains one supervised process/connection per issue. A stable
 `.opensymphony/acp-owner.lock` prevents competing owners without creating another
@@ -951,6 +957,10 @@ tagged as replay through the load response; subsequent live frames keep their
 own sequence and run binding. A finished nonpersistent session resets to a fresh
 agent with an explicit full-context requirement. Its old transcript remains
 inspection evidence. Unsupported required persistence rejects setup.
+When a configured harness changes after a crash, startup checks the same
+run/envelope-bound pending OpenHands ownership artifact used by workspace
+recovery before deciding whether the OpenHands client and local server are
+needed. Incompatible pending ownership is not promoted.
 
 On Unix, owner takeover also requires the prior process group to be absent.
 A crash between the durable launch reservation and process-ID checkpoint leaves
@@ -958,6 +968,42 @@ a conservative launch-uncertain fence. Windows uses the existing kill-on-close
 Job Object. Retirement waits for active work and leases to clear, then terminates
 and reaps owned process resources before acknowledging cleanup. Trusted local
 host execution provides filesystem/process access; it is not a sandbox.
+
+The production worker binds the selected ACP profile and effective model,
+including a profile default when there is no routing override, to `run.json`
+when preparing the run. It also persists `harness-route.json` before ACP owner
+reservation as the latest workspace route snapshot. Recovery takes its route
+from the matching run record; an older run record can use the workspace snapshot
+only when the durable ACP identity names that same run and attempt. A claim
+for a different run clears the prior turn's terminal status and stop reason
+in the synced claim checkpoint. Durable workflow-prompt seeding is tracked
+separately from that transient status, including for legacy manifests migrated
+before the claim clears their terminal state. The worker keeps the current run's
+verified terminal or parent runtime envelope and binds its ACP session without
+copying an older retained owner's hierarchy or checkout snapshot. A profile
+switch, a change to effective profile configuration or credential scope, or a
+harness switch retires the old owner
+before archiving its manifest. Interrupted or failed launches execute
+`after_run` only when the harness is known stopped. Uncertain work retains its
+workspace, memory grant and cleanup fence. A known-finished session whose host
+is gone can retire through the same exclusive lock and process-absence check
+without launching another peer.
+For an authoritative parent continuation, a process or grant revision archives
+the retired owner while preserving the bound manifest and session ID. The
+replacement claims the new fingerprint under the exclusive owner lock and
+restores that ID through negotiated load or resume. Unsupported or missing
+restoration fails before prompt submission; a scope change requiring a fresh
+conversation is rejected before retirement.
+An ACP session that has not seeded its workflow prompt receives the full
+workflow prompt on the next attempt, even when `session/load` restores the peer
+session ID. A seeded session receives continuation guidance after a new run
+resets its transient status to `ready`. Production ACP turns use configured
+scheduler stall detection and cancellation rather than a fixed client prompt
+deadline; direct client callers can set a bound or use zero to disable it.
+When cancellation closes the owner before prompt submission, scheduler stop
+observation checks the durable record for the exact owner, generation, run and
+workspace. Only a stopped process with `ready` or `finished` state counts as
+stopped; submitted or uncertain state keeps cleanup fenced.
 
 
 Filesystem callbacks require absolute paths in the bound workspace and reject

@@ -197,6 +197,7 @@ mod tests {
 
     fn sample_conversation(fresh_conversation: bool) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(super::ConversationId::new("conv_260")),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),

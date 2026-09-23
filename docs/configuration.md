@@ -965,8 +965,28 @@ launch. These host API settings are independent of profile protocol capabilities
 `SessionLaunch::require_persistence` rejects peers without negotiated load/resume
 support. The caller supplies a non-secret credential/grant revision and the
 scheduler's exact workspace identity; changes prevent session reuse.
-Production `opensymphony run` routing is a separate implementation slice; an ACP
-route currently fails scheduler capability selection before worker dispatch.
+Production `opensymphony run` selects this profile through the scheduler and
+persists the effective route under the workspace metadata directory. Recovery
+uses the route bound to the prepared `run.json` record even when the current
+default profile differs. If `routing.model` is unset, preparation resolves the
+profile's `session.model` into that route and the runtime envelope. Older run
+records may use the workspace route snapshot
+only when the durable ACP identity matches their run ID and attempt. A finished ACP
+turn reconciles a recovered run only when its durable run ID and attempt match;
+a newly prepared attempt submits its own prompt. ACP-only execution
+does not start an OpenHands server. Production retains at most 128 ACP sessions;
+the scheduler continues to enforce `agent.max_concurrent_agents`. Select a
+different profile only after the retained session can retire safely; uncertain
+submissions remain fenced. The same profile ID starts a fresh owner when its
+effective command, arguments, session options, host services, or resolved
+credential scope changes.
+Credential source names follow the host platform's environment-name rules;
+Windows aliases differing only in ASCII case resolve to the same credential
+when checking whether a retained owner must rotate.
+Managed memory run ID, attempt and project-set values are part of that scope;
+when they change, the retained ACP process is replaced so its environment
+matches the active run. ACP memory prompt guidance uses the scoped worker
+overlay that supplies the managed memory attachment.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated
@@ -979,6 +999,11 @@ distinct under host name rules; Windows rejects case-equivalent `env_refs` targe
 before launch, while POSIX preserves case-distinct variables.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
+Profile preflight evaluates the resolved worker environment, including Linear
+client-credentials overrides, with the same precedence used at launch. References
+to checkout-only credential variables are unavailable to ACP profiles, including
+when an ambient value happens to exist. Unrelated non-UTF-8 ambient variables
+are ignored when assembling the launch environment.
 The selected authentication method must be an advertised agent-handled method;
 terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.
@@ -1008,8 +1033,12 @@ model/mode prerequisites apply before dependent options, using the refreshed
 advertisements after each response. Legacy
 `session/set_mode` is used when the peer supplies modes without config options.
 Unsupported explicit choices fail setup. Boolean options and legacy experimental
-model RPCs are not advertised. The generic routing model override remains
-unavailable for ACP; use the profile's explicit session selection.
+model RPCs are not advertised. `routing.model` and its configured environment override select an ACP model ID
+and take precedence over `session.model`. OpenHands `routing.model_profile` is
+rejected for ACP.
+The negotiated run capability reports model selection when the bound ACP
+session advertises a selectable model option; it updates if that capability
+changes before a retained prompt.
 
 The host supplies `LaunchContext.services: HostServices`. Its `read_files`,
 `write_files`, and `terminals` flags default to false and enable only the matching

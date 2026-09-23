@@ -186,6 +186,9 @@ for line in sys.stdin:
             send({'method': 'session/update', 'params': {'sessionId': session, 'update': {'sessionUpdate': 'config_option_update', 'configOptions': config()}}})
         if text == "crash":
             sys.exit(7)
+        if text == "unknown-stop":
+            send({"id": message["id"], "result": {"stopReason": "future_stop_reason", "usage": {"inputTokens": 3}}})
+            continue
         if text == "hang":
             pending = message["id"]
             update("pending")

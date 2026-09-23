@@ -2056,6 +2056,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
     };
     let issues = vec![
         IssueSnapshot {
+            harness_capability: None,
             identifier: "COE-255".to_owned(),
             title: "Observability and FrankenTUI".to_owned(),
             tracker_state: "In Progress".to_owned(),
@@ -2108,6 +2109,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             operator: None,
         },
         IssueSnapshot {
+            harness_capability: None,
             identifier: "OSYM-401".to_owned(),
             title: "Control-plane API and snapshot store".to_owned(),
             tracker_state: "Done".to_owned(),
@@ -2156,6 +2158,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             operator: None,
         },
         IssueSnapshot {
+            harness_capability: None,
             identifier: "OSYM-402".to_owned(),
             title: "FrankenTUI operator client".to_owned(),
             tracker_state: "In Progress".to_owned(),

@@ -28,6 +28,9 @@ pub enum RunLifecycleState {
 /// Run detail exposed by `/api/v1/runs/{run_id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_capability:
+        Option<crate::opensymphony_gateway_schema::capability::HarnessRunCapability>,
     pub schema_version: SchemaVersion,
     pub run_id: String,
     pub issue_id: String,

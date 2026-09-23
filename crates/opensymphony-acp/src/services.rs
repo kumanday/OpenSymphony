@@ -7,7 +7,9 @@ use crate::opensymphony_workspace::{
 };
 use agent_client_protocol::{
     Error, Responder,
-    schema::v1::{ClientCapabilities, FileSystemCapabilities, McpServer},
+    schema::v1::{
+        ClientCapabilities, FileSystemCapabilities, HttpHeader, McpServer, McpServerHttp,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,6 +37,17 @@ pub struct HostServices {
     pub mcp_servers: Vec<McpServer>,
 }
 impl HostServices {
+    pub fn attach_scoped_memory(&mut self, endpoint: &str, token: Option<&str>) {
+        let mut server = McpServerHttp::new("opensymphony-memory", endpoint);
+        if let Some(token) = token {
+            server = server.headers(vec![HttpHeader::new(
+                "Authorization",
+                format!("Bearer {token}"),
+            )]);
+        }
+        self.mcp_servers.push(McpServer::Http(server));
+    }
+
     pub(super) fn capabilities(&self) -> ClientCapabilities {
         ClientCapabilities::default()
             .fs(FileSystemCapabilities::default()

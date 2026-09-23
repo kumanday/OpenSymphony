@@ -4395,6 +4395,7 @@ mod tests {
                 },
                 issues: (0..issue_count)
                     .map(|index| IssueSnapshot {
+                        harness_capability: None,
                         identifier: format!("COE-{}", 255 + index),
                         title: format!("Issue {index}"),
                         tracker_state: "In Progress".to_owned(),

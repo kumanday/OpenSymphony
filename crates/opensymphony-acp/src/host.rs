@@ -43,6 +43,23 @@ impl Default for RetentionPolicy {
     }
 }
 
+/// Retire a durable, known-quiescent session after its original host is gone.
+/// The owner lock and prior process check must both succeed; this never launches
+/// a peer or resolves an ambiguous prompt by assuming its process exited.
+pub async fn retire_persisted_session(
+    manager: WorkspaceManager,
+    workspace: WorkspaceHandle,
+) -> Result<(), HostError> {
+    let state = manager
+        .load_conversation_manifest(&workspace)
+        .await
+        .map_err(|_| HostError::Persistence)?
+        .and_then(|manifest| manifest.acp)
+        .ok_or(HostError::NativeManifest)?;
+    Durability::retire_persisted(manager, workspace, state.identity).await?;
+    Ok(())
+}
+
 /// Host callers supply the scheduler's verified workspace and current credential/grant revision.
 pub struct SessionLaunch {
     pub manager: WorkspaceManager,
@@ -52,6 +69,9 @@ pub struct SessionLaunch {
     pub context: LaunchContext,
     pub limits: ClientLimits,
     pub require_persistence: bool,
+    /// A parent continuation may refresh its process credentials only while
+    /// retaining this already-authoritative ACP session binding.
+    pub expected_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -217,6 +237,47 @@ impl EventPublisher {
 pub struct SourceHistory {
     pub events: Vec<SessionEvent>,
     pub truncated: bool,
+    /// Latest published source cursor, including a frame too large to retain.
+    #[serde(default)]
+    pub latest_cursor: Option<(u64, u64)>,
+}
+impl SourceHistory {
+    /// A sticky historical eviction is harmless when every frame after this
+    /// run's processed cursor still appears in the retained contiguous tail.
+    pub fn covers_since(&self, cursor: (u64, u64)) -> bool {
+        let Some(latest) = self.latest_cursor else {
+            return true;
+        };
+        if latest.0 != cursor.0 {
+            return false;
+        }
+        if latest.1 <= cursor.1 {
+            return true;
+        }
+        let Some(mut expected) = cursor.1.checked_add(1) else {
+            return false;
+        };
+        for event in &self.events {
+            if let SessionEvent::Source {
+                generation, frame, ..
+            } = event
+                && *generation == cursor.0
+                && frame.sequence >= expected
+            {
+                if frame.sequence != expected {
+                    return false;
+                }
+                if expected == latest.1 {
+                    return true;
+                }
+                let Some(next) = expected.checked_add(1) else {
+                    return false;
+                };
+                expected = next;
+            }
+        }
+        false
+    }
 }
 struct EventHistory {
     events: VecDeque<(SessionEvent, usize)>,
@@ -224,9 +285,16 @@ struct EventHistory {
     max_bytes: usize,
     max_frames: usize,
     truncated: bool,
+    latest_cursor: Option<(u64, u64)>,
 }
 impl EventHistory {
     fn retain(&mut self, event: SessionEvent) -> bool {
+        if let SessionEvent::Source {
+            generation, frame, ..
+        } = &event
+        {
+            self.latest_cursor = Some((*generation, frame.sequence));
+        }
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
         if bytes > self.max_bytes {
             self.truncated = true;
@@ -277,6 +345,7 @@ impl SessionHandle {
                 .map(|(event, _)| event.clone())
                 .collect(),
             truncated: history.truncated,
+            latest_cursor: history.latest_cursor,
         }
     }
     pub async fn inspect(&self) -> Result<SessionSnapshot, HostError> {
@@ -427,6 +496,10 @@ impl SessionHost {
                         let _ = reply.send(result);
                     }
                     HostCommand::Open { mut launch, reply } => {
+                        if launch.expected_session_id.is_some() && !launch.require_persistence {
+                            let _ = reply.send(Err(HostError::PersistenceUnsupported));
+                            continue;
+                        }
                         let key = launch.workspace.issue_id().to_owned();
                         let fingerprint = profile_fingerprint(
                             &launch.profile,
@@ -438,10 +511,19 @@ impl SessionHost {
                             continue;
                         };
                         launch.identity.profile_fingerprint = fingerprint;
-                        if super::validate_launch(&launch.profile, &launch.context, &launch.limits)
-                            .is_err()
-                            || launch.context.issue_workspace != launch.identity.workspace_path
-                            || launch.context.workspace_key != launch.workspace.workspace_key()
+                        if let Err(error) =
+                            super::validate_launch(&launch.profile, &launch.context, &launch.limits)
+                        {
+                            let _ = reply.send(Err(HostError::Client(error.to_string())));
+                            continue;
+                        }
+                        if launch.context.issue_workspace != launch.identity.workspace_path
+                            || Some(launch.context.workspace_key.as_str())
+                                != launch
+                                    .workspace
+                                    .workspace_path()
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
                         {
                             let _ = reply.send(Err(HostError::IdentityMismatch));
                             continue;
@@ -517,14 +599,23 @@ async fn start(
     super::validate_launch(&launch.profile, &launch.context, &launch.limits)
         .map_err(|e| HostError::Client(e.to_string()))?;
     if launch.context.issue_workspace != launch.workspace.workspace_path()
-        || launch.context.workspace_key != launch.workspace.workspace_key()
+        || Some(launch.context.workspace_key.as_str())
+            != launch
+                .workspace
+                .workspace_path()
+                .file_name()
+                .and_then(|name| name.to_str())
         || launch.identity.workspace_path != launch.workspace.workspace_path()
     {
         return Err(HostError::IdentityMismatch);
     }
-    let durable = Durability::open(launch.manager, launch.workspace, launch.identity)
-        .await
-        .map_err(HostError::from)?;
+    let durable = if let Some(expected) = launch.expected_session_id {
+        Durability::open_bound_parent(launch.manager, launch.workspace, launch.identity, expected)
+            .await
+    } else {
+        Durability::open(launch.manager, launch.workspace, launch.identity).await
+    }
+    .map_err(HostError::from)?;
     let identity = durable.state().identity.clone();
     let (commands, receive) = mpsc::channel(16);
     let (events, _) = broadcast::channel(
@@ -539,6 +630,7 @@ async fn start(
         max_bytes: launch.limits.queued_bytes,
         max_frames: launch.limits.queued_frames,
         truncated: false,
+        latest_cursor: None,
     }));
     let mut handle = SessionHandle {
         owner_id: durable.state().owner_id.clone(),
@@ -588,16 +680,16 @@ async fn start(
         };
         // A failed connection cannot establish remote quiescence. A submitted marker
         // survives even if the outcome checkpoint fails, and prevents another prompt.
-        let checkpointed = if result
-            .as_ref()
-            .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none())
-            || matches!(
-                result,
-                Err(ClientError::InvalidConfiguration(_)
-                    | ClientError::InvalidWorkspace
-                    | ClientError::Launch(_)
-                    | ClientError::CancelledBeforePrompt)
-            ) {
+        let checkpointed = if result.as_ref().is_ok_and(|r| {
+            r.process_reaped
+                && (r.process_tree_signal_error.is_none() || driver.durable.process_is_absent())
+        }) || matches!(
+            result,
+            Err(ClientError::InvalidConfiguration(_)
+                | ClientError::InvalidWorkspace
+                | ClientError::Launch(_)
+                | ClientError::CancelledBeforePrompt)
+        ) {
             driver.durable.stopped().await.is_ok()
         } else {
             false
@@ -617,10 +709,7 @@ async fn start(
             && matches!(
                 driver.durable.state().status,
                 AcpSessionStatus::Ready | AcpSessionStatus::Finished
-            )
-            && result
-                .as_ref()
-                .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none());
+            );
         let mut ended_snapshot = driver.snapshot(false);
         ended_snapshot.live = false;
         ended_snapshot.retirement_eligible = false;
@@ -788,8 +877,18 @@ impl SessionDriver {
         } else {
             None
         };
+        let model_selection = configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .supports_model_selection();
         self.durable
-            .ready(session_id.0.to_string(), metadata, recovery, reset_reason)
+            .ready(
+                session_id.0.to_string(),
+                metadata,
+                model_selection,
+                recovery,
+                reset_reason,
+            )
             .await
             .map_err(|_| ClientError::Setup("durable session checkpoint failed".into()))?;
         self.publisher
@@ -821,6 +920,14 @@ impl SessionDriver {
                     if let Err(error) = result {
                         let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
                         return Err(error);
+                    }
+                    let model_selection = configuration
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .supports_model_selection();
+                    if self.durable.set_model_selection(model_selection).await.is_err() {
+                        let _ = pending.reply.send(Err(HostError::Persistence));
+                        return Err(ClientError::Setup("model capability checkpoint failed".into()));
                     }
                     if self.durable.submitted(pending.run_id.clone(), pending.attempt).await.is_err() {
                         let _ = pending.reply.send(Err(HostError::Persistence));
@@ -1010,26 +1117,22 @@ async fn prompt_rpc(
             connection.send_notification(CancelNotification::new(session_id.clone())).map_err(|_| ClientError::Protocol { submitted: true })?;
             tokio::time::timeout(limits.cancel_timeout, &mut response).await.map_err(|_| ClientError::CancelTimeout)?
         },
-        _ = tokio::time::sleep(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
+        _ = super::wait_prompt_timeout(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
     }.map_err(|error| super::rpc_failure("session/prompt", &error, &capture, true).unwrap_or(ClientError::Protocol { submitted: true }))?;
     let stop_reason = result
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
-        .filter(|reason| reason.len() <= 1024)
-        .ok_or(ClientError::Protocol { submitted: true })?
-        .to_owned();
-    // Unknown reasons do not establish the tested stop contract.
-    if ![
-        "end_turn",
-        "max_tokens",
-        "max_turn_requests",
-        "refusal",
-        "cancelled",
-    ]
-    .contains(&stop_reason.as_str())
-    {
-        return Err(ClientError::Protocol { submitted: true });
-    }
+        .filter(|reason| !reason.is_empty() && reason.len() <= 1024)
+        .ok_or(ClientError::Protocol { submitted: true })?;
+    // The captured response is redacted independently. The terminal report is
+    // also persisted and projected into scheduler status, so apply the same
+    // known-secret matcher before it crosses that boundary.
+    let stop_reason = capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .redact_stop_reason(stop_reason);
+    // A prompt response establishes delivery and a terminal peer observation.
+    // The worker decides which bounded reasons count as success or cancellation.
     services.end_turn(limits.setup_timeout).await?;
     Ok(TurnReport {
         cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",

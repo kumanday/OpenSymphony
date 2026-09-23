@@ -245,10 +245,12 @@ pub struct WorkerStartRequest {
     pub parent_repair: Option<ParentRepairAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessRouteDecision {
     pub task_type: String,
     pub harness_kind: String,
+    #[serde(default)]
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub reason: String,
@@ -264,8 +266,13 @@ impl HarnessRouteDecision {
             .unwrap_or("<default model profile>");
         let model = self.model.as_deref().unwrap_or("<harness default model>");
         let mode = if self.dry_run { "dry-run " } else { "" };
+        let harness_profile = self
+            .harness_profile
+            .as_deref()
+            .map(|profile| format!(" profile `{profile}`"))
+            .unwrap_or_default();
         format!(
-            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
+            "{mode}selected harness `{}`{harness_profile} with model `{model}` and profile `{profile}`: {}",
             self.harness_kind, self.reason
         )
     }
@@ -293,6 +300,10 @@ pub enum WorkerUpdate {
     ConversationMetadataUpdate {
         worker_id: WorkerId,
         conversation: ConversationMetadata,
+    },
+    HarnessCapabilityUpdate {
+        worker_id: WorkerId,
+        capability: crate::opensymphony_gateway_schema::capability::HarnessRunCapability,
     },
     TokenUsageUpdate {
         worker_id: WorkerId,
@@ -6838,6 +6849,24 @@ where
                         execution.update_conversation(conversation);
                     }
                 }
+                WorkerUpdate::HarnessCapabilityUpdate {
+                    worker_id,
+                    capability,
+                } => {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id)
+                        && let Some(mut conversation) = execution.conversation().cloned()
+                    {
+                        conversation.harness_capability = Some(Box::new(capability));
+                        execution.update_conversation(conversation);
+                    }
+                }
                 WorkerUpdate::TokenUsageUpdate {
                     worker_id,
                     input_tokens,
@@ -8902,6 +8931,7 @@ pub fn decide_issue_route(
     Ok(HarnessRouteDecision {
         task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
         harness_kind: config.routing.harness.clone(),
+        harness_profile: config.routing.harness_profile.clone(),
         model: config.routing.model.clone(),
         model_profile: config.routing.model_profile.clone(),
         reason: routing_reason(&config.routing),
@@ -9629,6 +9659,45 @@ fn observe_parent_command_event(
     let Some(payload) = payload else {
         return Ok(());
     };
+    if kind == "acp.command_started" {
+        if let (Some(command_id), Some(command)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload.get("command").and_then(serde_json::Value::as_str),
+        ) {
+            let cwd = payload.get("cwd").and_then(serde_json::Value::as_str);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                command,
+                root,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind == "acp.command_finished" {
+        if let (Some(command_id), Some(exit_code)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                None,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
     if kind == "codex.item/started" || kind == "codex.item/completed" {
         let params = payload.get("params").unwrap_or(payload);
         let item = params.get("item").unwrap_or(params);
@@ -9923,7 +9992,7 @@ mod tests {
     }
 
     #[test]
-    fn openhands_command_events_supply_exit_and_teardown_receipts() {
+    fn runtime_command_events_supply_parent_verification_receipts() {
         let mut controller = ParentIntegrationController::new(
             IssueId::new("parent-command-events").expect("parent id"),
             1,
@@ -10033,6 +10102,49 @@ mod tests {
                 && resource.status
                     == crate::opensymphony_orchestrator::ParentResourceStatus::Released
         }));
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(30),
+            Some("acp-1-2"),
+            Some("acp.command_started"),
+            Some(&serde_json::json!({"command_id":"terminal-1","command":"cargo test","cwd":"/parent/repositories/one"})),
+        )
+        .expect("ACP command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(40),
+            Some("acp-1-4"),
+            Some("acp.command_finished"),
+            Some(&serde_json::json!({"command_id":"terminal-1","exit_code":0})),
+        )
+        .expect("ACP command finish");
+        let evidence = crate::opensymphony_domain::ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".into(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".into(),
+            command_hash: crate::opensymphony_orchestrator::parent_command_identity("cargo test"),
+            root: "checkout-one".into(),
+            repair_repository_id: None,
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt_id, &evidence)
+                .expect("ACP verification evidence")
+        );
     }
 
     #[test]
