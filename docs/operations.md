@@ -1065,6 +1065,12 @@ the turn. A worker response that misses its acknowledgement deadline is fenced
 before a failure receipt and remains pending for another answer attempt. An
 answer already claimed by the ACP callback waits until the response frame is
 flushed to the peer's input sink; a write failure returns a failed receipt.
+The scheduler actor enqueues the response and applies the resulting receipt
+when its worker-completion message arrives, so a slow peer does not hold up
+tracker ticks, other issue updates, or shutdown. The terminal client waits for
+the authoritative receipt without a total HTTP timeout; it bounds connection
+establishment separately. Web and desktop invalidate an in-flight detail refresh
+when a local operator answer is accepted, keeping answered controls removed.
 The gateway also fences its queued command when its HTTP delivery deadline
 expires or the handler closes. Once the run loop claims a command, the gateway
 waits for the scheduler result instead of returning a premature timeout.

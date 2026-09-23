@@ -968,6 +968,17 @@ describe("OpenSymphonyApp mount", () => {
     await handle.refresh();
     expect((root.querySelector("[data-testid='operator-input'] input[value='west']") as HTMLInputElement).checked).toBe(true);
     expect((root.querySelector("[data-testid='operator-input'] input[value='north']") as HTMLInputElement).checked).toBe(true);
+    const originalValidation = transport.runValidation.bind(transport);
+    let releaseValidation = () => {};
+    const validationGate = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const validationRead = jest.spyOn(transport, "runValidation").mockImplementationOnce(async (runId) => {
+      await validationGate;
+      return originalValidation(runId);
+    });
+    const inputReadDuringRefresh = jest.spyOn(transport, "runInputs");
+    const refresh = (handle as unknown as { requestLiveRefresh(): Promise<void> }).requestLiveRefresh();
+    await flushUntil(() => validationRead.mock.calls.length > 0 && inputReadDuringRefresh.mock.calls.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // the refresh holds a stale input bundle
     (root.querySelector("[data-testid='operator-input-answer']") as HTMLButtonElement).click();
     await flushUntil(() => dispatch.mock.calls.length === 2);
     expect(dispatch.mock.calls[1]?.[0]).toMatchObject({ action_kind: "input_response",
@@ -975,6 +986,10 @@ describe("OpenSymphonyApp mount", () => {
         { question_id: "region", selected_option_ids: ["west"] },
         { question_id: "zone", selected_option_ids: ["north"] },
       ] } });
+    await flushUntil(() => root.querySelector("[data-testid='operator-input-answer']") === null);
+    releaseValidation();
+    await refresh;
+    expect(root.querySelector("[data-testid='operator-input-answer']")).toBeNull();
     await handle.destroy();
   });
 

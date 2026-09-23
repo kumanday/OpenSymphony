@@ -20,6 +20,11 @@ client infers completion, permission, or workspace confinement from absence.
 An ACP run may also publish ephemeral, bound operator interactions. The
 orchestrator actor owns pending decisions; gateway clients submit a response
 command, and the active ACP worker returns it to the original RPC responder.
+The actor validates and reserves a decision, then waits for the ACP input-sink
+flush in an owned task. A completion message returns to the actor to settle the
+pending decision and gateway receipt; other issues, callbacks, ticks, and
+shutdown remain responsive during that wait. An in-flight decision excludes a
+duplicate response.
 Worker callback reports wake that actor for immediate application and snapshot
 publication, independently of the tracker polling interval.
 The run loop selects an event before mutating scheduler state, so a newly

@@ -16,12 +16,12 @@ use crate::opensymphony_gateway_schema::approval::{
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
     IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
-    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, ParentRepairPolicy, RecoveredRun,
-    RecoveryRecord, ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry,
-    RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler,
-    SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    LeaseResource, NormalizedIssue, OperatorResponseDelivery, ParentEligibilityEvidence,
+    ParentRepairPolicy, RecoveredRun, RecoveryRecord, ReleaseReason, RequiredMergeCommit,
+    RetryAttempt, RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason,
+    RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
+    TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
     decide_issue_route,
@@ -937,6 +937,7 @@ struct FakeWorker {
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
     operator_responses: Vec<(WorkerId, String)>,
     operator_response_results: VecDeque<Result<bool, FakeError>>,
+    delayed_operator_receipt: Option<tokio::sync::oneshot::Receiver<Result<bool, String>>>,
 }
 
 impl WorkerBackend for FakeWorker {
@@ -979,6 +980,24 @@ impl WorkerBackend for FakeWorker {
         self.operator_response_results
             .pop_front()
             .unwrap_or(Ok(true))
+    }
+
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, Self::Error> {
+        let delivered = self
+            .respond_operator_request(worker_id, request_id, answer)
+            .await?;
+        if let Some(receipt) = self.delayed_operator_receipt.take() {
+            Ok(OperatorResponseDelivery::new(async move {
+                receipt.await.unwrap_or(Ok(false))
+            }))
+        } else {
+            Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
+        }
     }
 
     async fn abort_worker(
@@ -1129,6 +1148,104 @@ async fn delayed_operator_answer_and_closure_restart_stall_clock() {
         );
         assert!(scheduler.worker().aborted.is_empty());
     }
+}
+
+#[tokio::test]
+async fn pending_operator_flush_does_not_block_scheduler_or_duplicate_response() {
+    let now = Utc::now();
+    let issue_id = IssueId::new("operator-async").expect("issue id");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            issue_id.as_str(),
+            "COE-612",
+            "In Progress",
+            0,
+        )],
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.routing.harness = "acp".into();
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        config,
+    );
+    let observed_at = ts(now.timestamp_millis() as u64);
+    scheduler
+        .tick(observed_at)
+        .await
+        .expect("dispatch ACP worker");
+    let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+    let interaction = OperatorInteraction {
+        request_id: "delayed-flush".into(),
+        run_id: format!("run-{worker_id}"),
+        issue_id: issue_id.to_string(),
+        issue_identifier: "COE-612".into(),
+        session_id: "session".into(),
+        generation: 1,
+        rpc_id: "opaque-token".into(),
+        kind: OperatorInteractionKind::Permission,
+        title: "Permission".into(),
+        options: Vec::new(),
+        questions: Vec::new(),
+        plan: None,
+        requested_at: now,
+        expires_at: now + chrono::Duration::minutes(1),
+    };
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::OperatorRequest {
+            worker_id: worker_id.clone(),
+            interaction: interaction.clone(),
+        });
+    scheduler
+        .drain_worker_updates(observed_at)
+        .await
+        .expect("open request");
+    let (acknowledge, receipt) = tokio::sync::oneshot::channel();
+    scheduler.worker_mut().delayed_operator_receipt = Some(receipt);
+    let delivery = scheduler
+        .begin_operator_response(&interaction, OperatorAnswer::Cancel)
+        .await
+        .expect("enqueue response without awaiting flush");
+    assert!(
+        scheduler
+            .begin_operator_response(&interaction, OperatorAnswer::Cancel)
+            .await
+            .is_err(),
+        "in-flight answer excludes duplicates"
+    );
+    tokio::time::timeout(Duration::from_millis(250), scheduler.tick(observed_at))
+        .await
+        .expect("tracker tick remains responsive during ACP flush")
+        .expect("tracker tick");
+    assert_eq!(
+        scheduler.snapshot(observed_at).operator_interactions.len(),
+        1
+    );
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::OperatorClosed {
+            worker_id,
+            request_id: interaction.request_id.clone(),
+        });
+    scheduler
+        .drain_worker_updates(observed_at)
+        .await
+        .expect("worker closure");
+    acknowledge.send(Ok(true)).expect("flush acknowledgement");
+    scheduler
+        .complete_operator_response(&interaction, delivery.wait().await)
+        .expect("delivered response remains accepted after worker closure");
+    assert!(
+        scheduler
+            .snapshot(observed_at)
+            .operator_interactions
+            .is_empty()
+    );
 }
 
 #[tokio::test]

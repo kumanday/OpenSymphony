@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     time::Duration,
 };
 
@@ -739,6 +740,21 @@ pub trait WorkerBackend {
         Ok(false)
     }
 
+    /// Enqueue the answer without waiting for a potentially slow harness
+    /// transport. The scheduler actor completes the decision after the owned
+    /// delivery receipt resolves.
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, Self::Error> {
+        let delivered = self
+            .respond_operator_request(worker_id, request_id, answer)
+            .await?;
+        Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -757,6 +773,20 @@ pub trait WorkerBackend {
             )),
             timed_out: false,
         })
+    }
+}
+
+pub struct OperatorResponseDelivery(
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'static>>,
+);
+
+impl OperatorResponseDelivery {
+    pub fn new(wait: impl Future<Output = Result<bool, String>> + Send + 'static) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<bool, String> {
+        self.0.await
     }
 }
 
@@ -791,6 +821,7 @@ pub struct Scheduler<T, W, M> {
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     pending_operator: HashMap<String, (WorkerId, OperatorInteraction)>,
+    responding_operator: HashSet<String>,
     parent_issue_ids: HashSet<IssueId>,
     terminal_undispatched_parent_ids: HashSet<IssueId>,
     terminal_child_failure_ids: HashSet<IssueId>,
@@ -840,6 +871,7 @@ where
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
             pending_operator: HashMap::new(),
+            responding_operator: HashSet::new(),
             parent_issue_ids: HashSet::new(),
             terminal_undispatched_parent_ids: HashSet::new(),
             terminal_child_failure_ids: HashSet::new(),
@@ -2234,11 +2266,23 @@ where
         binding: &OperatorInteraction,
         answer: OperatorAnswer,
     ) -> Result<(), String> {
+        let delivery = self.begin_operator_response(binding, answer).await?;
+        self.complete_operator_response(binding, delivery.wait().await)
+    }
+
+    /// Reserve the live decision in actor-owned state and enqueue it. Waiting
+    /// for the harness flush happens outside the scheduler actor.
+    pub async fn begin_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, String> {
         let (worker_id, current) = self
             .pending_operator
             .get(&binding.request_id)
             .ok_or("operator request is stale or already answered")?;
         if current != binding
+            || self.responding_operator.contains(&binding.request_id)
             || current.expires_at <= Utc::now()
             || self
                 .worker_metadata
@@ -2254,19 +2298,48 @@ where
         }
         validate_operator_answer(current, &answer)?;
         let worker_id = worker_id.clone();
+        self.responding_operator.insert(binding.request_id.clone());
         match self
             .worker
-            .respond_operator_request(&worker_id, &binding.request_id, answer)
+            .begin_operator_response(&worker_id, &binding.request_id, answer)
             .await
         {
+            Ok(delivery) => Ok(delivery),
+            Err(error) => {
+                self.responding_operator.remove(&binding.request_id);
+                Err(format!("ACP response delivery failed: {error}"))
+            }
+        }
+    }
+
+    /// Apply a completed delivery only on the orchestrator actor. A retryable
+    /// failure leaves the still-live interaction pending for another answer.
+    pub fn complete_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        delivered: Result<bool, String>,
+    ) -> Result<(), String> {
+        if !self.responding_operator.remove(&binding.request_id) {
+            return Err("operator response attempt is stale".into());
+        }
+        let current = self.pending_operator.get(&binding.request_id).cloned();
+        match delivered {
             Ok(true) => {
-                self.pending_operator.remove(&binding.request_id);
-                self.observe_operator_resolution(&worker_id, binding);
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
                 Ok(())
             }
             Ok(false) => {
-                self.pending_operator.remove(&binding.request_id);
-                self.observe_operator_resolution(&worker_id, binding);
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
                 Err("ACP responder is no longer live".into())
             }
             Err(error) => Err(format!("ACP response delivery failed: {error}")),

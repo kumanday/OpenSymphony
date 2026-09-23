@@ -32,10 +32,10 @@ pub use parent_integration::{
     ParentTransition, ParentVerificationAttempt, parent_command_identity,
 };
 pub use scheduler::{
-    HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,
-    Scheduler, SchedulerConfig, SchedulerError, TrackerBackend, WorkerAbortReason, WorkerBackend,
-    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
-    WorkspaceBackend, decide_issue_route,
+    HarnessRouteDecision, OperatorResponseDelivery, RecoveredRun, RecoveryRecord,
+    RetryExhaustionRecord, RetryPendingRecord, Scheduler, SchedulerConfig, SchedulerError,
+    TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerInterruptAcknowledgement, WorkerLaunch,
+    WorkerStartRequest, WorkerUpdate, WorkspaceBackend, decide_issue_route,
 };
 pub use selection::{
     filter_issues_for_dispatch, issue_blocked_by_non_terminal_blockers,

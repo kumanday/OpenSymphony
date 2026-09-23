@@ -671,15 +671,21 @@ sink flushes its response frame, and sink failure fails every queued receipt.
 An early-finish native peer verifies that a completed prompt wakes the
 scheduler and clears its pending request even if callback closure loses the
 race, with tracker polling set to five minutes.
+The peer writes its round-trip completion marker by atomic replacement after
+closing the JSON file, so marker existence means the payload is readable.
 Gateway timeout and handler-drop tests verify that delayed commands cannot
 cross the scheduler application fence; a claimed command waits for its actual
 acknowledgement. A concurrent reservation test holds one ACP SDK enqueue while
 another callback responds and verifies output reservation and enqueue order.
 The run-loop wake regression queues a callback notification and an operator
 command during a selected tick, verifies that tick completes, and then drains
-both queued events. A malformed permission callback produces no waiting event;
+both queued events. A delayed ACP flush regression verifies that the actor can
+tick, process a worker wake, and receive shutdown while the acknowledgement is
+pending; the scheduler rejects a duplicate response and applies the eventual
+receipt through its own completion path. A malformed permission callback produces no waiting event;
 the routed production requests do. The shared web/desktop test retains two
-form selections after refresh and submits both answers.
+form selections after refresh, submits both answers, and drops a refresh that
+fetched the answered request before the successful submission.
 Native Unix tests replace the bound workspace root after service creation and
 verify file reads, atomic writes, and new terminal cwd remain on the original
 directory inode. They also swap a pinned terminal directory for an external

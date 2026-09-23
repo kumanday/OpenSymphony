@@ -2634,7 +2634,10 @@ impl OperatorApp {
                     .join("/api/v1/actions/dispatch")
                     .map_err(|e| e.to_string())?;
                 let receipt = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(35))
+                    // A claimed gateway command waits for the authoritative
+                    // ACP input-sink flush. A total HTTP timeout could report
+                    // failure while that answer is still being delivered.
+                    .connect_timeout(Duration::from_secs(10))
                     .build()
                     .map_err(|e| e.to_string())?
                     .post(url)

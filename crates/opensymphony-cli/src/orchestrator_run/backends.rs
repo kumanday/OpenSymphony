@@ -10341,6 +10341,19 @@ impl WorkerBackend for RuntimeWorkerBackend {
         request_id: &str,
         answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
     ) -> Result<bool, Self::Error> {
+        self.begin_operator_response(worker_id, request_id, answer)
+            .await?
+            .wait()
+            .await
+            .map_err(CliWorkerError::OperatorResponseRetryable)
+    }
+
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &crate::opensymphony_domain::WorkerId,
+        request_id: &str,
+        answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    ) -> Result<crate::opensymphony_orchestrator::OperatorResponseDelivery, Self::Error> {
         let sender = self
             .acp_active
             .lock()
@@ -10349,7 +10362,11 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .filter(|session| session.run_id == format!("run-{worker_id}"))
             .map(|session| session.operator_responses.clone());
         let Some(sender) = sender else {
-            return Ok(false);
+            return Ok(
+                crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async {
+                    Ok(false)
+                }),
+            );
         };
         let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
         let (acknowledgement, received) = oneshot::channel();
@@ -10365,19 +10382,29 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     "worker response queue is full".into(),
                 ));
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => return Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Ok(
+                    crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async {
+                        Ok(false)
+                    }),
+                );
+            }
         }
-        tokio::pin!(received);
-        match timeout(Duration::from_secs(5), &mut received).await {
-            Ok(result) => Ok(result.unwrap_or(false)),
-            Err(_) if delivery.cancel() => Err(CliWorkerError::OperatorResponseRetryable(
-                "worker did not consume the queued answer before its acknowledgement deadline"
-                    .into(),
-            )),
-            // Delivery already crossed the atomic fence. Wait for its real
-            // acknowledgement instead of publishing a false failure receipt.
-            Err(_) => Ok(received.await.unwrap_or(false)),
-        }
+        Ok(
+            crate::opensymphony_orchestrator::OperatorResponseDelivery::new(async move {
+                tokio::pin!(received);
+                match timeout(Duration::from_secs(5), &mut received).await {
+                Ok(result) => Ok(result.unwrap_or(false)),
+                Err(_) if delivery.cancel() => Err(
+                    "worker did not consume the queued answer before its acknowledgement deadline"
+                        .into(),
+                ),
+                // Delivery already crossed the atomic fence. Wait for its real
+                // acknowledgement instead of publishing a false failure receipt.
+                Err(_) => Ok(received.await.unwrap_or(false)),
+            }
+            }),
+        )
     }
 
     async fn abort_worker(

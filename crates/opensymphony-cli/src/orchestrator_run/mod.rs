@@ -35,8 +35,8 @@ use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_memory::MemoryVisibility;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
-    IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
-    TrackerBackend, WorkerBackend, WorkspaceBackend,
+    IssueStateCategory, OperatorResponseDelivery, OrchestratorSnapshot, Scheduler, SchedulerConfig,
+    SchedulerError, TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
@@ -74,6 +74,31 @@ enum RunWake {
     OperatorCommand(Box<crate::opensymphony_gateway::OperatorCommand>),
     OperatorUpdate,
     TrackerTick,
+}
+
+struct OperatorDeliveryCompleted {
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    delivered: Result<bool, String>,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+fn spawn_operator_delivery_completion(
+    delivery: OperatorResponseDelivery,
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    delivered_tx: tokio::sync::mpsc::Sender<OperatorDeliveryCompleted>,
+    notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let completed = OperatorDeliveryCompleted {
+            interaction,
+            delivered: delivery.wait().await,
+            reply,
+        };
+        if delivered_tx.send(completed).await.is_ok() {
+            notify.notify_one();
+        }
+    })
 }
 
 async fn start_shutdown_listener() -> tokio::task::JoinHandle<io::Result<()>> {
@@ -1261,6 +1286,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         None
     };
     let (operator_commands_tx, mut operator_commands_rx) = tokio::sync::mpsc::channel(64);
+    let (operator_deliveries_tx, mut operator_deliveries_rx) = tokio::sync::mpsc::channel(64);
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
             .with_operator_commands(operator_commands_tx)
@@ -1359,23 +1385,36 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                         .send(Err("operator response delivery timed out".into()));
                     continue;
                 }
-                let result = scheduler
-                    .respond_operator_request(&command.interaction, command.answer)
-                    .await;
-                let _ = command.reply.send(result);
-                let snapshot = scheduler.snapshot(now_timestamp());
-                store
-                    .publish(map_snapshot(
-                        &snapshot,
-                        runtime.workflow.config.workspace.root.as_path(),
-                        &terminal_state_set(&runtime.workflow),
-                        current_agent_server_status(&mut supervisor, agent_server_base_url),
-                        current_memory_server_status(memory_server.as_ref()),
-                        &recent_events,
-                    ))
-                    .await;
+                let crate::opensymphony_gateway::OperatorCommand {
+                    interaction,
+                    answer,
+                    reply,
+                    ..
+                } = *command;
+                match scheduler
+                    .begin_operator_response(&interaction, answer)
+                    .await
+                {
+                    Ok(delivery) => {
+                        spawn_operator_delivery_completion(
+                            delivery,
+                            interaction,
+                            reply,
+                            operator_deliveries_tx.clone(),
+                            operator_update_notify.clone(),
+                        );
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             RunWake::OperatorUpdate => {
+                while let Ok(completed) = operator_deliveries_rx.try_recv() {
+                    let result = scheduler
+                        .complete_operator_response(&completed.interaction, completed.delivered);
+                    let _ = completed.reply.send(result);
+                }
                 let observed_at = now_timestamp();
                 let snapshot = match scheduler.drain_worker_updates(observed_at).await {
                     Ok(snapshot) => snapshot,
@@ -2170,6 +2209,109 @@ pub(super) fn now_timestamp() -> TimestampMs {
 mod tests {
     use super::*;
     use crate::opensymphony_memory::MemoryError;
+
+    #[tokio::test]
+    async fn pending_operator_flush_allows_worker_wake_and_shutdown() {
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(1);
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let now = Utc::now();
+        let interaction = OperatorInteraction {
+            request_id: "delayed-flush".into(),
+            run_id: "run-worker".into(),
+            issue_id: "issue".into(),
+            issue_identifier: "COE-612".into(),
+            session_id: "session".into(),
+            generation: 1,
+            rpc_id: "opaque-token".into(),
+            kind: OperatorInteractionKind::Permission,
+            title: "Permission".into(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        let (acknowledge, acknowledgement) = tokio::sync::oneshot::channel();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let delivery = OperatorResponseDelivery::new(async move {
+            acknowledgement.await.expect("worker flush acknowledgement")
+        });
+        let delivery_task = spawn_operator_delivery_completion(
+            delivery,
+            interaction.clone(),
+            reply,
+            delivered_tx,
+            notify.clone(),
+        );
+        notify.notify_one(); // an unrelated worker update arrives during the flush
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("worker wake remains responsive"),
+            RunWake::OperatorUpdate
+        ));
+        assert!(delivered_rx.try_recv().is_err());
+        shutdown_tx.send(()).expect("signal shutdown");
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("shutdown remains responsive"),
+            RunWake::Shutdown
+        ));
+        acknowledge.send(Ok(true)).expect("release flush");
+        delivery_task.await.expect("delivery completion task");
+        let completed = delivered_rx.recv().await.expect("actor completion message");
+        assert_eq!(completed.interaction, interaction);
+        assert_eq!(completed.delivered, Ok(true));
+        completed.reply.send(Ok(())).expect("gateway receipt");
+        received
+            .await
+            .expect("authoritative receipt")
+            .expect("accepted");
+        server_task.abort();
+    }
 
     #[tokio::test]
     async fn selected_tracker_tick_completes_before_queued_operator_wakes() {

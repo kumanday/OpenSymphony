@@ -2543,6 +2543,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       const receipt = await (this.transport.dispatchAction?.(action) ?? unsupportedAction(actionKind));
       this.state.lastActionReceipt = receipt;
       if (receipt.status === "accepted") {
+        // A live refresh may have fetched this interaction before the answer
+        // completed. Invalidate that in-flight bundle before it can restore
+        // stale controls over the accepted local state.
+        this.interactionEpoch += 1;
         this.state.runApprovals = this.state.runApprovals?.filter((item) => item.operator_interaction?.request_id !== interaction.request_id) ?? null;
         this.state.runInputs = this.state.runInputs?.filter((item) => item.request_id !== interaction.request_id) ?? null;
         this.operatorSelections.delete(interaction.request_id);
