@@ -171,9 +171,20 @@ impl AcpProfile {
                 "session selections must be bounded nonempty opaque identifiers",
             ));
         }
-        if !self.extensions.is_empty() {
+        if self.extensions.len() > 8
+            || self
+                .extensions
+                .iter()
+                .any(|id| !matches!(id.as_str(), "cursor@2026.09.08-6caf4ff" | "fixture_echo@1"))
+            || self
+                .extensions
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.extensions.len()
+        {
             return Err(invalid(
-                "no extension handlers are implemented; extensions must be empty",
+                "extensions must name distinct supported contract versions",
             ));
         }
         if self.required_capabilities.iter().any(|c| {

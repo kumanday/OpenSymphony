@@ -185,6 +185,7 @@ impl ActionHandler {
             ActionKind::InputResponse | ActionKind::PlanDecision => {
                 validate_generic(&action, issue.as_ref(), &action_id)
             }
+            ActionKind::HarnessOperation => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::PublishPlan => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::TaskGraphMilestone => validate_task_graph(&action, &action_id),
             ActionKind::TaskGraphIssue => validate_task_graph(&action, &action_id),

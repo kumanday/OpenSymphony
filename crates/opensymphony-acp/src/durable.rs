@@ -199,6 +199,7 @@ impl Durability {
                     },
                     session_id: None,
                     initialization: Value::Null,
+                    enabled_operations: Vec::new(),
                     model_selection: false,
                     status: AcpSessionStatus::Ready,
                     stop_reason: None,
@@ -403,6 +404,9 @@ impl Durability {
         &mut self,
         session_id: String,
         initialization: Value,
+        enabled_operations: Vec<
+            crate::opensymphony_gateway_schema::capability::HarnessOperationCapability,
+        >,
         model_selection: bool,
         recovery: AcpRecovery,
         reset_reason: Option<String>,
@@ -418,6 +422,7 @@ impl Durability {
         let state = self.state_mut();
         state.session_id = Some(session_id);
         state.initialization = initialization;
+        state.enabled_operations = enabled_operations;
         state.model_selection = model_selection;
         state.recovery = recovery;
         if recovery == AcpRecovery::Fresh {
@@ -715,6 +720,7 @@ mod tests {
             .ready(
                 "session-1".into(),
                 Value::Null,
+                Vec::new(),
                 false,
                 AcpRecovery::Fresh,
                 None,
@@ -768,6 +774,7 @@ mod tests {
             .ready(
                 "session-1".into(),
                 Value::Null,
+                Vec::new(),
                 false,
                 AcpRecovery::Fresh,
                 None,
@@ -818,6 +825,7 @@ mod tests {
             .ready(
                 "session-1".into(),
                 Value::Null,
+                Vec::new(),
                 false,
                 AcpRecovery::Fresh,
                 None,
@@ -912,6 +920,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                Vec::new(),
                 false,
                 AcpRecovery::Fresh,
                 None,
@@ -937,6 +946,7 @@ mod tests {
                 .ready(
                     "replacement".into(),
                     Value::Null,
+                    Vec::new(),
                     false,
                     AcpRecovery::Fresh,
                     Some("reset".into())
@@ -977,6 +987,7 @@ mod tests {
             .ready(
                 "opaque/session:1".into(),
                 json!({"protocolVersion": 1}),
+                Vec::new(),
                 false,
                 AcpRecovery::RestoredLoad,
                 None,
@@ -1119,6 +1130,7 @@ mod tests {
                 .ready(
                     "bad\nsession".into(),
                     Value::Null,
+                    Vec::new(),
                     false,
                     AcpRecovery::Fresh,
                     None
@@ -1131,6 +1143,7 @@ mod tests {
                 .ready(
                     "session".into(),
                     json!("x".repeat(MAX_MANIFEST_BYTES)),
+                    Vec::new(),
                     false,
                     AcpRecovery::Fresh,
                     None

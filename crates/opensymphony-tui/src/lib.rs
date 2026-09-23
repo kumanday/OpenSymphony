@@ -5197,11 +5197,20 @@ mod tests {
             .await
             .expect("terminal permission timeout")
             .expect("terminal permission command");
+        let OperatorCommand::Response {
+            interaction,
+            answer,
+            reply,
+            ..
+        } = command
+        else {
+            panic!("operator response command");
+        };
         assert!(
-            matches!(command.answer, OperatorAnswer::Permission { ref option_id } if option_id == "opaque-allow-11")
+            matches!(answer, OperatorAnswer::Permission { ref option_id } if option_id == "opaque-allow-11")
         );
-        assert_eq!(command.interaction.rpc_id, "0");
-        command.reply.send(Ok(())).expect("permission receipt");
+        assert_eq!(interaction.rpc_id, "0");
+        reply.send(Ok(())).expect("permission receipt");
         for _ in 0..30 {
             app.update(AppMessage::Tick);
             if !app.operator_response_pending {
@@ -5228,12 +5237,13 @@ mod tests {
             .await
             .expect("terminal question timeout")
             .expect("terminal question command");
-        assert!(
-            matches!(command.answer, OperatorAnswer::Question { ref answers }
+        let OperatorCommand::Response { answer, reply, .. } = command else {
+            panic!("operator response command");
+        };
+        assert!(matches!(answer, OperatorAnswer::Question { ref answers }
             if answers.len() == 1 && answers[0].question_id == "region"
-                && answers[0].selected_option_ids == ["west-11"])
-        );
-        command.reply.send(Ok(())).expect("question receipt");
+                && answers[0].selected_option_ids == ["west-11"]));
+        reply.send(Ok(())).expect("question receipt");
         for _ in 0..30 {
             app.update(AppMessage::Tick);
             if !app.operator_response_pending {

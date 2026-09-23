@@ -630,6 +630,10 @@ async fn try_run(
         profile_fingerprint,
         credential_scope,
     } = effective_launch_identity(route, workflow, &worker_environment, &environment, &limits)?;
+    let cursor_enabled = profile
+        .extensions
+        .iter()
+        .any(|id| id == "cursor@2026.09.08-6caf4ff");
     let profile_id = route
         .harness_profile
         .as_ref()
@@ -771,7 +775,8 @@ async fn try_run(
         .source_history()
         .latest_cursor
         .unwrap_or((handle.generation, 0));
-    let mut projection = RuntimeProjection::after(baseline);
+    let mut projection = RuntimeProjection::after(baseline)
+        .with_cursor(cursor_enabled, snapshot.state.session_id.as_deref());
     let prompt = handle.prompt_with_operator(
         manifest.run_id.clone(),
         manifest.attempt,

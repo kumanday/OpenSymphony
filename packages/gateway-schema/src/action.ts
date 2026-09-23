@@ -16,6 +16,7 @@ export type ActionKind =
   | "approval_decision"
   | "input_response"
   | "plan_decision"
+  | "harness_operation"
   | "publish_plan"
   | "task_graph_milestone"
   | "task_graph_issue"

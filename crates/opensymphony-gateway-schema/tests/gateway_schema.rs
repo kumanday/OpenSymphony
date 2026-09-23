@@ -931,6 +931,21 @@ fn action_dispatch_roundtrips() {
     assert_eq!(back.action_kind, ActionKind::Retry);
     assert_eq!(back.correlation_id, "corr-1");
     assert_eq!(back.idempotency_key, Some("idem-1".into()));
+    let operation = ActionDispatch {
+        action_kind: ActionKind::HarnessOperation,
+        payload: Some(
+            serde_json::json!({"run_id":"run-1","operation_id":"fixture.echo","arguments":{"value":"hello"}}),
+        ),
+        idempotency_key: None,
+        ..action
+    };
+    let json = must_serialize(&operation);
+    let back: ActionDispatch = must_deserialize(&json);
+    assert_eq!(back.action_kind, ActionKind::HarnessOperation);
+    assert_eq!(
+        back.payload.expect("operation payload")["operation_id"],
+        "fixture.echo"
+    );
 }
 
 #[test]
@@ -1711,6 +1726,8 @@ fn acp_profile_and_run_capabilities_share_typescript_fixture() {
         serde_json::from_value(fixture["run"].clone()).expect("run DTO");
     assert!(!profile.preflight_ready);
     assert!(run.session_restore);
+    assert_eq!(profile.operations[0].operation_id, "fixture.echo");
+    assert_eq!(run.operations[0].deadline_ms, 5000);
     assert_eq!(
         serde_json::to_value(profile).expect("profile round trip"),
         fixture["profile"]

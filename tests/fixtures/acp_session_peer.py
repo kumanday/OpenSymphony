@@ -16,6 +16,7 @@ verbosity = "quiet"
 serial = 100
 abandoned_request = None
 pending_new = None
+extension_prompt = None
 
 
 def send(payload):
@@ -83,6 +84,8 @@ for line in sys.stdin:
         caps = {"loadSession": persistence == "load"}
         if persistence == "resume":
             caps["sessionCapabilities"] = {"resume": {}}
+        if mode.startswith('extension_echo'):
+            caps['_meta'] = {'opensymphony.dev/fixtureEcho': 1}
         send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": caps}})
     elif method == "session/new":
         if abandoned_request is not None:
@@ -139,6 +142,31 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'extension-echo':
+            extension_prompt = message['id']
+            pending = message['id']
+            open('extension-ready', 'w').close()
+            continue
+        if text == 'cursor-extension':
+            send({'id': 99, 'method': 'cursor/ask_question', 'params': {
+                'sessionId': session, 'toolCallId': 'malformed', 'questions': []}})
+            malformed = json.loads(sys.stdin.readline())
+            assert malformed['id'] == 99 and malformed['result'] == {'outcome': {'outcome': 'cancelled'}}, malformed
+            send({'id': 0, 'method': 'cursor/ask_question', 'params': {
+                'sessionId': session, 'toolCallId': 'cursor-q1', 'title': 'Choose mode',
+                'questions': [{'id': 'mode', 'prompt': 'Which mode?', 'options': [
+                    {'id': 'agent', 'label': 'Agent'}, {'id': 'plan', 'label': 'Plan'}]}],
+                '_meta': {'traceparent': 'trace-cursor'}}})
+            answer = json.loads(sys.stdin.readline())
+            assert answer['id'] == 0, answer
+            assert answer['result'] == {'outcome': {'outcome': 'answered', 'answers': [
+                {'questionId': 'mode', 'selectedOptionIds': ['plan']}]}}, answer
+            send({'method': 'cursor/update_todos', 'params': {'sessionId': session,
+                'toolCallId': 'cursor-t1', 'merge': True,
+                'todos': [{'id': 't1', 'content': 'Verify', 'status': 'completed'}]}})
+            assert callback('cursor/unknown', {'toolCallId': 'unknown'}, error=True)['code'] == -32601
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'form-no-route':
             result = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region',
                 'requestedSchema': {'type': 'object', 'required': ['region'], 'properties': {
@@ -260,6 +288,20 @@ for line in sys.stdin:
             continue
         update(text)
         send({"id": message["id"], "result": {"stopReason": "end_turn"}})
+    elif method == '_opensymphony.test/echo':
+        assert extension_prompt is not None, message
+        assert message['params']['sessionId'] == session, message
+        assert message['params']['value'] == 'hello', message
+        assert message['params']['_meta'] == {'traceparent': 'trace-echo'}, message
+        if mode == 'extension_echo_timeout':
+            open('extension-request-count', 'a').write('1\n')
+            continue
+        send({'id': message['id'], 'result': {'value': 'hello', '_meta': {'traceparent': 'trace-echo'}}})
+        # Keep the turn live until the client has consumed the operation result.
+        import time
+        time.sleep(0.05)
+        send({'id': extension_prompt, 'result': {'stopReason': 'end_turn'}})
+        extension_prompt = None
     elif method == "session/cancel":
         update("cancelling")
         send({"id": pending, "result": {"stopReason": "cancelled"}})

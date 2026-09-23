@@ -942,6 +942,10 @@ credential/grant revision, exact workspace/repository/checkout binding, opaque
 session ID, run/attempt, connection generation, negotiated capabilities and
 submission/outcome state. Native manifests remain readable and cannot be silently
 replaced by ACP. Every command checks the owning connection generation.
+The negotiated ACP record also stores enabled outbound operation descriptors.
+Recovery projects those descriptors for inspection, while a new invocation
+still requires the live owner, current run, exact profile registration, and
+peer capability check; a durable descriptor alone grants no execution right.
 
 The manifest is atomically replaced and synced, including its parent directory,
 before a prompt can reach the transport. Cancellation after the synced

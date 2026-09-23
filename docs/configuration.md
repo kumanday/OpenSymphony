@@ -1018,12 +1018,17 @@ The selected authentication method must be an advertised agent-handled method;
 terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.
 
-Profiles reject cwd overrides, unsupported wire versions/transports, extension
-handlers, credential arguments regardless of flag casing, and invalid environment
+Profiles reject cwd overrides, unsupported wire versions/transports, unregistered
+extensions, credential arguments regardless of flag casing, and invalid environment
 references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
+`extensions` accepts exact registration IDs: `cursor@2026.09.08-6caf4ff`
+for the pinned Cursor callback contract and `fixture_echo@1` for executable
+outbound tests. Duplicate IDs and unspecified vendor versions fail validation.
+Registration alone grants no operation: outbound use also requires the peer's
+capability predicate and an active, bound run.
 The prompt API sends text. Explicit session selections live in each profile:
 
 ```yaml
@@ -1063,6 +1068,14 @@ including generic header values, are also redacted from echoed events and
 stderr. The peer receives the exact host-supplied attachment. ACP operator
 responses use the scheduler-owned pending request path; arbitrary vendor
 extensions remain separately gated.
+
+The gateway publishes each registered outbound operation's parameter and
+result schemas, version, capability predicate, deadline, and effect policy in
+profile and negotiated run capabilities. Clients invoke one through
+`POST /api/v1/actions/dispatch` with `action_kind: harness_operation`, a run
+target, and exactly `run_id`, `operation_id`, and `arguments` in the payload.
+The owner resolves the wire method and session ID. The action rejects an
+idempotency key so replay cannot silently repeat an uncertain operation.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,

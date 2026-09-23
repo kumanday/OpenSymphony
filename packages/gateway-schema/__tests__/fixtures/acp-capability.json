@@ -3,7 +3,41 @@
     "harness": "acp",
     "profile_id": "local",
     "preflight_ready": false,
-    "unavailable_reason": "credential_reference_unavailable"
+    "unavailable_reason": "credential_reference_unavailable",
+    "operations": [
+      {
+        "operation_id": "fixture.echo",
+        "namespace": "opensymphony.test",
+        "version": "1",
+        "capability_predicate": "agentCapabilities._meta['opensymphony.dev/fixtureEcho'] == 1",
+        "parameters_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "result_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "deadline_ms": 5000,
+        "effect": "read_only_idempotent"
+      }
+    ]
   },
   "run": {
     "harness": "acp",
@@ -18,6 +52,40 @@
     "history_replay": false,
     "model_selection": false,
     "cancellation": true,
-    "operator_responses": false
+    "operator_responses": false,
+    "operations": [
+      {
+        "operation_id": "fixture.echo",
+        "namespace": "opensymphony.test",
+        "version": "1",
+        "capability_predicate": "agentCapabilities._meta['opensymphony.dev/fixtureEcho'] == 1",
+        "parameters_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "result_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "deadline_ms": 5000,
+        "effect": "read_only_idempotent"
+      }
+    ]
   }
 }

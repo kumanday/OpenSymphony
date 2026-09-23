@@ -1378,37 +1378,67 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
                 }
             },
-            RunWake::OperatorCommand(command) => {
-                if !command.delivery.claim() {
-                    let _ = command
-                        .reply
-                        .send(Err("operator response delivery timed out".into()));
-                    continue;
-                }
-                let crate::opensymphony_gateway::OperatorCommand {
+            RunWake::OperatorCommand(command) => match *command {
+                crate::opensymphony_gateway::OperatorCommand::Response {
                     interaction,
                     answer,
                     reply,
-                    ..
-                } = *command;
-                match scheduler
-                    .begin_operator_response(&interaction, answer)
-                    .await
-                {
-                    Ok(delivery) => {
-                        spawn_operator_delivery_completion(
-                            delivery,
-                            interaction,
-                            reply,
-                            operator_deliveries_tx.clone(),
-                            operator_update_notify.clone(),
-                        );
+                    delivery,
+                } => {
+                    if !delivery.claim() {
+                        let _ = reply.send(Err("operator response delivery timed out".into()));
+                        continue;
                     }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
+                    match scheduler
+                        .begin_operator_response(&interaction, answer)
+                        .await
+                    {
+                        Ok(delivery) => {
+                            spawn_operator_delivery_completion(
+                                delivery,
+                                interaction,
+                                reply,
+                                operator_deliveries_tx.clone(),
+                                operator_update_notify.clone(),
+                            );
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
                 }
-            }
+                crate::opensymphony_gateway::OperatorCommand::HarnessOperation {
+                    issue_identifier,
+                    run_id,
+                    operation_id,
+                    arguments,
+                    reply,
+                    delivery,
+                } => {
+                    if !delivery.claim() {
+                        let _ = reply.send(Err("harness operation dispatch timed out".into()));
+                        continue;
+                    }
+                    match scheduler
+                        .begin_harness_operation(
+                            &issue_identifier,
+                            &run_id,
+                            &operation_id,
+                            arguments,
+                        )
+                        .await
+                    {
+                        Ok(delivery) => {
+                            tokio::spawn(async move {
+                                let _ = reply.send(delivery.wait().await);
+                            });
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
+            },
             RunWake::OperatorUpdate => {
                 while let Ok(completed) = operator_deliveries_rx.try_recv() {
                     let result = scheduler
@@ -2346,7 +2376,7 @@ mod tests {
             let now = Utc::now();
             let (reply, _received) = tokio::sync::oneshot::channel();
             commands_tx
-                .send(OperatorCommand {
+                .send(OperatorCommand::Response {
                     interaction: OperatorInteraction {
                         request_id: "request".into(),
                         run_id: "run".into(),

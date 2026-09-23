@@ -399,6 +399,27 @@ impl SessionHandle {
             .map_err(channel_error)?;
         receive.await.map_err(|_| HostError::Unavailable)?
     }
+
+    /// Invoke only a registered operation on this owner and generation. The
+    /// session ID and wire method are resolved inside the host actor.
+    pub async fn operation(
+        &self,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .try_send(Command::Operation {
+                generation: self.generation,
+                run_id,
+                operation_id,
+                arguments,
+                reply,
+            })
+            .map_err(channel_error)?;
+        receive.await.map_err(|_| HostError::Unavailable)?
+    }
 }
 fn channel_error<T>(error: mpsc::error::TrySendError<T>) -> HostError {
     match error {
@@ -425,6 +446,13 @@ pub enum ControlResult {
 }
 
 enum Command {
+    Operation {
+        generation: u64,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+        reply: oneshot::Sender<Result<serde_json::Value, HostError>>,
+    },
     Control {
         generation: u64,
         action: SessionControl,
@@ -902,6 +930,17 @@ impl SessionDriver {
             .ready(
                 session_id.0.to_string(),
                 metadata,
+                super::extensions::configured_operations(profile)
+                    .into_iter()
+                    .filter(|operation| {
+                        super::extensions::outbound_operation(
+                            profile,
+                            &serde_json::to_value(&initialization).unwrap_or_default(),
+                            &operation.operation_id,
+                        )
+                        .is_some()
+                    })
+                    .collect(),
                 model_selection,
                 recovery,
                 reset_reason,
@@ -999,6 +1038,51 @@ impl SessionDriver {
                         continue;
                     };
                     match command {
+                        Command::Operation { generation, run_id, operation_id, arguments, reply } => {
+                            if generation != self.durable.state().identity.generation
+                                || run_id != self.durable.state().identity.run_id
+                            {
+                                let _ = reply.send(Err(HostError::IdentityMismatch));
+                                continue;
+                            }
+                            if active.is_none() || preparing.is_some() {
+                                let _ = reply.send(Err(HostError::Busy));
+                                continue;
+                            }
+                            let metadata = &self.durable.state().initialization;
+                            let Some(descriptor) = super::extensions::outbound_operation(profile, metadata, &operation_id) else {
+                                let _ = reply.send(Err(HostError::Unavailable));
+                                continue;
+                            };
+                            if !super::extensions::validate_echo_arguments(&arguments) {
+                                let _ = reply.send(Err(HostError::Client("invalid registered operation arguments".into())));
+                                continue;
+                            }
+                            let mut params = arguments;
+                            params["sessionId"] = serde_json::Value::String(session_id.0.to_string());
+                            let request = match UntypedMessage::new(super::extensions::FIXTURE_ECHO_METHOD, params) {
+                                Ok(request) => request,
+                                Err(_) => {
+                                    let _ = reply.send(Err(HostError::Client("invalid registered operation arguments".into())));
+                                    continue;
+                                }
+                            };
+                            let request = connection.send_request(request);
+                            let timeout = Duration::from_millis(descriptor.deadline_ms);
+                            let epoch = self.operator_router.lock().unwrap_or_else(|e| e.into_inner())
+                                .as_ref().map(|(_, epoch)| epoch.clone());
+                            tokio::spawn(async move {
+                                let result = tokio::select! {
+                                    result = tokio::time::timeout(timeout, request.block_task()) => match result {
+                                        Ok(Ok(value)) if super::extensions::validate_echo_result(&value) => Ok(value),
+                                        Ok(_) => Err(HostError::Client(ClientError::OperationFailed.to_string())),
+                                        Err(_) => Err(HostError::Client(ClientError::OperationTimeoutUnknown.to_string())),
+                                    },
+                                    _ = async { if let Some(epoch) = epoch { epoch.cancelled().await } else { std::future::pending().await } } => Err(HostError::Client("ACP operation turn ended; outcome is unknown".into())),
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
                         Command::Prompt { generation, run_id, attempt, prompt, cancellation, operator_requests, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
                             if active.is_some() || preparing.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }

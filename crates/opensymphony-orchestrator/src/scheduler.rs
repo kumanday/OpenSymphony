@@ -755,6 +755,18 @@ pub trait WorkerBackend {
         Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
     }
 
+    async fn begin_harness_operation(
+        &mut self,
+        _worker_id: &WorkerId,
+        _run_id: &str,
+        _operation_id: &str,
+        _arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, Self::Error> {
+        Ok(HarnessOperationDelivery::new(async {
+            Err("harness operations are unavailable".into())
+        }))
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -786,6 +798,22 @@ impl OperatorResponseDelivery {
     }
 
     pub async fn wait(self) -> Result<bool, String> {
+        self.0.await
+    }
+}
+
+pub struct HarnessOperationDelivery(
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'static>>,
+);
+
+impl HarnessOperationDelivery {
+    pub fn new(
+        wait: impl Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    ) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<serde_json::Value, String> {
         self.0.await
     }
 }
@@ -2268,6 +2296,40 @@ where
     ) -> Result<(), String> {
         let delivery = self.begin_operator_response(binding, answer).await?;
         self.complete_operator_response(binding, delivery.wait().await)
+    }
+
+    /// Bind an operator action to the scheduler's current ACP worker. The
+    /// backend and retained owner perform the profile and peer checks.
+    pub async fn begin_harness_operation(
+        &mut self,
+        issue_identifier: &str,
+        run_id: &str,
+        operation_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, String> {
+        let mut matching = self
+            .executions
+            .values()
+            .filter_map(IssueExecution::current_run)
+            .filter(|run| run.issue_identifier.as_str() == issue_identifier);
+        let run = matching.next().ok_or("operator run is not active")?;
+        if matching.next().is_some()
+            || run_id != format!("run-{}", run.worker_id)
+            || self
+                .worker_metadata
+                .get(&run.worker_id)
+                .is_none_or(|metadata| {
+                    metadata.issue_id != run.issue_id
+                        || metadata.harness_kind.as_deref() != Some("acp")
+                })
+        {
+            return Err("operator run binding is stale or ambiguous".into());
+        }
+        let worker_id = run.worker_id.clone();
+        self.worker
+            .begin_harness_operation(&worker_id, run_id, operation_id, arguments)
+            .await
+            .map_err(|error| format!("ACP operation dispatch failed: {error}"))
     }
 
     /// Reserve the live decision in actor-owned state and enqueue it. Waiting

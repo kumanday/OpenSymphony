@@ -659,6 +659,16 @@ cancel responses, private large numeric peer RPC IDs with generated public
 binding tokens, disabled Cursor methods, and form-only
 capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
+The extension peer verifies a registered outbound request has the host-bound
+session ID and permitted `_meta`, returns a structured result, and rejects
+unregistered methods, stale runs, and unexpected argument keys. A Cursor-shaped
+fixture sends request ID `0` and checks the documented `answered` result,
+then sends a todo notification and unknown request; only requests receive
+responses. A pinned real Cursor CLI probe is required before claiming vendor
+compatibility: record CLI version, redacted envelopes, authentication state,
+and the observed callback response separately from deterministic fixture tests.
+The current redacted probe and its authentication boundary are recorded in
+[ACP extension qualification evidence](acp-extension-evidence.md).
 It uses a five-minute tracker interval and processes both callbacks through
 worker-update wakeups without another tracker tick.
 An un-routed native form receives protocol cancellation without failing its

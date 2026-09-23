@@ -41,6 +41,8 @@ pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<Str
 
 #[derive(Default)]
 pub struct RuntimeProjection {
+    cursor_enabled: bool,
+    cursor_session_id: Option<String>,
     last: Option<(u64, u64)>,
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
@@ -57,6 +59,12 @@ impl RuntimeProjection {
             last: Some(cursor),
             ..Self::default()
         }
+    }
+
+    pub fn with_cursor(mut self, enabled: bool, session_id: Option<&str>) -> Self {
+        self.cursor_enabled = enabled;
+        self.cursor_session_id = session_id.map(str::to_owned);
+        self
     }
 
     pub fn last_cursor(&self) -> Option<(u64, u64)> {
@@ -91,6 +99,44 @@ impl RuntimeProjection {
         }
         if frame.direction != "incoming" {
             return None;
+        }
+        if self.cursor_enabled
+            && self.cursor_session_id.as_deref()
+                == frame
+                    .payload
+                    .pointer("/params/sessionId")
+                    .and_then(Value::as_str)
+            && let Some(method) = frame.payload.get("method").and_then(Value::as_str)
+            && let Some(params) = frame.payload.get("params")
+            && super::extensions::cursor_notification(method, params)
+            && frame.payload.get("id").is_none()
+        {
+            let (kind, summary, payload) = match method {
+                "cursor/update_todos" => (
+                    "vendor_todos",
+                    "Cursor todos updated",
+                    json!({"todos": params["todos"], "merge": params["merge"]}),
+                ),
+                "cursor/task" => (
+                    "vendor_task",
+                    "Cursor subagent task reported",
+                    json!({"toolCallId": params["toolCallId"], "description": params["description"]}),
+                ),
+                "cursor/generate_image" => (
+                    "artifact_candidate",
+                    "Cursor image output reported",
+                    json!({"toolCallId": params["toolCallId"], "filePath": params.get("filePath"), "verified": false}),
+                ),
+                _ => unreachable!("validated Cursor notification"),
+            };
+            return Some(RuntimeUpdate {
+                sequence: frame.sequence,
+                generation: *generation,
+                observed_at: frame.observed_at,
+                kind: kind.into(),
+                summary: Some(summary.into()),
+                payload,
+            });
         }
         if let Some(activity) = self.project_filesystem_request(*generation, frame) {
             return Some(activity);
@@ -440,6 +486,7 @@ pub fn run_capability(
         model_selection: state.model_selection,
         cancellation: true,
         operator_responses: true,
+        operations: state.enabled_operations.clone(),
     }
 }
 
@@ -543,6 +590,7 @@ fn profile_capabilities_with_environment(
                 profile_id: id.clone(),
                 preflight_ready: reason.is_none(),
                 unavailable_reason: reason.map(str::to_owned),
+                operations: super::extensions::configured_operations(profile),
             }
         })
         .collect()
@@ -603,6 +651,19 @@ mod tests {
         assert!(
             profile_capabilities_with_environment(&config, &environment, &BTreeSet::new())[0]
                 .preflight_ready
+        );
+        config
+            .profiles
+            .get_mut("profile")
+            .expect("profile")
+            .extensions
+            .push("fixture_echo@1".into());
+        let advertised =
+            profile_capabilities_with_environment(&config, &environment, &BTreeSet::new());
+        assert_eq!(advertised[0].operations[0].operation_id, "fixture.echo");
+        assert_eq!(
+            advertised[0].operations[0].parameters_schema["required"],
+            json!(["value"])
         );
         let profile = config.profiles.get_mut("profile").expect("profile");
         profile.env_refs.insert("PATH".into(), "MISSING".into());
@@ -764,6 +825,45 @@ mod tests {
             );
             assert!(update.is_none(), "only accepted routed requests may wait");
         }
+    }
+
+    #[test]
+    fn cursor_notification_projects_only_for_enabled_bound_session() {
+        let payload = |session: &str| {
+            json!({"method":"cursor/update_todos","params":{
+            "sessionId":session,"toolCallId":"todo-1","merge":true,
+            "todos":[{"id":"one","content":"Verify","status":"completed"}]}})
+        };
+        let mut disabled = RuntimeProjection::default();
+        assert!(
+            disabled
+                .apply(&callback_event(1, "incoming", payload("s")), "run")
+                .is_none()
+        );
+        let mut enabled = RuntimeProjection::default().with_cursor(true, Some("s"));
+        assert!(
+            enabled
+                .apply(&callback_event(1, "incoming", payload("other")), "run")
+                .is_none()
+        );
+        let update = enabled
+            .apply(&callback_event(2, "incoming", payload("s")), "run")
+            .expect("bound update");
+        assert_eq!(update.kind, "vendor_todos");
+        assert_eq!(update.payload["todos"][0]["content"], "Verify");
+        assert!(
+            enabled
+                .apply(
+                    &callback_event(
+                        3,
+                        "incoming",
+                        json!({"id":0,"method":"cursor/update_todos","params":{
+            "sessionId":"s","toolCallId":"todo-1","merge":true,"todos":[]}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
     }
 
     #[test]

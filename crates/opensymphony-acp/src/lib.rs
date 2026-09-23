@@ -43,11 +43,13 @@ use tracing::instrument::WithSubscriber;
 
 mod atomic_file;
 mod durable;
+mod extensions;
 mod host;
 mod operator;
 mod projection;
 mod services;
 mod session_config;
+pub use extensions::OperationCapability;
 pub use host::*;
 pub use operator::{
     AcpOperatorDeliveryFence, AcpOperatorEvent, AcpOperatorReply, AcpOperatorRequest,
@@ -196,6 +198,10 @@ pub enum ClientError {
     ResourceLimit { submitted: bool },
     #[error("ACP child could not be terminated and reaped")]
     Teardown,
+    #[error("ACP extension operation deadline exceeded; outcome is unknown")]
+    OperationTimeoutUnknown,
+    #[error("ACP extension operation failed or returned an invalid result")]
+    OperationFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1022,6 +1028,7 @@ async fn run_connection(
         .map(|driver| driver.operator_router.clone())
         .unwrap_or_else(|| Arc::new(Mutex::new(None)));
     let permission_policy = profile.permissions.mode;
+    let cursor_enabled = extensions::cursor_enabled(profile);
     let input = FramedRead::new(stdout, LinesCodec::new_with_max_length(limits.frame_bytes));
     let incoming = input.map({
         let queued = queued.clone();
@@ -1164,7 +1171,9 @@ async fn run_connection(
                                 });
                         }
                         let operator_method = matches!(request.method.as_str(),
-                            "session/request_permission" | "elicitation/create");
+                            "session/request_permission" | "elicitation/create")
+                            || (cursor_enabled && matches!(request.method.as_str(),
+                                "cursor/ask_question" | "cursor/create_plan"));
                         if operator_method {
                             let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let rpc_id = serde_json::to_value(responder.id())?;
@@ -1213,7 +1222,7 @@ async fn run_connection(
                             let (sender, epoch) = match route {
                                 Some((sender, epoch)) if !epoch.is_cancelled() => (sender, epoch),
                                 _ => {
-                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let response = Ok(operator::response_for_method(&request.method, &interaction, OperatorAnswer::Cancel));
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                                     let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                                     if !output.admit(frame, &limits) {
@@ -1225,7 +1234,7 @@ async fn run_connection(
                                 }
                             };
                             if let Some(answer) = operator::automatic_answer(permission_policy, &interaction) {
-                                let response = Ok(operator::response_for(&interaction, answer));
+                                let response = Ok(operator::response_for_method(&request.method, &interaction, answer));
                                 let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                                 let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                                 if !output.admit(frame, &limits) {
@@ -1242,7 +1251,7 @@ async fn run_connection(
                             ) {
                                 Ok(reservation) => reservation,
                                 Err(_) => {
-                                    let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                                    let response = Ok(operator::response_for_method(&request.method, &interaction, OperatorAnswer::Cancel));
                                     let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                                     let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                                     if !output.admit(frame, &limits) {
@@ -1276,7 +1285,7 @@ async fn run_connection(
                                             }
                                             None => (answer, None),
                                         };
-                                        let response = Ok(operator::response_for(&interaction, answer));
+                                        let response = Ok(operator::response_for_method(&request.method, &interaction, answer));
                                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
                                         let delivered = frame.ok().and_then(|frame| {
                                             reserve_and_enqueue_operator_response(&callback_output, frame, &limits, &mut acknowledgement, || responder.respond_with_result(response))
@@ -1315,7 +1324,7 @@ async fn run_connection(
                             if request.method == "session/request_permission" {
                                 fatal.cancel();
                             }
-                            let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
+                            let response = Ok(operator::response_for_method(&request.method, &interaction, OperatorAnswer::Cancel));
                             let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                             let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                             if output.admit(frame, &limits) {

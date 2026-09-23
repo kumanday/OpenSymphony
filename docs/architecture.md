@@ -533,6 +533,14 @@ advertisements. The ordered dispatch handler admits callbacks to one bounded
 connection-owned actor. File operations are serialized; terminal waits use
 bounded asynchronous responses so they cannot block RPC dispatch. Terminal
 processes use the existing process-group or Windows Job Object supervisors.
+ACP extension registrations are exact profile/version entries inside the ACP
+module. Registered Cursor requests reuse the scheduler-owned question and plan
+response path; known notifications contribute bounded activity or artifact
+evidence without authorizing new work. Outbound operation dispatch enters
+through the gateway's operator action, binds the current run in the scheduler,
+and resolves the registered method and session inside the retained owner.
+Negotiated peer support and profile enablement are both required. Timeouts
+report an unknown outcome, and lifecycle state remains orchestrator-owned.
 Each retained prompt first retires the prior callback epoch through a bounded,
 cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses

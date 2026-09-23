@@ -566,6 +566,17 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
     let rendered = serde_yaml::to_string(&resolved.extensions.acp).expect("render");
     assert!(rendered.contains("AUTH_SOURCE"));
     assert!(!rendered.contains("auth-secret"));
+    for version in ["cursor@2026.09.08-6caf4ff", "fixture_echo@1"] {
+        let configured = WorkflowDefinition::parse(&source.replace(
+            "args: [agent.py]",
+            &format!("args: [agent.py]\n      extensions: [{version}]"),
+        ))
+        .expect("versioned ACP profile");
+        assert!(
+            configured.resolve(Path::new("/repo"), &env).is_ok(),
+            "{version}"
+        );
+    }
     for (old, new) in [
         ("harness_profile: fake", "harness_profile: missing"),
         ("args: [agent.py]", "args: ['--TOKEN=secret']"),
@@ -1230,6 +1241,12 @@ fn acp_adapter_exposes_execution_and_explicit_gaps() {
     assert!(capability.actions.approve && capability.approvals.human_decision);
     assert!(!capability.pause_resume.resume);
     assert!(!capability.feature_gaps.is_empty());
+    let public = serde_json::to_value(capability).expect("public adapter capability");
+    assert_eq!(public["kind"], "acp");
+    assert!(
+        public.get("method").is_none(),
+        "wire methods stay inside ACP"
+    );
 }
 
 fn services_profile(mode: &str) -> AcpProfile {

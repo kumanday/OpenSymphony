@@ -1267,6 +1267,9 @@ pub struct AcpSessionState {
     pub session_id: Option<String>,
     /// Negotiated initialization metadata, redacted by the protocol client.
     pub initialization: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_operations:
+        Vec<crate::opensymphony_gateway_schema::capability::HarnessOperationCapability>,
     /// Whether this session advertised a selectable model configuration option.
     #[serde(default)]
     pub model_selection: bool,
