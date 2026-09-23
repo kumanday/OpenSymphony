@@ -88,6 +88,7 @@ last_memory_sync: 2026-07-04T01:04:06.159695+00:00
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
 
 ## Source refs
 
@@ -146,5 +147,6 @@ last_memory_sync: 2026-07-04T01:04:06.159695+00:00
 - COE-567
 - COE-608
 - COE-609
+- COE-610
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

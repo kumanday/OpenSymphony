@@ -1055,6 +1055,7 @@ or MCP grants.
 - COE-419: Hosted Auth Placeholders And Web Parity
 - COE-473: Desktop task graph dependency and run detail parity
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
 
 ## Source refs
 
@@ -1076,5 +1077,6 @@ or MCP grants.
 - COE-419
 - COE-473
 - COE-609
+- COE-610
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
