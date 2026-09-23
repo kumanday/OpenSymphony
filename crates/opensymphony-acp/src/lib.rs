@@ -49,7 +49,9 @@ mod projection;
 mod services;
 mod session_config;
 pub use host::*;
-pub use operator::{AcpOperatorEvent, AcpOperatorReply, AcpOperatorRequest};
+pub use operator::{
+    AcpOperatorDeliveryFence, AcpOperatorEvent, AcpOperatorReply, AcpOperatorRequest,
+};
 pub use projection::{RuntimeProjection, RuntimeUpdate, profile_capabilities, run_capability};
 pub use services::HostServices;
 pub use session_config::SessionConfiguration;
@@ -1104,9 +1106,7 @@ async fn run_connection(
                             // an altered opaque ID back to the peer or expose a secret.
                             let interaction = interaction.and_then(|safe| {
                                 let original = operator::parse_interaction(&request.method, &request.params, rpc_id, &safe.session_id, limits.callback_timeout)?;
-                                if safe.options.iter().map(|o| &o.id).ne(original.options.iter().map(|o| &o.id))
-                                    || safe.questions.iter().map(|q| (&q.id, q.options.iter().map(|o| &o.id).collect::<Vec<_>>()))
-                                        .ne(original.questions.iter().map(|q| (&q.id, q.options.iter().map(|o| &o.id).collect::<Vec<_>>()))) {
+                                if !operator::same_binding_ids(&safe, &original) {
                                     return Err(agent_client_protocol::Error::invalid_params());
                                 }
                                 Ok(safe)
@@ -1178,11 +1178,16 @@ async fn run_connection(
                                     let limits = limits.clone();
                                     tokio::spawn(async move {
                                         let _reservation = reservation;
-                                        let (answer, acknowledgement) = tokio::select! {
+                                        let (answer, reply) = tokio::select! {
                                             biased;
                                             _ = epoch.cancelled() => (OperatorAnswer::Cancel, None),
-                                            result = receive => result.map(|reply: AcpOperatorReply| (reply.answer, Some(reply.acknowledgement))).unwrap_or((OperatorAnswer::Cancel, None)),
+                                            result = receive => result.map(|reply: AcpOperatorReply| (reply.answer.clone(), Some(reply))).unwrap_or((OperatorAnswer::Cancel, None)),
                                             _ = tokio::time::sleep(limits.callback_timeout) => (OperatorAnswer::Cancel, None),
+                                        };
+                                        let (answer, acknowledgement, claimed) = match reply {
+                                            Some(reply) if reply.delivery.claim() => (answer, Some(reply.acknowledgement), true),
+                                            Some(reply) => (OperatorAnswer::Cancel, Some(reply.acknowledgement), false),
+                                            None => (answer, None, false),
                                         };
                                         let response = Ok(operator::response_for(&interaction, answer));
                                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
@@ -1193,15 +1198,18 @@ async fn run_connection(
                                             return;
                                         }
                                         let delivered = responder.respond_with_result(response).is_ok();
-                                        if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(delivered); }
+                                        if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(delivered && claimed); }
                                         let _ = sender.try_send(AcpOperatorEvent::Closed(interaction.request_id));
                                     });
                                     return Ok(());
                                 }
                             }
-                            // An operator-mode profile without a live response path is a
-                            // failed run, never an implicit approval or infinite wait.
-                            fatal.cancel();
+                            // A permission with no operator route fails visibly. A form
+                            // can safely return protocol cancellation so direct clients
+                            // can continue without an interactive operator.
+                            if request.method == "session/request_permission" {
+                                fatal.cancel();
+                            }
                             let response = Ok(operator::response_for(&interaction, OperatorAnswer::Cancel));
                             let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()))?;
                             if callback_output.lock().unwrap_or_else(|e| e.into_inner()).admit(frame, &limits) {

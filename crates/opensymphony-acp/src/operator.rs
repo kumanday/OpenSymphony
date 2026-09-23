@@ -9,7 +9,33 @@ use agent_client_protocol::schema::v1::{
     MultiSelectItems, RequestPermissionRequest,
 };
 use chrono::{Duration as ChronoDuration, Utc};
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicU8, Ordering},
+};
+
+/// A failed operator receipt must fence a response still waiting in the worker queue.
+/// Claiming delivery and cancelling it are mutually exclusive atomic transitions.
+#[derive(Clone, Default)]
+pub struct AcpOperatorDeliveryFence(Arc<AtomicU8>);
+
+impl AcpOperatorDeliveryFence {
+    pub fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 1
+    }
+
+    pub fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
 
 pub struct AcpOperatorRequest {
     pub interaction: OperatorInteraction,
@@ -19,6 +45,7 @@ pub struct AcpOperatorRequest {
 pub struct AcpOperatorReply {
     pub answer: OperatorAnswer,
     pub acknowledgement: oneshot::Sender<bool>,
+    pub delivery: AcpOperatorDeliveryFence,
 }
 
 pub enum AcpOperatorEvent {
@@ -47,6 +74,32 @@ fn no_secret_prompt(value: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+pub(super) fn same_binding_ids(safe: &OperatorInteraction, original: &OperatorInteraction) -> bool {
+    let ids = |interaction: &OperatorInteraction| {
+        let options = interaction
+            .options
+            .iter()
+            .map(|option| option.id.clone())
+            .collect::<HashSet<_>>();
+        let questions = interaction
+            .questions
+            .iter()
+            .map(|question| {
+                (
+                    question.id.clone(),
+                    question
+                        .options
+                        .iter()
+                        .map(|option| option.id.clone())
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        (options, questions)
+    };
+    ids(safe) == ids(original)
 }
 
 pub(super) fn parse_interaction(
@@ -434,6 +487,14 @@ mod tests {
             Duration::from_secs(30),
         )
         .expect("question");
+        let mut reordered = interaction.clone();
+        reordered.questions.reverse();
+        for question in &mut reordered.questions {
+            question.options.reverse();
+        }
+        assert!(same_binding_ids(&interaction, &reordered));
+        reordered.questions[0].options[0].id = "substituted-opaque-id".into();
+        assert!(!same_binding_ids(&interaction, &reordered));
         let answer = OperatorAnswer::Question {
             answers: vec![
                 OperatorQuestionAnswer {

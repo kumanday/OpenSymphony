@@ -135,6 +135,22 @@ async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
 }
 
 #[tokio::test]
+async fn session_prompt_without_operator_route_cancels_form_and_completes() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let handle = host
+        .open(launch(root.path(), "ISSUE-612-NO-ROUTE", "none").await)
+        .await
+        .expect("open");
+    assert!(
+        prompt(&handle, "run-no-route", "form-no-route")
+            .await
+            .succeeded()
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
 async fn native_peer_operator_permission_and_form_question_round_trip() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");
@@ -194,7 +210,8 @@ async fn native_peer_operator_permission_and_form_question_round_trip() {
                 .reply
                 .send(AcpOperatorReply {
                     answer,
-                    acknowledgement
+                    acknowledgement,
+                    delivery: AcpOperatorDeliveryFence::default(),
                 })
                 .is_ok()
         );
@@ -258,6 +275,7 @@ async fn native_peer_operator_permission_and_form_question_round_trip() {
                 .send(AcpOperatorReply {
                     answer,
                     acknowledgement,
+                    delivery: AcpOperatorDeliveryFence::default(),
                 })
                 .is_ok()
         );

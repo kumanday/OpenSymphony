@@ -69,6 +69,12 @@ for line in sys.stdin:
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
         prompt_id = message["id"]
+        if mode == "form_no_route":
+            send({"id": "form-no-route", "method": "elicitation/create", "params": {
+                "sessionId": session, "mode": "form", "message": "Choose region",
+                "requestedSchema": {"type": "object", "required": ["region"], "properties": {
+                    "region": {"type": "string", "enum": ["west", "east"]}}}}})
+            continue
         if mode == "adjacent_session_update":
             respond(message, {"stopReason": "end_turn"})
             continue
@@ -166,6 +172,10 @@ for line in sys.stdin:
             update("before cancellation response")
             send({"id": prompt_id, "result": {"stopReason": "cancelled"}})
     elif method is None:
+        if mode == "form_no_route" and message["id"] == "form-no-route":
+            assert message["result"] == {"action": "cancel"}
+            send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "paced_queue":
             assert message["error"]["code"] == -32601
             index = int(message["id"].removeprefix("queued-")) + 1

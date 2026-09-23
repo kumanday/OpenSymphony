@@ -660,6 +660,9 @@ capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
 It uses a five-minute tracker interval and processes both callbacks through
 worker-update wakeups without another tracker tick.
+An un-routed native form receives protocol cancellation without failing its
+turn, and a delayed worker-consume regression verifies that a timed-out
+operator answer cannot reach the ACP callback after its failure receipt.
 The run-loop wake regression queues a callback notification and an operator
 command during a selected tick, verifies that tick completes, and then drains
 both queued events. A malformed permission callback produces no waiting event;

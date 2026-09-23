@@ -10348,23 +10348,27 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let Some(sender) = sender else {
             return Ok(false);
         };
+        let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
         let (acknowledgement, received) = oneshot::channel();
         if sender
-            .send(acp::OperatorResponseCommand {
+            .try_send(acp::OperatorResponseCommand {
                 request_id: request_id.into(),
                 answer,
                 acknowledgement,
+                delivery: delivery.clone(),
             })
-            .await
             .is_err()
         {
             return Ok(false);
         }
-        Ok(timeout(Duration::from_secs(5), received)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false))
+        tokio::pin!(received);
+        match timeout(Duration::from_secs(5), &mut received).await {
+            Ok(result) => Ok(result.unwrap_or(false)),
+            Err(_) if delivery.cancel() => Ok(false),
+            // Delivery already crossed the atomic fence. Wait for its real
+            // acknowledgement instead of publishing a false failure receipt.
+            Err(_) => Ok(received.await.unwrap_or(false)),
+        }
     }
 
     async fn abort_worker(

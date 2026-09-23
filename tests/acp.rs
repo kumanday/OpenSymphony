@@ -82,6 +82,23 @@ async fn acp_operator_policy_without_response_path_fails_visibly() {
     assert!(run.process_reaped);
 }
 
+#[tokio::test]
+async fn standard_form_without_operator_route_is_cancelled_without_failing_turn() {
+    let root = tempfile::tempdir().expect("temp");
+    let run = run_turn(
+        &profile("form_no_route"),
+        context(root.path()),
+        "form fallback".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(run.outcome.expect("protocol cancellation").succeeded());
+    assert!(run.process_reaped);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn acp_turn_without_client_deadline_survives_five_minutes_of_virtual_time() {
     let root = tempfile::tempdir().expect("temp");

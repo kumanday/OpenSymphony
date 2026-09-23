@@ -139,6 +139,13 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'form-no-route':
+            result = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region',
+                'requestedSchema': {'type': 'object', 'required': ['region'], 'properties': {
+                    'region': {'type': 'string', 'enum': ['east', 'west']}}}})
+            assert result == {'action': 'cancel'}, result
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'operator-roundtrip':
             serial = 9007199254740992
             assert callback('cursor/ask_question', {'questions': []}, error=True)['code'] == -32601

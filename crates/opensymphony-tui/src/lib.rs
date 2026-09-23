@@ -207,6 +207,15 @@ impl TuiState {
             TuiAction::SnapshotReceived(envelope) => {
                 let selected_issue_identifier =
                     self.selected_issue().map(|issue| issue.identifier.clone());
+                let visible_requests = envelope
+                    .snapshot
+                    .issues
+                    .iter()
+                    .flat_map(|issue| &issue.operator_interactions)
+                    .map(|request| request.request_id.as_str())
+                    .collect::<HashSet<_>>();
+                self.operator_answers
+                    .retain(|request_id, _| visible_requests.contains(request_id.as_str()));
                 self.latest_snapshot = Some(*envelope);
                 if !matches!(self.connection, ConnectionState::Live) {
                     self.status_line = match self.connection {
@@ -2426,6 +2435,7 @@ struct OperatorApp {
     operator_result_tx: mpsc::Sender<String>,
     operator_result_rx: mpsc::Receiver<String>,
     operator_response_pending: bool,
+    operator_response_request_id: Option<String>,
 }
 
 impl OperatorApp {
@@ -2452,6 +2462,7 @@ impl OperatorApp {
             operator_result_tx,
             operator_result_rx,
             operator_response_pending: false,
+            operator_response_request_id: None,
         }
     }
 
@@ -2614,6 +2625,7 @@ impl OperatorApp {
             idempotency_key: None,
         };
         self.operator_response_pending = true;
+        self.operator_response_request_id = Some(request.request_id.clone());
         self.state.status_line = "Sending ACP operator response".into();
         let tx = self.operator_result_tx.clone();
         thread::spawn(move || {
@@ -3317,6 +3329,11 @@ impl Model for OperatorApp {
         self.drain_workspace_status();
         while let Ok(result) = self.operator_result_rx.try_recv() {
             self.operator_response_pending = false;
+            if let Some(request_id) = self.operator_response_request_id.take()
+                && result == "ACP operator response accepted"
+            {
+                self.state.operator_answers.remove(&request_id);
+            }
             self.state.status_line = result;
         }
         match message {
@@ -5202,6 +5219,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(visible.iter().any(|line| line.contains("Region 11")));
         app.choose_operator_option(3);
+        assert!(app.state.operator_answers.contains_key("question"));
         app.operator_decision('s');
         let command = tokio::time::timeout(Duration::from_secs(3), commands_rx.recv())
             .await
@@ -5221,7 +5239,18 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(app.state.status_line, "ACP operator response accepted");
+        assert!(!app.state.operator_answers.contains_key("question"));
         server.abort();
+    }
+
+    #[test]
+    fn snapshot_removal_discards_stale_operator_form_selections() {
+        let mut state = TuiState::default();
+        state
+            .operator_answers
+            .insert("closed-form".into(), vec![vec!["west".into()]]);
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(2, 1))));
+        assert!(state.operator_answers.is_empty());
     }
 
     #[test]

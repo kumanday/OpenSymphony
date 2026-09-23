@@ -23,6 +23,7 @@ pub(super) struct OperatorResponseCommand {
     pub request_id: String,
     pub answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
     pub acknowledgement: oneshot::Sender<bool>,
+    pub delivery: crate::opensymphony_acp::AcpOperatorDeliveryFence,
 }
 pub(super) type ActiveSessions = Arc<Mutex<HashMap<String, ActiveSession>>>;
 
@@ -810,14 +811,7 @@ async fn try_run(
                 None => operator_requests_open = false,
             },
             response = operator_responses_rx.recv(), if operator_responses_open => match response {
-                Some(response) => {
-                    let reply = crate::opensymphony_acp::AcpOperatorReply {
-                        answer: response.answer, acknowledgement: response.acknowledgement,
-                    };
-                    if let Some(waiter) = operator_waiters.remove(&response.request_id) {
-                        if let Err(reply) = waiter.send(reply) { let _ = reply.acknowledgement.send(false); }
-                    } else { let _ = reply.acknowledgement.send(false); }
-                }
+                Some(response) => forward_operator_response(response, &mut operator_waiters),
                 None => operator_responses_open = false,
             },
             event = receiver.recv() => match event {
@@ -922,11 +916,61 @@ fn project_event(
     }
 }
 
+fn forward_operator_response(
+    response: OperatorResponseCommand,
+    waiters: &mut HashMap<String, oneshot::Sender<crate::opensymphony_acp::AcpOperatorReply>>,
+) {
+    if response.delivery.is_cancelled() {
+        let _ = response.acknowledgement.send(false);
+        return;
+    }
+    let reply = crate::opensymphony_acp::AcpOperatorReply {
+        answer: response.answer,
+        acknowledgement: response.acknowledgement,
+        delivery: response.delivery,
+    };
+    if let Some(waiter) = waiters.remove(&response.request_id) {
+        if let Err(reply) = waiter.send(reply) {
+            let _ = reply.acknowledgement.send(false);
+        }
+    } else {
+        let _ = reply.acknowledgement.send(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+
+    #[tokio::test]
+    async fn expired_operator_ack_fences_delayed_worker_consume() {
+        let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
+        let (acknowledgement, mut received) = oneshot::channel();
+        let response = OperatorResponseCommand {
+            request_id: "queued-request".into(),
+            answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer::Cancel,
+            acknowledgement,
+            delivery: delivery.clone(),
+        };
+        let (waiter, mut callback) = oneshot::channel();
+        let mut waiters = HashMap::from([("queued-request".into(), waiter)]);
+
+        assert!(
+            timeout(Duration::from_millis(10), &mut received)
+                .await
+                .is_err()
+        );
+        assert!(delivery.cancel(), "failure receipt wins the delivery fence");
+        forward_operator_response(response, &mut waiters);
+        assert!(!received.await.expect("negative acknowledgement"));
+        assert!(waiters.contains_key("queued-request"));
+        assert!(
+            callback.try_recv().is_err(),
+            "operator answer never reaches ACP"
+        );
+    }
 
     #[test]
     fn credential_scope_uses_platform_environment_name_rules() {
