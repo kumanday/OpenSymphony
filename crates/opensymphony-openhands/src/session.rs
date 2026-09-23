@@ -1640,16 +1640,15 @@ impl IssueSessionRunner {
         const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 1;
 
         let observed_run = observed_run_for_turn(run);
-        let active_session = match self
-            .initialize_session(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                &observed_run,
-                issue,
-                workflow,
-            )
-            .await?
+        let active_session = match Box::pin(self.initialize_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            issue,
+            workflow,
+        ))
+        .await?
         {
             Step::Continue(session) => session,
             Step::EarlyResult(result) => return Ok(*result),
@@ -1675,8 +1674,8 @@ impl IssueSessionRunner {
         let mut retry_count = 0;
         let mut current_session = active_session;
         let (final_session, outcome) = loop {
-            let (mut active_session, outcome, turn_launch_reported) = match self
-                .execute_turn(
+            let (mut active_session, outcome, turn_launch_reported) =
+                match Box::pin(self.execute_turn(
                     workspace_manager,
                     workspace,
                     run_manifest,
@@ -1687,12 +1686,12 @@ impl IssueSessionRunner {
                     current_session,
                     launch_reported,
                     observer,
-                )
+                ))
                 .await?
-            {
-                Step::Continue(result) => result,
-                Step::EarlyResult(result) => return Ok(*result),
-            };
+                {
+                    Step::Continue(result) => result,
+                    Step::EarlyResult(result) => return Ok(*result),
+                };
             launch_reported = turn_launch_reported;
 
             if is_context_overflow_outcome(&outcome) && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES {
@@ -1867,48 +1866,45 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
-        let (mut active_session, mut prepared_turn) = match self
-            .prepare_turn(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                observed_run,
-                workflow,
-                issue,
-                run,
-                active_session,
-                launch_reported,
-                observer,
-            )
-            .await?
+        let (mut active_session, mut prepared_turn) = match Box::pin(self.prepare_turn(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            workflow,
+            issue,
+            run,
+            active_session,
+            launch_reported,
+            observer,
+        ))
+        .await?
         {
             Step::Continue(state) => state,
             Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
-        active_session = match self
-            .start_turn(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                observed_run,
-                active_session,
-                &mut prepared_turn,
-                observer,
-            )
-            .await?
+        active_session = match Box::pin(self.start_turn(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            active_session,
+            &mut prepared_turn,
+            observer,
+        ))
+        .await?
         {
             Step::Continue(session) => session,
             Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
-        let outcome = self
-            .await_terminal_outcome(
-                &mut active_session,
-                &prepared_turn.baseline_event_ids,
-                observer,
-            )
-            .await;
+        let outcome = Box::pin(self.await_terminal_outcome(
+            &mut active_session,
+            &prepared_turn.baseline_event_ids,
+            observer,
+        ))
+        .await;
 
         Ok(Step::Continue((
             active_session,
@@ -2998,13 +2994,11 @@ impl IssueSessionRunner {
             .write_run_manifest(workspace, run_manifest)
             .await?;
 
-        let stream = match self
-            .client
-            .attach_runtime_stream(
-                conversation.conversation_id,
-                self.config.runtime_stream.clone(),
-            )
-            .await
+        let stream = match Box::pin(self.client.attach_runtime_stream(
+            conversation.conversation_id,
+            self.config.runtime_stream.clone(),
+        ))
+        .await
         {
             Ok(stream) => stream,
             Err(error) => {
@@ -3571,9 +3565,12 @@ impl IssueSessionRunner {
                 next_token_accumulation = Instant::now() + Duration::from_secs(15);
             }
 
-            match self
-                .terminal_outcome_from_state(&mut session.stream, baseline_event_ids, observer)
-                .await
+            match Box::pin(self.terminal_outcome_from_state(
+                &mut session.stream,
+                baseline_event_ids,
+                observer,
+            ))
+            .await
             {
                 StateCheckResult::Terminal(outcome) => {
                     session.accumulate_tokens();
@@ -3598,7 +3595,8 @@ impl IssueSessionRunner {
             let event_timeout =
                 compute_timeout_duration(&tracker, next_token_accumulation, now, now_ts);
 
-            let next_event = timeout_at(now + event_timeout, session.stream.next_event()).await;
+            let next_event =
+                timeout_at(now + event_timeout, Box::pin(session.stream.next_event())).await;
 
             match next_event {
                 Err(_) => {

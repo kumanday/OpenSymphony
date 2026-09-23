@@ -189,6 +189,10 @@ The internal `opensymphony_openhands` module owns:
 - ready-state detection
 - issue session launch and reuse
 
+The local `opensymphony run` worker keeps OpenHands attach and event-poll futures
+off its shared routing stack. Attach runs in a cancellation-owned task, so an
+aborted issue run also aborts its in-flight attach before it can report launch.
+
 Harness interrupt uses `POST /api/conversations/{id}/interrupt` as the primary
 mid-turn stop request. If an older agent-server returns a missing-route status
 for that endpoint, the adapter falls back to `POST /api/conversations/{id}/pause`

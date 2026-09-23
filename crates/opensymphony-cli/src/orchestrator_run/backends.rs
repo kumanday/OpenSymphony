@@ -6924,7 +6924,7 @@ impl RuntimeWorkerBackend {
                     .as_ref()
                     .and_then(|memory| memory.scope_grants.clone())
                     .filter(|_| memory_grant_requires_fresh_conversation);
-                let mut outcome = run_codex_stdio_issue_with_mode(
+                let mut outcome = Box::pin(run_codex_stdio_issue_with_mode(
                     &route,
                     &workspace_manager,
                     &ensured.handle,
@@ -6945,7 +6945,7 @@ impl RuntimeWorkerBackend {
                     memory_grant_requires_fresh_conversation,
                     fresh_conversation_grants,
                     issue.identifier.as_str(),
-                )
+                ))
                 .await;
                 attach_parent_verification_receipt(
                     &mut outcome,
@@ -6988,28 +6988,26 @@ impl RuntimeWorkerBackend {
                 updates_tx: updates_tx.clone(),
             };
             let result = if recovered && !initialize_fresh_conversation {
-                runner
-                    .recover_with_observer(
-                        &workspace_manager,
-                        &ensured.handle,
-                        &mut run_manifest,
-                        &issue,
-                        &run,
-                        &mut observer,
-                    )
-                    .await
+                Box::pin(runner.recover_with_observer(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &issue,
+                    &run,
+                    &mut observer,
+                ))
+                .await
             } else {
-                runner
-                    .run_with_observer(
-                        &workspace_manager,
-                        &ensured.handle,
-                        &mut run_manifest,
-                        &issue,
-                        &run,
-                        &workflow,
-                        &mut observer,
-                    )
-                    .await
+                Box::pin(runner.run_with_observer(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &issue,
+                    &run,
+                    &workflow,
+                    &mut observer,
+                ))
+                .await
             };
 
             let launch_succeeded = observer.launch_tx.is_none();

@@ -393,7 +393,8 @@ async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
     );
     write_memory_config(project.path());
 
-    let mut child = spawn_run_child(project.path(), &[]);
+    // Keep this below Linux's 2 MiB Tokio worker default to catch poll-stack growth.
+    let mut child = spawn_run_child_with_worker_stack(project.path(), &[], 1_572_864);
     use tokio::io::AsyncReadExt;
     let mut child_stderr = child.stderr.take().expect("run child stderr");
     let stderr_task = tokio::spawn(async move {
@@ -504,7 +505,15 @@ Run the scheduler.
 }
 
 fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child {
-    spawn_run_child_configured(project_root, extra_args, None)
+    spawn_run_child_configured(project_root, extra_args, None, None)
+}
+
+fn spawn_run_child_with_worker_stack(
+    project_root: &std::path::Path,
+    extra_args: &[&str],
+    stack_bytes: usize,
+) -> Child {
+    spawn_run_child_configured(project_root, extra_args, None, Some(stack_bytes))
 }
 
 fn spawn_run_child_with_codex_bin(
@@ -512,13 +521,14 @@ fn spawn_run_child_with_codex_bin(
     extra_args: &[&str],
     codex_bin: &str,
 ) -> Child {
-    spawn_run_child_configured(project_root, extra_args, Some(codex_bin))
+    spawn_run_child_configured(project_root, extra_args, Some(codex_bin), None)
 }
 
 fn spawn_run_child_configured(
     project_root: &std::path::Path,
     extra_args: &[&str],
     codex_bin: Option<&str>,
+    worker_stack_bytes: Option<usize>,
 ) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
@@ -538,6 +548,11 @@ fn spawn_run_child_configured(
         .kill_on_drop(true);
     if let Some(codex_bin) = codex_bin {
         command.env("OPENSYMPHONY_CODEX_BIN", codex_bin);
+    }
+    if cfg!(unix)
+        && let Some(stack_bytes) = worker_stack_bytes
+    {
+        command.env("RUST_MIN_STACK", stack_bytes.to_string());
     }
     command.spawn().expect("run command should spawn")
 }
@@ -801,7 +816,7 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
 
 async fn wait_for_running_issue(url: &str, identifier: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_observation = "gateway unavailable".to_owned();
     while Instant::now() < deadline {
         match client.get(url).send().await {
