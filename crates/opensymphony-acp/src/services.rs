@@ -818,6 +818,40 @@ fn append_output(
 type TerminalChild = tokio::process::Child;
 #[cfg(windows)]
 type TerminalChild = super::windows_process::WindowsChild;
+#[cfg(target_os = "macos")]
+async fn terminate_terminal_tree(
+    child: &mut TerminalChild,
+    pid: Option<u32>,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    let group = pid
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw);
+    let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_millis(500));
+    loop {
+        match terminate_process_tree(child, pid).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Darwin can report EPERM while the exited group leader is
+                // being reaped. Only an absent group proves cleanup; a live
+                // group that remains inaccessible must still fail teardown.
+                let Some(group) = group else {
+                    return Err(error);
+                };
+                match rustix::process::test_kill_process_group(group) {
+                    Err(rustix::io::Errno::SRCH) => return Ok(()),
+                    Ok(()) | Err(rustix::io::Errno::PERM) => {}
+                    Err(probe_error) => return Err(probe_error.into()),
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 async fn run_terminal(
     #[cfg(unix)] mut guard: crate::opensymphony_workspace::ProcessGroupGuard,
     mut child: TerminalChild,
@@ -857,7 +891,11 @@ async fn run_terminal(
             },
         }
     };
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let signalled = terminate_terminal_tree(&mut child, pid, timeout)
+        .await
+        .is_ok();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let signalled = terminate_process_tree(&mut child, pid).await.is_ok();
     #[cfg(windows)]
     let signalled = child.start_kill().is_ok();

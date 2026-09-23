@@ -673,7 +673,10 @@ restoration response, reapply changed model/mode/options before the next prompt,
 and keep cancellation/deadline failures ahead of durable submission.
 The retained host also blocks the filesystem worker during the durable submission
 checkpoint, cancels the accepted prompt, and verifies that no prompt reaches the
-peer and the persisted marker closes as `cancelled_before_prompt`.
+peer and the persisted marker closes as `cancelled_before_prompt`. On macOS,
+the normal-completion retained fixture repeats short-lived terminal callbacks
+through successive prompts while the full host suite runs in parallel, covering
+the natural-exit process-group reap race.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,

@@ -968,7 +968,10 @@ agent starts, and the agent child enters that same directory inode with
 if its original pathname is replaced, reject every symlink component,
 including in-workspace links, and use no-follow opens for new files. Terminal
 launch traverses from the same pinned root; its child enters the selected
-directory using `fchdir` before executing the command. Windows pins every
+directory using `fchdir` before executing the command. On macOS, terminal
+teardown retries a transient process-group permission error after natural exit;
+cleanup succeeds only when group signaling succeeds or the group is confirmed
+absent. An inaccessible live group remains a teardown failure. Windows pins every
 ancestor without write/delete sharing, rejects reparse points through opened
 handles, and holds those guards through file I/O or terminal spawn. Writes create missing
 parent directories only after containment validation. File writes stage in the

@@ -255,7 +255,9 @@ async fn retention_leases_expire_and_resource_limits_refuse_active_owners() {
     let host = SessionHost::new(RetentionPolicy {
         max_sessions: 1,
         idle_timeout: Duration::from_millis(100),
-        attachment_ttl: Duration::from_millis(300),
+        // Leave room for parallel workspace setup before the renewal; expiry
+        // is asserted after the full lease interval below.
+        attachment_ttl: Duration::from_secs(2),
         ..RetentionPolicy::default()
     })
     .expect("host");
@@ -278,7 +280,7 @@ async fn retention_leases_expire_and_resource_limits_refuse_active_owners() {
     a.control(SessionControl::Renew { lease_id })
         .await
         .expect("renew");
-    tokio::time::sleep(Duration::from_millis(380)).await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(
         a.inspect().await.is_err(),
         "expired attachment allows visible retirement"
@@ -1247,6 +1249,14 @@ async fn normal_retained_completion_reaps_callbacks_and_rejects_adjacent_idle_wo
         handle.inspect().await.expect("idle owner").state.status,
         AcpSessionStatus::Finished
     );
-    assert!(prompt(&handle, "next", "services-next").await.succeeded());
+    // Repeated short-lived terminals exercise Darwin's exit/group-reap race
+    // while other retained-host cases run in parallel.
+    for attempt in 0..if cfg!(target_os = "macos") { 12 } else { 1 } {
+        assert!(
+            prompt(&handle, &format!("next-{attempt}"), "services-next")
+                .await
+                .succeeded()
+        );
+    }
     retire(&handle).await;
 }
