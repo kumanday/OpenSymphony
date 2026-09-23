@@ -24,6 +24,7 @@ fn profile(mode: &str) -> AcpProfile {
         }),
         required_capabilities: vec![],
         extensions: vec![],
+        session: Default::default(),
     }
 }
 fn context(root: &Path) -> LaunchContext {
@@ -39,6 +40,7 @@ fn context(root: &Path) -> LaunchContext {
             ("CHECKOUT_SECRET".into(), "checkout-secret-value".into()),
         ]),
         excluded_environment: BTreeSet::from(["CHECKOUT_SECRET".into()]),
+        services: Default::default(),
     }
 }
 fn limits() -> ClientLimits {
@@ -1064,4 +1066,745 @@ async fn acp_env_reference_sources_are_retained_only_when_explicitly_targeted() 
                 .succeeded()
         );
     }
+}
+
+fn services_profile(mode: &str) -> AcpProfile {
+    let mut profile = profile(mode);
+    profile.args[0] = format!(
+        "{}/tests/fixtures/acp_services_peer.py",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    profile.auth = None;
+    profile
+}
+fn services_context(root: &Path) -> LaunchContext {
+    let mut context = context(root);
+    context.services = opensymphony::opensymphony_acp::HostServices {
+        read_files: true,
+        write_files: true,
+        terminals: true,
+        ..Default::default()
+    };
+    context
+        .environment
+        .insert("HOST_SCOPE".into(), "COE-610".into());
+    context
+}
+fn services_limits() -> ClientLimits {
+    ClientLimits {
+        file_bytes: 1024,
+        terminal_output_bytes: 2048,
+        prompt_timeout: Duration::from_secs(10),
+        ..limits()
+    }
+}
+#[tokio::test]
+async fn acp_client_services_files_enforce_text_limits_and_containment() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    std::fs::write(context.issue_workspace.join("oversized"), vec![b'x'; 1025]).expect("file");
+    std::fs::write(context.issue_workspace.join("invalid-utf8"), [0xff]).expect("file");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.path(), context.issue_workspace.join("outside"))
+            .expect("link");
+        std::os::unix::fs::symlink(
+            root.path().join("nonexistent"),
+            context.issue_workspace.join("dangling"),
+        )
+        .expect("link");
+    }
+    let run = run_turn(
+        &services_profile("files"),
+        context,
+        "files".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome.expect("file callbacks").succeeded(),
+        "{}",
+        run.stderr
+    );
+}
+#[tokio::test]
+async fn acp_client_services_terminal_output_exit_release_and_host_policy() {
+    for mode in ["terminal", "release", "shutdown", "wait_timeout"] {
+        let root = tempfile::tempdir().expect("root");
+        let run = run_turn(
+            &services_profile(mode),
+            services_context(root.path()),
+            "terminal".into(),
+            CancellationToken::new(),
+            None,
+            ClientLimits {
+                callback_timeout: Duration::from_millis(500),
+                ..services_limits()
+            },
+        )
+        .await
+        .expect("launch");
+        assert!(
+            run.outcome.expect("terminal callbacks").succeeded(),
+            "{}",
+            run.stderr
+        );
+        assert!(run.process_reaped);
+    }
+}
+#[tokio::test]
+async fn acp_client_services_cancel_reaps_terminal_without_blocking_dispatch() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    let marker = context.issue_workspace.join("terminal.pid");
+    let cancel = CancellationToken::new();
+    let cancellation = cancel.clone();
+    let cancelling = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancellation.cancel();
+    };
+    let config = services_profile("cancel");
+    let (run, ()) = tokio::join!(
+        run_turn(
+            &config,
+            context,
+            "cancel".into(),
+            cancel,
+            None,
+            services_limits()
+        ),
+        cancelling
+    );
+    let run = run.expect("launch");
+    assert!(
+        run.outcome.expect("cancelled").cancellation_acknowledged,
+        "{}",
+        run.stderr
+    );
+    assert!(run.process_reaped);
+    #[cfg(unix)]
+    {
+        let pid = std::fs::read_to_string(marker)
+            .expect("pid")
+            .parse::<i32>()
+            .expect("pid");
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .expect("probe")
+                .status
+                .code()
+                .is_some_and(|code| code != 0)
+        );
+    }
+}
+#[tokio::test]
+async fn acp_client_services_absence_and_session_configuration_are_negotiated() {
+    for mode in ["disabled", "config", "legacy_mode", "unsupported_config"] {
+        let root = tempfile::tempdir().expect("root");
+        let mut profile = services_profile(mode);
+        if mode == "config" {
+            profile.session.model = Some("second".into());
+        }
+        if mode == "unsupported_config" {
+            profile.session.model = Some("unknown".into());
+        }
+        if mode == "legacy_mode" {
+            profile.session.mode = Some("code".into());
+        }
+        let run = run_turn(
+            &profile,
+            context(root.path()),
+            "configuration".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect("launch");
+        if mode == "unsupported_config" {
+            assert!(matches!(run.outcome, Err(ClientError::Setup(_))));
+            assert!(
+                !run.evidence
+                    .iter()
+                    .any(|f| f.payload["method"] == "session/prompt")
+            );
+        } else {
+            let report = run.outcome.expect("configured");
+            assert!(report.succeeded(), "{}", run.stderr);
+            if mode == "config" {
+                assert_eq!(report.configuration.options[0]["currentValue"], "first");
+            }
+            if mode == "legacy_mode" {
+                assert_eq!(report.configuration.current_mode.as_deref(), Some("ask"));
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn acp_scoped_mcp_attachment_requires_negotiated_transport_and_redacts_grants() {
+    use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("peer MCP access");
+        let mut data = vec![0; 4096];
+        let size = socket.read(&mut data).await.expect("request");
+        assert!(
+            String::from_utf8_lossy(&data[..size])
+                .contains("Authorization: Bearer scoped-grant-610")
+        );
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nCOE-610")
+            .await
+            .expect("response");
+    });
+    for mode in ["missing_mcp", "mcp"] {
+        let root = tempfile::tempdir().expect("root");
+        let mut context = context(root.path());
+        context.services.mcp_servers.push(McpServer::Http(
+            McpServerHttp::new("opensymphony-memory", format!("http://{address}/mcp")).headers(
+                vec![
+                    HttpHeader::new("Authorization", "Bearer scoped-grant-610"),
+                    HttpHeader::new("X-Debug", "3"),
+                ],
+            ),
+        ));
+        let run = run_turn(
+            &services_profile(mode),
+            context,
+            "memory".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect("launch");
+        if mode == "missing_mcp" {
+            assert!(matches!(run.outcome, Err(ClientError::Setup(_))));
+        } else {
+            assert!(
+                run.outcome.expect("MCP attached").succeeded(),
+                "{}",
+                run.stderr
+            );
+        }
+        assert!(
+            !serde_json::to_string(&run.evidence)
+                .expect("evidence")
+                .contains("scoped-grant-610")
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("MCP accessed")
+        .expect("server");
+}
+
+#[tokio::test]
+async fn acp_mcp_credential_arguments_are_redacted_from_requests_echoes_and_stderr() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    let root = tempfile::tempdir().expect("root");
+    let mut context = context(root.path());
+    context.services.mcp_servers.push(McpServer::Stdio(
+        McpServerStdio::new("memory", "memory-server").args(vec![
+            "--token".into(),
+            "standalone-oauth-value".into(),
+            "--api-key=inline-api-value".into(),
+            "--header".into(),
+            "Authorization: Bearer generic-header-value".into(),
+            "--custom".into(),
+            "opaque-generic-arg".into(),
+        ]),
+    ));
+    let run = run_turn(
+        &services_profile("mcp_argv"),
+        context,
+        "memory".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome.expect("stdio attachment").succeeded(),
+        "{}",
+        run.stderr
+    );
+    let evidence = serde_json::to_string(&run.evidence).expect("evidence");
+    for secret in [
+        "standalone-oauth-value",
+        "inline-api-value",
+        "generic-header-value",
+    ] {
+        assert!(!evidence.contains(secret));
+        assert!(!run.stderr.contains(secret));
+    }
+    assert!(!evidence.contains("opaque-generic-arg"));
+    assert!(evidence.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn acp_one_turn_rejects_write_adjacent_to_prompt_response() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    let marker = context.issue_workspace.join("late-written");
+    let run = run_turn(
+        &services_profile("late_after_prompt"),
+        context,
+        "finish".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome.expect("completed").succeeded(),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "post-response callback wrote into workspace"
+    );
+}
+
+#[test]
+fn acp_one_turn_cancels_callback_pending_when_prompt_response_arrives() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let root = tempfile::tempdir().expect("root");
+        let context = services_context(root.path());
+        let marker = context.issue_workspace.join("late-written");
+        let response_sent = context.issue_workspace.join("response-sent");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx.recv().expect("release filesystem worker");
+        });
+        started_rx.await.expect("filesystem worker occupied");
+        let run = tokio::spawn(async move {
+            run_turn(
+                &services_profile("pending_at_response"),
+                context,
+                "finish".into(),
+                CancellationToken::new(),
+                None,
+                services_limits(),
+            )
+            .await
+        });
+        let sent = tokio::time::timeout(Duration::from_secs(3), async {
+            while !response_sent.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_tx.send(()).expect("release worker");
+        blocker.await.expect("blocking worker");
+        sent.expect("peer sent adjacent response");
+        let run = run.await.expect("run task").expect("launch");
+        assert!(
+            run.outcome.expect("completed").succeeded(),
+            "{}",
+            run.stderr
+        );
+        assert!(!marker.exists(), "callback committed after prompt response");
+    });
+}
+
+#[tokio::test]
+async fn acp_client_services_callback_admission_bounds_pending_waits() {
+    let root = tempfile::tempdir().expect("root");
+    let run = run_turn(
+        &services_profile("wait_flood"),
+        services_context(root.path()),
+        "flood".into(),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            pending_callbacks: 2,
+            ..services_limits()
+        },
+    )
+    .await
+    .expect("launch");
+    assert!(matches!(
+        run.outcome,
+        Err(ClientError::ResourceLimit { submitted: true })
+    ));
+    assert!(run.process_reaped);
+}
+#[tokio::test]
+async fn acp_client_services_handles_are_connection_scoped_even_with_equal_session_ids() {
+    let first_root = tempfile::tempdir().expect("first");
+    let first = services_context(first_root.path());
+    let marker = first.issue_workspace.join("terminal.id");
+    let cancel = CancellationToken::new();
+    let cancellation = cancel.clone();
+    let owner_profile = services_profile("owner");
+    let other = async {
+        let id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(id) = tokio::fs::read_to_string(&marker).await
+                    && !id.is_empty()
+                {
+                    break id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owner terminal");
+        let second_root = tempfile::tempdir().expect("second");
+        let mut second = services_context(second_root.path());
+        second.environment.insert("OTHER_TERMINAL".into(), id);
+        let result = run_turn(
+            &services_profile("foreign_handle"),
+            second,
+            "foreign".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect("second launch");
+        cancellation.cancel();
+        assert!(
+            result.outcome.expect("foreign denied").succeeded(),
+            "{}",
+            result.stderr
+        );
+    };
+    let (run, ()) = tokio::join!(
+        run_turn(
+            &owner_profile,
+            first,
+            "owner".into(),
+            cancel,
+            None,
+            services_limits()
+        ),
+        other
+    );
+    assert!(
+        run.expect("owner launch")
+            .outcome
+            .expect("owner cancelled")
+            .cancellation_acknowledged
+    );
+}
+
+#[test]
+fn acp_explicit_session_profile_selections_are_bounded_and_round_trip() {
+    let mut profile = services_profile("config");
+    profile.session.model = Some("provider/model:revision".into());
+    profile
+        .session
+        .options
+        .insert("reasoning".into(), "high".into());
+    profile.validate().expect("opaque selections");
+    let encoded = serde_yaml::to_string(&profile).expect("serialize");
+    let decoded: AcpProfile = serde_yaml::from_str(&encoded).expect("deserialize");
+    assert_eq!(decoded.session, profile.session);
+    profile.session.model = Some(String::new());
+    assert!(profile.validate().is_err());
+    profile.session.model = Some("x".repeat(1025));
+    assert!(profile.validate().is_err());
+    profile.session.model = None;
+    profile.session.options = (0..33)
+        .map(|i| (format!("option-{i}"), "value".into()))
+        .collect();
+    assert!(profile.validate().is_err());
+}
+
+#[tokio::test]
+async fn acp_configuration_applies_model_before_dependent_options() {
+    let root = tempfile::tempdir().expect("root");
+    let mut profile = services_profile("config_dependent");
+    profile.session.model = Some("second".into());
+    profile
+        .session
+        .options
+        .insert("a-reasoning".into(), "high".into());
+    let run = run_turn(
+        &profile,
+        context(root.path()),
+        "configured".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    let report = run.outcome.expect("dependent selection applied");
+    assert!(report.succeeded(), "{}", run.stderr);
+    assert!(
+        report
+            .configuration
+            .options
+            .iter()
+            .any(|option| option["id"] == "a-reasoning" && option["currentValue"] == "high")
+    );
+}
+
+#[tokio::test]
+async fn acp_configuration_rpc_errors_preserve_classification_and_redact_context() {
+    for mode in ["config_auth_error", "config_rpc_error", "legacy_rpc_error"] {
+        let root = tempfile::tempdir().expect("root");
+        let mut profile = services_profile(mode);
+        let mut context = context(root.path());
+        context
+            .environment
+            .insert("TEST_TOKEN".into(), "rpc-secret-610".into());
+        if mode.starts_with("legacy") {
+            profile.session.mode = Some("code".into());
+        } else {
+            profile.session.model = Some("second".into());
+        }
+        let run = run_turn(
+            &profile,
+            context,
+            "unsubmitted".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect("launch");
+        let error = run.outcome.expect_err("configuration RPC failed");
+        if mode == "config_auth_error" {
+            assert_eq!(
+                error,
+                ClientError::AuthenticationRequired { submitted: false }
+            );
+        } else {
+            let ClientError::Rpc {
+                method,
+                code,
+                message,
+                submitted,
+            } = error
+            else {
+                panic!("expected contextual RPC error: {error:?}");
+            };
+            assert_eq!(
+                method,
+                if mode.starts_with("legacy") {
+                    "session/set_mode"
+                } else {
+                    "session/set_config_option"
+                }
+            );
+            assert_eq!(code, -32603);
+            assert!(!submitted);
+            assert!(message.contains("unavailable"));
+            assert!(!message.contains("rpc-secret-610"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_configuration_resolves_mode_category_after_model_prerequisite() {
+    let root = tempfile::tempdir().expect("root");
+    let mut profile = services_profile("config_dependent_mode");
+    profile.session.model = Some("second".into());
+    profile.session.mode = Some("code".into());
+    let run = run_turn(
+        &profile,
+        context(root.path()),
+        "configured".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    let report = run.outcome.expect("dependent mode applied");
+    assert!(report.succeeded(), "{}", run.stderr);
+    assert!(
+        report
+            .configuration
+            .options
+            .iter()
+            .any(|option| option["category"] == "mode" && option["currentValue"] == "code")
+    );
+}
+
+#[tokio::test]
+async fn acp_mcp_urls_reject_embedded_credentials_before_launch() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerHttp, McpServerSse};
+    for url in [
+        "https://user:password@example.com/mcp",
+        "https://example.com/mcp?access_token=url-secret",
+        "https://example.com/mcp?api%5fkey=url-secret",
+        "https://example.com/mcp?oauth=url-secret",
+        "https://example.com/mcp?bearer=url-secret",
+        "https://example.com/mcp?key=url-secret",
+        "https://example.com/mcp?signature=url-secret",
+        "https://example.com/mcp?ordinary=query-value",
+        "https://example.com/mcp?",
+        "https://example.com/mcp#url-secret",
+    ] {
+        for sse in [false, true] {
+            let root = tempfile::tempdir().expect("root");
+            let mut context = context(root.path());
+            context.services.mcp_servers.push(if sse {
+                McpServer::Sse(McpServerSse::new("memory", url))
+            } else {
+                McpServer::Http(McpServerHttp::new("memory", url))
+            });
+            let error = run_turn(
+                &services_profile("mcp"),
+                context,
+                "unused".into(),
+                CancellationToken::new(),
+                None,
+                services_limits(),
+            )
+            .await
+            .expect_err("URL rejected before source capture");
+            assert!(matches!(error, ClientError::InvalidConfiguration(_)));
+            assert!(!error.to_string().contains("url-secret"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_filesystem_payloads_stay_on_wire_and_out_of_evidence() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    std::fs::write(
+        context.issue_workspace.join("private-file"),
+        "opaque_workspace_payload_610",
+    )
+    .expect("private file");
+    let run = run_turn(
+        &services_profile("file_privacy"),
+        context,
+        "files".into(),
+        CancellationToken::new(),
+        None,
+        services_limits(),
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome
+            .expect("peer received original content")
+            .succeeded()
+    );
+    let evidence = serde_json::to_string(&run.evidence).expect("evidence");
+    assert!(!evidence.contains("opaque_workspace_payload_610"));
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["result"]["content"] == "[redacted]")
+    );
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["method"] == "fs/write_text_file"
+                && frame.payload["params"]["content"] == "[redacted]")
+    );
+    assert!(
+        run.evidence
+            .iter()
+            .any(|frame| frame.payload["result"]["output"] == "[redacted]")
+    );
+}
+
+#[tokio::test]
+async fn acp_mcp_aliases_cannot_forward_resolved_excluded_checkout_values() {
+    use agent_client_protocol::schema::v1::{
+        EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    };
+    for server in [
+        McpServer::Stdio(McpServerStdio::new("memory", "memory-server").env(vec![
+            EnvVariable::new("ACCESS_TOKEN", "checkout-secret-value"),
+        ])),
+        McpServer::Stdio(
+            McpServerStdio::new("memory", "memory-server")
+                .args(vec!["--token=checkout-secret-value".into()]),
+        ),
+        McpServer::Http(
+            McpServerHttp::new("memory", "https://example.test/mcp").headers(vec![
+                HttpHeader::new("Authorization", "Bearer checkout-secret-value"),
+            ]),
+        ),
+        McpServer::Sse(
+            McpServerSse::new("memory", "https://example.test/mcp")
+                .headers(vec![HttpHeader::new("X-Grant", "checkout-secret-value")]),
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("root");
+        let mut context = context(root.path());
+        context.services.mcp_servers.push(server);
+        let error = run_turn(
+            &services_profile("mcp"),
+            context,
+            "unused".into(),
+            CancellationToken::new(),
+            None,
+            services_limits(),
+        )
+        .await
+        .expect_err("excluded value rejected before launch");
+        assert!(matches!(error, ClientError::InvalidConfiguration(_)));
+        assert!(!error.to_string().contains("checkout-secret-value"));
+    }
+}
+
+#[tokio::test]
+async fn acp_encoded_facility_output_respects_small_response_budgets() {
+    let root = tempfile::tempdir().expect("root");
+    let context = services_context(root.path());
+    std::fs::write(context.issue_workspace.join("escaped"), vec![0; 2048]).expect("escaped");
+    std::fs::write(context.issue_workspace.join("small"), "ok").expect("small");
+    let run = run_turn(
+        &services_profile("response_budget"),
+        context,
+        "bounded".into(),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            file_bytes: 4096,
+            terminal_output_bytes: 4096,
+            frame_bytes: 1024,
+            callback_bytes: 1024,
+            ..services_limits()
+        },
+    )
+    .await
+    .expect("launch");
+    assert!(
+        run.outcome
+            .expect("oversized callbacks do not tear down transport")
+            .succeeded(),
+        "{}",
+        run.stderr
+    );
+    assert!(run.process_reaped);
 }

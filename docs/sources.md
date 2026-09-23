@@ -247,7 +247,19 @@ terminates descendants when ownership ends.
 Wire authority: [v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization),
 [v1 prompt/cancel lifecycle](https://agentclientprotocol.com/protocol/v1/prompt-turn),
 and [v1 transports](https://agentclientprotocol.com/protocol/v1/transports).
-Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/acp.rs`.
+Client facilities follow the [v1 filesystem](https://agentclientprotocol.com/protocol/v1/file-system),
+[v1 terminals](https://agentclientprotocol.com/protocol/v1/terminals),
+[v1 session config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+and [v1 MCP attachments](https://agentclientprotocol.com/protocol/v1/session-setup)
+contracts. Optional callback fields use strict local deserialization so malformed
+line, cwd, environment and output limits cannot silently become defaults.
+Implementation and tests are in `crates/opensymphony-acp/src/` and `tests/acp.rs`.
+
+Windows callback path ownership uses documented [CreateFile sharing and reparse
+flags](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+through [Rust OpenOptionsExt](https://doc.rust-lang.org/std/os/windows/fs/trait.OpenOptionsExt.html).
+No-follow handles are checked before mutation, and ancestor handles exclude
+write/delete sharing until file I/O or terminal spawn finishes.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

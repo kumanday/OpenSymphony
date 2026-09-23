@@ -629,6 +629,15 @@ That document covers:
 
 ## ACP stdio client tests
 
+`cargo test-system-duckdb --test acp` includes the executable
+`tests/fixtures/acp_services_peer.py` peer. It exercises line ranges and endings,
+invalid UTF-8, missing write parents, traversal/symlinks, oversized content,
+capability absence, cross-session rejection, UTF-8 terminal truncation, exit
+races, release-before-exit, cancellation/reaping, immutable host policy,
+advertised configuration changes and an authenticated scoped MCP HTTP attachment.
+These deterministic tests establish client behavior; live harness qualification
+is tracked separately in OSYM-906.
+
 Run `cargo test-system-duckdb --test acp` for the executable client contract and
 `cargo test-system-duckdb --lib acp` for central configuration coverage. The reusable
 `tests/fixtures/acp_peer.py` peer validates initialize/authenticate/new/prompt,
@@ -645,12 +654,44 @@ adjacent response/update pair is dispatched, and saturate callback output while
 a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
+Native Unix tests replace the bound workspace root after service creation and
+verify file reads, atomic writes, and new terminal cwd remain on the original
+directory inode. They also swap a pinned terminal directory for an external
+symlink before spawn and verify it reads from the original directory. A narrow
+`unsafe_code` allowance wraps child-only `pre_exec` registration for `fchdir`;
+the repository lint is `deny`, and the closure performs no allocation, locking,
+logging or host cwd mutation. Callback tests cancel a file operation queued behind
+a blocked filesystem worker and verify no write occurs. Executable peers exercise
+partial staged-write cancellation and atomic replacement on native platforms,
+ordinary MCP environment values beside secret grants, JSON-escaped file/terminal
+responses against smaller response budgets, generic credential-bearing MCP
+header arguments with exact wire delivery and masked evidence, a one-turn
+prompt response immediately followed by a denied file write, deferred
+model-to-mode selection, and rejection of credentials embedded in MCP URLs.
+Retained-owner fixtures reject abandoned-session callbacks adjacent to a missing
+restoration response, reapply changed model/mode/options before the next prompt,
+and keep cancellation/deadline failures ahead of durable submission.
+The retained host also blocks the filesystem worker during the durable submission
+checkpoint, cancels the accepted prompt, and verifies that no prompt reaches the
+peer and the persisted marker closes as `cancelled_before_prompt`. On macOS,
+the normal-completion retained fixture repeats short-lived terminal callbacks
+through successive prompts while the full host suite runs in parallel, covering
+the natural-exit process-group reap race.
 The `acp-windows` CI job runs `python scripts/validation/check-acp-windows.py`
 on Windows. Its temporary Cargo harness compiles the production Windows process
 owner and verifies descendant termination on normal teardown, parent exit,
 wait deadline, and dropped futures. It also executes the shared environment
 replacement helper against a real child to verify case-insensitive alias
-precedence. Dependencies are read from the root manifest. On another host,
+precedence. The shared Windows callback path validator rejects real junctions
+for existing reads, nonexistent writes and terminal directories; pinned-handle
+tests attempt directory and leaf swaps during I/O and terminal spawn. Windows SDK
+bindings support same-directory stage promotion and deletion by
+handle. Two small audited unsafe wrappers use synchronous owned handles and
+bounded SDK-layout buffers; native tests verify successful atomic replacement,
+original preservation on cancellation and promotion errors, stage/parent rename
+exclusion, and deletion after an outstanding write handle closes. The temporary
+validation harness uses the same deny-by-default unsafe lint as the root crate.
+Dependencies are read from the root manifest. On another host,
 `--check-target x86_64-pc-windows-gnu` checks compilation with that Rust target
 installed; cross-compilation alone does not prove Windows process behavior.
 Run `cargo fmt --check` and `cargo clippy-system-duckdb`; dependency changes also
@@ -661,6 +702,15 @@ later live-qualification task and must not be inferred from fake-peer tests.
 with executable subprocesses: repeated attempts, concurrent issues, live leases,
 idle expiry, cancellation/busy fencing, negotiated load/replay and resume, fresh
 nonpersistent reset, durable uncertain-submission refusal and stale generations.
+Callback integration covers cancellation followed by a fresh turn on the same
+process, stale terminal rejection, live configuration and secret-safe host-policy/
+MCP grant compatibility checks. Normal-completion tests send adjacent late file
+and terminal callbacks, verify rejection while idle and process reaping before
+completion, then start a fresh callback epoch. Pre-prompt tests reject file and
+terminal requests after session binding. File and terminal-output tests verify
+exact wire contents with structural redaction in retained history and evidence.
+Configuration tests check preparation-frame attribution on success, cancellation
+and timeout; MCP tests reject query strings and aliased excluded credentials.
 The peer verifies that the submitted marker is already on disk when a prompt
 arrives. `cargo test-system-duckdb --lib opensymphony_acp::durable::tests` covers
 owner locks, process-group loss, the launch checkpoint gap, compatibility bounds,

@@ -118,7 +118,24 @@ Known gaps:
 
 `opensymphony_acp::run_turn` implements an SDK-backed ACP v1 stdio session through
 setup, one text prompt, ordered updates, cancellation, and supervised teardown.
-Only the executable client and typed launch profiles are available in this slice.
+The executable client includes typed launch profiles and host-owned callbacks.
 ACP is not yet advertised as a runnable scheduler harness; production routing,
-retained sessions, negotiated public capabilities, complete callbacks and operator
+negotiated public capabilities and operator
 responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+
+
+| ACP client surface | Implemented contract |
+| --- | --- |
+| `fs/read_text_file` | Opt-in; session-bound UTF-8, 1-based lines, optional line count, preserved line endings, bounded file size. |
+| `fs/write_text_file` | Opt-in; contained absolute paths, checked missing parents, bounded content, regular files. |
+| `terminal/*` | Opt-in; create/output/wait/kill/release, connection-local random IDs, immutable host environment, contained cwd, bounded UTF-8 output. |
+| Session configuration | Advertised select options and grouped values; explicit model/mode choices; legacy modes; ordered updates. |
+| MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
+| Permission | Cancelled response until operator routing is implemented. |
+| Interactive auth and elicitation | Not advertised. |
+
+Windows callback operations pin path ancestors through use and reject reparse
+points, including junctions, through no-follow handles. Callback epoch handoff shares the setup
+deadline and observes caller cancellation before prompt submission.
+
+Callback policies do not establish a sandbox for the local agent process.

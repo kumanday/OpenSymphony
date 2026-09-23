@@ -989,15 +989,58 @@ references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-The current prompt API sends text. ACP model overrides are rejected until the
-session configuration implementation is available. Filesystem, terminal, MCP,
-extension, and operator permission policies are follow-on slices.
+The prompt API sends text. Explicit session selections live in each profile:
+
+```yaml
+session:
+  model: model-id
+  mode: code
+  options:
+    thought-level: high
+```
+
+`session.model` and `session.mode` select advertised config options by category;
+`session.options` selects by exact option ID, including grouped select values.
+The client applies choices before every prompt, including retained turns,
+validates the returned complete option list, and consumes subsequent config and
+mode updates. Currently supported
+model/mode prerequisites apply before dependent options, using the refreshed
+advertisements after each response. Legacy
+`session/set_mode` is used when the peer supplies modes without config options.
+Unsupported explicit choices fail setup. Boolean options and legacy experimental
+model RPCs are not advertised. The generic routing model override remains
+unavailable for ACP; use the profile's explicit session selection.
+
+The host supplies `LaunchContext.services: HostServices`. Its `read_files`,
+`write_files`, and `terminals` flags default to false and enable only the matching
+implemented callbacks. `mcp_servers` contains resolved host-owned scoped MCP
+attachments: stdio is baseline support, while HTTP and SSE require the peer's
+advertisement. Every supplied server is required; unsupported transports fail
+before session creation. Existing memory grants can be passed as an HTTP server
+named `opensymphony-memory` with the issued Authorization header. Resolved values
+stay out of the profile. Every stdio MCP argument value is structurally masked
+in captured requests; credential option values in separate and equals forms,
+including generic header values, are also redacted from echoed events and
+stderr. The peer receives the exact host-supplied attachment. Operator
+responses and extensions remain separate slices.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,
 including mixed case; credentials belong in `env_refs`. A top-level `acp` section
 selects the central configuration parser, so incomplete central files fail
 validation before legacy defaults can be applied.
+
+ACP callback text is bounded by both its facility limit and the complete encoded
+response budget, including JSON escaping and the request ID. A file response that
+does not fit returns a callback parameter error; terminal output retains a UTF-8
+tail and reports truncation. Scoped HTTP/SSE MCP endpoints must use HTTP or HTTPS
+without URL userinfo, fragments or query strings; pass resolved grants in headers.
+MCP attachments cannot include resolved excluded checkout credentials, including
+values aliased under another environment name, header or argument. Filesystem
+contents and terminal output remain intact on the wire and are structurally
+redacted from source history and evidence. Model and mode categories are
+resolved from each refreshed option list so prerequisite selections can reveal
+dependent options.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

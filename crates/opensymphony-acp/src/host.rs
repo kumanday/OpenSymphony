@@ -428,7 +428,11 @@ impl SessionHost {
                     }
                     HostCommand::Open { mut launch, reply } => {
                         let key = launch.workspace.issue_id().to_owned();
-                        let fingerprint = profile_fingerprint(&launch.profile);
+                        let fingerprint = profile_fingerprint(
+                            &launch.profile,
+                            &launch.context.services,
+                            &launch.limits,
+                        );
                         let Ok(fingerprint) = fingerprint else {
                             let _ = reply.send(Err(HostError::Persistence));
                             continue;
@@ -652,6 +656,17 @@ struct ActivePrompt {
     cancellation: CancellationToken,
 }
 
+struct PreparingPrompt {
+    result: Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send>>,
+    run_id: String,
+    attempt: u32,
+    prompt: String,
+    cancellation: CancellationToken,
+    forced: CancellationToken,
+    callback_epoch: CancellationToken,
+    reply: oneshot::Sender<Result<TurnReport, HostError>>,
+}
+
 pub(super) struct SessionDriver {
     durable: Durability,
     receive: mpsc::Receiver<Command>,
@@ -739,6 +754,7 @@ impl SessionDriver {
             snapshot: Box::new(self.snapshot(active)),
         });
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn drive(
         &mut self,
         connection: ConnectionTo<Agent>,
@@ -746,6 +762,9 @@ impl SessionDriver {
         session_id: SessionId,
         capture: &SharedCapture,
         limits: &ClientLimits,
+        services: &super::services::CallbackSender,
+        configuration: &Arc<Mutex<super::SessionConfiguration>>,
+        profile: &AcpProfile,
     ) -> Result<TurnReport, ClientError> {
         let mut metadata = serde_json::to_value(&initialization)
             .map_err(|_| ClientError::Setup("invalid negotiation metadata".into()))?;
@@ -789,14 +808,53 @@ impl SessionDriver {
         }
         self.publish(false);
         let mut active: Option<ActivePrompt> = None;
+        let mut preparing: Option<PreparingPrompt> = None;
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut commands_closed = false;
         loop {
             tokio::select! {
+                result = async { preparing.as_mut().expect("guarded preparation").result.as_mut().await }, if preparing.is_some() => {
+                    let pending = preparing.take().expect("preparing prompt");
+                    let result = result.and_then(|()| {
+                        if pending.cancellation.is_cancelled() || pending.forced.is_cancelled() { Err(ClientError::CancelledBeforePrompt) } else { Ok(()) }
+                    });
+                    if let Err(error) = result {
+                        let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                        return Err(error);
+                    }
+                    if self.durable.submitted(pending.run_id.clone(), pending.attempt).await.is_err() {
+                        let _ = pending.reply.send(Err(HostError::Persistence));
+                        return Err(ClientError::Setup("submission checkpoint failed".into()));
+                    }
+                    if pending.cancellation.is_cancelled() || pending.forced.is_cancelled() {
+                        pending.callback_epoch.cancel();
+                        if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                            let _ = pending.reply.send(Err(HostError::Persistence));
+                            return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                        }
+                        let error = ClientError::CancelledBeforePrompt;
+                        let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                        return Err(error);
+                    }
+                    active = Some(ActivePrompt {
+                        result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
+                        reply: pending.reply, cancellation: pending.forced,
+                    });
+                    self.publish(true);
+                }
                 result = async { active.as_mut().expect("guarded active prompt").result.as_mut().await }, if active.is_some() => {
                     let pending = active.take().expect("active prompt");
                     let report = match result {
                         Ok(report) => report,
+                        Err(ClientError::CancelledBeforePrompt) => {
+                            if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                                let _ = pending.reply.send(Err(HostError::Persistence));
+                                return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                            }
+                            let error = ClientError::CancelledBeforePrompt;
+                            let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                            return Err(error);
+                        }
                         Err(error) => { let _ = self.durable.uncertain().await; let _ = pending.reply.send(Err(HostError::Client(error.to_string()))); return Err(error); }
                     };
                     if self.durable.finished(report.stop_reason.clone()).await.is_err() {
@@ -811,25 +869,48 @@ impl SessionDriver {
                     let Some(command) = command else {
                         commands_closed = true;
                         if let Some(active) = &active { active.cancellation.cancel(); }
+                        if let Some(preparing) = &preparing { preparing.forced.cancel(); }
                         continue;
                     };
                     match command {
                         Command::Prompt { generation, run_id, attempt, prompt, cancellation, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
-                            if active.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }
+                            if active.is_some() || preparing.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }
                             if prompt.len() > limits.frame_bytes / 6 || run_id.is_empty() || run_id.len() > 1024 { let _ = reply.send(Err(HostError::ResourceLimit)); continue; }
                             if cancellation.is_cancelled() { let _ = reply.send(Err(HostError::Client(ClientError::CancelledBeforePrompt.to_string()))); continue; }
-                            if self.durable.submitted(run_id.clone(), attempt).await.is_err() { let _ = reply.send(Err(HostError::Persistence)); return Err(ClientError::Setup("submission checkpoint failed".into())); }
-                            self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = run_id;
-                            let forced = CancellationToken::new();
-                            active = Some(ActivePrompt { result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), prompt, cancellation, forced.clone(), capture.clone(), limits.clone())), reply, cancellation: forced });
+                            let forced = cancellation.child_token();
+                            let callback_epoch = forced.child_token();
+                            let sender = services.clone();
+                            let epoch = callback_epoch.clone();
+                            let timeout = limits.setup_timeout;
+                            let connection = connection.clone();
+                            let profile = profile.clone();
+                            let session_id = session_id.clone();
+                            let configuration = configuration.clone();
+                            let capture = capture.clone();
+                            // Preparation frames belong to this accepted run even if setup
+                            // fails before any durable prompt submission occurs.
+                            self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = run_id.clone();
+                            preparing = Some(PreparingPrompt {
+                                result: Box::pin(async move {
+                                    tokio::select! {
+                                        biased;
+                                        _ = epoch.cancelled() => Err(ClientError::CancelledBeforePrompt),
+                                        result = tokio::time::timeout(timeout, async {
+                                            sender.begin_turn(epoch.clone(), timeout).await?;
+                                            super::session_config::apply(&connection, &profile, session_id.0.as_ref(), &configuration, &capture).await
+                                        }) => result.map_err(|_| ClientError::SetupTimeout)?,
+                                    }
+                                }),
+                                run_id, attempt, prompt, cancellation, forced, callback_epoch, reply,
+                            });
                             self.publish(true);
                         }
                         Command::Control { generation, action, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
                             self.expire_leases();
                             let result = match action {
-                                SessionControl::Inspect => Ok(ControlResult::Snapshot(Box::new(self.snapshot(active.is_some())))),
+                                SessionControl::Inspect => Ok(ControlResult::Snapshot(Box::new(self.snapshot(active.is_some() || preparing.is_some())))),
                                 SessionControl::Attach => {
                                     if self.attachments.len() >= self.policy.max_attachments { Err(HostError::ResourceLimit) } else {
                                         let lease_id = uuid::Uuid::new_v4().to_string();
@@ -843,7 +924,7 @@ impl SessionDriver {
                                 },
                                 SessionControl::Release { lease_id } => if self.attachments.remove(&lease_id).is_some() { self.idle_since = tokio::time::Instant::now(); Ok(ControlResult::Released) } else { Err(HostError::IdentityMismatch) },
                                 SessionControl::Retire => {
-                                    if active.is_some() || !self.attachments.is_empty() { Err(HostError::Busy) } else { self.retire_reply = Some(reply); break; }
+                                    if active.is_some() || preparing.is_some() || !self.attachments.is_empty() { Err(HostError::Busy) } else { self.retire_reply = Some(reply); break; }
                                 }
                             };
                             let _ = reply.send(result);
@@ -852,7 +933,7 @@ impl SessionDriver {
                 }
                 _ = tick.tick() => {
                     self.expire_leases();
-                    if active.is_none() && self.attachments.is_empty() && (commands_closed || self.idle_since.elapsed() >= self.policy.idle_timeout) { break; }
+                    if active.is_none() && preparing.is_none() && self.attachments.is_empty() && (commands_closed || self.idle_since.elapsed() >= self.policy.idle_timeout) { break; }
                 }
             }
         }
@@ -862,6 +943,10 @@ impl SessionDriver {
             cancellation_acknowledged: false,
             session_id: session_id.0.to_string(),
             initialization,
+            configuration: configuration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         })
     }
     fn expire_leases(&mut self) {
@@ -880,7 +965,17 @@ async fn prompt_rpc(
     forced: CancellationToken,
     capture: SharedCapture,
     limits: ClientLimits,
+    configuration: Arc<Mutex<super::SessionConfiguration>>,
+    callback_epoch: CancellationToken,
+    services: super::services::CallbackSender,
 ) -> Result<TurnReport, ClientError> {
+    // The submitted marker may finish persisting after cancellation. This
+    // check runs again when the active future is first polled, immediately
+    // before transport submission.
+    if cancellation.is_cancelled() || forced.is_cancelled() {
+        callback_epoch.cancel();
+        return Err(ClientError::CancelledBeforePrompt);
+    }
     let request = UntypedMessage::new(
         "session/prompt",
         PromptRequest::new(
@@ -889,13 +984,29 @@ async fn prompt_rpc(
         ),
     )
     .map_err(|_| ClientError::Protocol { submitted: false })?;
-    let response = connection.send_request(request).block_task();
+    let (response_tx, response_rx) = oneshot::channel();
+    connection
+        .send_request(request)
+        .on_receiving_result(async move |result| {
+            // Revoke callback authority in ordered response dispatch, before an
+            // adjacent late callback can run. This does not cancel the prompt token.
+            callback_epoch.cancel();
+            let _ = response_tx.send(result);
+            Ok(())
+        })
+        .map_err(|_| ClientError::Protocol { submitted: true })?;
+    let response = async {
+        response_rx
+            .await
+            .map_err(|_| agent_client_protocol::Error::internal_error())?
+    };
     tokio::pin!(response);
     let mut cancellation_requested = false;
     let result = tokio::select! {
         result = &mut response => result,
         _ = async { tokio::select! { _ = cancellation.cancelled() => {}, _ = forced.cancelled() => {} } } => {
             cancellation_requested = true;
+            forced.cancel();
             connection.send_notification(CancelNotification::new(session_id.clone())).map_err(|_| ClientError::Protocol { submitted: true })?;
             tokio::time::timeout(limits.cancel_timeout, &mut response).await.map_err(|_| ClientError::CancelTimeout)?
         },
@@ -919,11 +1030,16 @@ async fn prompt_rpc(
     {
         return Err(ClientError::Protocol { submitted: true });
     }
+    services.end_turn(limits.setup_timeout).await?;
     Ok(TurnReport {
         cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",
         cancellation_requested,
         stop_reason,
         session_id: session_id.0.to_string(),
         initialization,
+        configuration: configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
     })
 }
