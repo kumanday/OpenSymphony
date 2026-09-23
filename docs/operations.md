@@ -995,11 +995,17 @@ ACP process so child environment and memory evidence remain scoped to the run.
 After a revoked memory grant requires a fresh owner, the revocation marker clears
 when that owner reports a successful launch; failed setup leaves it in place.
 ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
+The ACP child and its terminal callbacks receive memory variables only from the
+run-scoped managed grant; ambient and workflow `OPENSYMPHONY_MEMORY_*` values are
+discarded. Profiles cannot remap credentials into or out of that reserved namespace.
 Repository-neutral ACP parents receive project, authorized-repository, run, and
 attempt guidance from that overlay without an execution-repository default.
 Production ACP turns have no fixed client prompt deadline. When configured,
 `agent.stall_timeout_ms` applies the scheduler's activity-based stall policy;
 the interrupt path handles an operator or scheduler stop request.
+Unknown, redacted `session/update` variants produce bounded generic scheduler
+activity. After a subscriber lag, the worker replays retained source frames when
+they cover every frame after its processed cursor; an actual gap fences the run.
 An ACP session restored through `session/load` receives the full workflow prompt
 when its durable state has never seeded that prompt. A seeded session receives
 continuation guidance even when the new run's claim has reset its status to

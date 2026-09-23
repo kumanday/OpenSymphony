@@ -862,6 +862,35 @@ async fn acp_configured_environment_targets_follow_platform_name_rules() {
 }
 
 #[tokio::test]
+async fn acp_profile_cannot_map_unscoped_credential_into_memory_scope() {
+    let root = tempfile::tempdir().expect("temp");
+    for (target, source) in [
+        ("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "AGENT_TOKEN"),
+        ("AGENT_TOKEN", "OPENSYMPHONY_MEMORY_TOKEN"),
+    ] {
+        let mut config = profile("complete");
+        config.env_refs.insert(target.into(), source.into());
+        let mut launch = context(root.path());
+        launch
+            .environment
+            .insert("AGENT_TOKEN".into(), "unscoped-bearer".into());
+        launch
+            .environment
+            .insert("OPENSYMPHONY_MEMORY_TOKEN".into(), "managed-grant".into());
+        let result = run_turn(
+            &config,
+            launch,
+            "hello".into(),
+            CancellationToken::new(),
+            None,
+            limits(),
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::InvalidConfiguration(_))));
+    }
+}
+
+#[tokio::test]
 async fn acp_live_input_queue_bounds_bytes_and_releases_dispatched_charges() {
     let root = tempfile::tempdir().expect("temp");
     for (mode, succeeds) in [("evidence_flood", false), ("paced_queue", true)] {

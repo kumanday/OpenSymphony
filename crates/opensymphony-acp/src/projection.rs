@@ -55,6 +55,17 @@ pub struct RuntimeProjection {
 }
 
 impl RuntimeProjection {
+    pub fn after(cursor: (u64, u64)) -> Self {
+        Self {
+            last: Some(cursor),
+            ..Self::default()
+        }
+    }
+
+    pub fn last_cursor(&self) -> Option<(u64, u64)> {
+        self.last
+    }
+
     pub fn apply(&mut self, event: &SessionEvent, run_id: &str) -> Option<RuntimeUpdate> {
         let SessionEvent::Source {
             generation,
@@ -264,7 +275,29 @@ impl RuntimeProjection {
             | "available_commands_update"
             | "current_mode_update"
             | "config_option_update" => None,
-            _ => return None,
+            _ => {
+                // Source frames are already redacted by Capture. Keep future
+                // update shapes visible as activity without letting an
+                // unrecognized payload grow scheduler storage without bound.
+                const MAX_UNKNOWN_UPDATE_BYTES: usize = 16 * 1024;
+                let payload = if serde_json::to_vec(&update).ok()?.len() <= MAX_UNKNOWN_UPDATE_BYTES
+                {
+                    update
+                } else {
+                    json!({
+                        "sessionUpdate": kind.chars().take(128).collect::<String>(),
+                        "truncated": true
+                    })
+                };
+                return Some(RuntimeUpdate {
+                    sequence: frame.sequence,
+                    generation,
+                    observed_at: frame.observed_at,
+                    kind: "session_update".into(),
+                    summary: Some("ACP session update".into()),
+                    payload,
+                });
+            }
         };
         // Activity storage requires a summary; structural updates must remain
         // visible even when the peer sends no text or title.
@@ -358,8 +391,12 @@ pub fn profile_capabilities(
 ) -> Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability> {
     let mut environment = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| !super::is_reserved_memory_environment_name(name))
         .collect::<BTreeMap<_, _>>();
-    for (name, value) in worker_environment {
+    for (name, value) in worker_environment
+        .iter()
+        .filter(|(name, _)| !super::is_reserved_memory_environment_name(name))
+    {
         crate::opensymphony_workspace::insert_environment_value(
             &mut environment,
             name.clone(),
@@ -422,7 +459,10 @@ fn profile_capabilities_with_environment(
             };
             let reason = if profile.validate().is_err()
                 || has_environment_name_collision(profile.env_refs.keys().map(String::as_str))
-            {
+                || profile.env_refs.iter().any(|(target, source)| {
+                    super::is_reserved_memory_environment_name(target)
+                        || super::is_reserved_memory_environment_name(source)
+                }) {
                 Some("invalid_profile")
             } else if profile
                 .env_refs
@@ -573,6 +613,36 @@ mod tests {
                 .unavailable_reason
                 .as_deref(),
             Some("credential_reference_excluded")
+        );
+    }
+
+    #[test]
+    fn profile_preflight_cannot_map_into_reserved_memory_scope() {
+        let mut config: crate::opensymphony_workflow::AcpConfig = serde_json::from_value(json!({
+            "profiles": {
+                "profile": {
+                    "command": std::env::current_exe().expect("test executable"),
+                    "env_refs": {"OPENSYMPHONY_MEMORY_ADMIN_TOKEN": "AGENT_TOKEN"}
+                }
+            }
+        }))
+        .expect("profile");
+        let overlay = BTreeMap::from([("AGENT_TOKEN".into(), "unscoped-bearer".into())]);
+        let capability = &profile_capabilities(&config, &overlay, &BTreeSet::new())[0];
+        assert_eq!(
+            capability.unavailable_reason.as_deref(),
+            Some("invalid_profile")
+        );
+        config
+            .profiles
+            .get_mut("profile")
+            .expect("profile")
+            .env_refs =
+            BTreeMap::from([("AGENT_TOKEN".into(), "OPENSYMPHONY_MEMORY_TOKEN".into())]);
+        let capability = &profile_capabilities(&config, &overlay, &BTreeSet::new())[0];
+        assert_eq!(
+            capability.unavailable_reason.as_deref(),
+            Some("invalid_profile")
         );
     }
 
@@ -759,5 +829,31 @@ mod tests {
             )
             .expect("projected update");
         assert!(usage.payload.get("inputTokens").is_none());
+    }
+
+    #[test]
+    fn unknown_session_updates_remain_bounded_scheduler_activity() {
+        let mut projection = RuntimeProjection::default();
+        let unknown = event(
+            1,
+            false,
+            json!({"sessionUpdate":"vendor_progress","detail":{"status":"working","credential":"[redacted]"}}),
+        );
+        let projected = projection.apply(&unknown, "run").expect("generic activity");
+        assert_eq!(projected.kind, "session_update");
+        assert_eq!(projected.summary.as_deref(), Some("ACP session update"));
+        assert_eq!(projected.payload["sessionUpdate"], "vendor_progress");
+        assert_eq!(projected.payload["detail"]["credential"], "[redacted]");
+        assert!(projection.apply(&unknown, "run").is_none(), "deduplicated");
+
+        let large = event(
+            2,
+            false,
+            json!({"sessionUpdate":"vendor_progress","data":"x".repeat(20 * 1024)}),
+        );
+        let projected = projection.apply(&large, "run").expect("bounded activity");
+        assert_eq!(projected.kind, "session_update");
+        assert_eq!(projected.payload["truncated"], true);
+        assert!(serde_json::to_vec(&projected.payload).expect("JSON").len() < 1024);
     }
 }

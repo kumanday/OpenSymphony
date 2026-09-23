@@ -465,6 +465,7 @@ pub(super) fn launch_environment(
     let mut environment = ambient
         .into_iter()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| !crate::opensymphony_acp::is_reserved_memory_environment_name(name))
         .collect::<BTreeMap<_, _>>();
     for (name, value) in overlay {
         crate::opensymphony_workspace::insert_environment_value(
@@ -744,7 +745,11 @@ async fn try_run(
         }
     }
     let mut receiver = handle.subscribe();
-    let mut projection = RuntimeProjection::default();
+    let baseline = handle
+        .source_history()
+        .latest_cursor
+        .unwrap_or((handle.generation, 0));
+    let mut projection = RuntimeProjection::after(baseline);
     let prompt = handle.prompt(
         manifest.run_id.clone(),
         manifest.attempt,
@@ -760,7 +765,7 @@ async fn try_run(
                 Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let history = handle.source_history();
-                    if history.truncated { return Err("ACP worker source stream exceeded retention; submission remains fenced".into()); }
+                    if !history.covers_since(projection.last_cursor().unwrap_or(baseline)) { return Err("ACP worker source stream exceeded retention; submission remains fenced".into()); }
                     for event in history.events { project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates); }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break Err(crate::opensymphony_acp::HostError::Unavailable),
@@ -783,7 +788,7 @@ async fn try_run(
             ),
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 let history = handle.source_history();
-                if history.truncated {
+                if !history.covers_since(projection.last_cursor().unwrap_or(baseline)) {
                     return Err("ACP worker source stream exceeded retention".into());
                 }
                 for event in history.events {
@@ -895,5 +900,33 @@ mod tests {
         assert_eq!(environment.get("SCOPED").map(String::as_str), Some("token"));
         assert!(!environment.contains_key("BAD"));
         assert_eq!(environment.len(), 2);
+    }
+
+    #[test]
+    fn launch_environment_replaces_ambient_memory_scope_with_worker_grant() {
+        let ambient = [
+            (
+                "OPENSYMPHONY_MEMORY_ADMIN_TOKEN".into(),
+                "admin-bearer".into(),
+            ),
+            ("OPENSYMPHONY_MEMORY_TOKEN".into(), "stale-grant".into()),
+            ("OPENSYMPHONY_MEMORY_PROJECT".into(), "stale-project".into()),
+            ("PATH".into(), "/usr/bin".into()),
+        ];
+        let overlay = BTreeMap::from([
+            ("OPENSYMPHONY_MEMORY_TOKEN".into(), "scoped-grant".into()),
+            (
+                "OPENSYMPHONY_MEMORY_PROJECT".into(),
+                "current-project".into(),
+            ),
+        ]);
+        let environment = launch_environment(ambient, &overlay);
+        assert!(!environment.contains_key("OPENSYMPHONY_MEMORY_ADMIN_TOKEN"));
+        assert_eq!(environment["OPENSYMPHONY_MEMORY_TOKEN"], "scoped-grant");
+        assert_eq!(
+            environment["OPENSYMPHONY_MEMORY_PROJECT"],
+            "current-project"
+        );
+        assert_eq!(environment["PATH"], "/usr/bin");
     }
 }

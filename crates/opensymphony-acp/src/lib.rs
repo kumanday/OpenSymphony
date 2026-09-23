@@ -522,6 +522,21 @@ impl Capture {
 
 type SharedCapture = Arc<Mutex<Capture>>;
 
+/// Memory access belongs to the run-scoped worker overlay, never the daemon's
+/// ambient environment. This also protects terminal callbacks, which inherit
+/// the validated ACP child environment.
+pub(crate) fn is_reserved_memory_environment_name(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        name.to_ascii_uppercase()
+            .starts_with("OPENSYMPHONY_MEMORY_")
+    }
+    #[cfg(not(windows))]
+    {
+        name.starts_with("OPENSYMPHONY_MEMORY_")
+    }
+}
+
 fn capture(capture: &SharedCapture, direction: &str, payload: Value) {
     capture
         .lock()
@@ -645,6 +660,13 @@ fn validate_launch(
         .collect::<BTreeMap<_, _>>();
     let mut secrets = Vec::new();
     for (target, source) in &profile.env_refs {
+        if is_reserved_memory_environment_name(target)
+            || is_reserved_memory_environment_name(source)
+        {
+            return Err(ClientError::InvalidConfiguration(
+                "env_refs cannot remap a run-scoped memory grant".into(),
+            ));
+        }
         if excluded(target) || excluded(source) {
             return Err(ClientError::InvalidConfiguration(
                 "env_refs cannot expose excluded checkout credentials".into(),

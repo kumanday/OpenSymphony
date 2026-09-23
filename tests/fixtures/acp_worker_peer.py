@@ -67,18 +67,21 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as source:
             assert json.load(source)["acp"]["status"] == "submitted"
         callback_roundtrip = False
+        callback_admin_present = False
         if profile == "configured":
             assert selected_model is not None
             path = os.path.join(os.getcwd(), "acp-callback.txt")
             request("fs/write_text_file", {"path": path, "content": "configured worker"})
             assert request("fs/read_text_file", {"path": path})["content"] == "configured worker"
-            terminal = request("terminal/create", {"command": sys.executable, "args": ["-c", "print('configured terminal')"]})["terminalId"]
+            terminal = request("terminal/create", {"command": sys.executable, "args": ["-c", "import os; print('configured terminal'); print('admin-present' if os.environ.get('OPENSYMPHONY_MEMORY_ADMIN_TOKEN') else 'admin-absent')"]})["terminalId"]
             assert request("terminal/wait_for_exit", {"terminalId": terminal})["exitCode"] == 0
-            assert "configured terminal" in request("terminal/output", {"terminalId": terminal})["output"]
+            terminal_output = request("terminal/output", {"terminalId": terminal})["output"]
+            assert "configured terminal" in terminal_output
+            callback_admin_present = "admin-present" in terminal_output
             request("terminal/release", {"terminalId": terminal})
             callback_roundtrip = True
         with open("acp-worker.json", "w") as output:
-            json.dump({"cwd": os.getcwd(), "profile": profile, "prompt": message["params"]["prompt"][0]["text"], "memory_project": os.environ.get("OPENSYMPHONY_MEMORY_PROJECT"), "memory_repo": os.environ.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO"), "checkout_secret_present": "OPENSYMPHONY_CHECKOUT_TEST_ONLY" in os.environ, "memory_token_present": bool(os.environ.get("OPENSYMPHONY_MEMORY_TOKEN")), "memory_mcp_attached": bool(session_mcp), "selected_model": selected_model, "callback_roundtrip": callback_roundtrip}, output)
+            json.dump({"cwd": os.getcwd(), "profile": profile, "prompt": message["params"]["prompt"][0]["text"], "memory_project": os.environ.get("OPENSYMPHONY_MEMORY_PROJECT"), "memory_repo": os.environ.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO"), "checkout_secret_present": "OPENSYMPHONY_CHECKOUT_TEST_ONLY" in os.environ, "memory_token_present": bool(os.environ.get("OPENSYMPHONY_MEMORY_TOKEN")), "memory_endpoint_present": bool(os.environ.get("OPENSYMPHONY_MEMORY_ENDPOINT")), "memory_admin_present": bool(os.environ.get("OPENSYMPHONY_MEMORY_ADMIN_TOKEN")), "memory_mcp_attached": bool(session_mcp), "selected_model": selected_model, "callback_roundtrip": callback_roundtrip, "callback_admin_present": callback_admin_present}, output)
         send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ACP fixture completed"}}}})
         send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "plan", "entries": []}}})
         send({"method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "usage_update", "used": 42, "size": 100}}})

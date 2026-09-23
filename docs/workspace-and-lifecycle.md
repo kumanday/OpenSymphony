@@ -927,6 +927,10 @@ rejected before spawn. Profiles cannot supply a cwd. The host supplies an explic
 environment with scoped memory grants and checkout credential exclusions. The
 client clears ambient inheritance and rejects profile references that would
 reintroduce excluded credentials.
+Production routing removes ambient and workflow `OPENSYMPHONY_MEMORY_*` values
+before adding the current run's managed grant. Profile environment mappings
+cannot read from or write into this reserved namespace; terminal callbacks inherit the same
+scoped environment as the ACP child.
 
 `SessionHost` retains one supervised process/connection per issue. A stable
 `.opensymphony/acp-owner.lock` prevents competing owners without creating another

@@ -234,6 +234,47 @@ impl EventPublisher {
 pub struct SourceHistory {
     pub events: Vec<SessionEvent>,
     pub truncated: bool,
+    /// Latest published source cursor, including a frame too large to retain.
+    #[serde(default)]
+    pub latest_cursor: Option<(u64, u64)>,
+}
+impl SourceHistory {
+    /// A sticky historical eviction is harmless when every frame after this
+    /// run's processed cursor still appears in the retained contiguous tail.
+    pub fn covers_since(&self, cursor: (u64, u64)) -> bool {
+        let Some(latest) = self.latest_cursor else {
+            return true;
+        };
+        if latest.0 != cursor.0 {
+            return false;
+        }
+        if latest.1 <= cursor.1 {
+            return true;
+        }
+        let Some(mut expected) = cursor.1.checked_add(1) else {
+            return false;
+        };
+        for event in &self.events {
+            if let SessionEvent::Source {
+                generation, frame, ..
+            } = event
+                && *generation == cursor.0
+                && frame.sequence >= expected
+            {
+                if frame.sequence != expected {
+                    return false;
+                }
+                if expected == latest.1 {
+                    return true;
+                }
+                let Some(next) = expected.checked_add(1) else {
+                    return false;
+                };
+                expected = next;
+            }
+        }
+        false
+    }
 }
 struct EventHistory {
     events: VecDeque<(SessionEvent, usize)>,
@@ -241,9 +282,16 @@ struct EventHistory {
     max_bytes: usize,
     max_frames: usize,
     truncated: bool,
+    latest_cursor: Option<(u64, u64)>,
 }
 impl EventHistory {
     fn retain(&mut self, event: SessionEvent) -> bool {
+        if let SessionEvent::Source {
+            generation, frame, ..
+        } = &event
+        {
+            self.latest_cursor = Some((*generation, frame.sequence));
+        }
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
         if bytes > self.max_bytes {
             self.truncated = true;
@@ -294,6 +342,7 @@ impl SessionHandle {
                 .map(|(event, _)| event.clone())
                 .collect(),
             truncated: history.truncated,
+            latest_cursor: history.latest_cursor,
         }
     }
     pub async fn inspect(&self) -> Result<SessionSnapshot, HostError> {
@@ -570,6 +619,7 @@ async fn start(
         max_bytes: launch.limits.queued_bytes,
         max_frames: launch.limits.queued_frames,
         truncated: false,
+        latest_cursor: None,
     }));
     let mut handle = SessionHandle {
         owner_id: durable.state().owner_id.clone(),

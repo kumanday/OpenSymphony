@@ -139,6 +139,10 @@ such as plans. Response observations retain reported counters without inferring
 delta accumulation into native aggregate totals. Missing counters stay absent
 and duplicate or load-replayed observations are suppressed. Numeric usage counters retain their meaning through source redaction;
 credential fields remain redacted.
+Unrecognized `session/update` variants still emit a bounded, redacted generic
+activity record so an active peer remains visible to the scheduler. Subscriber
+lag replays the retained source tail when it covers the current run's processed
+cursor; only a current gap fences automatic completion.
 
 Operator responses, writer transfer and IDE presentation follow the
 [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission

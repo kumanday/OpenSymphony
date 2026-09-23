@@ -6,6 +6,47 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn retained_source_history_distinguishes_old_eviction_from_current_loss() {
+    let source = |sequence| SessionEvent::Source {
+        generation: 7,
+        run_id: "current-run".into(),
+        replay: false,
+        frame: SourceFrame {
+            sequence,
+            direction: "incoming".into(),
+            observed_at: chrono::Utc::now(),
+            payload: serde_json::json!({"method":"session/update"}),
+        },
+    };
+    let history = SourceHistory {
+        events: (129..=140).map(source).collect(),
+        truncated: true,
+        latest_cursor: Some((7, 140)),
+    };
+    assert!(
+        history.covers_since((7, 128)),
+        "ancient eviction is harmless"
+    );
+    assert!(
+        history.covers_since((7, 130)),
+        "processed frames may remain in history"
+    );
+    assert!(
+        !history.covers_since((7, 127)),
+        "missing current frame must fence"
+    );
+
+    let oversized_tail = SourceHistory {
+        latest_cursor: Some((7, 141)),
+        ..history
+    };
+    assert!(
+        !oversized_tail.covers_since((7, 140)),
+        "a dropped oversized frame must fence even without later frames"
+    );
+}
+
 async fn launch(root: &Path, issue: &str, mode: &str) -> SessionLaunch {
     let root = root.canonicalize().expect("root");
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {

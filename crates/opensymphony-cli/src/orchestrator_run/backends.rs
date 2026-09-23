@@ -6276,7 +6276,8 @@ impl RuntimeWorkerBackend {
                                 parent_runtime_envelope
                                     .as_ref()
                                     .map(|envelope| envelope.run_id.clone())
-                            });
+                            })
+                            .or_else(|| memory.run_id.clone());
                         scoped.attempt = runtime_envelope
                             .as_ref()
                             .map(|envelope| envelope.attempt)
@@ -6284,7 +6285,8 @@ impl RuntimeWorkerBackend {
                                 parent_runtime_envelope
                                     .as_ref()
                                     .map(|envelope| envelope.attempt)
-                            });
+                            })
+                            .or(memory.attempt);
                         scoped.target_commit = runtime_envelope
                             .as_ref()
                             .map(|envelope| envelope.target_commit.clone());
@@ -6399,6 +6401,13 @@ impl RuntimeWorkerBackend {
                         memory.scope_grants.is_some() && !memory.parent_scope
                     }));
             let mut worker_environment = worker_env.clone();
+            if route.harness_kind == acp::KIND {
+                // Only the run-scoped memory grant may populate reserved ACP
+                // variables; workflow/daemon values can carry an admin bearer.
+                worker_environment.retain(|name, _| {
+                    !crate::opensymphony_acp::is_reserved_memory_environment_name(name)
+                });
+            }
             if let Some(memory) = &worker_memory_env {
                 inject_memory_env(&mut worker_environment, memory);
             }
@@ -14534,6 +14543,20 @@ mod tests {
     }
 
     #[test]
+    fn acp_worker_memory_overlay_discards_unmanaged_reserved_values() {
+        let mut worker_environment: BTreeMap<String, String> = BTreeMap::from([
+            ("OPENSYMPHONY_MEMORY_ADMIN_TOKEN".into(), "admin".into()),
+            ("OPENSYMPHONY_MEMORY_TOKEN".into(), "stale".into()),
+            ("OPENSYMPHONY_MEMORY_PROJECT".into(), "stale-project".into()),
+            ("AGENT_TOKEN".into(), "worker-grant".into()),
+        ]);
+        worker_environment
+            .retain(|name, _| !crate::opensymphony_acp::is_reserved_memory_environment_name(name));
+        assert_eq!(worker_environment.len(), 1);
+        assert_eq!(worker_environment["AGENT_TOKEN"], "worker-grant");
+    }
+
+    #[test]
     fn worker_memory_scope_prefers_canonical_project_id_over_slug() {
         let mut issue = sample_issue();
         issue.project_id = Some("canonical-project-id".to_owned());
@@ -17306,14 +17329,25 @@ exit 64
             Arc::new(workflow),
             manager.clone(),
             None,
-            BTreeMap::from([
-                ("OPENSYMPHONY_MEMORY_PROJECT".into(), "project-scope".into()),
-                (
-                    "OPENSYMPHONY_MEMORY_EXECUTION_REPO".into(),
-                    "repo-scope".into(),
-                ),
-            ]),
+            BTreeMap::new(),
         );
+        let mut backend = backend;
+        backend.memory_env = Some(RuntimeMemoryEnv {
+            endpoint: "http://127.0.0.1:8765/mcp".into(),
+            token: None,
+            project: "project-scope".into(),
+            execution_repo: "repo-scope".into(),
+            parent_scope: false,
+            authorized_repositories: BTreeSet::from(["repo-scope".into()]),
+            authorized_repositories_by_project: BTreeMap::new(),
+            scope_grants: None,
+            project_set: None,
+            visibility: crate::opensymphony_memory::MemoryVisibility::Private,
+            run_id: None,
+            attempt: None,
+            target_commit: None,
+            checkout_head: None,
+        });
         (backend, manager)
     }
 
@@ -17333,13 +17367,7 @@ exit 64
     async fn acp_worker_applies_route_model_and_host_services_before_prompt() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
-        backend.worker_env.insert(
-            "OPENSYMPHONY_MEMORY_ENDPOINT".into(),
-            "http://127.0.0.1:8765/mcp".into(),
-        );
-        backend
-            .worker_env
-            .insert("OPENSYMPHONY_MEMORY_TOKEN".into(), "scoped-grant".into());
+        backend.memory_env.as_mut().expect("managed memory").token = Some("scoped-grant".into());
         let root = manager.config().root.clone();
         let mut request = acp_test_request(&root, "configured", 1);
         request.route.model = Some("route-model".into());
@@ -18022,13 +18050,15 @@ exit 64
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
         let root = manager.config().root.clone();
         let mut previous_owner = None;
-        for (ordinal, name, value) in [
-            (1, "OPENSYMPHONY_MEMORY_RUN_ID", "run-a"),
-            (2, "OPENSYMPHONY_MEMORY_RUN_ID", "run-b"),
-            (3, "OPENSYMPHONY_MEMORY_ATTEMPT", "2"),
-            (4, "OPENSYMPHONY_MEMORY_PROJECT_SET", "project-set-b"),
-        ] {
-            backend.worker_env.insert(name.into(), value.into());
+        for ordinal in 1..=4 {
+            let memory = backend.memory_env.as_mut().expect("managed memory");
+            match ordinal {
+                1 => memory.run_id = Some("run-a".into()),
+                2 => memory.run_id = Some("run-b".into()),
+                3 => memory.attempt = Some(2),
+                4 => memory.project_set = Some("project-set-b".into()),
+                _ => unreachable!(),
+            }
             backend
                 .start_worker(acp_test_request(&root, "first", ordinal))
                 .await
@@ -18170,8 +18200,9 @@ exit 64
             .env("ACP_TEST_AMBIENT_SCOPE", "1")
             .env("OPENSYMPHONY_MEMORY_PROJECT", "stale-project")
             .env("OPENSYMPHONY_MEMORY_EXECUTION_REPO", "stale-repo")
-            .env_remove("OPENSYMPHONY_MEMORY_ENDPOINT")
-            .env_remove("OPENSYMPHONY_MEMORY_TOKEN")
+            .env("OPENSYMPHONY_MEMORY_ENDPOINT", "http://stale.invalid/mcp")
+            .env("OPENSYMPHONY_MEMORY_TOKEN", "stale-grant")
+            .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-bearer")
             .output()
             .await
             .expect("child test");
@@ -18192,9 +18223,10 @@ exit 64
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
         backend.worker_env.clear();
+        backend.memory_env = None;
         let root = manager.config().root.clone();
         backend
-            .start_worker(acp_test_request(&root, "first", 1))
+            .start_worker(acp_test_request(&root, "configured", 1))
             .await
             .expect("ACP launch");
         assert_eq!(
@@ -18216,6 +18248,11 @@ exit 64
         assert!(!prompt.contains("stale-project"));
         assert!(!prompt.contains("stale-repo"));
         assert_eq!(evidence["memory_mcp_attached"], false);
+        assert_eq!(evidence["memory_admin_present"], false);
+        assert_eq!(evidence["memory_token_present"], false);
+        assert_eq!(evidence["memory_endpoint_present"], false);
+        assert_eq!(evidence["callback_roundtrip"], true);
+        assert_eq!(evidence["callback_admin_present"], false);
         acp::retire(&manager, &handle, backend.acp_host.as_ref())
             .await
             .expect("retire");
