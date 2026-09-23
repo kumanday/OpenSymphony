@@ -104,7 +104,9 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
+      - area:orchestrator
       - area:runtime
       - area:workspace
       linear_milestones:
@@ -880,6 +882,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:data-contracts
       - area:evidence
@@ -1502,6 +1505,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:evidence
       - area:experiments
@@ -1539,6 +1543,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:experiments
       - area:harness
@@ -1810,6 +1815,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -2963,6 +2969,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -3084,6 +3091,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -3112,6 +3120,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -3140,6 +3149,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:orchestrator
       - area:provider
@@ -3162,6 +3172,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:evidence
       - area:experiments
@@ -3275,7 +3286,9 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
+      - area:orchestrator
       - area:recovery
       - area:runtime
       - area:workspace
@@ -3389,6 +3402,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:orchestrator
       - area:recovery
@@ -3486,6 +3500,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -3681,6 +3696,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -3912,6 +3928,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -4487,6 +4504,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory
@@ -4680,6 +4698,7 @@ areas:
     source_refs:
       linear_labels:
       - area:acp
+      - area:cli
       - area:configuration
       - area:harness
       - area:memory

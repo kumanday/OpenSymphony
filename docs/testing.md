@@ -131,6 +131,7 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
 - PR-196: Desktop task and diff latency plus live-refresh UX fixes
 - PR-197: Graph visualization command center and shared fixtures
 
@@ -234,6 +235,7 @@ last_memory_sync: 2026-06-28T06:08:14.403748+00:00
 - COE-608
 - COE-609
 - COE-610
+- COE-611
 - PR-196
 - PR-197
 

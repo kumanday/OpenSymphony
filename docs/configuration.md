@@ -1254,6 +1254,7 @@ dependent options.
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
 
 ## Source refs
 
@@ -1414,5 +1415,6 @@ dependent options.
 - COE-608
 - COE-609
 - COE-610
+- COE-611
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
