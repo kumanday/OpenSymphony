@@ -110,6 +110,8 @@ pub struct ClientLimits {
     pub pending_callbacks: usize,
     pub callback_timeout: Duration,
     pub setup_timeout: Duration,
+    /// Client wall-clock bound for a turn. Zero disables this bound, allowing
+    /// the orchestrator's activity-based stall and abort policy to own liveness.
     pub prompt_timeout: Duration,
     pub cancel_timeout: Duration,
     pub reap_timeout: Duration,
@@ -136,6 +138,14 @@ impl Default for ClientLimits {
             cancel_timeout: Duration::from_secs(10),
             reap_timeout: Duration::from_secs(5),
         }
+    }
+}
+
+async fn wait_prompt_timeout(timeout: Duration) {
+    if timeout.is_zero() {
+        std::future::pending().await
+    } else {
+        tokio::time::sleep(timeout).await;
     }
 }
 
@@ -575,7 +585,6 @@ fn validate_launch(
         || !(1..=128).contains(&limits.pending_callbacks)
         || [
             limits.setup_timeout,
-            limits.prompt_timeout,
             limits.cancel_timeout,
             limits.reap_timeout,
             limits.callback_timeout,
@@ -1331,7 +1340,7 @@ async fn run_connection(
                         }
                     }
                 },
-                _ = tokio::time::sleep(limits.prompt_timeout) => {
+                _ = wait_prompt_timeout(limits.prompt_timeout) => {
                     phase_error = Some(ClientError::PromptTimeout);
                     return Err(agent_client_protocol::Error::internal_error());
                 }

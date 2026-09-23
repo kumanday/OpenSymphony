@@ -1056,7 +1056,7 @@ async fn prompt_rpc(
             connection.send_notification(CancelNotification::new(session_id.clone())).map_err(|_| ClientError::Protocol { submitted: true })?;
             tokio::time::timeout(limits.cancel_timeout, &mut response).await.map_err(|_| ClientError::CancelTimeout)?
         },
-        _ = tokio::time::sleep(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
+        _ = super::wait_prompt_timeout(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
     }.map_err(|error| super::rpc_failure("session/prompt", &error, &capture, true).unwrap_or(ClientError::Protocol { submitted: true }))?;
     let stop_reason = result
         .get("stopReason")

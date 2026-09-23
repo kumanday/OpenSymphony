@@ -6415,7 +6415,7 @@ impl RuntimeWorkerBackend {
                         &workflow,
                         &worker_environment,
                         &environment,
-                        &crate::opensymphony_acp::ClientLimits::default(),
+                        &acp::production_client_limits(),
                     ) {
                         Ok(identity) => {
                             previous.identity.profile_fingerprint != identity.profile_fingerprint
@@ -17210,6 +17210,7 @@ exit 64
             "corrupt",
             "configured",
             "slow_model_hang",
+            "unprompted_retry",
         ] {
             let profile = serde_json::from_value(serde_json::json!({
                 "command":"python3", "args":[format!("{}/tests/fixtures/acp_worker_peer.py", env!("CARGO_MANIFEST_DIR")), id]
@@ -17230,6 +17231,14 @@ exit 64
             .profiles
             .get_mut("slow_model_hang")
             .expect("slow model profile")
+            .session
+            .model = Some("profile-model".into());
+        workflow
+            .extensions
+            .acp
+            .profiles
+            .get_mut("unprompted_retry")
+            .expect("unprompted retry profile")
             .session
             .model = Some("profile-model".into());
         workflow.config.routing.harness = "acp".into();
@@ -17466,6 +17475,71 @@ exit 64
                 .await
                 .expect("retire");
         }
+    }
+
+    #[tokio::test]
+    async fn acp_restored_unprompted_session_receives_full_workflow_prompt() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "unprompted_retry", 1))
+            .await
+            .expect("first owner reached Ready");
+        let first_outcome = acp_test_finished(&mut backend).await;
+        assert_eq!(first_outcome.outcome, WorkerOutcomeKind::Failed);
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let first = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("conversation");
+        let state = first.acp.expect("ACP state");
+        assert_eq!(
+            state.status,
+            crate::opensymphony_workspace::AcpSessionStatus::Ready
+        );
+        assert!(
+            state.session_id.is_some(),
+            "session/new completed: {state:?}; outcome: {first_outcome:?}"
+        );
+        assert!(!handle.workspace_path().join("acp-prompts.jsonl").exists());
+
+        backend
+            .start_worker(acp_test_request(&root, "unprompted_retry", 2))
+            .await
+            .expect("restored owner launch");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let restored = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("conversation")
+            .acp
+            .expect("ACP state");
+        assert_eq!(
+            restored.recovery,
+            crate::opensymphony_workspace::AcpRecovery::RestoredLoad
+        );
+        let prompts = fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl"))
+            .expect("recorded prompt");
+        let sent: serde_json::Value =
+            serde_json::from_str(prompts.lines().next().expect("first prompt")).expect("JSON");
+        let prompt = sent["prompt"].as_str().expect("prompt text");
+        assert!(prompt.contains("# Test Workflow"), "{prompt}");
+        assert!(prompt.contains("Run the scheduler."), "{prompt}");
+        assert_eq!(prompts.lines().count(), 1);
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
     }
 
     #[tokio::test]
@@ -18304,6 +18378,17 @@ exit 64
             )
             .await
             .expect("durable cancellation checkpoint");
+        let raw = manager
+            .read_text_artifact(&handle, &handle.conversation_manifest_path())
+            .await
+            .expect("conversation artifact")
+            .expect("conversation");
+        assert!(
+            !acp::conversation_view(&raw)
+                .expect("scheduler view")
+                .workflow_prompt_seeded,
+            "cancelled_before_prompt does not seed workflow context"
+        );
         let mut crashed_run = manager
             .load_run_manifest(&handle)
             .await

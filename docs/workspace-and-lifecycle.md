@@ -977,6 +977,12 @@ before archiving its manifest. Interrupted or failed launches execute
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check
 without launching another peer.
+An ACP session that has reached `ready` but has not submitted a prompt receives
+the full workflow prompt on the next attempt, even when `session/load` restores
+the peer session ID. A finished session receives continuation guidance. Production
+ACP turns use configured scheduler stall detection and cancellation rather than a
+fixed client prompt deadline; direct client callers can set a bound or use zero
+to disable it.
 When cancellation closes the owner before prompt submission, scheduler stop
 observation checks the durable record for the exact owner, generation, run and
 workspace. Only a stopped process with `ready` or `finished` state counts as

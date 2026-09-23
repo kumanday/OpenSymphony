@@ -99,6 +99,14 @@ pub(super) fn new_host() -> SessionHost {
     .expect("valid production ACP retention policy")
 }
 
+pub(super) fn production_client_limits() -> ClientLimits {
+    // Scheduler stall detection and abort own production turn liveness.
+    ClientLimits {
+        prompt_timeout: Duration::ZERO,
+        ..ClientLimits::default()
+    }
+}
+
 /// Normalize shared manifest fields for existing scheduler recovery. Never persist this view:
 /// the ACP owner is the only writer of its durable conversation record.
 pub(super) fn conversation_view(raw: &str) -> Result<IssueConversationManifest, serde_json::Error> {
@@ -117,6 +125,10 @@ pub(super) fn conversation_view(raw: &str) -> Result<IssueConversationManifest, 
                 .pointer("/acp/status")
                 .and_then(serde_json::Value::as_str)
                 != Some("ready")
+                && value
+                    .pointer("/acp/stop_reason")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("cancelled_before_prompt")
         );
         if value["conversation_id"].as_str() == Some("") {
             // A launch reservation can precede the peer session ID. This identifies the
@@ -577,7 +589,7 @@ async fn try_run(
     }
     let worker_environment = environment;
     let environment = launch_environment(env::vars_os(), &worker_environment);
-    let limits = ClientLimits::default();
+    let limits = production_client_limits();
     let EffectiveLaunchIdentity {
         profile,
         services,
@@ -639,9 +651,14 @@ async fn try_run(
         .await
         .map_err(|e| e.to_string())?;
     let snapshot = handle.inspect().await.map_err(|e| e.to_string())?;
+    // A restored session can still be Ready when no prompt was ever submitted.
+    // Recovery kind describes the peer session, not whether workflow context
+    // has been seeded. Keep this separate from fresh-owner grant accounting.
+    let needs_full_prompt = snapshot.state.status == AcpSessionStatus::Ready
+        || snapshot.state.stop_reason.as_deref() == Some("cancelled_before_prompt");
     let fresh = snapshot.state.recovery == crate::opensymphony_workspace::AcpRecovery::Fresh
         && snapshot.state.status == AcpSessionStatus::Ready;
-    let mut prompt = if fresh {
+    let mut prompt = if needs_full_prompt {
         terminal_prompt
             .map(str::to_owned)
             .map(Ok)

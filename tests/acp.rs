@@ -53,6 +53,55 @@ fn limits() -> ClientLimits {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn acp_turn_without_client_deadline_survives_five_minutes_of_virtual_time() {
+    let root = tempfile::tempdir().expect("temp");
+    let (tx, mut updates) = tokio::sync::mpsc::channel(4);
+    let cancellation = CancellationToken::new();
+    let turn = tokio::spawn({
+        let cancellation = cancellation.clone();
+        let profile = profile("cancel");
+        let context = context(root.path());
+        async move {
+            run_turn(
+                &profile,
+                context,
+                "long running work".into(),
+                cancellation,
+                Some(tx),
+                ClientLimits {
+                    prompt_timeout: Duration::ZERO,
+                    ..limits()
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), updates.recv())
+        .await
+        .expect("peer update before clock advance")
+        .expect("peer update");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(
+        !turn.is_finished(),
+        "active turn must not hit a fixed client deadline"
+    );
+    tokio::time::resume();
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("cancelled turn completes")
+        .expect("turn task")
+        .expect("launch");
+    assert!(
+        result
+            .outcome
+            .expect("cancel acknowledged")
+            .cancellation_acknowledged
+    );
+}
+
 #[tokio::test]
 async fn acp_process_completes_ordered_callbacks_and_redacts_evidence() {
     let root = tempfile::tempdir().expect("temp");

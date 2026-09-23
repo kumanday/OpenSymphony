@@ -896,12 +896,14 @@ the client contract; real vendor qualification remains OSYM-906.
 The default limits are 1 MiB per frame, 128 queued incoming frames with a
 cumulative 4 MiB wire-byte budget, 128 outstanding callback responses with an
 independent 4 MiB encoded-byte budget, 256 retained source frames with a cumulative
-1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, 300 seconds
-for a prompt, 10 seconds for cancellation acknowledgement, and one 5-second
+1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, an
+300-second prompt deadline by default for direct client callers, 10 seconds
+for cancellation acknowledgement, and one 5-second
 deadline for process termination and reaping. Windows launches enter a kill-on-close Job Object before
 the child resumes, so dropping the turn future also terminates descendants. Unix
 launches retain process-group ownership for the same drop path. Callers
-may pass validated `ClientLimits`. A supplied update channel must be drained
+may pass validated `ClientLimits`; a zero `prompt_timeout` disables only the
+client's wall-clock prompt deadline. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Incoming queue
 charges are released when each frame reaches SDK dispatch. Its byte budget is
 independent of frame count, ranges from 256 bytes to 64 MiB, and rejects a single
@@ -993,6 +995,12 @@ ACP process so child environment and memory evidence remain scoped to the run.
 After a revoked memory grant requires a fresh owner, the revocation marker clears
 when that owner reports a successful launch; failed setup leaves it in place.
 ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
+Production ACP turns have no fixed client prompt deadline. When configured,
+`agent.stall_timeout_ms` applies the scheduler's activity-based stall policy;
+the interrupt path handles an operator or scheduler stop request.
+An ACP session restored through `session/load` while still `ready` receives the
+full workflow prompt because no prior prompt was submitted. Finished sessions
+receive continuation guidance.
 An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
 outcome on recovery.
 Cleanup after a known-finished owner loss acquires the durable owner lock and

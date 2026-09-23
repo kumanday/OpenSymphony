@@ -40,13 +40,20 @@ for line in sys.stdin:
             assert session_mcp[0]["url"] == os.environ["OPENSYMPHONY_MEMORY_ENDPOINT"]
             if token := os.environ.get("OPENSYMPHONY_MEMORY_TOKEN"):
                 assert session_mcp[0]["headers"] == [{"name": "Authorization", "value": "Bearer " + token}]
-        if profile in ("configured", "slow_model_hang"):
+        if profile in ("configured", "slow_model_hang", "unprompted_retry"):
             options = [{"id": "pick", "category": "model", "name": "Model", "type": "select", "currentValue": selected_model or "profile-model", "options": [{"value": value, "name": value} for value in ("profile-model", "route-model", "other-model")]}]
             send({"id": message["id"], "result": {"sessionId": session, "configOptions": options} if method == "session/new" else {"configOptions": options}})
         else:
             send({"id": message["id"], "result": {"sessionId": session} if method == "session/new" else {}})
     elif method == "session/set_config_option":
-        assert profile in ("configured", "slow_model_hang") and message["params"]["configId"] == "pick"
+        assert profile in ("configured", "slow_model_hang", "unprompted_retry") and message["params"]["configId"] == "pick"
+        if profile == "unprompted_retry":
+            if not os.path.exists(".opensymphony/first-configured"):
+                open(".opensymphony/first-configured", "w").close()
+            elif not os.path.exists(".opensymphony/setup-failed"):
+                open(".opensymphony/setup-failed", "w").close()
+                send({"id": message["id"], "error": {"code": -32602, "message": "first turn setup rejected before prompt"}})
+                continue
         if profile == "slow_model_hang" and prompt_count:
             open("acp-config-waiting", "w").close()
             while not os.path.exists("acp-config-release"):

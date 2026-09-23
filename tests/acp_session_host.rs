@@ -171,6 +171,57 @@ async fn concurrent_sessions_busy_prompt_fence_and_cancellation_keep_other_comma
     retire(&b).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn retained_turn_without_client_deadline_survives_five_minutes_of_virtual_time() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "LONG", "none").await;
+    request.limits.prompt_timeout = Duration::ZERO;
+    let handle = host.open(request).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let turn = tokio::spawn({
+        let handle = handle.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            handle
+                .prompt("long-run".into(), 1, "hang".into(), cancellation)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle
+                .source_history()
+                .events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::Source { frame, .. } if frame.payload["method"] == "session/prompt"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("prompt submitted");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(
+        !turn.is_finished(),
+        "retained turn must not hit a fixed client deadline"
+    );
+    tokio::time::resume();
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), turn)
+            .await
+            .expect("cancelled turn completes")
+            .expect("turn task")
+            .expect("cancelled prompt")
+            .cancellation_acknowledged
+    );
+    retire(&handle).await;
+}
+
 #[test]
 fn cancellation_while_submission_sync_is_blocked_never_sends_prompt() {
     let runtime = tokio::runtime::Builder::new_current_thread()
