@@ -1272,10 +1272,23 @@ pub struct AcpSessionState {
     pub model_selection: bool,
     pub status: AcpSessionStatus,
     pub stop_reason: Option<String>,
+    /// Independent of status, which returns to Ready when a new run claims the session.
+    /// None identifies a pre-migration manifest whose prior terminal state must be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_prompt_seeded: Option<bool>,
     pub recovery: AcpRecovery,
     pub owner_id: String,
     #[serde(default)]
     pub process: AcpProcessState,
+}
+
+impl AcpSessionState {
+    pub fn workflow_prompt_seeded(&self) -> bool {
+        self.workflow_prompt_seeded.unwrap_or(
+            self.status != AcpSessionStatus::Ready
+                && self.stop_reason.as_deref() != Some("cancelled_before_prompt"),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

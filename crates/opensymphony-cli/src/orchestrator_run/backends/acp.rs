@@ -122,13 +122,16 @@ pub(super) fn conversation_view(raw: &str) -> Result<IssueConversationManifest, 
         value["last_execution_status"] = value["acp"]["status"].clone();
         value["workflow_prompt_seeded"] = serde_json::json!(
             value
-                .pointer("/acp/status")
-                .and_then(serde_json::Value::as_str)
-                != Some("ready")
-                && value
-                    .pointer("/acp/stop_reason")
+                .pointer("/acp/workflow_prompt_seeded")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| value
+                    .pointer("/acp/status")
                     .and_then(serde_json::Value::as_str)
-                    != Some("cancelled_before_prompt")
+                    != Some("ready")
+                    && value
+                        .pointer("/acp/stop_reason")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("cancelled_before_prompt"))
         );
         if value["conversation_id"].as_str() == Some("") {
             // A launch reservation can precede the peer session ID. This identifies the
@@ -137,6 +140,27 @@ pub(super) fn conversation_view(raw: &str) -> Result<IssueConversationManifest, 
         }
     }
     serde_json::from_value(value)
+}
+
+/// Bind the current run to its ACP session without importing an older owner's
+/// hierarchy or checkout snapshot from a retained conversation manifest.
+pub(super) fn bind_current_run_envelopes(
+    run: &mut RunManifest,
+    conversation: &crate::opensymphony_workspace::ConversationManifest,
+) {
+    let Some(state) = conversation.acp.as_ref() else {
+        return;
+    };
+    if state.identity.run_id != run.run_id || state.identity.attempt != run.attempt {
+        return;
+    }
+    if let Some(envelope) = run.runtime_envelope.as_mut() {
+        envelope.acp_session = Some(state.identity.clone());
+        envelope.conversation_binding = state.session_id.clone();
+    }
+    if let Some(envelope) = run.parent_runtime_envelope.as_mut() {
+        envelope.conversation_binding = state.session_id.clone();
+    }
 }
 
 pub(super) async fn retire(
@@ -405,12 +429,7 @@ pub(super) async fn run_issue(
         }
     }
     if let Ok(Some(conversation)) = manager.load_conversation_manifest(workspace).await {
-        if conversation.runtime_envelope.is_some() {
-            manifest.runtime_envelope = conversation.runtime_envelope;
-        }
-        if conversation.parent_runtime_envelope.is_some() {
-            manifest.parent_runtime_envelope = conversation.parent_runtime_envelope;
-        }
+        bind_current_run_envelopes(manifest, &conversation);
     }
     manifest.harness_stopped = stopped;
     manifest.status_detail = Some(detail.clone());
@@ -654,8 +673,7 @@ async fn try_run(
     // A restored session can still be Ready when no prompt was ever submitted.
     // Recovery kind describes the peer session, not whether workflow context
     // has been seeded. Keep this separate from fresh-owner grant accounting.
-    let needs_full_prompt = snapshot.state.status == AcpSessionStatus::Ready
-        || snapshot.state.stop_reason.as_deref() == Some("cancelled_before_prompt");
+    let needs_full_prompt = !snapshot.state.workflow_prompt_seeded();
     let fresh = snapshot.state.recovery == crate::opensymphony_workspace::AcpRecovery::Fresh
         && snapshot.state.status == AcpSessionStatus::Ready;
     let mut prompt = if needs_full_prompt {
@@ -677,6 +695,9 @@ async fn try_run(
     manifest.started_at = Some(chrono::Utc::now());
     if let Some(envelope) = manifest.runtime_envelope.as_mut() {
         envelope.acp_session = Some(snapshot.state.identity.clone());
+        envelope.conversation_binding = snapshot.state.session_id.clone();
+    }
+    if let Some(envelope) = manifest.parent_runtime_envelope.as_mut() {
         envelope.conversation_binding = snapshot.state.session_id.clone();
     }
     manager

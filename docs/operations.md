@@ -995,12 +995,15 @@ ACP process so child environment and memory evidence remain scoped to the run.
 After a revoked memory grant requires a fresh owner, the revocation marker clears
 when that owner reports a successful launch; failed setup leaves it in place.
 ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
+Repository-neutral ACP parents receive project, authorized-repository, run, and
+attempt guidance from that overlay without an execution-repository default.
 Production ACP turns have no fixed client prompt deadline. When configured,
 `agent.stall_timeout_ms` applies the scheduler's activity-based stall policy;
 the interrupt path handles an operator or scheduler stop request.
-An ACP session restored through `session/load` while still `ready` receives the
-full workflow prompt because no prior prompt was submitted. Finished sessions
-receive continuation guidance.
+An ACP session restored through `session/load` receives the full workflow prompt
+when its durable state has never seeded that prompt. A seeded session receives
+continuation guidance even when the new run's claim has reset its status to
+`ready`.
 An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
 outcome on recovery.
 Cleanup after a known-finished owner loss acquires the durable owner lock and

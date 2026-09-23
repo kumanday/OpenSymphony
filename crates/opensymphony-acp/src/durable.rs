@@ -185,6 +185,7 @@ impl Durability {
                     model_selection: false,
                     status: AcpSessionStatus::Ready,
                     stop_reason: None,
+                    workflow_prompt_seeded: Some(false),
                     recovery: AcpRecovery::Fresh,
                     owner_id: String::new(),
                     process: AcpProcessState::Stopped,
@@ -236,6 +237,10 @@ impl Durability {
             return Err(DurabilityError::Uncertain);
         }
         verify_prior_process(state.process)?;
+        // Migrate before a new run clears the old terminal status and stop reason.
+        if state.workflow_prompt_seeded.is_none() {
+            state.workflow_prompt_seeded = Some(state.workflow_prompt_seeded());
+        }
         if identity.generation != 0 && identity.generation != state.identity.generation {
             return Err(DurabilityError::Binding("connection generation"));
         }
@@ -360,6 +365,9 @@ impl Durability {
         state.initialization = initialization;
         state.model_selection = model_selection;
         state.recovery = recovery;
+        if recovery == AcpRecovery::Fresh {
+            state.workflow_prompt_seeded = Some(false);
+        }
         state.status = AcpSessionStatus::Ready;
         state.stop_reason = None;
         self.persist().await
@@ -401,6 +409,9 @@ impl Durability {
         self.manifest.fresh_conversation = false;
         let state = self.state_mut();
         state.status = AcpSessionStatus::Finished;
+        if stop_reason != "cancelled_before_prompt" {
+            state.workflow_prompt_seeded = Some(true);
+        }
         state.stop_reason = Some(stop_reason);
         self.persist().await
     }
@@ -661,6 +672,7 @@ mod tests {
         assert_eq!(next.state().process, AcpProcessState::LaunchPending);
         assert_eq!(next.state().status, AcpSessionStatus::Ready);
         assert_eq!(next.state().stop_reason, None);
+        assert!(next.state().workflow_prompt_seeded());
         let persisted = manager(root.path())
             .load_conversation_manifest(&workspace)
             .await
@@ -672,6 +684,86 @@ mod tests {
         assert_eq!(persisted.identity.attempt, 2);
         assert_eq!(persisted.status, AcpSessionStatus::Ready);
         assert_eq!(persisted.stop_reason, None);
+        assert_eq!(persisted.workflow_prompt_seeded, Some(true));
+    }
+
+    #[tokio::test]
+    async fn legacy_finished_prompt_is_migrated_before_new_run_claim() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let input = identity(&workspace);
+        let mut first = Durability::open(manager(root.path()), workspace.clone(), input.clone())
+            .await
+            .expect("first owner");
+        first
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready");
+        first
+            .submitted(input.run_id, input.attempt)
+            .await
+            .expect("submitted");
+        first.finished("end_turn".into()).await.expect("finished");
+        first.stopped().await.expect("stopped");
+        drop(first);
+        let mut legacy = manager(root.path())
+            .load_conversation_manifest(&workspace)
+            .await
+            .expect("manifest")
+            .expect("conversation");
+        legacy.acp.as_mut().expect("ACP").workflow_prompt_seeded = None;
+        manager(root.path())
+            .write_json_artifact_atomically(
+                &workspace,
+                &workspace.conversation_manifest_path(),
+                &legacy,
+            )
+            .await
+            .expect("legacy manifest");
+
+        let mut next = identity(&workspace);
+        next.run_id = "run-2".into();
+        next.attempt = 2;
+        let claimed = Durability::open(manager(root.path()), workspace, next)
+            .await
+            .expect("second owner");
+        assert_eq!(claimed.state().status, AcpSessionStatus::Ready);
+        assert_eq!(claimed.state().workflow_prompt_seeded, Some(true));
+    }
+
+    #[tokio::test]
+    async fn pre_prompt_cancellation_does_not_seed_workflow_context() {
+        let root = tempfile::tempdir().expect("temp");
+        let workspace = workspace(root.path()).await;
+        let input = identity(&workspace);
+        let mut owner = Durability::open(manager(root.path()), workspace, input.clone())
+            .await
+            .expect("owner");
+        owner
+            .ready(
+                "session-1".into(),
+                Value::Null,
+                false,
+                AcpRecovery::Fresh,
+                None,
+            )
+            .await
+            .expect("ready");
+        owner
+            .submitted(input.run_id, input.attempt)
+            .await
+            .expect("submitted");
+        owner
+            .finished("cancelled_before_prompt".into())
+            .await
+            .expect("cancelled");
+        assert!(!owner.state().workflow_prompt_seeded());
     }
 
     #[test]

@@ -968,21 +968,24 @@ reservation as the latest workspace route snapshot. Recovery takes its route
 from the matching run record; an older run record can use the workspace snapshot
 only when the durable ACP identity names that same run and attempt. A claim
 for a different run clears the prior turn's terminal status and stop reason
-in the synced claim checkpoint. The owner also persists verified terminal
-or parent runtime envelopes; worker finish copies the owner-updated conversation
-binding back into the run record. A profile switch, a change to effective profile
-configuration or credential scope, or a harness switch retires the old owner
+in the synced claim checkpoint. Durable workflow-prompt seeding is tracked
+separately from that transient status, including for legacy manifests migrated
+before the claim clears their terminal state. The worker keeps the current run's
+verified terminal or parent runtime envelope and binds its ACP session without
+copying an older retained owner's hierarchy or checkout snapshot. A profile
+switch, a change to effective profile configuration or credential scope, or a
+harness switch retires the old owner
 before archiving its manifest. Interrupted or failed launches execute
 `after_run` only when the harness is known stopped. Uncertain work retains its
 workspace, memory grant and cleanup fence. A known-finished session whose host
 is gone can retire through the same exclusive lock and process-absence check
 without launching another peer.
-An ACP session that has reached `ready` but has not submitted a prompt receives
-the full workflow prompt on the next attempt, even when `session/load` restores
-the peer session ID. A finished session receives continuation guidance. Production
-ACP turns use configured scheduler stall detection and cancellation rather than a
-fixed client prompt deadline; direct client callers can set a bound or use zero
-to disable it.
+An ACP session that has not seeded its workflow prompt receives the full
+workflow prompt on the next attempt, even when `session/load` restores the peer
+session ID. A seeded session receives continuation guidance after a new run
+resets its transient status to `ready`. Production ACP turns use configured
+scheduler stall detection and cancellation rather than a fixed client prompt
+deadline; direct client callers can set a bound or use zero to disable it.
 When cancellation closes the owner before prompt submission, scheduler stop
 observation checks the durable record for the exact owner, generation, run and
 workspace. Only a stopped process with `ready` or `finished` state counts as

@@ -7539,10 +7539,20 @@ fn memory_scope_prompt_values(project: &str, repo: &str) -> String {
 }
 
 fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) -> Option<String> {
-    let mut prompt = memory_scope_prompt_values(
-        environment.get("OPENSYMPHONY_MEMORY_PROJECT")?,
-        environment.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")?,
-    );
+    // The resolved worker overlay is authoritative. A parent intentionally has
+    // no execution repository and must ask for one on each code-memory call.
+    let project = environment.get("OPENSYMPHONY_MEMORY_PROJECT")?;
+    let execution_repo = environment.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO");
+    if execution_repo.is_none() {
+        environment.get("OPENSYMPHONY_MEMORY_ENDPOINT")?;
+    }
+    let mut prompt = if let Some(repo) = execution_repo {
+        memory_scope_prompt_values(project, repo)
+    } else {
+        format!(
+            "\nMemory scope is repository-neutral for project {project} and requires an explicit repository for code access. Pass this project and a named authorized repository as `project` and `repo` arguments to memory.context, memory.search, memory.related, and code.ast.* calls; do not use process-global scope."
+        )
+    };
     if let Some(project_set) = environment.get("OPENSYMPHONY_MEMORY_PROJECT_SET") {
         prompt.push_str(&format!(" Project set is {project_set}."));
     }
@@ -7554,16 +7564,21 @@ fn memory_scope_prompt_from_environment(environment: &BTreeMap<String, String>) 
         ));
     }
     if let Some(run_id) = environment.get("OPENSYMPHONY_MEMORY_RUN_ID") {
-        prompt.push_str(&format!(
-            " Run identity is {run_id}; pass this exact value as runId only for a live execution-repository overlay."
-        ));
+        prompt.push_str(&format!(" Run identity is {run_id}."));
+        if execution_repo.is_some() {
+            prompt.push_str(
+                " Pass this exact value as runId only for a live execution-repository overlay.",
+            );
+        }
     }
     if let Some(attempt) = environment.get("OPENSYMPHONY_MEMORY_ATTEMPT") {
         prompt.push_str(&format!(" Attempt is {attempt}."));
     }
-    prompt.push_str(
-        " Sibling repositories are persisted-memory and target-snapshot reads only; live workspace overlays are limited to this execution repository and verified run.",
-    );
+    if execution_repo.is_some() {
+        prompt.push_str(" Sibling repositories are persisted-memory and target-snapshot reads only; live workspace overlays are limited to this execution repository and verified run.");
+    } else {
+        prompt.push_str(" Repository reads use persisted memory and target snapshots; parent scope has no live execution-repository overlay.");
+    }
     Some(prompt)
 }
 
@@ -14479,6 +14494,46 @@ mod tests {
     }
 
     #[test]
+    fn acp_parent_memory_guidance_uses_resolved_repository_neutral_scope() {
+        let memory = RuntimeMemoryEnv {
+            endpoint: "http://127.0.0.1:8765/mcp".into(),
+            token: None,
+            project: "project-parent".into(),
+            execution_repo: "stale-inherited-repo".into(),
+            parent_scope: true,
+            authorized_repositories: BTreeSet::from(["repo-one".into(), "repo-two".into()]),
+            authorized_repositories_by_project: BTreeMap::new(),
+            scope_grants: None,
+            project_set: Some("parent-set".into()),
+            visibility: crate::opensymphony_memory::MemoryVisibility::Private,
+            run_id: Some("parent-run-2".into()),
+            attempt: Some(2),
+            target_commit: None,
+            checkout_head: None,
+        };
+        let mut worker_env = BTreeMap::from([(
+            "OPENSYMPHONY_MEMORY_EXECUTION_REPO".into(),
+            "ambient-repo".into(),
+        )]);
+        inject_memory_env(&mut worker_env, &memory);
+        assert!(!worker_env.contains_key("OPENSYMPHONY_MEMORY_EXECUTION_REPO"));
+        let prompt = memory_scope_prompt_from_environment(&worker_env).expect("parent guidance");
+        for expected in [
+            "repository-neutral",
+            "project-parent",
+            "repo-one,repo-two",
+            "parent-run-2",
+            "Attempt is 2",
+            "parent-set",
+        ] {
+            assert!(prompt.contains(expected), "missing {expected}: {prompt}");
+        }
+        assert!(!prompt.contains("ambient-repo"));
+        assert!(!prompt.contains("stale-inherited-repo"));
+        assert!(prompt.contains("parent scope has no live execution-repository overlay"));
+    }
+
+    #[test]
     fn worker_memory_scope_prefers_canonical_project_id_over_slug() {
         let mut issue = sample_issue();
         issue.project_id = Some("canonical-project-id".to_owned());
@@ -17543,6 +17598,140 @@ exit 64
     }
 
     #[tokio::test]
+    async fn acp_restored_seeded_session_receives_continuation_prompt() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first owner");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let first = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("conversation")
+            .acp
+            .expect("ACP");
+        assert!(first.workflow_prompt_seeded());
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire first owner");
+
+        backend
+            .start_worker(acp_test_request(&root, "first", 2))
+            .await
+            .expect("restored owner");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let restored = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("conversation")
+            .acp
+            .expect("ACP");
+        assert_eq!(
+            restored.recovery,
+            crate::opensymphony_workspace::AcpRecovery::RestoredLoad
+        );
+        assert!(restored.workflow_prompt_seeded());
+        let prompts =
+            fs::read_to_string(handle.workspace_path().join("acp-prompts.jsonl")).expect("prompts");
+        assert_eq!(prompts.lines().count(), 2);
+        let second: serde_json::Value =
+            serde_json::from_str(prompts.lines().nth(1).expect("second prompt")).expect("JSON");
+        let prompt = second["prompt"].as_str().expect("prompt");
+        assert!(prompt.contains("Continue the current issue"), "{prompt}");
+        assert!(!prompt.contains("# Test Workflow"), "{prompt}");
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
+    async fn retained_acp_parent_binding_preserves_current_hierarchy_and_checkouts() {
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        let root = manager.config().root.clone();
+        backend
+            .start_worker(acp_test_request(&root, "first", 1))
+            .await
+            .expect("first turn");
+        assert_eq!(
+            acp_test_finished(&mut backend).await.outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+        let handle = manager
+            .list_all_workspaces()
+            .await
+            .expect("workspaces")
+            .remove(0)
+            .0;
+        let mut conversation = manager
+            .load_conversation_manifest(&handle)
+            .await
+            .expect("manifest")
+            .expect("conversation");
+        let mut prior = parent_envelope(handle.workspace_path());
+        prior.harness = "acp".into();
+        prior.conversation_binding = conversation.acp.as_ref().expect("ACP").session_id.clone();
+        conversation.parent_runtime_envelope = Some(prior.clone());
+        let mut current = manager
+            .load_run_manifest(&handle)
+            .await
+            .expect("run")
+            .expect("manifest");
+        current.run_id = "run-acp-worker-2".into();
+        current.attempt = 2;
+        let mut current_parent = prior;
+        current_parent.run_id = current.run_id.clone();
+        current_parent.attempt = current.attempt;
+        current_parent.hierarchy_generation = 8;
+        current_parent
+            .checkouts
+            .get_mut("checkout-one")
+            .expect("checkout")
+            .target_commit = "new-commit".into();
+        current_parent.conversation_binding = None;
+        current.parent_runtime_envelope = Some(current_parent.clone());
+
+        acp::bind_current_run_envelopes(&mut current, &conversation);
+        assert_eq!(
+            current.parent_runtime_envelope.as_ref(),
+            Some(&current_parent),
+            "prior turn cannot bind a new run"
+        );
+        let state = conversation.acp.as_mut().expect("ACP");
+        state.identity.run_id = current.run_id.clone();
+        state.identity.attempt = current.attempt;
+        acp::bind_current_run_envelopes(&mut current, &conversation);
+        let bound = current.parent_runtime_envelope.expect("current envelope");
+        assert_eq!(bound.hierarchy_generation, 8);
+        assert_eq!(bound.checkouts["checkout-one"].target_commit, "new-commit");
+        assert_eq!(bound.run_id, "run-acp-worker-2");
+        assert_eq!(
+            bound.conversation_binding,
+            conversation.acp.expect("ACP").session_id
+        );
+        acp::retire(&manager, &handle, backend.acp_host.as_ref())
+            .await
+            .expect("retire");
+    }
+
+    #[tokio::test]
     async fn acp_worker_retains_continuation_switches_profiles_and_recovers_persisted_route() {
         let temp = TempDir::new().expect("temp");
         let (mut backend, manager) = acp_test_backend(temp.path()).await;
@@ -18384,10 +18573,10 @@ exit 64
             .expect("conversation artifact")
             .expect("conversation");
         assert!(
-            !acp::conversation_view(&raw)
+            acp::conversation_view(&raw)
                 .expect("scheduler view")
                 .workflow_prompt_seeded,
-            "cancelled_before_prompt does not seed workflow context"
+            "cancelling a later prompt does not erase prior workflow context"
         );
         let mut crashed_run = manager
             .load_run_manifest(&handle)
