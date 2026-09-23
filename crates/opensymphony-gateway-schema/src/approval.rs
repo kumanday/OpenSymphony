@@ -13,7 +13,8 @@ pub struct OperatorInteraction {
     pub issue_identifier: String,
     pub session_id: String,
     pub generation: u64,
-    /// Lossless JSON encoding of the original RPC ID; clients echo this as an opaque string.
+    /// Generated public binding token; the original peer RPC ID stays private
+    /// inside the ACP responder. Clients echo this token unchanged.
     pub rpc_id: String,
     pub kind: OperatorInteractionKind,
     pub title: String,

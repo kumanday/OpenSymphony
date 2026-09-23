@@ -655,7 +655,8 @@ a peer stops reading stdin. Count and encoded-byte budgets cover successful,
 unknown and invalid permission callbacks; sequential round trips verify that
 completed transport writes release reservations.
 The native ACP peer also verifies `elicitation/create` form accept, decline and
-cancel responses, large numeric RPC IDs, disabled Cursor methods, and form-only
+cancel responses, private large numeric peer RPC IDs with generated public
+binding tokens, disabled Cursor methods, and form-only
 capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
 It uses a five-minute tracker interval and processes both callbacks through
@@ -663,6 +664,13 @@ worker-update wakeups without another tracker tick.
 An un-routed native form receives protocol cancellation without failing its
 turn, and a delayed worker-consume regression verifies that a timed-out
 operator answer cannot reach the ACP callback after its failure receipt.
+The scheduler retains a live request when the backend response queue is full or
+an unconsumed answer expires, allowing a new submission. An output-reservation
+test verifies that an operator answer is acknowledged only after the ACP input
+sink flushes its response frame, and sink failure fails every queued receipt.
+An early-finish native peer verifies that a completed prompt wakes the
+scheduler and clears its pending request even if callback closure loses the
+race, with tracker polling set to five minutes.
 Gateway timeout and handler-drop tests verify that delayed commands cannot
 cross the scheduler application fence; a claimed command waits for its actual
 acknowledgement. A concurrent reservation test holds one ACP SDK enqueue while

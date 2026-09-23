@@ -1052,9 +1052,9 @@ questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
 The gateway exposes permissions and plans at `/api/v1/runs/{run_id}/approvals`, questions at
 `/api/v1/runs/{run_id}/inputs`, and accepts bound responses through
 `/api/v1/actions/dispatch`. A response must carry the live request, run,
-issue, session, generation, and RPC IDs. The public RPC ID is a lossless JSON
-encoding echoed as an opaque string by clients; stale, duplicate, expired, and
-invalid option/answer submissions are rejected. A waiting interaction pauses
+issue, session, generation, and RPC binding token. The ACP responder retains the
+original peer RPC ID privately; clients echo a generated public token. Stale,
+duplicate, expired, and invalid option/answer submissions are rejected. A waiting interaction pauses
 stall detection only until its deadline. Disconnect, cancellation, completion,
 and restart clear the live responder; operators must wait for a fresh request.
 Callback arrivals and closures publish updated snapshots without waiting for
@@ -1062,8 +1062,9 @@ the next tracker poll.
 An un-routed form request receives an ACP `cancel` response so a direct client
 turn can continue. An operator-policy permission request without a route fails
 the turn. A worker response that misses its acknowledgement deadline is fenced
-before a failure receipt; an answer already claimed by the ACP callback waits
-for its actual delivery acknowledgement.
+before a failure receipt and remains pending for another answer attempt. An
+answer already claimed by the ACP callback waits until the response frame is
+flushed to the peer's input sink; a write failure returns a failed receipt.
 The gateway also fences its queued command when its HTTP delivery deadline
 expires or the handler closes. Once the run loop claims a command, the gateway
 waits for the scheduler result instead of returning a premature timeout.

@@ -284,7 +284,9 @@ pub(super) fn parse_interaction(
         issue_identifier: String::new(),
         session_id: session_id.into(),
         generation: 0,
-        rpc_id: serde_json::to_string(&rpc_id).map_err(|_| invalid())?,
+        // The SDK responder retains the exact peer ID privately. Public
+        // clients echo only this generated binding token, never peer input.
+        rpc_id: uuid::Uuid::new_v4().to_string(),
         kind,
         title,
         options,
@@ -396,7 +398,7 @@ mod tests {
     use crate::opensymphony_gateway_schema::approval::OperatorQuestionAnswer;
 
     #[test]
-    fn permission_uses_only_offered_opaque_option_and_preserves_zero_rpc_id() {
+    fn permission_uses_only_offered_option_and_keeps_peer_rpc_id_private() {
         let request = json!({"sessionId":"session-1","toolCall":{"toolCallId":"tool-1","title":"Run tests"},
             "options":[{"optionId":"opaque-allow","name":"Allow once","kind":"allow_once"},
                 {"optionId":"opaque-deny","name":"Deny","kind":"reject_once"}]});
@@ -408,7 +410,8 @@ mod tests {
             Duration::from_secs(30),
         )
         .expect("permission");
-        assert_eq!(interaction.rpc_id, "0");
+        assert!(uuid::Uuid::parse_str(&interaction.rpc_id).is_ok());
+        assert_ne!(interaction.rpc_id, "0");
         let large_id = parse_interaction(
             "session/request_permission",
             &request,
@@ -417,10 +420,24 @@ mod tests {
             Duration::from_secs(30),
         )
         .expect("large numeric RPC ID");
-        assert_eq!(large_id.rpc_id, "9007199254740993");
+        assert!(uuid::Uuid::parse_str(&large_id.rpc_id).is_ok());
+        assert_ne!(large_id.rpc_id, interaction.rpc_id);
         assert_eq!(
             serde_json::to_value(&large_id).expect("public binding")["rpc_id"],
-            "9007199254740993"
+            large_id.rpc_id
+        );
+        let sensitive_id = parse_interaction(
+            "session/request_permission",
+            &request,
+            json!("credential-as-rpc-id"),
+            "session-1",
+            Duration::from_secs(30),
+        )
+        .expect("sensitive string ID");
+        assert!(
+            !serde_json::to_string(&sensitive_id)
+                .expect("public interaction")
+                .contains("credential-as-rpc-id")
         );
         assert_eq!(
             response_for(

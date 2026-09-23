@@ -421,6 +421,8 @@ pub(super) enum CliWorkerError {
     Join(#[from] tokio::task::JoinError),
     #[error("worker interrupt failed: {0}")]
     InterruptFailed(String),
+    #[error("ACP operator response is retryable: {0}")]
+    OperatorResponseRetryable(String),
 }
 
 #[derive(Debug)]
@@ -7040,6 +7042,7 @@ impl RuntimeWorkerBackend {
                     worker_id: finished_worker_id.clone(),
                     outcome,
                 });
+                operator_update_notify.notify_one();
                 return;
             }
             if !matches!(
@@ -10350,21 +10353,27 @@ impl WorkerBackend for RuntimeWorkerBackend {
         };
         let delivery = crate::opensymphony_acp::AcpOperatorDeliveryFence::default();
         let (acknowledgement, received) = oneshot::channel();
-        if sender
-            .try_send(acp::OperatorResponseCommand {
-                request_id: request_id.into(),
-                answer,
-                acknowledgement,
-                delivery: delivery.clone(),
-            })
-            .is_err()
-        {
-            return Ok(false);
+        match sender.try_send(acp::OperatorResponseCommand {
+            request_id: request_id.into(),
+            answer,
+            acknowledgement,
+            delivery: delivery.clone(),
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(CliWorkerError::OperatorResponseRetryable(
+                    "worker response queue is full".into(),
+                ));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return Ok(false),
         }
         tokio::pin!(received);
         match timeout(Duration::from_secs(5), &mut received).await {
             Ok(result) => Ok(result.unwrap_or(false)),
-            Err(_) if delivery.cancel() => Ok(false),
+            Err(_) if delivery.cancel() => Err(CliWorkerError::OperatorResponseRetryable(
+                "worker did not consume the queued answer before its acknowledgement deadline"
+                    .into(),
+            )),
             // Delivery already crossed the atomic fence. Wait for its real
             // acknowledgement instead of publishing a false failure receipt.
             Err(_) => Ok(received.await.unwrap_or(false)),
@@ -17442,6 +17451,7 @@ exit 64
             "setup_retry",
             "permission",
             "operator_roundtrip",
+            "operator_early_finish",
             "corrupt",
             "configured",
             "slow_model_hang",
@@ -17813,6 +17823,73 @@ exit 64
             serde_json::json!({"permission":"allow-opaque","question":"west"})
         );
         server.abort();
+    }
+
+    #[test]
+    fn acp_prompt_finish_wakes_scheduler_even_when_callback_close_loses_race() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("integration runtime")
+                    .block_on(acp_prompt_finish_wake_inner())
+            })
+            .expect("integration thread")
+            .join()
+            .expect("integration result");
+    }
+
+    async fn acp_prompt_finish_wake_inner() {
+        use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig};
+
+        let temp = TempDir::new().expect("temp");
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        Arc::make_mut(&mut backend.workflow)
+            .config
+            .polling
+            .interval_ms = 300_000;
+        let workflow = backend.workflow.clone();
+        let workspace = RuntimeWorkspaceBackend::new(manager, &workflow);
+        let mut config = SchedulerConfig::from_workflow(&workflow).expect("config");
+        config.routing.harness_profile = Some("operator_early_finish".into());
+        config.routing.model = None;
+        config.routing.model_from_env = false;
+        let notify = backend.operator_update_notify();
+        let mut scheduler = Scheduler::new(
+            OperatorTracker(sample_tracker_issue(&sample_issue())),
+            workspace,
+            backend,
+            config,
+        );
+        let mut observed_at = now_timestamp().as_u64();
+        scheduler
+            .tick(TimestampMs::new(observed_at))
+            .await
+            .expect("dispatch ACP worker");
+        for _ in 0..10 {
+            timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("ACP completion wakes scheduler without tracker tick");
+            observed_at += 1_000;
+            let snapshot = scheduler
+                .drain_worker_updates(TimestampMs::new(observed_at))
+                .await
+                .expect("drain ACP result");
+            if snapshot
+                .issues
+                .iter()
+                .any(|issue| issue.last_worker_outcome.is_some())
+            {
+                assert!(
+                    snapshot.operator_interactions.is_empty(),
+                    "finished prompt clears its outstanding callback"
+                );
+                return;
+            }
+        }
+        panic!("ACP completion was not published after callback close race");
     }
 
     #[tokio::test]

@@ -264,7 +264,7 @@ pub struct RunResult {
 /// Retaining the SDK's exact encoding also rejects unreserved SDK-generated responses.
 #[derive(Default)]
 struct CallbackOutput {
-    frames: VecDeque<(String, bool)>,
+    frames: VecDeque<(String, bool, Option<oneshot::Sender<bool>>)>,
     bytes: usize,
 }
 
@@ -272,10 +272,13 @@ fn reserve_and_enqueue_operator_response<T>(
     output: &Mutex<CallbackOutput>,
     frame: String,
     limits: &ClientLimits,
+    acknowledgement: &mut Option<oneshot::Sender<bool>>,
     enqueue: impl FnOnce() -> T,
 ) -> Option<T> {
     let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
-    output.admit(frame, limits).then(enqueue)
+    output
+        .admit_with_ack(frame, limits, false, acknowledgement)
+        .then(enqueue)
 }
 
 impl CallbackOutput {
@@ -289,6 +292,16 @@ impl CallbackOutput {
         limits: &ClientLimits,
         opaque_payload: bool,
     ) -> bool {
+        self.admit_with_ack(frame, limits, opaque_payload, &mut None)
+    }
+
+    fn admit_with_ack(
+        &mut self,
+        frame: String,
+        limits: &ClientLimits,
+        opaque_payload: bool,
+        acknowledgement: &mut Option<oneshot::Sender<bool>>,
+    ) -> bool {
         let bytes = frame.len() + 1; // LinesCodec adds LF.
         if frame.len() > limits.frame_bytes
             || self.frames.len() >= limits.callback_frames
@@ -297,20 +310,39 @@ impl CallbackOutput {
             return false;
         }
         self.bytes += bytes;
-        self.frames.push_back((frame, opaque_payload));
+        self.frames
+            .push_back((frame, opaque_payload, acknowledgement.take()));
         true
     }
 
     fn matches_front(&self, frame: &str) -> bool {
         self.frames
             .front()
-            .is_some_and(|(expected, _)| expected == frame)
+            .is_some_and(|(expected, _, _)| expected == frame)
     }
 
     fn flushed(&mut self) {
-        if let Some((frame, _)) = self.frames.pop_front() {
+        if let Some((frame, _, acknowledgement)) = self.frames.pop_front() {
             self.bytes -= frame.len() + 1;
+            if let Some(acknowledgement) = acknowledgement {
+                let _ = acknowledgement.send(true);
+            }
         }
+    }
+
+    fn fail_all(&mut self) {
+        while let Some((_, _, acknowledgement)) = self.frames.pop_front() {
+            if let Some(acknowledgement) = acknowledgement {
+                let _ = acknowledgement.send(false);
+            }
+        }
+        self.bytes = 0;
+    }
+}
+
+impl Drop for CallbackOutput {
+    fn drop(&mut self) {
+        self.fail_all();
     }
 }
 
@@ -1033,17 +1065,35 @@ async fn run_connection(
             async move {
                 if line.len() > limits.frame_bytes {
                     resource_failure.store(true, Ordering::Release);
+                    callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .fail_all();
                     return Err(io_failure());
                 }
-                let mut value: Value = serde_json::from_str(&line).map_err(|_| io_failure())?;
+                let mut value: Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        callback_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .fail_all();
+                        return Err(io_failure());
+                    }
+                };
                 let is_response = value.get("method").is_none();
                 if is_response {
                     let output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
                     if !output.matches_front(&line) {
                         // Unreserved SDK errors cannot bypass callback admission.
+                        drop(output);
+                        callback_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .fail_all();
                         return Err(io_failure());
                     }
-                    if output.frames.front().is_some_and(|(_, opaque)| *opaque) {
+                    if output.frames.front().is_some_and(|(_, opaque, _)| *opaque) {
                         for field in ["/result/content", "/result/output"] {
                             if let Some(content) = value.pointer_mut(field) {
                                 *content = json!("[redacted]");
@@ -1055,7 +1105,17 @@ async fn run_connection(
                     submitted.store(true, Ordering::Release);
                 }
                 capture(&capture_state, "outgoing", value);
-                output.send(line).await.map_err(|_| io_failure())?;
+                if !matches!(
+                    tokio::time::timeout(limits.callback_timeout, output.send(line)).await,
+                    Ok(Ok(()))
+                ) {
+                    resource_failure.store(true, Ordering::Release);
+                    callback_output
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .fail_all();
+                    return Err(io_failure());
+                }
                 if is_response {
                     callback_output
                         .lock()
@@ -1108,6 +1168,9 @@ async fn run_connection(
                         if operator_method {
                             let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let rpc_id = serde_json::to_value(responder.id())?;
+                            // Reserve against the private peer ID's encoded size, not the
+                            // public opaque interaction token shown to operators.
+                            let private_rpc_id = rpc_id.to_string();
                             let mut safe_params = request.params.clone();
                             redactor.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut safe_params, false);
                             let interaction = session.as_deref().ok_or_else(agent_client_protocol::Error::invalid_params)
@@ -1156,7 +1219,7 @@ async fn run_connection(
                             let reservation = match service_sender.reserve_operator(
                                 &request.method,
                                 &request.params,
-                                &interaction.rpc_id,
+                                &private_rpc_id,
                             ) {
                                 Ok(reservation) => reservation,
                                 Err(_) => {
@@ -1198,15 +1261,18 @@ async fn run_connection(
                                             result = receive => result.map(|reply: AcpOperatorReply| (reply.answer.clone(), Some(reply))).unwrap_or((OperatorAnswer::Cancel, None)),
                                             _ = tokio::time::sleep(limits.callback_timeout) => (OperatorAnswer::Cancel, None),
                                         };
-                                        let (answer, acknowledgement, claimed) = match reply {
-                                            Some(reply) if reply.delivery.claim() => (answer, Some(reply.acknowledgement), true),
-                                            Some(reply) => (OperatorAnswer::Cancel, Some(reply.acknowledgement), false),
-                                            None => (answer, None, false),
+                                        let (answer, mut acknowledgement) = match reply {
+                                            Some(reply) if reply.delivery.claim() => (answer, Some(reply.acknowledgement)),
+                                            Some(reply) => {
+                                                let _ = reply.acknowledgement.send(false);
+                                                (OperatorAnswer::Cancel, None)
+                                            }
+                                            None => (answer, None),
                                         };
                                         let response = Ok(operator::response_for(&interaction, answer));
                                         let frame = serde_json::to_string(&RawJsonRpcMessage::response(responder.id().clone(), response.clone()));
                                         let delivered = frame.ok().and_then(|frame| {
-                                            reserve_and_enqueue_operator_response(&callback_output, frame, &limits, || responder.respond_with_result(response))
+                                            reserve_and_enqueue_operator_response(&callback_output, frame, &limits, &mut acknowledgement, || responder.respond_with_result(response))
                                         });
                                         let Some(delivered) = delivered else {
                                             resource_failure.store(true, Ordering::Release);
@@ -1214,8 +1280,12 @@ async fn run_connection(
                                             if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(false); }
                                             return;
                                         };
-                                        let delivered = delivered.is_ok();
-                                        if let Some(acknowledgement) = acknowledgement { let _ = acknowledgement.send(delivered && claimed); }
+                                        if delivered.is_err() {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                            callback_output.lock().unwrap_or_else(|e| e.into_inner()).fail_all();
+                                            return;
+                                        }
                                         let _ = sender.try_send(AcpOperatorEvent::Closed(interaction.request_id));
                                     });
                                     return Ok(());
@@ -1784,11 +1854,17 @@ mod tests {
             let sent = Arc::clone(&sent);
             let limits = limits.clone();
             std::thread::spawn(move || {
-                reserve_and_enqueue_operator_response(&output, "first".into(), &limits, || {
-                    entered.send(()).expect("first entered SDK enqueue");
-                    released.recv().expect("release first enqueue");
-                    sent.lock().expect("sent frames").push("first");
-                })
+                reserve_and_enqueue_operator_response(
+                    &output,
+                    "first".into(),
+                    &limits,
+                    &mut None,
+                    || {
+                        entered.send(()).expect("first entered SDK enqueue");
+                        released.recv().expect("release first enqueue");
+                        sent.lock().expect("sent frames").push("first");
+                    },
+                )
             })
         };
         first_enqueuing
@@ -1803,9 +1879,15 @@ mod tests {
             let sent = Arc::clone(&sent);
             let limits = limits.clone();
             std::thread::spawn(move || {
-                reserve_and_enqueue_operator_response(&output, "second".into(), &limits, || {
-                    sent.lock().expect("sent frames").push("second");
-                })
+                reserve_and_enqueue_operator_response(
+                    &output,
+                    "second".into(),
+                    &limits,
+                    &mut None,
+                    || {
+                        sent.lock().expect("sent frames").push("second");
+                    },
+                )
             })
         };
         release.send(()).expect("release first enqueue");
@@ -1824,10 +1906,31 @@ mod tests {
                 .expect("reservations")
                 .frames
                 .iter()
-                .map(|(frame, _)| frame.as_str())
+                .map(|(frame, _, _)| frame.as_str())
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
+    }
+
+    #[test]
+    fn operator_acknowledgement_tracks_flush_or_sink_failure() {
+        let mut output = CallbackOutput::default();
+        let limits = ClientLimits::default();
+        let (success, mut flushed) = oneshot::channel();
+        let mut success = Some(success);
+        assert!(output.admit_with_ack("first".into(), &limits, false, &mut success));
+        assert!(success.is_none());
+        assert!(
+            flushed.try_recv().is_err(),
+            "SDK enqueue is not transport delivery"
+        );
+        output.flushed();
+        assert!(flushed.try_recv().expect("flush acknowledgement"));
+
+        let (failure, mut failed) = oneshot::channel();
+        assert!(output.admit_with_ack("second".into(), &limits, false, &mut Some(failure)));
+        output.fail_all();
+        assert!(!failed.try_recv().expect("write failure acknowledgement"));
     }
 
     #[test]

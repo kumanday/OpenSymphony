@@ -936,6 +936,7 @@ struct FakeWorker {
     interrupt_results: VecDeque<Result<WorkerInterruptAcknowledgement, FakeError>>,
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
     operator_responses: Vec<(WorkerId, String)>,
+    operator_response_results: VecDeque<Result<bool, FakeError>>,
 }
 
 impl WorkerBackend for FakeWorker {
@@ -975,7 +976,9 @@ impl WorkerBackend for FakeWorker {
     ) -> Result<bool, Self::Error> {
         self.operator_responses
             .push((worker_id.clone(), request_id.to_owned()));
-        Ok(true)
+        self.operator_response_results
+            .pop_front()
+            .unwrap_or(Ok(true))
     }
 
     async fn abort_worker(
@@ -1065,10 +1068,32 @@ async fn delayed_operator_answer_and_closure_restart_stall_clock() {
 
         if answer_by_operator {
             scheduler
+                .worker_mut()
+                .operator_response_results
+                .push_back(Err(FakeError {
+                    message: "queued ACP answer expired before consumption".into(),
+                    category: None,
+                    retry_after: None,
+                }));
+            assert!(
+                scheduler
+                    .respond_operator_request(&interaction, OperatorAnswer::Cancel)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                scheduler
+                    .snapshot(ts(Utc::now().timestamp_millis() as u64))
+                    .operator_interactions
+                    .len(),
+                1,
+                "retryable worker timeout retains the live callback"
+            );
+            scheduler
                 .respond_operator_request(&interaction, OperatorAnswer::Cancel)
                 .await
                 .expect("deliver operator answer");
-            assert_eq!(scheduler.worker().operator_responses.len(), 1);
+            assert_eq!(scheduler.worker().operator_responses.len(), 2);
         } else {
             scheduler
                 .worker_mut()

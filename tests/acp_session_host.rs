@@ -183,14 +183,8 @@ async fn native_peer_operator_permission_and_form_question_round_trip() {
         let AcpOperatorEvent::Opened(request) = event else {
             continue;
         };
-        assert!(
-            request
-                .interaction
-                .rpc_id
-                .parse::<u64>()
-                .expect("numeric RPC ID")
-                > 9_007_199_254_740_992
-        );
+        assert!(uuid::Uuid::parse_str(&request.interaction.rpc_id).is_ok());
+        assert!(!request.interaction.rpc_id.contains("9007199254740993"));
         observed.push(request.interaction.kind);
         let answer = match request.interaction.kind {
             OperatorInteractionKind::Permission => OperatorAnswer::Permission {

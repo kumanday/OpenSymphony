@@ -114,6 +114,12 @@ for line in sys.stdin:
                 {"action":"accept","content":{"region":"west"}}
             with open("acp-operator-roundtrip.json", "w") as output:
                 json.dump({"permission":"allow-opaque","question":"west"}, output)
+        if profile == "operator_early_finish":
+            send({"id":"early-question","method":"elicitation/create","params":{"sessionId":session,
+                "mode":"form","message":"Choose region","requestedSchema":{"type":"object",
+                "required":["region"],"properties":{"region":{"type":"string","enum":["west"]}}}}})
+            send({"id":message["id"],"result":{"stopReason":"end_turn"}})
+            continue
         if profile in ("hang", "slow_model_hang"):
             pending = message["id"]
             continue
@@ -126,6 +132,8 @@ for line in sys.stdin:
     elif method is None and message.get("id") == "permission":
         assert message["result"]["outcome"]["outcome"] == "cancelled"
         send({"id": pending, "result": {"stopReason": "cancelled"}})
+    elif method is None and message.get("id") == "early-question":
+        assert message["result"]["action"] == "cancel"
     elif method == "session/cancel":
         send({"id": pending, "result": {"stopReason": "cancelled"}})
     else:
