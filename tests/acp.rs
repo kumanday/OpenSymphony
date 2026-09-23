@@ -1210,7 +1210,8 @@ fn acp_adapter_exposes_execution_and_explicit_gaps() {
             && capability.actions.start_run
             && capability.cancellation.acknowledges_cancel
     );
-    assert!(!capability.actions.approve && !capability.pause_resume.resume);
+    assert!(capability.actions.approve && capability.approvals.human_decision);
+    assert!(!capability.pause_resume.resume);
     assert!(!capability.feature_gaps.is_empty());
 }
 

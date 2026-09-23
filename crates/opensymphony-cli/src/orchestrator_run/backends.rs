@@ -66,7 +66,7 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, Command},
-    sync::{Mutex as AsyncMutex, mpsc, oneshot},
+    sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot},
     task::JoinHandle,
     time::{timeout, timeout_at},
 };
@@ -505,6 +505,7 @@ pub(super) struct RuntimeWorkerBackend {
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
+    operator_update_notify: Arc<Notify>,
     tasks: HashMap<String, ActiveWorkerTask>,
     worker_issue_ids: HashMap<String, String>,
 }
@@ -5636,6 +5637,7 @@ impl RuntimeWorkerBackend {
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
+            operator_update_notify: Arc::new(Notify::new()),
             tasks: HashMap::new(),
             worker_issue_ids: HashMap::new(),
         }
@@ -5644,6 +5646,10 @@ impl RuntimeWorkerBackend {
     pub(super) fn with_checkout_credential_envs(mut self, variables: BTreeSet<String>) -> Self {
         self.checkout_credential_envs = variables;
         self
+    }
+
+    pub(super) fn operator_update_notify(&self) -> Arc<Notify> {
+        self.operator_update_notify.clone()
     }
 
     pub(super) fn with_integration_instructions(
@@ -5734,6 +5740,7 @@ impl RuntimeWorkerBackend {
         let openhands_conversation_store = self.openhands_conversation_store.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
+        let operator_update_notify = self.operator_update_notify.clone();
         let worker_id = request.run.worker_id.clone();
         let issue_identifier = issue.identifier.to_string();
         self.worker_issue_ids
@@ -7012,6 +7019,7 @@ impl RuntimeWorkerBackend {
                     &acp_host,
                     &acp_active,
                     &updates_tx,
+                    &operator_update_notify,
                     &mut launch_tx,
                     worker_environment,
                     checkout_credential_envs,
@@ -17588,7 +17596,11 @@ exit 64
         use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig};
 
         let temp = TempDir::new().expect("temp");
-        let (backend, manager) = acp_test_backend(temp.path()).await;
+        let (mut backend, manager) = acp_test_backend(temp.path()).await;
+        Arc::make_mut(&mut backend.workflow)
+            .config
+            .polling
+            .interval_ms = 300_000;
         let workflow = backend.workflow.clone();
         let workspace = RuntimeWorkspaceBackend::new(manager.clone(), &workflow);
         let mut config = SchedulerConfig::from_workflow(&workflow).expect("config");
@@ -17598,6 +17610,7 @@ exit 64
         config.stall_timeout_ms = None;
         let mut tracker_issue = sample_tracker_issue(&sample_issue());
         tracker_issue.project_slug = Some("sample-project".into());
+        let operator_update_notify = backend.operator_update_notify();
         let mut scheduler =
             Scheduler::new(OperatorTracker(tracker_issue), workspace, backend, config);
         let mut observed_at = now_timestamp().as_u64();
@@ -17628,6 +17641,13 @@ exit 64
         let server = tokio::spawn(async move { gateway.serve(listener).await.expect("gateway") });
         let client = reqwest::Client::new();
 
+        observed_at += 1000;
+        let dispatched = scheduler
+            .tick(TimestampMs::new(observed_at))
+            .await
+            .expect("initial tracker dispatch");
+        store.publish(project(&dispatched)).await;
+
         for (kind, action_kind, answer_fields) in [
             (
                 OperatorInteractionKind::Permission,
@@ -17644,11 +17664,14 @@ exit 64
                 let mut found = None;
                 let mut last = String::new();
                 for _ in 0..100 {
+                    timeout(Duration::from_secs(5), operator_update_notify.notified())
+                        .await
+                        .expect("native ACP callback wakes scheduler without tracker polling");
                     observed_at += 1000;
                     let snapshot = scheduler
-                        .tick(TimestampMs::new(observed_at))
+                        .drain_worker_updates(TimestampMs::new(observed_at))
                         .await
-                        .expect("scheduler tick");
+                        .expect("operator update drain");
                     last = format!(
                         "health={:?} issues={:?} pending={:?}",
                         snapshot.daemon.health,
@@ -17675,7 +17698,6 @@ exit 64
                     if found.is_some() {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 found.unwrap_or_else(|| panic!("native peer request reached scheduler: {last}"))
             };

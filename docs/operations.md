@@ -1057,6 +1057,8 @@ encoding echoed as an opaque string by clients; stale, duplicate, expired, and
 invalid option/answer submissions are rejected. A waiting interaction pauses
 stall detection only until its deadline. Disconnect, cancellation, completion,
 and restart clear the live responder; operators must wait for a fresh request.
+Callback arrivals and closures publish updated snapshots without waiting for
+the next tracker poll.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

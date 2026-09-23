@@ -20,6 +20,8 @@ client infers completion, permission, or workspace confinement from absence.
 An ACP run may also publish ephemeral, bound operator interactions. The
 orchestrator actor owns pending decisions; gateway clients submit a response
 command, and the active ACP worker returns it to the original RPC responder.
+Worker callback reports wake that actor for immediate application and snapshot
+publication, independently of the tracker polling interval.
 Pending interactions are discarded on completion, cancellation, expiry, or
 restart and cannot be reconstructed from stored evidence.
 

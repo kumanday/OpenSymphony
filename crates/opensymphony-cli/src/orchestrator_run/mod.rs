@@ -1160,6 +1160,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .map(checkout_credential_environment_variables)
             .unwrap_or_default(),
     );
+    let operator_update_notify = worker.operator_update_notify();
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
     scheduler_config.repository_routing = runtime.repository_routing.clone();
@@ -1328,6 +1329,31 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     .await;
                 let _ = command.reply.send(result);
                 let snapshot = scheduler.snapshot(now_timestamp());
+                store.publish(map_snapshot(
+                    &snapshot,
+                    runtime.workflow.config.workspace.root.as_path(),
+                    &terminal_state_set(&runtime.workflow),
+                    current_agent_server_status(&mut supervisor, agent_server_base_url),
+                    current_memory_server_status(memory_server.as_ref()),
+                    &recent_events,
+                )).await;
+            }
+            _ = operator_update_notify.notified() => {
+                let observed_at = now_timestamp();
+                let snapshot = match scheduler.drain_worker_updates(observed_at).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        warn!(%error, "operator worker update failed");
+                        push_recent_event(
+                            &mut recent_events,
+                            RecentEventKind::Warning,
+                            None,
+                            format!("operator worker update failed: {error}"),
+                            Utc::now(),
+                        );
+                        scheduler.snapshot(observed_at)
+                    }
+                };
                 store.publish(map_snapshot(
                     &snapshot,
                     runtime.workflow.config.workspace.root.as_path(),

@@ -1384,6 +1384,8 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
             .iter()
             .any(|harness| harness.kind == "acp"
                 && harness.available
+                && harness.approvals.human_decision
+                && harness.actions.approve
                 && harness.transport.modes == ["stdio"])
     );
     assert!(caps_response.harness_profiles.is_empty());
@@ -5604,6 +5606,25 @@ async fn acp_operator_routes_live_permission_question_and_plan_responses() {
             assert!(rx.try_recv().is_err(), "wrong binding reached scheduler");
         }
         if expected == "permission" {
+            let mut missing = action.clone();
+            missing
+                .payload
+                .as_mut()
+                .expect("payload")
+                .as_object_mut()
+                .expect("object")
+                .remove("option_id");
+            let receipt: ActionReceipt = client
+                .post(format!("http://{address}/api/v1/actions/dispatch"))
+                .json(&missing)
+                .send()
+                .await
+                .expect("missing option response")
+                .json()
+                .await
+                .expect("missing option receipt");
+            assert_eq!(receipt.status, ActionStatus::Rejected);
+            assert!(rx.try_recv().is_err(), "missing option reached scheduler");
             let mut forged = action.clone();
             forged.payload.as_mut().expect("payload")["option_id"] =
                 serde_json::json!("unoffered-option");

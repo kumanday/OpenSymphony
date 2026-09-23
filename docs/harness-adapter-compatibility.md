@@ -164,8 +164,9 @@ cleanup until execution risk is reconciled.
 | Session configuration | Advertised select options and grouped values; explicit model/mode choices; legacy modes; ordered updates. |
 | MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
 | Permission | Offered opaque choices, `operator`/`deny`/`allow_once` policy, deadline and cancellation. |
-| Structured question and plan | `cursor/ask_question` choices and `cursor/create_plan` approval through gateway inputs and approvals. |
-| Interactive auth and elicitation | Not advertised. |
+| Structured question | Standard `elicitation/create` required string-enum and string-array-enum choice forms through gateway inputs, with accept, decline and cancel. |
+| Plan approval | Typed gateway and client control; vendor method registration is handled by COE-613. |
+| Interactive auth and elicitation | Form-only capability is advertised; free-text, numeric, optional, constrained, request-scoped and URL elicitation are unavailable. |
 
 The production worker enables file and terminal callbacks for its verified
 issue workspace and supplies the active scoped memory grant as a host-owned MCP

@@ -2290,6 +2290,22 @@ where
         Ok(self.snapshot(observed_at))
     }
 
+    /// Apply queued worker reports without waiting for a tracker polling cycle.
+    pub async fn drain_worker_updates(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<OrchestratorSnapshot, SchedulerError> {
+        let updates = self
+            .worker
+            .poll_updates()
+            .await
+            .map_err(|error| SchedulerError::Worker {
+                detail: error.to_string(),
+            })?;
+        self.apply_worker_updates(updates).await?;
+        Ok(self.snapshot(observed_at))
+    }
+
     pub async fn tick(
         &mut self,
         observed_at: TimestampMs,
@@ -2368,14 +2384,7 @@ where
             self.flush_pending_finished_updates().await?;
         }
 
-        let updates = self
-            .worker
-            .poll_updates()
-            .await
-            .map_err(|error| SchedulerError::Worker {
-                detail: error.to_string(),
-            })?;
-        self.apply_worker_updates(updates).await?;
+        self.drain_worker_updates(observed_at).await?;
         if !self.linear_cooldown_active(observed_at) {
             let freshly_inactive_issue_ids = pre_update_full_snapshot
                 .as_ref()

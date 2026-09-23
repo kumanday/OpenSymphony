@@ -658,6 +658,8 @@ The native ACP peer also verifies `elicitation/create` form accept, decline and
 cancel responses, large numeric RPC IDs, disabled Cursor methods, and form-only
 capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
+It uses a five-minute tracker interval and processes both callbacks through
+worker-update wakeups without another tracker tick.
 Native Unix tests replace the bound workspace root after service creation and
 verify file reads, atomic writes, and new terminal cwd remain on the original
 directory inode. They also swap a pinned terminal directory for an external

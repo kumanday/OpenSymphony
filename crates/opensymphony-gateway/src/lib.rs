@@ -3049,31 +3049,22 @@ fn operator_action(
             if decision == "cancelled" {
                 OperatorAnswer::Cancel
             } else {
-                let required_kind = match decision {
-                    "approved" => "allow_once",
-                    "rejected" => "reject_once",
-                    _ => return Err("invalid approval decision".into()),
-                };
-                let option = if let Some(id) =
-                    payload.get("option_id").and_then(serde_json::Value::as_str)
-                {
-                    request.options.iter().find(|option| {
-                        option.id == id
-                            && match decision {
-                                "approved" => {
-                                    matches!(option.kind.as_str(), "allow_once" | "allow_always")
-                                }
-                                _ => {
-                                    matches!(option.kind.as_str(), "reject_once" | "reject_always")
-                                }
+                if !matches!(decision, "approved" | "rejected") {
+                    return Err("invalid approval decision".into());
+                }
+                let id = payload
+                    .get("option_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("permission option_id is required")?;
+                let option = request.options.iter().find(|option| {
+                    option.id == id
+                        && match decision {
+                            "approved" => {
+                                matches!(option.kind.as_str(), "allow_once" | "allow_always")
                             }
-                    })
-                } else {
-                    request
-                        .options
-                        .iter()
-                        .find(|option| option.kind == required_kind)
-                };
+                            _ => matches!(option.kind.as_str(), "reject_once" | "reject_always"),
+                        }
+                });
                 OperatorAnswer::Permission {
                     option_id: option
                         .ok_or("offered permission option is missing or invalid")?

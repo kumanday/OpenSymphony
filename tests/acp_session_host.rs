@@ -210,6 +210,9 @@ async fn native_peer_operator_permission_and_form_question_round_trip() {
         .expect("native prompt timeout")
         .expect("task");
     assert!(report.succeeded());
+    assert!(
+        run_capability(&handle.inspect().await.expect("run capability").state).operator_responses
+    );
     assert_eq!(
         observed,
         vec![

@@ -333,6 +333,7 @@ pub(super) async fn run_issue(
     host: &SessionHost,
     active: &ActiveSessions,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
+    operator_update_notify: &Notify,
     launch: &mut Option<oneshot::Sender<LaunchReport>>,
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
@@ -352,6 +353,7 @@ pub(super) async fn run_issue(
         host,
         active,
         updates,
+        operator_update_notify,
         launch,
         environment,
         excluded_environment,
@@ -589,6 +591,7 @@ async fn try_run(
     host: &SessionHost,
     active: &ActiveSessions,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
+    operator_update_notify: &Notify,
     launch: &mut Option<oneshot::Sender<LaunchReport>>,
     environment: BTreeMap<String, String>,
     excluded_environment: BTreeSet<String>,
@@ -791,11 +794,15 @@ async fn try_run(
                     if operator_waiters.insert(request_id.clone(), request.reply).is_some() {
                         return Err("ACP callback repeated its request identity".into());
                     }
-                    let _ = updates.send(WorkerUpdate::OperatorRequest { worker_id: run.worker_id.clone(), interaction: request.interaction });
+                    if updates.send(WorkerUpdate::OperatorRequest { worker_id: run.worker_id.clone(), interaction: request.interaction }).is_ok() {
+                        operator_update_notify.notify_one();
+                    }
                 }
                 Some(AcpOperatorEvent::Closed(request_id)) => {
                     operator_waiters.remove(&request_id);
-                    let _ = updates.send(WorkerUpdate::OperatorClosed { worker_id: run.worker_id.clone(), request_id });
+                    if updates.send(WorkerUpdate::OperatorClosed { worker_id: run.worker_id.clone(), request_id }).is_ok() {
+                        operator_update_notify.notify_one();
+                    }
                 }
                 // The owner drops this sender while cancelling a prompt that
                 // has not been submitted. Keep waiting for the prompt's
