@@ -175,7 +175,10 @@ prompt submission. Run capability projection reports the negotiated selectable
 model option, while profile preflight uses the same resolved worker environment
 as launch. ACP terminal callback create and completion responses project bounded
 command receipts for parent final verification; only successful create responses
-and observed exit codes count.
+and observed exit codes count. Running `terminal/output` polls and successful
+responses with a null exit status emit constant-summary, payload-free activity
+so long commands keep the scheduler idle deadline current without exposing
+terminal output or recording a completion receipt.
 
 Windows callback operations pin path ancestors through use and reject reparse
 points, including junctions, through no-follow handles. Callback epoch handoff shares the setup

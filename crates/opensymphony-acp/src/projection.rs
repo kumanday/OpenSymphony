@@ -46,7 +46,7 @@ pub struct RuntimeProjection {
     tool_bytes: usize,
     prompt_request: Option<Value>,
     terminal_creates: BTreeMap<String, (String, Option<String>)>,
-    terminal_waits: BTreeMap<String, String>,
+    terminal_waits: BTreeMap<String, (String, bool)>,
     completed_terminals: BTreeSet<String>,
     filesystem_callbacks: BTreeSet<String>,
 }
@@ -95,8 +95,9 @@ impl RuntimeProjection {
         if let Some(activity) = self.project_filesystem_request(*generation, frame) {
             return Some(activity);
         }
-        if self.record_terminal_request(frame) {
-            return None;
+        if let Some(running_poll) = self.record_terminal_request(frame) {
+            return running_poll
+                .then(|| callback_activity(*generation, frame, "ACP terminal output polled"));
         }
         if frame.payload.get("method").is_none()
             && self
@@ -141,7 +142,7 @@ impl RuntimeProjection {
             }
             self.filesystem_callbacks.insert(id);
         }
-        Some(filesystem_activity(
+        Some(callback_activity(
             generation,
             frame,
             "ACP filesystem callback requested",
@@ -159,21 +160,21 @@ impl RuntimeProjection {
         let id = frame.payload.get("id").and_then(rpc_id)?;
         self.filesystem_callbacks
             .remove(&id)
-            .then(|| filesystem_activity(generation, frame, "ACP filesystem callback completed"))
+            .then(|| callback_activity(generation, frame, "ACP filesystem callback completed"))
     }
 
-    fn record_terminal_request(&mut self, frame: &SourceFrame) -> bool {
-        let Some(method) = frame.payload.get("method").and_then(Value::as_str) else {
-            return false;
-        };
+    // Some(true) means a running output poll can advance scheduler liveness.
+    // Other terminal requests are consumed without a projected event.
+    fn record_terminal_request(&mut self, frame: &SourceFrame) -> Option<bool> {
+        let method = frame.payload.get("method").and_then(Value::as_str)?;
         if !matches!(
             method,
             "terminal/create" | "terminal/wait_for_exit" | "terminal/output"
         ) {
-            return false;
+            return None;
         }
         let Some(id) = frame.payload.get("id").and_then(rpc_id) else {
-            return true;
+            return Some(false);
         };
         if method == "terminal/create" {
             let Some(command) = frame
@@ -181,15 +182,15 @@ impl RuntimeProjection {
                 .pointer("/params/command")
                 .and_then(Value::as_str)
             else {
-                return true;
+                return Some(false);
             };
             let args = match frame.payload.pointer("/params/args") {
                 Some(Value::Array(args)) => args.as_slice(),
                 None => &[],
-                _ => return true,
+                _ => return Some(false),
             };
             let Some(command) = terminal_command(command, args) else {
-                return true;
+                return Some(false);
             };
             let cwd = frame
                 .payload
@@ -205,12 +206,16 @@ impl RuntimeProjection {
             .pointer("/params/terminalId")
             .and_then(Value::as_str)
         {
+            let running_poll =
+                method == "terminal/output" && !self.completed_terminals.contains(terminal_id);
             if self.terminal_waits.len() >= 1024 {
                 self.terminal_waits.pop_first();
             }
-            self.terminal_waits.insert(id, terminal_id.to_owned());
+            self.terminal_waits
+                .insert(id, (terminal_id.to_owned(), method == "terminal/output"));
+            return Some(running_poll);
         }
-        true
+        Some(false)
     }
 
     fn project_terminal_response(
@@ -236,9 +241,21 @@ impl RuntimeProjection {
                 payload: json!({"command_id":terminal_id,"command":command,"cwd":cwd}),
             });
         }
-        let terminal_id = self.terminal_waits.remove(&id)?;
+        let (terminal_id, output_poll) = self.terminal_waits.remove(&id)?;
         if self.completed_terminals.contains(&terminal_id) {
             return None;
+        }
+        if output_poll
+            && frame
+                .payload
+                .pointer("/result/exitStatus")
+                .is_some_and(Value::is_null)
+        {
+            return Some(callback_activity(
+                generation,
+                frame,
+                "ACP terminal output received",
+            ));
         }
         let exit_code = frame
             .payload
@@ -374,7 +391,7 @@ impl RuntimeProjection {
     }
 }
 
-fn filesystem_activity(generation: u64, frame: &SourceFrame, summary: &str) -> RuntimeUpdate {
+fn callback_activity(generation: u64, frame: &SourceFrame, summary: &str) -> RuntimeUpdate {
     RuntimeUpdate {
         sequence: frame.sequence,
         generation,
@@ -728,6 +745,21 @@ mod tests {
         }
     }
 
+    fn timed_callback_event(
+        sequence: u64,
+        observed_ms: i64,
+        direction: &str,
+        payload: Value,
+    ) -> SessionEvent {
+        let mut event = callback_event(sequence, direction, payload);
+        let SessionEvent::Source { frame, .. } = &mut event else {
+            unreachable!("callback fixture is a source event")
+        };
+        frame.observed_at =
+            chrono::DateTime::from_timestamp_millis(observed_ms).expect("fixture timestamp");
+        event
+    }
+
     #[test]
     fn terminal_callback_responses_project_completed_command_once() {
         let mut projection = RuntimeProjection::default();
@@ -821,6 +853,137 @@ mod tests {
                     "run"
                 )
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn running_terminal_output_polls_keep_idle_deadline_sliding_without_completion() {
+        use crate::opensymphony_domain::{DurationMs, StallMetadata, TimestampMs};
+
+        let mut projection = RuntimeProjection::default();
+        let mut stall = StallMetadata::new(TimestampMs::new(0), DurationMs::new(1_000));
+        assert!(
+            projection
+                .apply(
+                    &timed_callback_event(
+                        1,
+                        0,
+                        "incoming",
+                        json!({
+                            "id": 1, "method": "terminal/create",
+                            "params": {"command": "cargo", "args": ["test"]}
+                        })
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        let started = projection
+            .apply(
+                &timed_callback_event(
+                    2,
+                    0,
+                    "outgoing",
+                    json!({
+                        "id": 1, "result": {"terminalId": "terminal-1"}
+                    }),
+                ),
+                "run",
+            )
+            .expect("command start");
+        assert_eq!(started.kind, "command_started");
+        stall.observe_activity(TimestampMs::new(0));
+
+        for (request_sequence, observed_ms) in [(3, 500), (5, 900), (7, 1_700)] {
+            let request = projection
+                .apply(
+                    &timed_callback_event(
+                        request_sequence,
+                        observed_ms,
+                        "incoming",
+                        json!({
+                            "id": request_sequence, "method": "terminal/output",
+                            "params": {"terminalId": "terminal-1"}
+                        }),
+                    ),
+                    "run",
+                )
+                .expect("running poll request activity");
+            assert_eq!(request.kind, "callback_activity");
+            assert_eq!(request.payload, Value::Null);
+            stall.observe_activity(TimestampMs::new(observed_ms as u64));
+
+            let response = projection
+                .apply(
+                    &timed_callback_event(
+                        request_sequence + 1,
+                        observed_ms + 1,
+                        "outgoing",
+                        json!({
+                            "id": request_sequence,
+                            "result": {"output": "private build output", "exitStatus": null}
+                        }),
+                    ),
+                    "run",
+                )
+                .expect("running poll response activity");
+            assert_eq!(response.kind, "callback_activity");
+            assert_eq!(response.payload, Value::Null);
+            assert!(
+                !response
+                    .summary
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("private")
+            );
+            stall.observe_activity(TimestampMs::new((observed_ms + 1) as u64));
+        }
+        assert_eq!(stall.last_activity_at, TimestampMs::new(1_701));
+        assert!(!stall.is_stalled_at(TimestampMs::new(2_000)));
+        assert!(
+            projection
+                .apply(
+                    &timed_callback_event(
+                        9,
+                        2_100,
+                        "incoming",
+                        json!({
+                            "id": 9, "method": "terminal/output",
+                            "params": {"terminalId": "terminal-1"}
+                        })
+                    ),
+                    "run"
+                )
+                .is_some()
+        );
+        let finished = projection
+            .apply(
+                &timed_callback_event(10, 2_101, "outgoing", json!({
+                    "id": 9, "result": {"output": "private build output", "exitStatus": {"exitCode": 0}}
+                })),
+                "run",
+            )
+            .expect("actual exit receipt");
+        assert_eq!(finished.kind, "command_finished");
+        assert_eq!(
+            finished.payload,
+            json!({"command_id":"terminal-1","exit_code":0})
+        );
+        assert!(
+            projection
+                .apply(
+                    &timed_callback_event(
+                        11,
+                        2_102,
+                        "incoming",
+                        json!({
+                            "id": 11, "method": "terminal/output",
+                            "params": {"terminalId": "terminal-1"}
+                        })
+                    ),
+                    "run"
+                )
+                .is_none()
         );
     }
 

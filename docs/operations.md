@@ -1018,6 +1018,9 @@ activity. After a subscriber lag, the worker replays retained source frames when
 they cover every frame after its processed cursor; an actual gap fences the run.
 Supported filesystem callback requests and their responses produce payload-free
 scheduler activity without recording file paths or contents.
+Running terminal output polls and successful responses with a null exit status
+likewise advance the idle deadline through payload-free activity; only an
+observed exit code records command completion.
 An ACP session restored through `session/load` receives the full workflow prompt
 when its durable state has never seeded that prompt. A seeded session receives
 continuation guidance even when the new run's claim has reset its status to
