@@ -690,6 +690,7 @@ and updates are committed in SDK dispatch order before prompt completion. No Ope
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-609: ACP Session Ownership And Durable Recovery
 - COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
 
 ## Source refs
 
@@ -828,5 +829,6 @@ and updates are committed in SDK dispatch order before prompt completion. No Ope
 - COE-556
 - COE-609
 - COE-610
+- COE-611
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
