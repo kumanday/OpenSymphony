@@ -101,6 +101,19 @@ Known gaps:
   tokens in OpenSymphony workspaces or browser payloads.
 - Hosted Codex worker pools and remote routing remain future work.
 
+## ACP live profile matrix
+
+[ACP live qualification](acp-live-qualification.md) records the pinned Cursor
+and Devin stdio profiles, negotiated ACP v1 methods, authentication, real
+tracked-issue outcomes, and optional-feature limits. Both advertise
+`loadSession` and omit `resumeSession`; profile preflight does not claim
+either. Cursor alone has a qualified pinned extension registration for
+observed `cursor/create_plan` and `cursor/update_todos` ID-bearing requests.
+Devin requires no custom scheduler path; its before-response session updates
+are bound by the common ACP client. The public capabilities response exposes
+generic adapter support, configured profile readiness, and negotiated run
+support as distinct states.
+
 ## Rust-Native Harness
 
 A Rust-native or in-process harness fits the same contract by implementing
@@ -114,11 +127,79 @@ Known gaps:
 - Hosted execution would need an isolation model before remote support is
   advertised.
 
-## ACP stdio client foundation
+## ACP stdio runtime
 
-`opensymphony_acp::run_turn` implements an SDK-backed ACP v1 stdio session through
-setup, one text prompt, ordered updates, cancellation, and supervised teardown.
-Only the executable client and typed launch profiles are available in this slice.
-ACP is not yet advertised as a runnable scheduler harness; production routing,
-retained sessions, negotiated public capabilities, complete callbacks and operator
-responses follow the [ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml).
+`acp` is an available local stdio adapter. `opensymphony run` selects a configured
+`routing.harness_profile` and executes through the retained `SessionHost` with
+ACP v1 JSON-RPC 2.0, UTF-8 and LF framing. Start, continuation, cancellation,
+recovery and terminal cleanup use the shared worker and scheduler boundaries.
+
+`/api/v1/capabilities` separates generic adapter support (`harnesses`) from
+configured profile preflight readiness (`harness_profiles`). The desktop
+`gateway_capabilities` command reads this response from its attached gateway
+with the configured connection credentials, so ACP availability and profile
+readiness match the daemon the operator is using. Preflight checks profile
+shape, executable availability and environment references, including
+checkout-only credential exclusions. Executable lookup honors profile-mapped
+`PATH` values and requires absolute search directories
+because no issue cwd is available during preflight. It does not
+claim agent authentication or session negotiation succeeded. Run details expose
+`harness_capability` only after negotiation, including the selected profile,
+load/resume and history replay support. These DTOs are shared by Rust and
+TypeScript. Recovery projects the persisted negotiation without launching a peer
+or replaying a completed prompt. They contain no commands, arguments, resolved
+credentials or source
+protocol payloads. Runtime activity carries context occupancy and optional usage
+reported with prompt responses separately, with summaries for structural updates
+such as plans. Response observations retain reported counters without inferring
+delta accumulation into native aggregate totals. Missing counters stay absent
+and duplicate or load-replayed observations are suppressed. Numeric usage counters retain their meaning through source redaction;
+credential fields remain redacted.
+Unrecognized `session/update` variants still emit a bounded, redacted generic
+activity record so an active peer remains visible to the scheduler. Subscriber
+lag replays the retained source tail when it covers the current run's processed
+cursor; only a current gap fences automatic completion.
+Filesystem callback requests and responses emit constant-summary, payload-free
+activity records, keeping stall detection current without exposing file data.
+An unfamiliar bounded prompt stop reason remains terminal peer evidence while
+only recognized successful reasons complete the worker successfully. The
+known-secret matcher redacts that reason before it reaches durable state or a
+worker summary, independently of source-frame redaction.
+
+Writer transfer and IDE presentation follow the
+[ACP runtime task package](tasks/acp-runtime-ide-task-package.yaml). Permission
+requests now use a live scheduler-owned operator response path. Unknown stop reasons
+and refusals stop automatic retry; uncertain submission or cancellation fences
+cleanup until execution risk is reconciled.
+
+| ACP client surface | Implemented contract |
+| --- | --- |
+| `fs/read_text_file` | Opt-in; session-bound UTF-8, 1-based lines, optional line count, preserved line endings, bounded file size. |
+| `fs/write_text_file` | Opt-in; contained absolute paths, checked missing parents, bounded content, regular files. |
+| `terminal/*` | Opt-in; create/output/wait/kill/release, connection-local random IDs, immutable host environment, contained cwd, bounded UTF-8 output. |
+| Session configuration | Advertised select options and grouped values; explicit model/mode choices; legacy modes; ordered updates. |
+| MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
+| Permission | Offered opaque choices, `operator`/`deny`/`allow_once` policy, deadline and cancellation. |
+| Structured question | Standard `elicitation/create` required string-enum and string-array-enum choice forms through gateway inputs, with accept, decline and cancel. |
+| Plan approval | Typed gateway and client control; the authenticated pinned Cursor `cursor/create_plan` request routes through the operator response path. |
+| ACP extensions | Exact version/profile registration for observed pinned Cursor plan and ID-bearing todo requests, peer-gated outbound `fixture.echo`, and advertised operation schemas and attempt binding on profile and run capabilities. Cursor question, task, image, and no-ID notification behavior remains unqualified. |
+| Interactive auth and elicitation | Form-only capability is advertised; free-text, numeric, optional, constrained, request-scoped and URL elicitation are unavailable. |
+
+The production worker enables file and terminal callbacks for its verified
+issue workspace and supplies the active scoped memory grant as a host-owned MCP
+attachment. An explicit `routing.model` selection takes precedence over the
+profile's `session.model` and is validated against negotiated options before
+prompt submission. Run capability projection reports the negotiated selectable
+model option, while profile preflight uses the same resolved worker environment
+as launch. ACP terminal callback create and completion responses project bounded
+command receipts for parent final verification; only successful create responses
+and observed exit codes count. Running `terminal/output` polls and successful
+responses with a null exit status emit constant-summary, payload-free activity
+so long commands keep the scheduler idle deadline current without exposing
+terminal output or recording a completion receipt.
+
+Windows callback operations pin path ancestors through use and reject reparse
+points, including junctions, through no-follow handles. Callback epoch handoff shares the setup
+deadline and observes caller cancellation before prompt submission.
+
+Callback policies do not establish a sandbox for the local agent process.

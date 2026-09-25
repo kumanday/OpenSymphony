@@ -28,6 +28,8 @@ pub struct ActionReceipt {
     pub correlation_id: String,
     pub status: ActionStatus,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
     /// Timestamp when the receipt was issued (ISO 8601 / RFC 3339).
     pub issued_at: String,
     /// Hosted-mode permission check placeholder.
@@ -90,6 +92,9 @@ pub enum ActionKind {
     TransitionIssue,
     CreateFollowup,
     ApprovalDecision,
+    InputResponse,
+    PlanDecision,
+    HarnessOperation,
     PublishPlan,
     /// Create or update a Linear project milestone.
     TaskGraphMilestone,
@@ -119,6 +124,9 @@ impl std::fmt::Display for ActionKind {
             ActionKind::TransitionIssue => "transition_issue",
             ActionKind::CreateFollowup => "create_followup",
             ActionKind::ApprovalDecision => "approval_decision",
+            ActionKind::InputResponse => "input_response",
+            ActionKind::PlanDecision => "plan_decision",
+            ActionKind::HarnessOperation => "harness_operation",
             ActionKind::PublishPlan => "publish_plan",
             ActionKind::TaskGraphMilestone => "task_graph_milestone",
             ActionKind::TaskGraphIssue => "task_graph_issue",
@@ -185,6 +193,10 @@ impl ActionKind {
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::StateTransition,
             ],
+            ActionKind::InputResponse | ActionKind::PlanDecision => {
+                vec![ExpectedFollowup::ActionCompletion]
+            }
+            ActionKind::HarnessOperation => vec![ExpectedFollowup::ActionCompletion],
             ActionKind::PublishPlan => vec![
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::JournalUpdate,
@@ -233,6 +245,7 @@ impl ActionReceipt {
             correlation_id: correlation_id.into(),
             status: ActionStatus::Accepted,
             reason: None,
+            result: None,
             issued_at: Utc::now().to_rfc3339(),
             permission: None,
             expected_followup: action_kind.expected_followups(),
@@ -252,6 +265,7 @@ impl ActionReceipt {
             correlation_id: correlation_id.into(),
             status: ActionStatus::Rejected,
             reason: Some(reason.into()),
+            result: None,
             issued_at: Utc::now().to_rfc3339(),
             permission: None,
             expected_followup: action_kind.expected_followups(),

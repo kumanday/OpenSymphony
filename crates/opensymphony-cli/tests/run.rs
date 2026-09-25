@@ -21,6 +21,448 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    let peer =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_worker_peer.py");
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: true\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: first\nacp:\n  profiles:\n    first:\n      command: python3\n      args: ['{}', first]\n    second:\n      command: python3\n      args: ['{}', second]\npolling:\n  interval_ms: 50\nhooks:\n  after_create: 'echo after_create >> hooks'\n  before_run: 'echo before_run >> hooks'\n  after_run: 'echo after_run >> hooks'\n",
+            peer.display(),
+            peer.display()
+        ),
+    );
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|run| run["status"] == "succeeded")
+            && std::fs::read_to_string(workspace.join("hooks"))
+                .is_ok_and(|hooks| hooks.contains("after_run\n"))
+        {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("child status") {
+            use tokio::io::AsyncReadExt;
+            let mut error = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut error).await;
+            }
+            panic!("ACP CLI exited {status}: {error}");
+        }
+        if Instant::now() >= deadline {
+            terminate_child(&mut child).await;
+            panic!(
+                "ACP CLI did not finish: {:?}",
+                std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    let evidence: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join("acp-worker.json")).expect("peer evidence"),
+    )
+    .expect("json");
+    assert_eq!(
+        std::path::Path::new(evidence["cwd"].as_str().expect("cwd")),
+        std::fs::canonicalize(&workspace).expect("workspace")
+    );
+    assert_eq!(evidence["profile"], "first");
+    assert_eq!(evidence["memory_project"], "project-test");
+    assert_eq!(evidence["memory_token_present"], true);
+    let first_prompt: Value = serde_json::from_str(
+        std::fs::read_to_string(workspace.join("acp-prompts.jsonl"))
+            .expect("prompt history")
+            .lines()
+            .next()
+            .expect("first prompt"),
+    )
+    .expect("prompt record");
+    assert!(
+        first_prompt["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("Run the scheduler")
+    );
+    let hooks = std::fs::read_to_string(workspace.join("hooks")).expect("hooks");
+    assert!(hooks.starts_with("after_create\nbefore_run\n"));
+    assert!(hooks.contains("after_run\n"));
+    let route: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join(".opensymphony/harness-route.json"))
+            .expect("route"),
+    )
+    .expect("json");
+    assert_eq!(route["harness_profile"], "first");
+    let snapshot = loop {
+        let snapshot: Value = reqwest::get(format!("http://{bind}/api/v1/snapshot"))
+            .await
+            .expect("snapshot")
+            .json()
+            .await
+            .expect("json");
+        if snapshot["snapshot"]["issues"][0]["recent_events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["kind"] == "acp.turn_usage"))
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ACP usage did not reach public snapshot: {snapshot}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    };
+    let events = snapshot["snapshot"]["issues"][0]["recent_events"]
+        .as_array()
+        .expect("events");
+    let usage = events
+        .iter()
+        .find(|event| event["kind"] == "acp.turn_usage")
+        .expect("turn usage");
+    assert_eq!(usage["payload"]["inputTokens"], 4);
+    assert!(usage["payload"].get("cachedReadTokens").is_none());
+    assert!(events.iter().any(|event| event["kind"] == "acp.plan"));
+    let context_usage = events
+        .iter()
+        .find(|event| event["kind"] == "acp.usage_update")
+        .expect("context usage");
+    assert_eq!(context_usage["payload"]["used"], 42);
+    assert!(context_usage["payload"].get("inputTokens").is_none());
+    assert!(snapshot.to_string().contains("acp"));
+    assert!(snapshot["snapshot"]["issues"][0]["server_base_url"].is_null());
+    assert_eq!(
+        snapshot["snapshot"]["agent_server"]["status_line"],
+        "not_selected"
+    );
+    let capabilities: Value = reqwest::get(format!("http://{bind}/api/v1/capabilities"))
+        .await
+        .expect("capabilities")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        capabilities["harnesses"]
+            .as_array()
+            .expect("adapters")
+            .iter()
+            .any(|c| c["kind"] == "acp" && c["available"] == true)
+    );
+    assert_eq!(
+        capabilities["harness_profiles"]
+            .as_array()
+            .expect("profiles")
+            .len(),
+        2
+    );
+    assert!(
+        capabilities["harness_profiles"][0]["preflight_ready"]
+            .as_bool()
+            .expect("ready")
+    );
+    terminate_child(&mut child).await;
+}
+
+// Manual qualification: these tests require locally authenticated vendor CLIs.
+// They drive the same tracked-issue `opensymphony run` route as the fake peer.
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_edits_workspace() {
+    live_acp_tracked_issue_edit(
+        "OPENSYMPHONY_CURSOR_AGENT_BIN",
+        "2026.09.08-6caf4ff",
+        "cursor",
+        "      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Devin CLI"]
+async fn live_devin_acp_tracked_issue_edits_workspace() {
+    live_acp_tracked_issue_edit("OPENSYMPHONY_DEVIN_BIN", "3000.10.21", "devin", "").await;
+}
+
+async fn live_acp_tracked_issue_edit(
+    binary_env: &str,
+    version: &str,
+    profile: &str,
+    profile_extra: &str,
+) {
+    let binary = std::env::var(binary_env).expect("set vendor CLI path for manual test");
+    let output = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("vendor CLI version");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains(version));
+
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: {profile}\nacp:\n  profiles:\n    {profile}:\n      command: {binary}\n      args: [acp]\n      permissions:\n        mode: allow_once\n{profile_extra}polling:\n  interval_ms: 50\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "In the current issue workspace, create a file named acp-live-proof.txt containing exactly `ACP tracked issue proof` followed by a newline. Do not edit another file. After writing it, reply Done.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let result = loop {
+        if let Ok(raw) = std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            && let Ok(run) = serde_json::from_str::<Value>(&raw)
+            && matches!(
+                run["status"].as_str(),
+                Some("succeeded" | "failed" | "cancelled")
+            )
+        {
+            break run;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "vendor run timed out");
+        sleep(Duration::from_millis(100)).await;
+    };
+    terminate_child(&mut child).await;
+    assert_eq!(result["status"], "succeeded", "vendor tracked run failed");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("acp-live-proof.txt")).expect("workspace edit"),
+        "ACP tracked issue proof\n"
+    );
+    let route: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join(".opensymphony/harness-route.json"))
+            .expect("route"),
+    )
+    .expect("route JSON");
+    assert_eq!(route["harness_profile"], profile);
+    assert_eq!(route["harness_kind"], "acp");
+    println!("{profile}: tracked issue succeeded; workspace edit and ACP route verified");
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_returns_operator_plan_decision() {
+    let binary = pinned_cursor_binary();
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: cursor\nacp:\n  profiles:\n    cursor:\n      command: {binary}\n      args: [acp]\n      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n      session:\n        mode: plan\npolling:\n  interval_ms: 50\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "Read-only protocol test. Use CreatePlan to propose answering a color question entirely in chat. Wait for the operator decision, then reply blue. Do not inspect or edit files, run commands, browse, or use MCP.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let interaction = loop {
+        if let Ok(response) = client
+            .get(format!("http://{bind}/api/v1/runs/COE-429/approvals"))
+            .send()
+            .await
+            && let Ok(body) = response.json::<Value>().await
+            && let Some(interaction) = body["approvals"].as_array().and_then(|approvals| {
+                approvals.iter().find_map(|approval| {
+                    let interaction = &approval["operator_interaction"];
+                    (interaction["kind"] == "plan_approval").then(|| interaction.clone())
+                })
+            })
+        {
+            break interaction;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "Cursor plan callback timed out");
+        sleep(Duration::from_millis(100)).await;
+    };
+    let mut payload = json!({
+        "request_id": interaction["request_id"],
+        "run_id": interaction["run_id"],
+        "issue_id": interaction["issue_id"],
+        "session_id": interaction["session_id"],
+        "generation": interaction["generation"],
+        "rpc_id": interaction["rpc_id"],
+        "decision": "rejected"
+    });
+    let dispatch = |payload: Value| {
+        json!({
+            "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+            "action_kind": "plan_decision",
+            "target_entity": { "entity_kind": "run", "entity_id": "COE-429" },
+            "payload": payload
+        })
+    };
+    payload["session_id"] = json!("wrong-session");
+    let rejected: Value = client
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&dispatch(payload.clone()))
+        .send()
+        .await
+        .expect("wrong-session reply")
+        .json()
+        .await
+        .expect("wrong-session receipt");
+    assert_eq!(rejected["status"], "rejected");
+    payload["session_id"] = interaction["session_id"].clone();
+    let accepted: Value = client
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&dispatch(payload))
+        .send()
+        .await
+        .expect("bound plan reply")
+        .json()
+        .await
+        .expect("plan receipt");
+    assert_eq!(accepted["status"], "accepted");
+    terminate_child(&mut child).await;
+    println!(
+        "cursor: tracked issue rejected cross-session reply and acknowledged bound plan decision"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_cancel_acknowledgement() {
+    let binary = pinned_cursor_binary();
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: cursor\nacp:\n  profiles:\n    cursor:\n      command: {binary}\n      args: [acp]\n      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n      permissions:\n        mode: allow_once\npolling:\n  interval_ms: 5000\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "Controlled cancellation test: run `sleep 90` in the current issue workspace, then reply Done. Do not edit files or run any other command.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(workspace.join(".opensymphony/conversation.json"))
+            && let Ok(state) = serde_json::from_str::<Value>(&raw)
+            && state["acp"]["status"] == "submitted"
+        {
+            break;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "Cursor prompt not submitted");
+        sleep(Duration::from_millis(100)).await;
+    }
+    sleep(Duration::from_secs(2)).await;
+    let receipt: Value = reqwest::Client::new()
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&json!({
+            "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+            "action_kind": "cancel",
+            "target_entity": { "entity_kind": "run", "entity_id": "COE-429" },
+            "idempotency_key": "cancel-COE-429"
+        }))
+        .send()
+        .await
+        .expect("cancel action")
+        .json()
+        .await
+        .expect("cancel receipt");
+    assert_eq!(receipt["status"], "accepted");
+    loop {
+        if let Ok(response) = reqwest::get(format!("http://{bind}/api/v1/snapshot")).await
+            && let Ok(snapshot) = response.json::<Value>().await
+            && snapshot["snapshot"]["issues"][0]["recent_events"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "scheduler.interrupt_acknowledged"
+                            && event["summary"]
+                                .as_str()
+                                .is_some_and(|summary| summary == "ACP prompt stopped: cancelled")
+                    })
+                })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cursor cancellation not acknowledged"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+    terminate_child(&mut child).await;
+    println!("cursor: tracked issue cancellation acknowledged by matching prompt response");
+}
+
+fn pinned_cursor_binary() -> String {
+    let binary = std::env::var("OPENSYMPHONY_CURSOR_AGENT_BIN").expect("pinned Cursor CLI");
+    let version = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("Cursor CLI version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("2026.09.08-6caf4ff"));
+    binary
+}
+
+#[tokio::test]
 async fn run_auto_detects_config_and_workflow_from_project_directory() {
     let openhands = FakeOpenHandsServer::start()
         .await
@@ -241,11 +683,26 @@ async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
     );
     write_memory_config(project.path());
 
-    let mut child = spawn_run_child(project.path(), &[]);
+    // Keep this below Linux's 2 MiB Tokio worker default to catch poll-stack growth.
+    let mut child = spawn_run_child_with_worker_stack(project.path(), &[], 1_572_864);
+    use tokio::io::AsyncReadExt;
+    let mut child_stderr = child.stderr.take().expect("run child stderr");
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = String::new();
+        let _ = child_stderr.read_to_string(&mut stderr).await;
+        stderr
+    });
     let gateway_base = format!("http://{bind_addr}");
-    wait_for_running_issue(&format!("{gateway_base}/api/v1/snapshot"), "COE-429")
-        .await
-        .expect("run command should expose a running issue before cancel");
+    if let Err(error) =
+        wait_for_running_issue(&format!("{gateway_base}/api/v1/snapshot"), "COE-429").await
+    {
+        let status = child.try_wait().expect("run child status");
+        terminate_child(&mut child).await;
+        let stderr = stderr_task.await.expect("run child stderr task");
+        panic!(
+            "run command should expose a running issue before cancel: {error}; child status: {status:?}; child stderr: {stderr}"
+        );
+    }
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_base}/api/v1/actions/dispatch"))
@@ -269,6 +726,7 @@ async fn run_dispatches_gateway_cancel_to_openhands_interrupt() {
         .expect("gateway cancel should reach fake OpenHands interrupt");
 
     terminate_child(&mut child).await;
+    let _ = stderr_task.await;
 }
 
 #[test]
@@ -312,6 +770,8 @@ Run the scheduler.
         .arg("run")
         .current_dir(project.path())
         .env("LINEAR_API_KEY", "test-linear-key")
+        .env_remove("LINEAR_CLIENT_ID")
+        .env_remove("LINEAR_CLIENT_SECRET")
         .env_remove("OPENSYMPHONY_HARNESS")
         .env_remove("OPENSYMPHONY_MODEL")
         .env_remove("OPENSYMPHONY_MODEL_PROFILE")
@@ -335,7 +795,15 @@ Run the scheduler.
 }
 
 fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child {
-    spawn_run_child_configured(project_root, extra_args, None)
+    spawn_run_child_configured(project_root, extra_args, None, None)
+}
+
+fn spawn_run_child_with_worker_stack(
+    project_root: &std::path::Path,
+    extra_args: &[&str],
+    stack_bytes: usize,
+) -> Child {
+    spawn_run_child_configured(project_root, extra_args, None, Some(stack_bytes))
 }
 
 fn spawn_run_child_with_codex_bin(
@@ -343,13 +811,14 @@ fn spawn_run_child_with_codex_bin(
     extra_args: &[&str],
     codex_bin: &str,
 ) -> Child {
-    spawn_run_child_configured(project_root, extra_args, Some(codex_bin))
+    spawn_run_child_configured(project_root, extra_args, Some(codex_bin), None)
 }
 
 fn spawn_run_child_configured(
     project_root: &std::path::Path,
     extra_args: &[&str],
     codex_bin: Option<&str>,
+    worker_stack_bytes: Option<usize>,
 ) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
@@ -369,6 +838,11 @@ fn spawn_run_child_configured(
         .kill_on_drop(true);
     if let Some(codex_bin) = codex_bin {
         command.env("OPENSYMPHONY_CODEX_BIN", codex_bin);
+    }
+    if cfg!(unix)
+        && let Some(stack_bytes) = worker_stack_bytes
+    {
+        command.env("RUST_MIN_STACK", stack_bytes.to_string());
     }
     command.spawn().expect("run command should spawn")
 }
@@ -633,17 +1107,43 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
 async fn wait_for_running_issue(url: &str, identifier: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_observation = "gateway unavailable".to_owned();
     while Instant::now() < deadline {
-        if let Ok(response) = client.get(url).send().await
-            && response.status().is_success()
-            && let Ok(snapshot) = response.json::<Value>().await
-            && issue_runtime_state_visible(&snapshot, identifier, "running")
-        {
-            return Ok(());
+        match client.get(url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(snapshot) => {
+                        if issue_runtime_state_visible(&snapshot, identifier, "running") {
+                            return Ok(());
+                        }
+                        last_observation = snapshot["snapshot"]["issues"]
+                            .as_array()
+                            .map(|issues| {
+                                issues
+                                    .iter()
+                                    .map(|issue| {
+                                        format!(
+                                            "{}:{}",
+                                            issue["identifier"].as_str().unwrap_or("?"),
+                                            issue["runtime_state"].as_str().unwrap_or("?")
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .unwrap_or_else(|| "snapshot issues unavailable".into());
+                    }
+                    Err(error) => last_observation = format!("invalid snapshot: {error}"),
+                }
+            }
+            Ok(response) => last_observation = format!("HTTP {}", response.status()),
+            Err(error) => last_observation = format!("gateway unavailable: {error}"),
         }
         sleep(Duration::from_millis(50)).await;
     }
-    Err(format!("timed out waiting for running issue at {url}"))
+    Err(format!(
+        "timed out waiting for running issue at {url}; last observation: {last_observation}"
+    ))
 }
 
 async fn wait_for_openhands_interrupt(openhands: &FakeOpenHandsServer) -> Result<(), String> {

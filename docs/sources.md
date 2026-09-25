@@ -247,7 +247,31 @@ terminates descendants when ownership ends.
 Wire authority: [v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization),
 [v1 prompt/cancel lifecycle](https://agentclientprotocol.com/protocol/v1/prompt-turn),
 and [v1 transports](https://agentclientprotocol.com/protocol/v1/transports).
-Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/acp.rs`.
+Client facilities follow the [v1 filesystem](https://agentclientprotocol.com/protocol/v1/file-system),
+[v1 terminals](https://agentclientprotocol.com/protocol/v1/terminals),
+[v1 session config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+and [v1 MCP attachments](https://agentclientprotocol.com/protocol/v1/session-setup)
+contracts. Optional callback fields use strict local deserialization so malformed
+line, cwd, environment and output limits cannot silently become defaults.
+Implementation and tests are in `crates/opensymphony-acp/src/` and `tests/acp.rs`.
+
+Windows callback path ownership uses documented [CreateFile sharing and reparse
+flags](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+through [Rust OpenOptionsExt](https://doc.rust-lang.org/std/os/windows/fs/trait.OpenOptionsExt.html).
+No-follow handles are checked before mutation, and ancestor handles exclude
+write/delete sharing until file I/O or terminal spawn finishes.
+
+## ACP vendor pins and observed contract
+
+The [live qualification report](acp-live-qualification.md) pins Cursor CLI
+`2026.09.08-6caf4ff` and Devin CLI `3000.10.21 (611c1cba)` as observed on
+2026-09-25. Both negotiated ACP v1 over local stdio and advertised
+`loadSession`; neither advertised `resumeSession`. Devin emitted configuration
+updates before `session/new` replied. These are observed runtime contracts,
+not assumptions about newer CLI releases. Re-run the ignored tests and revise
+the pin before claiming another version. The supported Cursor extension shapes
+and response observations are in [ACP extension
+evidence](acp-extension-evidence.md).
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -355,6 +379,11 @@ Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -438,5 +467,10 @@ Implementation and tests are in `crates/opensymphony-acp/src/lib.rs` and `tests/
 - COE-563
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

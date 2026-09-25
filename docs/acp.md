@@ -13,6 +13,10 @@ last_memory_sync: 2026-09-22T11:51:20.924956+00:00
 
 - COE-608 contributed: PR #241: feat(acp): add supervised ACP v1 client and launch profiles (merge `70619ec`)
 - COE-609 contributed: PR #243: feat(acp): retain host-owned sessions with durable recovery (merge `5b67134`)
+- COE-610 contributed: PR #242: feat(acp): implement host callbacks and session configuration (merge `cd683ea`)
+- COE-611 contributed: PR #245: COE-611: Route production workers through ACP profiles (merge `80e5ac3`)
+- COE-612 contributed: PR #246: Route ACP operator requests through scheduler and clients (merge `a6cd118`)
+- COE-613 contributed: PR #247: COE-613: Add registered ACP extensions and harness operations (merge `90154b5`)
 
 ## Important invariants
 
@@ -31,10 +35,20 @@ last_memory_sync: 2026-09-22T11:51:20.924956+00:00
 
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

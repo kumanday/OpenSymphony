@@ -10,15 +10,18 @@ use crate::opensymphony_domain::{
     RepositoryBindingOutcome, RepositoryIdentity, RepositoryInventoryEntry, RepositoryRouting,
     RepositoryRoutingMode, SafeRemoteFingerprint, TrackerErrorCategory, TrackerIssueRef,
 };
+use crate::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+};
 use crate::opensymphony_orchestrator::{
     ChildEligibilityEvidence, ConversationId, ConversationMetadata, HierarchySnapshot, IssueId,
     IssueIdentifier, IssueRef, IssueState, IssueStateCategory, LeaseKind, LeaseOwner, LeaseRecord,
-    LeaseResource, NormalizedIssue, ParentEligibilityEvidence, ParentRepairPolicy, RecoveredRun,
-    RecoveryRecord, ReleaseReason, RequiredMergeCommit, RetryAttempt, RetryEntry,
-    RetryExhaustionRecord, RetryPendingRecord, RetryReason, RuntimeStreamState, Scheduler,
-    SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend, TrackerIssue,
-    TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
+    LeaseResource, NormalizedIssue, OperatorResponseDelivery, ParentEligibilityEvidence,
+    ParentRepairPolicy, RecoveredRun, RecoveryRecord, ReleaseReason, RequiredMergeCommit,
+    RetryAttempt, RetryEntry, RetryExhaustionRecord, RetryPendingRecord, RetryReason,
+    RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
+    TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
     decide_issue_route,
@@ -241,6 +244,25 @@ fn selected_route_uses_configured_codex_harness_and_model() {
 }
 
 #[test]
+fn selected_acp_route_persists_profile_and_model_identity() {
+    let issue = normalized_issue("lin-acp", "COE-611", "In Progress");
+    let mut config = scheduler_config();
+    config.routing.harness = "acp".into();
+    config.routing.harness_profile = Some("second".into());
+    config.routing.model = Some("agent-model".into());
+    let route = decide_issue_route(&issue, &config).expect("ACP route");
+    assert_eq!(route.harness_kind, "acp");
+    assert_eq!(route.harness_profile.as_deref(), Some("second"));
+    assert_eq!(route.model.as_deref(), Some("agent-model"));
+    let persisted = serde_json::to_value(&route).expect("route JSON");
+    assert_eq!(
+        serde_json::from_value::<crate::opensymphony_orchestrator::HarnessRouteDecision>(persisted)
+            .expect("persisted route"),
+        route
+    );
+}
+
+#[test]
 fn selected_route_rejects_unavailable_harness() {
     let issue = normalized_issue("lin-430", "COE-430", "In Progress");
     let mut config = scheduler_config();
@@ -306,6 +328,7 @@ fn workspace_record(identifier: &str, path: &str) -> WorkspaceRecord {
 
 fn conversation(worker_id: &WorkerId) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(format!("conv-{}", worker_id.as_str()))
             .expect("conversation id should be valid"),
         server_base_url: Some("http://127.0.0.1:8000".to_string()),
@@ -912,6 +935,9 @@ struct FakeWorker {
     interrupts: Vec<HarnessInterruptCommand>,
     interrupt_results: VecDeque<Result<WorkerInterruptAcknowledgement, FakeError>>,
     launch_results: VecDeque<Result<WorkerLaunch, FakeError>>,
+    operator_responses: Vec<(WorkerId, String)>,
+    operator_response_results: VecDeque<Result<bool, FakeError>>,
+    delayed_operator_receipt: Option<tokio::sync::oneshot::Receiver<Result<bool, String>>>,
 }
 
 impl WorkerBackend for FakeWorker {
@@ -943,6 +969,37 @@ impl WorkerBackend for FakeWorker {
         Ok(self.updates.drain(..).collect())
     }
 
+    async fn respond_operator_request(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        _answer: OperatorAnswer,
+    ) -> Result<bool, Self::Error> {
+        self.operator_responses
+            .push((worker_id.clone(), request_id.to_owned()));
+        self.operator_response_results
+            .pop_front()
+            .unwrap_or(Ok(true))
+    }
+
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, Self::Error> {
+        let delivered = self
+            .respond_operator_request(worker_id, request_id, answer)
+            .await?;
+        if let Some(receipt) = self.delayed_operator_receipt.take() {
+            Ok(OperatorResponseDelivery::new(async move {
+                receipt.await.unwrap_or(Ok(false))
+            }))
+        } else {
+            Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
+        }
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -965,6 +1022,230 @@ impl WorkerBackend for FakeWorker {
                 timed_out: false,
             }))
     }
+}
+
+#[tokio::test]
+async fn delayed_operator_answer_and_closure_restart_stall_clock() {
+    for answer_by_operator in [true, false] {
+        let now = Utc::now();
+        let start = ts((now.timestamp_millis() - 1_000) as u64);
+        let issue_id = IssueId::new("operator-stall").expect("issue id");
+        let tracker = FakeTracker {
+            active: vec![tracker_issue(
+                issue_id.as_str(),
+                "COE-612",
+                "In Progress",
+                0,
+            )],
+            ..Default::default()
+        };
+        let mut config = scheduler_config();
+        config.routing.harness = "acp".into();
+        config.stall_timeout_ms = Some(500);
+        let mut scheduler = Scheduler::new(
+            tracker,
+            FakeWorkspace::default(),
+            FakeWorker::default(),
+            config,
+        );
+        scheduler.tick(start).await.expect("dispatch ACP worker");
+        let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+        let interaction = OperatorInteraction {
+            request_id: format!("request-{answer_by_operator}"),
+            run_id: format!("run-{worker_id}"),
+            issue_id: issue_id.to_string(),
+            issue_identifier: "COE-612".into(),
+            session_id: "session".into(),
+            generation: 1,
+            rpc_id: "1".into(),
+            kind: OperatorInteractionKind::Permission,
+            title: "Permission".into(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        scheduler
+            .worker_mut()
+            .updates
+            .push_back(WorkerUpdate::OperatorRequest {
+                worker_id: worker_id.clone(),
+                interaction: interaction.clone(),
+            });
+        let opened = scheduler
+            .drain_worker_updates(ts(now.timestamp_millis() as u64))
+            .await
+            .expect("accept operator request");
+        assert_eq!(opened.operator_interactions.len(), 1);
+        let old_deadline = opened.issues[0]
+            .runtime
+            .stalled_at
+            .expect("running stall deadline");
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        assert!(old_deadline < ts(Utc::now().timestamp_millis() as u64));
+
+        if answer_by_operator {
+            scheduler
+                .worker_mut()
+                .operator_response_results
+                .push_back(Err(FakeError {
+                    message: "queued ACP answer expired before consumption".into(),
+                    category: None,
+                    retry_after: None,
+                }));
+            assert!(
+                scheduler
+                    .respond_operator_request(&interaction, OperatorAnswer::Cancel)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                scheduler
+                    .snapshot(ts(Utc::now().timestamp_millis() as u64))
+                    .operator_interactions
+                    .len(),
+                1,
+                "retryable worker timeout retains the live callback"
+            );
+            scheduler
+                .respond_operator_request(&interaction, OperatorAnswer::Cancel)
+                .await
+                .expect("deliver operator answer");
+            assert_eq!(scheduler.worker().operator_responses.len(), 2);
+        } else {
+            scheduler
+                .worker_mut()
+                .updates
+                .push_back(WorkerUpdate::OperatorClosed {
+                    worker_id,
+                    request_id: interaction.request_id,
+                });
+            scheduler
+                .drain_worker_updates(ts(Utc::now().timestamp_millis() as u64))
+                .await
+                .expect("close operator request");
+        }
+        let resumed = scheduler.snapshot(ts(Utc::now().timestamp_millis() as u64));
+        assert!(resumed.operator_interactions.is_empty());
+        assert!(
+            resumed.issues[0]
+                .runtime
+                .stalled_at
+                .expect("resumed stall deadline")
+                > ts(Utc::now().timestamp_millis() as u64)
+        );
+        scheduler
+            .tick(ts(Utc::now().timestamp_millis() as u64))
+            .await
+            .expect("resumed scheduler tick");
+        assert_eq!(
+            scheduler
+                .execution(&issue_id)
+                .expect("active execution")
+                .status(),
+            SchedulerStatus::Running
+        );
+        assert!(scheduler.worker().aborted.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn pending_operator_flush_does_not_block_scheduler_or_duplicate_response() {
+    let now = Utc::now();
+    let issue_id = IssueId::new("operator-async").expect("issue id");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue(
+            issue_id.as_str(),
+            "COE-612",
+            "In Progress",
+            0,
+        )],
+        ..Default::default()
+    };
+    let mut config = scheduler_config();
+    config.routing.harness = "acp".into();
+    let mut scheduler = Scheduler::new(
+        tracker,
+        FakeWorkspace::default(),
+        FakeWorker::default(),
+        config,
+    );
+    let observed_at = ts(now.timestamp_millis() as u64);
+    scheduler
+        .tick(observed_at)
+        .await
+        .expect("dispatch ACP worker");
+    let worker_id = scheduler.worker().launches[0].run.worker_id.clone();
+    let interaction = OperatorInteraction {
+        request_id: "delayed-flush".into(),
+        run_id: format!("run-{worker_id}"),
+        issue_id: issue_id.to_string(),
+        issue_identifier: "COE-612".into(),
+        session_id: "session".into(),
+        generation: 1,
+        rpc_id: "opaque-token".into(),
+        kind: OperatorInteractionKind::Permission,
+        title: "Permission".into(),
+        options: Vec::new(),
+        questions: Vec::new(),
+        plan: None,
+        requested_at: now,
+        expires_at: now + chrono::Duration::minutes(1),
+    };
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::OperatorRequest {
+            worker_id: worker_id.clone(),
+            interaction: interaction.clone(),
+        });
+    scheduler
+        .drain_worker_updates(observed_at)
+        .await
+        .expect("open request");
+    let (acknowledge, receipt) = tokio::sync::oneshot::channel();
+    scheduler.worker_mut().delayed_operator_receipt = Some(receipt);
+    let delivery = scheduler
+        .begin_operator_response(&interaction, OperatorAnswer::Cancel)
+        .await
+        .expect("enqueue response without awaiting flush");
+    assert!(
+        scheduler
+            .begin_operator_response(&interaction, OperatorAnswer::Cancel)
+            .await
+            .is_err(),
+        "in-flight answer excludes duplicates"
+    );
+    tokio::time::timeout(Duration::from_millis(250), scheduler.tick(observed_at))
+        .await
+        .expect("tracker tick remains responsive during ACP flush")
+        .expect("tracker tick");
+    assert_eq!(
+        scheduler.snapshot(observed_at).operator_interactions.len(),
+        1
+    );
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::OperatorClosed {
+            worker_id,
+            request_id: interaction.request_id.clone(),
+        });
+    scheduler
+        .drain_worker_updates(observed_at)
+        .await
+        .expect("worker closure");
+    acknowledge.send(Ok(true)).expect("flush acknowledgement");
+    scheduler
+        .complete_operator_response(&interaction, delivery.wait().await)
+        .expect("delivered response remains accepted after worker closure");
+    assert!(
+        scheduler
+            .snapshot(observed_at)
+            .operator_interactions
+            .is_empty()
+    );
 }
 
 #[tokio::test]

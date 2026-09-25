@@ -17,6 +17,20 @@ The control-plane issue snapshot may carry an optional sanitized operator
 projection for repository, parent, lease, repair, memory, containment,
 provider, verification, and cleanup facts. Missing facts remain unknown. No
 client infers completion, permission, or workspace confinement from absence.
+An ACP run may also publish ephemeral, bound operator interactions. The
+orchestrator actor owns pending decisions; gateway clients submit a response
+command, and the active ACP worker returns it to the original RPC responder.
+The actor validates and reserves a decision, then waits for the ACP input-sink
+flush in an owned task. A completion message returns to the actor to settle the
+pending decision and gateway receipt; other issues, callbacks, ticks, and
+shutdown remain responsive during that wait. An in-flight decision excludes a
+duplicate response.
+Worker callback reports wake that actor for immediate application and snapshot
+publication, independently of the tracker polling interval.
+The run loop selects an event before mutating scheduler state, so a newly
+arriving callback or operator command cannot cancel an in-progress tick.
+Pending interactions are discarded on completion, cancellation, expiry, or
+restart and cannot be reconstructed from stored evidence.
 
 ## 2. Layered design
 
@@ -487,8 +501,23 @@ session actor accepts generation-fenced commands and allows one outstanding
 prompt. Worker handles borrow a process across attempts; dropping a handle or
 subscriber preserves the session. Idle expiry and explicit retirement use the
 same supervised process teardown. The `run_turn` compatibility API creates one
-session for one prompt. Neither API mutates scheduling state. Production worker
-routing is the separate OSYM-902 integration slice.
+session for one prompt. Neither API mutates scheduling state. The production
+`opensymphony run` worker selects ACP explicitly, borrows the retained owner, and
+reports normalized updates and outcomes through scheduler-owned worker messages.
+The same launch preparation verifies checkout bindings, instruction provenance,
+hooks, review context and scoped memory before adapter dispatch. ACP-only startup
+requires neither an OpenHands client nor an OpenHands server.
+
+The persisted route retains the ACP profile and model selection across daemon
+recovery. Profile switches retire a quiescent owner before archiving its manifest;
+active prompts, observation leases and uncertain submissions fence switching and
+cleanup. A submitted prompt is never replayed on restart. Tool patches merge by
+call identity with bounded state; replay frames do not contribute usage. Optional
+usage remains absent when the peer does not report it. Raw redacted source frames
+stay on the owner separately from the normalized scheduler event stream.
+For a bound parent continuation, a changed run-scoped grant rotates the process
+while retaining the authoritative session ID. The replacement must negotiate
+load or resume; it cannot create a new parent session after a failed restore.
 
 Durable ACP identity and submission/outcome markers live in the existing
 conversation manifest, with additive ACP identity in its runtime envelope.
@@ -499,8 +528,53 @@ writer control; scheduler holds and writer transfer belong to OSYM-907.
 Handlers are installed before initialization. Permission callbacks receive the
 protocol cancellation outcome; unknown requests receive method-not-found and
 unknown notifications receive no response. Updates are processed before the
-prompt response is returned. The client advertises no filesystem or terminal
-capabilities. No OpenHands server or client participates in this launch path.
+prompt response is returned. Host policy gates filesystem and terminal
+advertisements. The ordered dispatch handler admits callbacks to one bounded
+connection-owned actor. File operations are serialized; terminal waits use
+bounded asynchronous responses so they cannot block RPC dispatch. Terminal
+processes use the existing process-group or Windows Job Object supervisors.
+ACP extension registrations are exact profile/version entries inside the ACP
+module. The pinned Cursor `cursor/create_plan` request uses the scheduler-owned
+plan response path; its ID-bearing `cursor/update_todos` request receives a
+bounded response and contributes todo activity only after its correlated
+accepted response. The response correlator tracks IDs across all inbound
+callback methods, so a plan response cannot accept a concurrent same-ID todo.
+A bounded pending-candidate queue fences the worker with a
+visible diagnostic on saturation. Both bind to the connection-owned
+active session without a peer-supplied session field. Unobserved Cursor question,
+task, and image methods are outside the enabled registration. Outbound operation dispatch enters
+through the gateway's operator action, binds the current run in the scheduler,
+and resolves the registered method and session inside the retained owner. The
+public run capability supplies its attempt binding; the host bounds concurrent
+requests and the gateway journals each accepted operation's outcome. An outbound
+RPC retains its own ID and deadline after prompt completion so a back-to-back
+operation result is not discarded by the prompt callback epoch.
+Negotiated peer support and profile enablement are both required. Timeouts
+report an unknown outcome, while the unresolved SDK waiter retains its permit
+until a peer response or connection closure. This caps pending replies at eight
+even across successive timeout batches. Known-secret redaction runs on the
+validated result before it can enter an operator receipt. Lifecycle state
+remains orchestrator-owned.
+Each retained prompt first retires the prior callback epoch through a bounded,
+cancellable preparation step while the owner continues servicing commands. Only
+then does it persist submission and dispatch the prompt. Session config responses
+and updates are committed in SDK dispatch order before prompt completion. The
+prompt response revokes its callback epoch before an adjacent request is
+dispatched; automatic permission policy also requires that live epoch.
+Callback closures use a bounded channel wait so a burst of open requests cannot
+silently drop the expiry signal. A receiver that stops draining fails the turn;
+worker completion clears its pending interactions. No
+OpenHands server or client participates in this launch path.
+
+## ACP live interoperability
+
+The [ACP live qualification](acp-live-qualification.md) records production
+`opensymphony run` paths for pinned Cursor and Devin stdio CLIs. Both use the
+same scheduler-owned routing and issue workspace; vendor-specific behavior
+stays inside the ACP client/registered extension boundary. Devin may announce
+configuration before the `session/new` response, so the client buffers those
+bounded announcements until it can bind the authoritative session ID. The
+response wins for fields it supplies.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -662,6 +736,11 @@ capabilities. No OpenHands server or client participates in this launch path.
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
 - COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -799,5 +878,10 @@ capabilities. No OpenHands server or client participates in this launch path.
 - COE-551
 - COE-556
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

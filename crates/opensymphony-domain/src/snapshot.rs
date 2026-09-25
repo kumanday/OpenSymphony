@@ -233,6 +233,9 @@ pub struct OrchestratorSnapshot {
     pub generated_at: TimestampMs,
     pub daemon: DaemonSnapshot,
     pub issues: Vec<IssueSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_interactions:
+        Vec<crate::opensymphony_gateway_schema::approval::OperatorInteraction>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hierarchy: BTreeMap<String, HierarchyStateSnapshot>,
 }
@@ -260,6 +263,7 @@ impl OrchestratorSnapshot {
                 ..daemon
             },
             issues,
+            operator_interactions: Vec::new(),
             hierarchy: BTreeMap::new(),
         }
     }

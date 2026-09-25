@@ -43,6 +43,23 @@ impl Default for RetentionPolicy {
     }
 }
 
+/// Retire a durable, known-quiescent session after its original host is gone.
+/// The owner lock and prior process check must both succeed; this never launches
+/// a peer or resolves an ambiguous prompt by assuming its process exited.
+pub async fn retire_persisted_session(
+    manager: WorkspaceManager,
+    workspace: WorkspaceHandle,
+) -> Result<(), HostError> {
+    let state = manager
+        .load_conversation_manifest(&workspace)
+        .await
+        .map_err(|_| HostError::Persistence)?
+        .and_then(|manifest| manifest.acp)
+        .ok_or(HostError::NativeManifest)?;
+    Durability::retire_persisted(manager, workspace, state.identity).await?;
+    Ok(())
+}
+
 /// Host callers supply the scheduler's verified workspace and current credential/grant revision.
 pub struct SessionLaunch {
     pub manager: WorkspaceManager,
@@ -52,6 +69,9 @@ pub struct SessionLaunch {
     pub context: LaunchContext,
     pub limits: ClientLimits,
     pub require_persistence: bool,
+    /// A parent continuation may refresh its process credentials only while
+    /// retaining this already-authoritative ACP session binding.
+    pub expected_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -217,6 +237,47 @@ impl EventPublisher {
 pub struct SourceHistory {
     pub events: Vec<SessionEvent>,
     pub truncated: bool,
+    /// Latest published source cursor, including a frame too large to retain.
+    #[serde(default)]
+    pub latest_cursor: Option<(u64, u64)>,
+}
+impl SourceHistory {
+    /// A sticky historical eviction is harmless when every frame after this
+    /// run's processed cursor still appears in the retained contiguous tail.
+    pub fn covers_since(&self, cursor: (u64, u64)) -> bool {
+        let Some(latest) = self.latest_cursor else {
+            return true;
+        };
+        if latest.0 != cursor.0 {
+            return false;
+        }
+        if latest.1 <= cursor.1 {
+            return true;
+        }
+        let Some(mut expected) = cursor.1.checked_add(1) else {
+            return false;
+        };
+        for event in &self.events {
+            if let SessionEvent::Source {
+                generation, frame, ..
+            } = event
+                && *generation == cursor.0
+                && frame.sequence >= expected
+            {
+                if frame.sequence != expected {
+                    return false;
+                }
+                if expected == latest.1 {
+                    return true;
+                }
+                let Some(next) = expected.checked_add(1) else {
+                    return false;
+                };
+                expected = next;
+            }
+        }
+        false
+    }
 }
 struct EventHistory {
     events: VecDeque<(SessionEvent, usize)>,
@@ -224,9 +285,16 @@ struct EventHistory {
     max_bytes: usize,
     max_frames: usize,
     truncated: bool,
+    latest_cursor: Option<(u64, u64)>,
 }
 impl EventHistory {
     fn retain(&mut self, event: SessionEvent) -> bool {
+        if let SessionEvent::Source {
+            generation, frame, ..
+        } = &event
+        {
+            self.latest_cursor = Some((*generation, frame.sequence));
+        }
         let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |v| v.len());
         if bytes > self.max_bytes {
             self.truncated = true;
@@ -277,6 +345,7 @@ impl SessionHandle {
                 .map(|(event, _)| event.clone())
                 .collect(),
             truncated: history.truncated,
+            latest_cursor: history.latest_cursor,
         }
     }
     pub async fn inspect(&self) -> Result<SessionSnapshot, HostError> {
@@ -304,6 +373,18 @@ impl SessionHandle {
         prompt: String,
         cancellation: CancellationToken,
     ) -> Result<TurnReport, HostError> {
+        self.prompt_with_operator(run_id, attempt, prompt, cancellation, None)
+            .await
+    }
+
+    pub async fn prompt_with_operator(
+        &self,
+        run_id: String,
+        attempt: u32,
+        prompt: String,
+        cancellation: CancellationToken,
+        operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
+    ) -> Result<TurnReport, HostError> {
         let (reply, receive) = oneshot::channel();
         self.commands
             .try_send(Command::Prompt {
@@ -312,6 +393,28 @@ impl SessionHandle {
                 attempt,
                 prompt,
                 cancellation,
+                operator_requests,
+                reply,
+            })
+            .map_err(channel_error)?;
+        receive.await.map_err(|_| HostError::Unavailable)?
+    }
+
+    /// Invoke only a registered operation on this owner and generation. The
+    /// session ID and wire method are resolved inside the host actor.
+    pub async fn operation(
+        &self,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .try_send(Command::Operation {
+                generation: self.generation,
+                run_id,
+                operation_id,
+                arguments,
                 reply,
             })
             .map_err(channel_error)?;
@@ -343,6 +446,13 @@ pub enum ControlResult {
 }
 
 enum Command {
+    Operation {
+        generation: u64,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+        reply: oneshot::Sender<Result<serde_json::Value, HostError>>,
+    },
     Control {
         generation: u64,
         action: SessionControl,
@@ -354,6 +464,7 @@ enum Command {
         attempt: u32,
         prompt: String,
         cancellation: CancellationToken,
+        operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
         reply: oneshot::Sender<Result<TurnReport, HostError>>,
     },
 }
@@ -427,17 +538,34 @@ impl SessionHost {
                         let _ = reply.send(result);
                     }
                     HostCommand::Open { mut launch, reply } => {
+                        if launch.expected_session_id.is_some() && !launch.require_persistence {
+                            let _ = reply.send(Err(HostError::PersistenceUnsupported));
+                            continue;
+                        }
                         let key = launch.workspace.issue_id().to_owned();
-                        let fingerprint = profile_fingerprint(&launch.profile);
+                        let fingerprint = profile_fingerprint(
+                            &launch.profile,
+                            &launch.context.services,
+                            &launch.limits,
+                        );
                         let Ok(fingerprint) = fingerprint else {
                             let _ = reply.send(Err(HostError::Persistence));
                             continue;
                         };
                         launch.identity.profile_fingerprint = fingerprint;
-                        if super::validate_launch(&launch.profile, &launch.context, &launch.limits)
-                            .is_err()
-                            || launch.context.issue_workspace != launch.identity.workspace_path
-                            || launch.context.workspace_key != launch.workspace.workspace_key()
+                        if let Err(error) =
+                            super::validate_launch(&launch.profile, &launch.context, &launch.limits)
+                        {
+                            let _ = reply.send(Err(HostError::Client(error.to_string())));
+                            continue;
+                        }
+                        if launch.context.issue_workspace != launch.identity.workspace_path
+                            || Some(launch.context.workspace_key.as_str())
+                                != launch
+                                    .workspace
+                                    .workspace_path()
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
                         {
                             let _ = reply.send(Err(HostError::IdentityMismatch));
                             continue;
@@ -513,14 +641,23 @@ async fn start(
     super::validate_launch(&launch.profile, &launch.context, &launch.limits)
         .map_err(|e| HostError::Client(e.to_string()))?;
     if launch.context.issue_workspace != launch.workspace.workspace_path()
-        || launch.context.workspace_key != launch.workspace.workspace_key()
+        || Some(launch.context.workspace_key.as_str())
+            != launch
+                .workspace
+                .workspace_path()
+                .file_name()
+                .and_then(|name| name.to_str())
         || launch.identity.workspace_path != launch.workspace.workspace_path()
     {
         return Err(HostError::IdentityMismatch);
     }
-    let durable = Durability::open(launch.manager, launch.workspace, launch.identity)
-        .await
-        .map_err(HostError::from)?;
+    let durable = if let Some(expected) = launch.expected_session_id {
+        Durability::open_bound_parent(launch.manager, launch.workspace, launch.identity, expected)
+            .await
+    } else {
+        Durability::open(launch.manager, launch.workspace, launch.identity).await
+    }
+    .map_err(HostError::from)?;
     let identity = durable.state().identity.clone();
     let (commands, receive) = mpsc::channel(16);
     let (events, _) = broadcast::channel(
@@ -535,6 +672,7 @@ async fn start(
         max_bytes: launch.limits.queued_bytes,
         max_frames: launch.limits.queued_frames,
         truncated: false,
+        latest_cursor: None,
     }));
     let mut handle = SessionHandle {
         owner_id: durable.state().owner_id.clone(),
@@ -566,6 +704,7 @@ async fn start(
         idle_since: tokio::time::Instant::now(),
         retire_reply: None,
         reset_reason: None,
+        operator_router: Arc::new(Mutex::new(None)),
     };
     tokio::spawn(async move {
         let result = super::run_connection(
@@ -584,16 +723,16 @@ async fn start(
         };
         // A failed connection cannot establish remote quiescence. A submitted marker
         // survives even if the outcome checkpoint fails, and prevents another prompt.
-        let checkpointed = if result
-            .as_ref()
-            .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none())
-            || matches!(
-                result,
-                Err(ClientError::InvalidConfiguration(_)
-                    | ClientError::InvalidWorkspace
-                    | ClientError::Launch(_)
-                    | ClientError::CancelledBeforePrompt)
-            ) {
+        let checkpointed = if result.as_ref().is_ok_and(|r| {
+            r.process_reaped
+                && (r.process_tree_signal_error.is_none() || driver.durable.process_is_absent())
+        }) || matches!(
+            result,
+            Err(ClientError::InvalidConfiguration(_)
+                | ClientError::InvalidWorkspace
+                | ClientError::Launch(_)
+                | ClientError::CancelledBeforePrompt)
+        ) {
             driver.durable.stopped().await.is_ok()
         } else {
             false
@@ -613,10 +752,7 @@ async fn start(
             && matches!(
                 driver.durable.state().status,
                 AcpSessionStatus::Ready | AcpSessionStatus::Finished
-            )
-            && result
-                .as_ref()
-                .is_ok_and(|r| r.process_reaped && r.process_tree_signal_error.is_none());
+            );
         let mut ended_snapshot = driver.snapshot(false);
         ended_snapshot.live = false;
         ended_snapshot.retirement_eligible = false;
@@ -652,6 +788,18 @@ struct ActivePrompt {
     cancellation: CancellationToken,
 }
 
+struct PreparingPrompt {
+    result: Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send>>,
+    run_id: String,
+    attempt: u32,
+    prompt: String,
+    cancellation: CancellationToken,
+    forced: CancellationToken,
+    callback_epoch: CancellationToken,
+    operator_requests: Option<mpsc::Sender<super::AcpOperatorEvent>>,
+    reply: oneshot::Sender<Result<TurnReport, HostError>>,
+}
+
 pub(super) struct SessionDriver {
     durable: Durability,
     receive: mpsc::Receiver<Command>,
@@ -663,6 +811,7 @@ pub(super) struct SessionDriver {
     idle_since: tokio::time::Instant,
     retire_reply: Option<oneshot::Sender<Result<ControlResult, HostError>>>,
     reset_reason: Option<String>,
+    pub(super) operator_router: super::operator::OperatorRouter,
 }
 impl SessionDriver {
     pub(super) async fn launched(&mut self, pid: Option<u32>) -> Result<(), ClientError> {
@@ -739,6 +888,7 @@ impl SessionDriver {
             snapshot: Box::new(self.snapshot(active)),
         });
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn drive(
         &mut self,
         connection: ConnectionTo<Agent>,
@@ -746,6 +896,9 @@ impl SessionDriver {
         session_id: SessionId,
         capture: &SharedCapture,
         limits: &ClientLimits,
+        services: &super::services::CallbackSender,
+        configuration: &Arc<Mutex<super::SessionConfiguration>>,
+        profile: &AcpProfile,
     ) -> Result<TurnReport, ClientError> {
         let mut metadata = serde_json::to_value(&initialization)
             .map_err(|_| ClientError::Setup("invalid negotiation metadata".into()))?;
@@ -769,8 +922,29 @@ impl SessionDriver {
         } else {
             None
         };
+        let model_selection = configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .supports_model_selection();
         self.durable
-            .ready(session_id.0.to_string(), metadata, recovery, reset_reason)
+            .ready(
+                session_id.0.to_string(),
+                metadata,
+                super::extensions::configured_operations(profile)
+                    .into_iter()
+                    .filter(|operation| {
+                        super::extensions::outbound_operation(
+                            profile,
+                            &serde_json::to_value(&initialization).unwrap_or_default(),
+                            &operation.operation_id,
+                        )
+                        .is_some()
+                    })
+                    .collect(),
+                model_selection,
+                recovery,
+                reset_reason,
+            )
             .await
             .map_err(|_| ClientError::Setup("durable session checkpoint failed".into()))?;
         self.publisher
@@ -789,14 +963,64 @@ impl SessionDriver {
         }
         self.publish(false);
         let mut active: Option<ActivePrompt> = None;
+        let mut preparing: Option<PreparingPrompt> = None;
+        let operation_permits = Arc::new(tokio::sync::Semaphore::new(8));
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut commands_closed = false;
         loop {
             tokio::select! {
+                result = async { preparing.as_mut().expect("guarded preparation").result.as_mut().await }, if preparing.is_some() => {
+                    let pending = preparing.take().expect("preparing prompt");
+                    let result = result.and_then(|()| {
+                        if pending.cancellation.is_cancelled() || pending.forced.is_cancelled() { Err(ClientError::CancelledBeforePrompt) } else { Ok(()) }
+                    });
+                    if let Err(error) = result {
+                        let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                        return Err(error);
+                    }
+                    let model_selection = configuration
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .supports_model_selection();
+                    if self.durable.set_model_selection(model_selection).await.is_err() {
+                        let _ = pending.reply.send(Err(HostError::Persistence));
+                        return Err(ClientError::Setup("model capability checkpoint failed".into()));
+                    }
+                    if self.durable.submitted(pending.run_id.clone(), pending.attempt).await.is_err() {
+                        let _ = pending.reply.send(Err(HostError::Persistence));
+                        return Err(ClientError::Setup("submission checkpoint failed".into()));
+                    }
+                    if pending.cancellation.is_cancelled() || pending.forced.is_cancelled() {
+                        pending.callback_epoch.cancel();
+                        if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                            let _ = pending.reply.send(Err(HostError::Persistence));
+                            return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                        }
+                        let error = ClientError::CancelledBeforePrompt;
+                        let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                        return Err(error);
+                    }
+                    *self.operator_router.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((pending.operator_requests, pending.callback_epoch.clone()));
+                    active = Some(ActivePrompt {
+                        result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), pending.prompt, pending.cancellation, pending.forced.clone(), capture.clone(), limits.clone(), configuration.clone(), pending.callback_epoch, services.clone())),
+                        reply: pending.reply, cancellation: pending.forced,
+                    });
+                    self.publish(true);
+                }
                 result = async { active.as_mut().expect("guarded active prompt").result.as_mut().await }, if active.is_some() => {
                     let pending = active.take().expect("active prompt");
                     let report = match result {
                         Ok(report) => report,
+                        Err(ClientError::CancelledBeforePrompt) => {
+                            if self.durable.finished("cancelled_before_prompt".into()).await.is_err() {
+                                let _ = pending.reply.send(Err(HostError::Persistence));
+                                return Err(ClientError::Setup("cancellation checkpoint failed".into()));
+                            }
+                            let error = ClientError::CancelledBeforePrompt;
+                            let _ = pending.reply.send(Err(HostError::Client(error.to_string())));
+                            return Err(error);
+                        }
                         Err(error) => { let _ = self.durable.uncertain().await; let _ = pending.reply.send(Err(HostError::Client(error.to_string()))); return Err(error); }
                     };
                     if self.durable.finished(report.stop_reason.clone()).await.is_err() {
@@ -811,25 +1035,110 @@ impl SessionDriver {
                     let Some(command) = command else {
                         commands_closed = true;
                         if let Some(active) = &active { active.cancellation.cancel(); }
+                        if let Some(preparing) = &preparing { preparing.forced.cancel(); }
                         continue;
                     };
                     match command {
-                        Command::Prompt { generation, run_id, attempt, prompt, cancellation, reply } => {
+                        Command::Operation { generation, run_id, operation_id, arguments, reply } => {
+                            if generation != self.durable.state().identity.generation
+                                || run_id != self.durable.state().identity.run_id
+                            {
+                                let _ = reply.send(Err(HostError::IdentityMismatch));
+                                continue;
+                            }
+                            if active.is_none() || preparing.is_some() {
+                                let _ = reply.send(Err(HostError::Busy));
+                                continue;
+                            }
+                            let metadata = &self.durable.state().initialization;
+                            let Some(descriptor) = super::extensions::outbound_operation(profile, metadata, &operation_id) else {
+                                let _ = reply.send(Err(HostError::Unavailable));
+                                continue;
+                            };
+                            if !super::extensions::validate_echo_arguments(&arguments) {
+                                let _ = reply.send(Err(HostError::Client("invalid registered operation arguments".into())));
+                                continue;
+                            }
+                            let Ok(operation_permit) = operation_permits.clone().try_acquire_owned() else {
+                                let _ = reply.send(Err(HostError::ResourceLimit));
+                                continue;
+                            };
+                            let mut params = arguments;
+                            params["sessionId"] = serde_json::Value::String(session_id.0.to_string());
+                            let request = match UntypedMessage::new(super::extensions::FIXTURE_ECHO_METHOD, params) {
+                                Ok(request) => request,
+                                Err(_) => {
+                                    let _ = reply.send(Err(HostError::Client("invalid registered operation arguments".into())));
+                                    continue;
+                                }
+                            };
+                            let request = connection.send_request(request);
+                            let timeout = Duration::from_millis(descriptor.deadline_ms);
+                            let capture = capture.clone();
+                            tokio::spawn(async move {
+                                let _operation_permit = operation_permit;
+                                // The outbound RPC has its own ID and deadline. Prompt
+                                // completion may be decoded before the SDK wakes this
+                                // request waiter, so ending the prompt must not discard
+                                // an already-sent, correlated operation response.
+                                // Keep the future and its permit after a caller deadline:
+                                // dropping the SDK waiter sends cancellation but leaves its
+                                // pending-reply entry until the peer responds or disconnects.
+                                let response = request.block_task();
+                                tokio::pin!(response);
+                                let result = match tokio::time::timeout(timeout, &mut response).await {
+                                    Ok(Ok(mut value)) if super::extensions::validate_echo_result(&value) => {
+                                        capture.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut value, false);
+                                        Ok(value)
+                                    },
+                                    Ok(_) => Err(HostError::Client(ClientError::OperationFailed.to_string())),
+                                    Err(_) => {
+                                        let _ = reply.send(Err(HostError::Client(ClientError::OperationTimeoutUnknown.to_string())));
+                                        let _ = response.await;
+                                        return;
+                                    },
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Command::Prompt { generation, run_id, attempt, prompt, cancellation, operator_requests, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
-                            if active.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }
+                            if active.is_some() || preparing.is_some() { let _ = reply.send(Err(HostError::Busy)); continue; }
                             if prompt.len() > limits.frame_bytes / 6 || run_id.is_empty() || run_id.len() > 1024 { let _ = reply.send(Err(HostError::ResourceLimit)); continue; }
                             if cancellation.is_cancelled() { let _ = reply.send(Err(HostError::Client(ClientError::CancelledBeforePrompt.to_string()))); continue; }
-                            if self.durable.submitted(run_id.clone(), attempt).await.is_err() { let _ = reply.send(Err(HostError::Persistence)); return Err(ClientError::Setup("submission checkpoint failed".into())); }
-                            self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = run_id;
-                            let forced = CancellationToken::new();
-                            active = Some(ActivePrompt { result: Box::pin(prompt_rpc(connection.clone(), initialization.clone(), session_id.clone(), prompt, cancellation, forced.clone(), capture.clone(), limits.clone())), reply, cancellation: forced });
+                            let forced = cancellation.child_token();
+                            let callback_epoch = forced.child_token();
+                            let sender = services.clone();
+                            let epoch = callback_epoch.clone();
+                            let timeout = limits.setup_timeout;
+                            let connection = connection.clone();
+                            let profile = profile.clone();
+                            let session_id = session_id.clone();
+                            let configuration = configuration.clone();
+                            let capture = capture.clone();
+                            // Preparation frames belong to this accepted run even if setup
+                            // fails before any durable prompt submission occurs.
+                            self.publisher.binding.lock().unwrap_or_else(|e| e.into_inner()).1 = run_id.clone();
+                            preparing = Some(PreparingPrompt {
+                                result: Box::pin(async move {
+                                    tokio::select! {
+                                        biased;
+                                        _ = epoch.cancelled() => Err(ClientError::CancelledBeforePrompt),
+                                        result = tokio::time::timeout(timeout, async {
+                                            sender.begin_turn(epoch.clone(), timeout).await?;
+                                            super::session_config::apply(&connection, &profile, session_id.0.as_ref(), &configuration, &capture).await
+                                        }) => result.map_err(|_| ClientError::SetupTimeout)?,
+                                    }
+                                }),
+                                run_id, attempt, prompt, cancellation, forced, callback_epoch, operator_requests, reply,
+                            });
                             self.publish(true);
                         }
                         Command::Control { generation, action, reply } => {
                             if generation != self.durable.state().identity.generation { let _ = reply.send(Err(HostError::IdentityMismatch)); continue; }
                             self.expire_leases();
                             let result = match action {
-                                SessionControl::Inspect => Ok(ControlResult::Snapshot(Box::new(self.snapshot(active.is_some())))),
+                                SessionControl::Inspect => Ok(ControlResult::Snapshot(Box::new(self.snapshot(active.is_some() || preparing.is_some())))),
                                 SessionControl::Attach => {
                                     if self.attachments.len() >= self.policy.max_attachments { Err(HostError::ResourceLimit) } else {
                                         let lease_id = uuid::Uuid::new_v4().to_string();
@@ -843,7 +1152,7 @@ impl SessionDriver {
                                 },
                                 SessionControl::Release { lease_id } => if self.attachments.remove(&lease_id).is_some() { self.idle_since = tokio::time::Instant::now(); Ok(ControlResult::Released) } else { Err(HostError::IdentityMismatch) },
                                 SessionControl::Retire => {
-                                    if active.is_some() || !self.attachments.is_empty() { Err(HostError::Busy) } else { self.retire_reply = Some(reply); break; }
+                                    if active.is_some() || preparing.is_some() || !self.attachments.is_empty() { Err(HostError::Busy) } else { self.retire_reply = Some(reply); break; }
                                 }
                             };
                             let _ = reply.send(result);
@@ -852,7 +1161,7 @@ impl SessionDriver {
                 }
                 _ = tick.tick() => {
                     self.expire_leases();
-                    if active.is_none() && self.attachments.is_empty() && (commands_closed || self.idle_since.elapsed() >= self.policy.idle_timeout) { break; }
+                    if active.is_none() && preparing.is_none() && self.attachments.is_empty() && (commands_closed || self.idle_since.elapsed() >= self.policy.idle_timeout) { break; }
                 }
             }
         }
@@ -862,6 +1171,10 @@ impl SessionDriver {
             cancellation_acknowledged: false,
             session_id: session_id.0.to_string(),
             initialization,
+            configuration: configuration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         })
     }
     fn expire_leases(&mut self) {
@@ -880,7 +1193,17 @@ async fn prompt_rpc(
     forced: CancellationToken,
     capture: SharedCapture,
     limits: ClientLimits,
+    configuration: Arc<Mutex<super::SessionConfiguration>>,
+    callback_epoch: CancellationToken,
+    services: super::services::CallbackSender,
 ) -> Result<TurnReport, ClientError> {
+    // The submitted marker may finish persisting after cancellation. This
+    // check runs again when the active future is first polled, immediately
+    // before transport submission.
+    if cancellation.is_cancelled() || forced.is_cancelled() {
+        callback_epoch.cancel();
+        return Err(ClientError::CancelledBeforePrompt);
+    }
     let request = UntypedMessage::new(
         "session/prompt",
         PromptRequest::new(
@@ -889,41 +1212,58 @@ async fn prompt_rpc(
         ),
     )
     .map_err(|_| ClientError::Protocol { submitted: false })?;
-    let response = connection.send_request(request).block_task();
+    let (response_tx, response_rx) = oneshot::channel();
+    connection
+        .send_request(request)
+        .on_receiving_result(async move |result| {
+            // Revoke callback authority in ordered response dispatch, before an
+            // adjacent late callback can run. This does not cancel the prompt token.
+            callback_epoch.cancel();
+            let _ = response_tx.send(result);
+            Ok(())
+        })
+        .map_err(|_| ClientError::Protocol { submitted: true })?;
+    let response = async {
+        response_rx
+            .await
+            .map_err(|_| agent_client_protocol::Error::internal_error())?
+    };
     tokio::pin!(response);
     let mut cancellation_requested = false;
     let result = tokio::select! {
         result = &mut response => result,
         _ = async { tokio::select! { _ = cancellation.cancelled() => {}, _ = forced.cancelled() => {} } } => {
             cancellation_requested = true;
+            forced.cancel();
             connection.send_notification(CancelNotification::new(session_id.clone())).map_err(|_| ClientError::Protocol { submitted: true })?;
             tokio::time::timeout(limits.cancel_timeout, &mut response).await.map_err(|_| ClientError::CancelTimeout)?
         },
-        _ = tokio::time::sleep(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
+        _ = super::wait_prompt_timeout(limits.prompt_timeout) => return Err(ClientError::PromptTimeout),
     }.map_err(|error| super::rpc_failure("session/prompt", &error, &capture, true).unwrap_or(ClientError::Protocol { submitted: true }))?;
     let stop_reason = result
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
-        .filter(|reason| reason.len() <= 1024)
-        .ok_or(ClientError::Protocol { submitted: true })?
-        .to_owned();
-    // Unknown reasons do not establish the tested stop contract.
-    if ![
-        "end_turn",
-        "max_tokens",
-        "max_turn_requests",
-        "refusal",
-        "cancelled",
-    ]
-    .contains(&stop_reason.as_str())
-    {
-        return Err(ClientError::Protocol { submitted: true });
-    }
+        .filter(|reason| !reason.is_empty() && reason.len() <= 1024)
+        .ok_or(ClientError::Protocol { submitted: true })?;
+    // The captured response is redacted independently. The terminal report is
+    // also persisted and projected into scheduler status, so apply the same
+    // known-secret matcher before it crosses that boundary.
+    let stop_reason = capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .redact_stop_reason(stop_reason);
+    // A prompt response establishes delivery and a terminal peer observation.
+    // The worker decides which bounded reasons count as success or cancellation.
+    services.end_turn(limits.setup_timeout).await?;
     Ok(TurnReport {
         cancellation_acknowledged: cancellation_requested && stop_reason == "cancelled",
         cancellation_requested,
         stop_reason,
         session_id: session_id.0.to_string(),
         initialization,
+        configuration: configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
     })
 }

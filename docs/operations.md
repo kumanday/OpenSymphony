@@ -903,12 +903,14 @@ the client contract; real vendor qualification remains OSYM-906.
 The default limits are 1 MiB per frame, 128 queued incoming frames with a
 cumulative 4 MiB wire-byte budget, 128 outstanding callback responses with an
 independent 4 MiB encoded-byte budget, 256 retained source frames with a cumulative
-1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, 300 seconds
-for a prompt, 10 seconds for cancellation acknowledgement, and one 5-second
+1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, an
+300-second prompt deadline by default for direct client callers, 10 seconds
+for cancellation acknowledgement, and one 5-second
 deadline for process termination and reaping. Windows launches enter a kill-on-close Job Object before
 the child resumes, so dropping the turn future also terminates descendants. Unix
 launches retain process-group ownership for the same drop path. Callers
-may pass validated `ClientLimits`. A supplied update channel must be drained
+may pass validated `ClientLimits`; a zero `prompt_timeout` disables only the
+client's wall-clock prompt deadline. A supplied update channel must be drained
 concurrently; saturation or receiver loss fails the run visibly. Incoming queue
 charges are released when each frame reaches SDK dispatch. Its byte budget is
 independent of frame count, ranges from 256 bytes to 64 MiB, and rejects a single
@@ -947,6 +949,19 @@ requested cancellation. Sending `session/cancel`, killing a process, or receivin
 an unrelated stop reason does not establish that acknowledgement. Prompt failures
 after possible submission are uncertain and are never retried by this client.
 
+
+ACP client facilities add independent defaults of 256 KiB per text file, 64 KiB
+of retained output per terminal, 16 terminal handles/processes, 64 pending
+callbacks, and a 300-second callback deadline. Pending callbacks also share a
+`queued_bytes` byte budget independent of transport ingress. Callback response
+reservations remain charged until stdin flush. An exceeded admission budget
+fails the run visibly and tears down owned processes. Host policy disables all
+filesystem and terminal callbacks by default. Output discards oldest characters
+at UTF-8 boundaries; zero output retention is allowed. Scoped MCP headers,
+environment values and credential option arguments join the redactor before any
+wire frame is captured. Configuration RPC failures retain method, error code and
+redacted context; authentication failures retain their dedicated classification.
+
 Retained ACP ownership is available through `SessionHost`. A finished worker may
 borrow the same live process again; nonpersistent agents remain attachable while
 that process is alive. Owner loss allows only capability-gated restoration of a
@@ -963,8 +978,157 @@ SSE state/source events and explicit history-gap events when a bounded buffer or
 subscriber loses data. Tokens belong in the Authorization header. Source frames
 preserve redacted content and unknown payloads, with connection generation,
 arrival sequence, run binding and replay origin. Recorded history is bounded by
-the client's queue count and byte budgets. Production CLI routing and IDE writer
-handoff are separate integration slices.
+the client's queue count and byte budgets. IDE writer handoff is a separate
+integration slice.
+
+### Production ACP routing
+
+Configure `routing.harness: acp`, a named `routing.harness_profile`, and its
+`acp.profiles` entry, then use `opensymphony run`. The gateway publishes profile
+preflight readiness separately from negotiated run support. An unavailable
+executable or missing credential reference is reported without exposing its value.
+Retained profile identity survives a default-profile change on restart. A known
+ACP profile and model are bound to the prepared run manifest. Recovery rejects
+an older unbound prepared run when its workspace route snapshot belongs to a
+different ACP run. Claims for a new run clear the old terminal result before launch,
+so a crash at that checkpoint cannot complete the new run from the prior turn.
+A known terminal prompt is reconciled without sending it again; a possibly submitted
+prompt remains uncertain and blocks automatic retry and workspace removal.
+Recovered finished turns reconcile only the matching run ID and attempt; a
+prepared later run receives its own scoped memory environment and prompt.
+An unfamiliar but nonempty bounded ACP `stopReason` is preserved as a finished
+peer response and reported as an unsuccessful, non-retryable outcome. Known
+credential values in the reason are redacted before durable storage and worker
+status projection. The reason does not become an uncertain submission merely
+because it is new.
+The bound model includes a profile's `session.model` when no routing override is
+set. Changes to managed memory run ID, attempt or project set rotate the retained
+ACP process so child environment and memory evidence remain scoped to the run.
+For an authoritative parent continuation, that rotation archives the old owner
+but keeps the conversation manifest and session ID. The new process must
+negotiate load or resume; an unavailable restore fails before another prompt
+instead of creating a different parent session. A grant change that requires a
+fresh conversation is rejected before parent retirement.
+After a revoked memory grant requires a fresh owner, the revocation marker clears
+when that owner reports a successful launch; failed setup leaves it in place.
+ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
+The ACP child and its terminal callbacks receive memory variables only from the
+run-scoped managed grant; ambient and workflow `OPENSYMPHONY_MEMORY_*` values are
+discarded. Profiles cannot remap credentials into or out of that reserved namespace.
+Repository-neutral ACP parents receive project, authorized-repository, run, and
+attempt guidance from that overlay without an execution-repository default.
+Production ACP turns have no fixed client prompt deadline. When configured,
+`agent.stall_timeout_ms` applies the scheduler's activity-based stall policy;
+the interrupt path handles an operator or scheduler stop request.
+Unknown, redacted `session/update` variants produce bounded generic scheduler
+activity. After a subscriber lag, the worker replays retained source frames when
+they cover every frame after its processed cursor; an actual gap fences the run.
+Supported filesystem callback requests and their responses produce payload-free
+scheduler activity without recording file paths or contents.
+Running terminal output polls and successful responses with a null exit status
+likewise advance the idle deadline through payload-free activity; only an
+observed exit code records command completion.
+An ACP session restored through `session/load` receives the full workflow prompt
+when its durable state has never seeded that prompt. A seeded session receives
+continuation guidance even when the new run's claim has reset its status to
+`ready`.
+An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
+outcome on recovery.
+Cleanup after a known-finished owner loss acquires the durable owner lock and
+verifies the prior process is absent before recording its stop. Setup failures
+before submission permit scheduler retry. Cancellation is accepted after
+matching live or durable stopped-state observation. If the owner closes during
+pre-submission cancellation, the scheduler verifies matching durable identity,
+stopped process state and a `ready` or `finished` status before acknowledging.
+Scheduled ACP interrupts identify the active worker by issue ID and issue
+identifier, then verify its current owner, generation, run and conversation
+before cancellation.
+
+ACP permission and standard `elicitation/create` choice-form requests appear as
+pending interactions for the selected run. Form capability advertises only the
+form mode; URL elicitation is disabled. The supported form schema has one to
+eight required string enum or string-array enum fields, with at most 32 offered
+choices per field. Unsupported constraints, free-text fields, URL mode, and
+secret prompts are rejected without exposing them in public snapshots. Web and
+desktop Run Detail panels use offered permission option IDs and multiple-choice
+form controls. Plan approval controls are typed for a registered extension;
+The authenticated pinned Cursor `cursor/create_plan` request uses the plan
+control when the profile enables its exact version registration. FrankenTUI shows a pending
+request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
+through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
+questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
+The gateway exposes permissions and plans at `/api/v1/runs/{run_id}/approvals`, questions at
+`/api/v1/runs/{run_id}/inputs`, and accepts bound responses through
+`/api/v1/actions/dispatch`. A response must carry the live request, run,
+issue, session, generation, and RPC binding token. The ACP responder retains the
+original peer RPC ID privately; clients echo a generated public token. Stale,
+duplicate, expired, and invalid option/answer submissions are rejected. A waiting interaction pauses
+stall detection only until its deadline. Disconnect, cancellation, completion,
+and restart clear the live responder; operators must wait for a fresh request.
+Automatic `allow_once` and `deny` permission decisions require the same active
+turn and are cancelled when a peer asks after its prompt has completed.
+Callback arrivals and closures publish updated snapshots without waiting for
+the next tracker poll. Timed-out callbacks retain their closure notification
+through bounded channel backpressure, so pending requests clear when the worker
+drains the queue.
+An un-routed form request receives an ACP `cancel` response so a direct client
+turn can continue. An operator-policy permission request without a route fails
+the turn. A worker response that misses its acknowledgement deadline is fenced
+before a failure receipt and remains pending for another answer attempt. An
+answer already claimed by the ACP callback waits until the response frame is
+flushed to the peer's input sink; a write failure returns a failed receipt.
+The scheduler actor enqueues the response and applies the resulting receipt
+when its worker-completion message arrives, so a slow peer does not hold up
+tracker ticks, other issue updates, or shutdown. The terminal client waits for
+the authoritative receipt without a total HTTP timeout; it bounds connection
+establishment separately. Web and desktop invalidate an in-flight detail refresh
+when a local operator answer is accepted, keeping answered controls removed.
+The gateway also fences its queued command when its HTTP delivery deadline
+expires or the handler closes. Once the run loop claims a command, the gateway
+waits for the scheduler result instead of returning a premature timeout.
+Only requests accepted into the scheduler's live pending set emit waiting
+activity. Web and desktop retain selected form choices across live refreshes
+while the same request remains pending.
+
+Registered ACP harness operations appear in profile and active run capabilities.
+An operator invokes `harness_operation` through the gateway with a run target
+and advertised operation ID. The payload `run_id` is the current
+`harness_capability.run_binding_id` in the run detail or snapshot. The service
+binds the current run and session and
+validates arguments before sending a structured result receipt. Permission
+failure, stale binding, absent peer capability, invalid arguments, and disabled
+registration reject the action. `fixture.echo` is read-only and available only
+to `fixture_echo@1` profiles when the peer advertises
+`opensymphony.dev/fixtureEcho: 1`; it exists for executable contract tests.
+A deadline or disconnect after dispatch reports an unknown outcome, requiring
+evidence inspection before any repeat. The event journal emits a correlated
+completion or failure for each accepted dispatch. The pinned Cursor profile
+supports observed plan approvals and ID-bearing todo requests; question, task,
+image, and no-ID notification paths remain unqualified. The captured wire
+contract and production test are in
+[acp-extension-evidence.md](acp-extension-evidence.md).
+Todo activity follows the correlated accepted callback result. Duplicate
+in-flight peer IDs across plan, todo, and standard callbacks remain ambiguous
+until all matching responses drain. More than 16 unresolved todo requests or
+128 concurrent callback IDs emits a diagnostic and fences the worker.
+The outbound operation's response can complete after the prompt finishes;
+prompt completion does not cancel its separately bounded RPC wait. A deadline
+returns outcome unknown to the caller while keeping that unresolved SDK request
+inside the eight-operation limit until its reply or connection closure. Peer
+results are redacted with the session's known secrets before entering the public
+action receipt, including strings in `value` and `_meta`.
+
+## ACP live qualification and recovery
+
+Run the ignored authenticated tests in [ACP live
+qualification](acp-live-qualification.md) after checking both pinned CLI
+versions and local login status. The report separates the local profile
+preflight result from a completed tracked issue run. Cursor and Devin both
+advertised `session/load` and restored a known-finished session; neither
+advertised `session/resume` in this qualification. An unadvertised optional
+method must not be assumed. A credential or option failure before prompt
+submission is a setup failure; a possibly submitted prompt is fenced from
+automatic resend and cleanup until reconciled.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -1159,6 +1323,11 @@ handoff are separate integration slices.
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -1329,5 +1498,10 @@ handoff are separate integration slices.
 - COE-567
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

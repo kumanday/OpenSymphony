@@ -69,6 +69,7 @@ pub(super) fn map_snapshot(
                     terminal_states,
                     generated_at,
                     snapshot.hierarchy.get(issue.issue.id.as_str()),
+                    &snapshot.operator_interactions,
                 )
             })
             .collect(),
@@ -100,6 +101,7 @@ fn map_issue(
     terminal_states: &HashSet<String>,
     generated_at: DateTime<Utc>,
     hierarchy: Option<&crate::opensymphony_domain::HierarchyStateSnapshot>,
+    operator_interactions: &[crate::opensymphony_gateway_schema::approval::OperatorInteraction],
 ) -> IssueSnapshot {
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
@@ -118,7 +120,9 @@ fn map_issue(
                     Some(
                         WorkerOutcomeKind::Failed
                         | WorkerOutcomeKind::TimedOut
-                        | WorkerOutcomeKind::Stalled,
+                        | WorkerOutcomeKind::Stalled
+                        | WorkerOutcomeKind::Detached
+                        | WorkerOutcomeKind::CancelFailed,
                     ) => IssueRuntimeState::Failed,
                     _ if issue.runtime.release_reason
                         == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
@@ -241,6 +245,15 @@ fn map_issue(
     });
 
     IssueSnapshot {
+        operator_interactions: operator_interactions
+            .iter()
+            .filter(|request| request.issue_id == issue.issue.id.as_str())
+            .cloned()
+            .collect(),
+        harness_capability: issue
+            .conversation
+            .as_ref()
+            .and_then(|c| c.harness_capability.as_deref().cloned()),
         identifier: issue.issue.identifier.to_string(),
         title: issue.issue.title.clone(),
         tracker_state: issue.issue.state.name.clone(),
@@ -514,10 +527,15 @@ pub(super) fn current_agent_server_status(
     }
 
     AgentServerStatus {
-        reachable: true,
+        reachable: !base_url.is_empty(),
         base_url: base_url.to_string(),
         conversation_count: 0,
-        status_line: "reachable".to_string(),
+        status_line: if base_url.is_empty() {
+            "not_selected"
+        } else {
+            "reachable"
+        }
+        .to_string(),
     }
 }
 
@@ -704,6 +722,7 @@ tracker:
                     last_seen_tracker_refresh_at: None,
                 }),
                 conversation: Some(ConversationMetadata {
+                    harness_capability: None,
                     conversation_id: must(ConversationId::new("conv_352")),
                     server_base_url: Some("http://127.0.0.1:3000".to_owned()),
                     transport_target: Some("loopback".to_owned()),
@@ -901,6 +920,7 @@ tracker:
 
     fn codex_conversation(thread_id: &str) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(ConversationId::new(thread_id.to_owned())),
             server_base_url: None,
             transport_target: Some("codex_app_server".to_owned()),
@@ -1085,6 +1105,36 @@ tracker:
         assert_eq!(
             state,
             crate::opensymphony_control::IssueRuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn detached_active_run_is_failed_while_its_cleanup_remains_fenced() {
+        let mut issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-acp-uncertain")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Detached,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: Some("ACP prompt outcome is uncertain".into()),
+            error: None,
+            harness_stopped: false,
+            parent_verification: None,
+        });
+        let issue = map_single_issue(issue);
+        assert_eq!(
+            issue.runtime_state,
+            crate::opensymphony_control::IssueRuntimeState::Failed
+        );
+        assert_eq!(
+            issue.last_outcome,
+            crate::opensymphony_control::WorkerOutcome::Failed
         );
     }
 

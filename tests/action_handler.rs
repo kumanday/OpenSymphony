@@ -45,6 +45,8 @@ fn fixture_snapshot(
             total_cost_micros: 0,
         },
         issues: vec![IssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: identifier.to_owned(),
             title: "Test Issue".to_owned(),
             tracker_state: "In Progress".to_owned(),

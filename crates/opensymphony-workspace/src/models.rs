@@ -644,6 +644,7 @@ pub struct RunDescriptor {
     pub repository_binding: Option<RepositoryBinding>,
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    pub acp_route: Option<AcpRunRoute>,
 }
 
 impl RunDescriptor {
@@ -655,6 +656,7 @@ impl RunDescriptor {
             repository_binding: None,
             runtime_envelope: None,
             parent_runtime_envelope: None,
+            acp_route: None,
         }
     }
 
@@ -686,6 +688,25 @@ impl RunDescriptor {
         self.parent_runtime_envelope = parent_runtime_envelope;
         self
     }
+
+    pub fn with_acp_route(mut self, acp_route: Option<AcpRunRoute>) -> Self {
+        self.acp_route = acp_route;
+        self
+    }
+}
+
+/// The ACP route selected for this run. Stored with the prepared run so recovery
+/// cannot take model or profile choices from a prior turn's workspace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpRunRoute {
+    pub task_type: String,
+    pub harness_kind: String,
+    pub harness_profile: Option<String>,
+    pub model: Option<String>,
+    pub model_profile: Option<String>,
+    pub reason: String,
+    pub dry_run: bool,
+    pub user_override: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1125,6 +1146,8 @@ pub struct RunManifest {
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_route: Option<AcpRunRoute>,
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
@@ -1171,6 +1194,7 @@ impl RunManifest {
             repository_binding: run.repository_binding.clone(),
             runtime_envelope: run.runtime_envelope.clone(),
             parent_runtime_envelope: run.parent_runtime_envelope.clone(),
+            acp_route: run.acp_route.clone(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,
@@ -1243,12 +1267,31 @@ pub struct AcpSessionState {
     pub session_id: Option<String>,
     /// Negotiated initialization metadata, redacted by the protocol client.
     pub initialization: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_operations:
+        Vec<crate::opensymphony_gateway_schema::capability::HarnessOperationCapability>,
+    /// Whether this session advertised a selectable model configuration option.
+    #[serde(default)]
+    pub model_selection: bool,
     pub status: AcpSessionStatus,
     pub stop_reason: Option<String>,
+    /// Independent of status, which returns to Ready when a new run claims the session.
+    /// None identifies a pre-migration manifest whose prior terminal state must be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_prompt_seeded: Option<bool>,
     pub recovery: AcpRecovery,
     pub owner_id: String,
     #[serde(default)]
     pub process: AcpProcessState,
+}
+
+impl AcpSessionState {
+    pub fn workflow_prompt_seeded(&self) -> bool {
+        self.workflow_prompt_seeded.unwrap_or(
+            self.status != AcpSessionStatus::Ready
+                && self.stop_reason.as_deref() != Some("cancelled_before_prompt"),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,6 +1310,8 @@ pub struct ConversationManifest {
     pub runtime_contract_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpSessionState>,
 }
@@ -1291,6 +1336,7 @@ impl ConversationManifest {
             reset_reason: None,
             runtime_contract_version: runtime_contract_version.into(),
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             acp: None,
         }
     }

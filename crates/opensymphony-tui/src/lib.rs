@@ -15,6 +15,12 @@ use crate::opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use crate::opensymphony_domain::{
     ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot, SnapshotEnvelope,
 };
+use crate::opensymphony_gateway_schema::{
+    action::{ActionDispatch, ActionKind, ActionStatus, ActionTarget},
+    approval::{OperatorInteraction, OperatorInteractionKind},
+    envelope::EntityKind,
+    version::SchemaVersion,
+};
 use chrono::{DateTime, Utc};
 use crossterm::terminal;
 use ftui::{
@@ -77,6 +83,10 @@ pub struct TuiState {
     pub selected_issue: usize,
     pub latest_snapshot: Option<SnapshotEnvelope>,
     pub status_line: String,
+    operator_request_index: usize,
+    operator_question_index: usize,
+    operator_option_page: usize,
+    operator_answers: HashMap<String, Vec<Vec<String>>>,
     workspace_status: HashMap<String, WorkspaceStatusEntry>,
     selected_changed_file: usize,
     detail_diff_open: bool,
@@ -94,6 +104,10 @@ impl Default for TuiState {
             selected_issue: 0,
             latest_snapshot: None,
             status_line: "connecting to control plane".to_owned(),
+            operator_request_index: 0,
+            operator_question_index: 0,
+            operator_option_page: 0,
+            operator_answers: HashMap::new(),
             workspace_status: HashMap::new(),
             selected_changed_file: 0,
             detail_diff_open: false,
@@ -193,6 +207,15 @@ impl TuiState {
             TuiAction::SnapshotReceived(envelope) => {
                 let selected_issue_identifier =
                     self.selected_issue().map(|issue| issue.identifier.clone());
+                let visible_requests = envelope
+                    .snapshot
+                    .issues
+                    .iter()
+                    .flat_map(|issue| &issue.operator_interactions)
+                    .map(|request| request.request_id.as_str())
+                    .collect::<HashSet<_>>();
+                self.operator_answers
+                    .retain(|request_id, _| visible_requests.contains(request_id.as_str()));
                 self.latest_snapshot = Some(*envelope);
                 if !matches!(self.connection, ConnectionState::Live) {
                     self.status_line = match self.connection {
@@ -692,6 +715,10 @@ impl TuiState {
 
         match self.selected_issue() {
             Some(issue) => {
+                if lines.len() < max_rows {
+                    let operator_budget = max_rows.saturating_sub(lines.len()).min(8);
+                    lines.extend(self.operator_lines(width, operator_budget));
+                }
                 let id_style = Style::new().fg(CYAN).bold();
                 let deps = dependency_summary(
                     self.latest_snapshot
@@ -1554,6 +1581,140 @@ impl TuiState {
             .and_then(|snapshot| snapshot.snapshot.issues.get(self.selected_issue))
     }
 
+    fn selected_operator(&self) -> Option<&OperatorInteraction> {
+        let issue = self.selected_issue()?;
+        if issue.operator_interactions.is_empty() {
+            return None;
+        }
+        issue
+            .operator_interactions
+            .get(self.operator_request_index % issue.operator_interactions.len())
+    }
+
+    fn operator_lines(&self, width: usize, budget: usize) -> Vec<Line> {
+        let Some(issue) = self.selected_issue() else {
+            return Vec::new();
+        };
+        let Some(request) = self.selected_operator() else {
+            return Vec::new();
+        };
+        let mut rows = vec![Line::from(Span::styled(
+            fit(
+                &format!(
+                    "ACP {}/{}: {} [o next; x cancel]",
+                    self.operator_request_index % issue.operator_interactions.len() + 1,
+                    issue.operator_interactions.len(),
+                    request.title
+                ),
+                width,
+            ),
+            Style::new().fg(YELLOW).bold(),
+        ))];
+        const OPTIONS_PER_PAGE: usize = 4;
+        match request.kind {
+            OperatorInteractionKind::Permission => {
+                let page = self
+                    .operator_option_page
+                    .min(request.options.len().saturating_sub(1) / OPTIONS_PER_PAGE);
+                let pages = request.options.len().div_ceil(OPTIONS_PER_PAGE);
+                rows.push(Line::from(fit(
+                    &format!(
+                        "Options {}/{} [, previous; . next; 1-4 select]",
+                        page + 1,
+                        pages
+                    ),
+                    width,
+                )));
+                rows.extend(
+                    request
+                        .options
+                        .iter()
+                        .skip(page * OPTIONS_PER_PAGE)
+                        .take(OPTIONS_PER_PAGE)
+                        .enumerate()
+                        .map(|(index, option)| {
+                            Line::from(fit(
+                                &format!("{} {} ({})", index + 1, option.label, option.kind),
+                                width,
+                            ))
+                        }),
+                );
+            }
+            OperatorInteractionKind::Question => {
+                if let Some(question) = request
+                    .questions
+                    .get(self.operator_question_index % request.questions.len().max(1))
+                {
+                    rows.push(Line::from(fit(
+                        &format!(
+                            "Question {}/{}: {} [[/] next; s submit; n decline]",
+                            self.operator_question_index % request.questions.len() + 1,
+                            request.questions.len(),
+                            question.prompt
+                        ),
+                        width,
+                    )));
+                    let selected =
+                        self.operator_answers
+                            .get(&request.request_id)
+                            .and_then(|answers| {
+                                answers.get(self.operator_question_index % request.questions.len())
+                            });
+                    let page = self
+                        .operator_option_page
+                        .min(question.options.len().saturating_sub(1) / OPTIONS_PER_PAGE);
+                    let pages = question.options.len().div_ceil(OPTIONS_PER_PAGE);
+                    rows.push(Line::from(fit(
+                        &format!(
+                            "Options {}/{} [, previous; . next; 1-4 select]",
+                            page + 1,
+                            pages
+                        ),
+                        width,
+                    )));
+                    rows.extend(
+                        question
+                            .options
+                            .iter()
+                            .skip(page * OPTIONS_PER_PAGE)
+                            .take(OPTIONS_PER_PAGE)
+                            .enumerate()
+                            .map(|(index, option)| {
+                                Line::from(fit(
+                                    &format!(
+                                        "{} [{}] {}",
+                                        index + 1,
+                                        if selected
+                                            .is_some_and(|selected| selected.contains(&option.id))
+                                        {
+                                            "x"
+                                        } else {
+                                            " "
+                                        },
+                                        option.label
+                                    ),
+                                    width,
+                                ))
+                            }),
+                    );
+                }
+            }
+            OperatorInteractionKind::PlanApproval => {
+                rows.push(Line::from(fit("[y approve; n reject]", width)));
+                rows.extend(
+                    request
+                        .plan
+                        .as_deref()
+                        .unwrap_or_default()
+                        .lines()
+                        .map(|line| Line::from(fit(line, width))),
+                );
+            }
+        }
+        rows.truncate(budget);
+        rows
+    }
+
     fn visible_issue_rows<'a>(
         &self,
         snapshot: &'a SnapshotEnvelope,
@@ -2162,6 +2323,16 @@ enum AppMessage {
     FocusPrevious,
     ToggleDetailDiff,
     ToggleTimelineMode,
+    NextOperator,
+    NextQuestion,
+    PreviousQuestion,
+    NextOptionPage,
+    PreviousOptionPage,
+    SelectOperatorOption(usize),
+    SubmitOperator,
+    ApproveOperator,
+    RejectOperator,
+    CancelOperator,
     Quit,
 }
 
@@ -2176,6 +2347,18 @@ impl From<Event> for AppMessage {
                 KeyCode::BackTab => AppMessage::FocusPrevious,
                 KeyCode::Enter => AppMessage::ToggleDetailDiff,
                 KeyCode::Char('e') => AppMessage::ToggleTimelineMode,
+                KeyCode::Char('o') => AppMessage::NextOperator,
+                KeyCode::Char(']') => AppMessage::NextQuestion,
+                KeyCode::Char('[') => AppMessage::PreviousQuestion,
+                KeyCode::Char('.') => AppMessage::NextOptionPage,
+                KeyCode::Char(',') => AppMessage::PreviousOptionPage,
+                KeyCode::Char(digit @ '1'..='4') => {
+                    AppMessage::SelectOperatorOption(digit as usize - '1' as usize)
+                }
+                KeyCode::Char('s') => AppMessage::SubmitOperator,
+                KeyCode::Char('y') => AppMessage::ApproveOperator,
+                KeyCode::Char('n') => AppMessage::RejectOperator,
+                KeyCode::Char('x') => AppMessage::CancelOperator,
                 _ => AppMessage::Tick,
             },
             _ => AppMessage::Tick,
@@ -2184,16 +2367,17 @@ impl From<Event> for AppMessage {
 }
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
-    let bridge = BridgeHandle::spawn(base_url);
+    let bridge = BridgeHandle::spawn(base_url.clone());
     let workspace_status = WorkspaceStatusHandle::spawn();
     let outcome = Arc::new(Mutex::new(RunOutcome::default()));
-    let app = OperatorApp::new(
+    let mut app = OperatorApp::new(
         bridge.mailbox(),
         workspace_status.mailbox(),
         workspace_status.request_sender(),
         exit_after,
         Arc::clone(&outcome),
     );
+    app.operator_url = Some(base_url);
     let config = tui_program_config();
     let run_result = ftui::Program::with_config(app, config)
         .and_then(|mut program| program.run())
@@ -2247,6 +2431,11 @@ struct OperatorApp {
     started_at: Instant,
     saw_live_stream: bool,
     outcome: Arc<Mutex<RunOutcome>>,
+    operator_url: Option<Url>,
+    operator_result_tx: mpsc::Sender<String>,
+    operator_result_rx: mpsc::Receiver<String>,
+    operator_response_pending: bool,
+    operator_response_request_id: Option<String>,
 }
 
 impl OperatorApp {
@@ -2257,6 +2446,7 @@ impl OperatorApp {
         exit_after: Option<Duration>,
         outcome: Arc<Mutex<RunOutcome>>,
     ) -> Self {
+        let (operator_result_tx, operator_result_rx) = mpsc::channel();
         Self {
             state: TuiState::default(),
             bridge,
@@ -2268,7 +2458,204 @@ impl OperatorApp {
             started_at: Instant::now(),
             saw_live_stream: false,
             outcome,
+            operator_url: None,
+            operator_result_tx,
+            operator_result_rx,
+            operator_response_pending: false,
+            operator_response_request_id: None,
         }
+    }
+
+    fn choose_operator_option(&mut self, index: usize) {
+        const OPTIONS_PER_PAGE: usize = 4;
+        if index >= OPTIONS_PER_PAGE {
+            return;
+        }
+        let Some(request) = self.state.selected_operator().cloned() else {
+            return;
+        };
+        let option_count = match request.kind {
+            OperatorInteractionKind::Permission => request.options.len(),
+            OperatorInteractionKind::Question => request
+                .questions
+                .get(self.state.operator_question_index % request.questions.len().max(1))
+                .map_or(0, |question| question.options.len()),
+            OperatorInteractionKind::PlanApproval => 0,
+        };
+        let page = self
+            .state
+            .operator_option_page
+            .min(option_count.saturating_sub(1) / OPTIONS_PER_PAGE);
+        let index = page * OPTIONS_PER_PAGE + index;
+        match request.kind {
+            OperatorInteractionKind::Permission => {
+                let Some(option) = request.options.get(index) else {
+                    return;
+                };
+                let decision = if matches!(option.kind.as_str(), "allow_once" | "allow_always") {
+                    "approved"
+                } else if matches!(option.kind.as_str(), "reject_once" | "reject_always") {
+                    "rejected"
+                } else {
+                    return;
+                };
+                let option_id = option.id.clone();
+                self.send_operator_response(
+                    request,
+                    ActionKind::ApprovalDecision,
+                    serde_json::json!({"decision": decision, "option_id": option_id}),
+                );
+            }
+            OperatorInteractionKind::Question => {
+                let question_index =
+                    self.state.operator_question_index % request.questions.len().max(1);
+                let Some(question) = request.questions.get(question_index) else {
+                    return;
+                };
+                let Some(option) = question.options.get(index) else {
+                    return;
+                };
+                let answers = self
+                    .state
+                    .operator_answers
+                    .entry(request.request_id)
+                    .or_insert_with(|| vec![Vec::new(); request.questions.len()]);
+                if question.allow_multiple {
+                    if let Some(position) = answers[question_index]
+                        .iter()
+                        .position(|id| id == &option.id)
+                    {
+                        answers[question_index].remove(position);
+                    } else {
+                        answers[question_index].push(option.id.clone());
+                    }
+                } else {
+                    answers[question_index] = vec![option.id.clone()];
+                }
+            }
+            OperatorInteractionKind::PlanApproval => {}
+        }
+    }
+
+    fn operator_decision(&mut self, choice: char) {
+        let Some(request) = self.state.selected_operator().cloned() else {
+            return;
+        };
+        match request.kind {
+            OperatorInteractionKind::Permission if choice == 'x' => self.send_operator_response(
+                request,
+                ActionKind::ApprovalDecision,
+                serde_json::json!({"decision": "cancelled"}),
+            ),
+            OperatorInteractionKind::PlanApproval if matches!(choice, 'y' | 'n' | 'x') => self
+                .send_operator_response(
+                    request,
+                    ActionKind::PlanDecision,
+                    serde_json::json!({"decision": match choice {
+                    'y' => "approved", 'n' => "rejected", _ => "cancelled" }}),
+                ),
+            OperatorInteractionKind::Question if matches!(choice, 's' | 'n' | 'x') => {
+                let mut outcome = match choice {
+                    's' => "answered",
+                    'n' => "declined",
+                    _ => "cancelled",
+                };
+                let answers = self
+                    .state
+                    .operator_answers
+                    .get(&request.request_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if outcome == "answered"
+                    && (answers.len() != request.questions.len()
+                        || answers.iter().any(Vec::is_empty))
+                {
+                    self.state.status_line =
+                        "Select at least one option for each ACP question".into();
+                    return;
+                }
+                if outcome != "answered" {
+                    outcome = if choice == 'n' {
+                        "declined"
+                    } else {
+                        "cancelled"
+                    };
+                }
+                let answers = request.questions.iter().enumerate().map(|(index, question)| serde_json::json!({
+                    "question_id": question.id, "selected_option_ids": answers.get(index).cloned().unwrap_or_default()
+                })).collect::<Vec<_>>();
+                self.send_operator_response(
+                    request,
+                    ActionKind::InputResponse,
+                    serde_json::json!({"outcome": outcome, "answers": answers}),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn send_operator_response(
+        &mut self,
+        request: OperatorInteraction,
+        kind: ActionKind,
+        response: serde_json::Value,
+    ) {
+        if self.operator_response_pending {
+            return;
+        }
+        let Some(base_url) = self.operator_url.clone() else {
+            return;
+        };
+        let Some(payload) = response.as_object() else {
+            return;
+        };
+        let mut payload = payload.clone();
+        payload.extend(serde_json::json!({"request_id": request.request_id, "run_id": request.run_id,
+            "issue_id": request.issue_id, "session_id": request.session_id, "generation": request.generation,
+            "rpc_id": request.rpc_id}).as_object().cloned().unwrap_or_default());
+        let action = ActionDispatch {
+            schema_version: SchemaVersion::v1(),
+            correlation_id: format!("operator-{}-{}", request.request_id, uuid::Uuid::new_v4()),
+            action_kind: kind,
+            target_entity: ActionTarget {
+                entity_kind: EntityKind::Run,
+                entity_id: request.issue_identifier,
+            },
+            payload: Some(serde_json::Value::Object(payload)),
+            idempotency_key: None,
+        };
+        self.operator_response_pending = true;
+        self.operator_response_request_id = Some(request.request_id.clone());
+        self.state.status_line = "Sending ACP operator response".into();
+        let tx = self.operator_result_tx.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let url = base_url
+                    .join("/api/v1/actions/dispatch")
+                    .map_err(|e| e.to_string())?;
+                let receipt = reqwest::blocking::Client::builder()
+                    // A claimed gateway command waits for the authoritative
+                    // ACP input-sink flush. A total HTTP timeout could report
+                    // failure while that answer is still being delivered.
+                    .connect_timeout(Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| e.to_string())?
+                    .post(url)
+                    .json(&action)
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .json::<crate::opensymphony_gateway_schema::action::ActionReceipt>()
+                    .map_err(|e| e.to_string())?;
+                if receipt.status == ActionStatus::Accepted {
+                    Ok("ACP operator response accepted".into())
+                } else {
+                    Err(receipt
+                        .reason
+                        .unwrap_or_else(|| "ACP operator response rejected".into()))
+                }
+            })();
+            let _ = tx.send(result.unwrap_or_else(|error| format!("ACP response failed: {error}")));
+        });
     }
 
     fn drain_bridge(&mut self) {
@@ -2943,6 +3330,15 @@ impl Model for OperatorApp {
     fn update(&mut self, message: Self::Message) -> Cmd<Self::Message> {
         self.drain_bridge();
         self.drain_workspace_status();
+        while let Ok(result) = self.operator_result_rx.try_recv() {
+            self.operator_response_pending = false;
+            if let Some(request_id) = self.operator_response_request_id.take()
+                && result == "ACP operator response accepted"
+            {
+                self.state.operator_answers.remove(&request_id);
+            }
+            self.state.status_line = result;
+        }
         match message {
             AppMessage::Tick => {}
             AppMessage::MoveSelectionUp => self.state.reduce(TuiAction::MoveSelectionUp),
@@ -2951,6 +3347,33 @@ impl Model for OperatorApp {
             AppMessage::FocusPrevious => self.state.reduce(TuiAction::FocusPrevious),
             AppMessage::ToggleDetailDiff => self.state.reduce(TuiAction::ToggleDetailDiff),
             AppMessage::ToggleTimelineMode => self.state.reduce(TuiAction::ToggleTimelineMode),
+            AppMessage::NextOperator => {
+                self.state.operator_request_index =
+                    self.state.operator_request_index.saturating_add(1);
+                self.state.operator_question_index = 0;
+                self.state.operator_option_page = 0;
+            }
+            AppMessage::NextQuestion => {
+                self.state.operator_question_index =
+                    self.state.operator_question_index.saturating_add(1);
+                self.state.operator_option_page = 0;
+            }
+            AppMessage::PreviousQuestion => {
+                self.state.operator_question_index =
+                    self.state.operator_question_index.saturating_sub(1);
+                self.state.operator_option_page = 0;
+            }
+            AppMessage::NextOptionPage => {
+                self.state.operator_option_page = self.state.operator_option_page.saturating_add(1)
+            }
+            AppMessage::PreviousOptionPage => {
+                self.state.operator_option_page = self.state.operator_option_page.saturating_sub(1)
+            }
+            AppMessage::SelectOperatorOption(index) => self.choose_operator_option(index),
+            AppMessage::SubmitOperator => self.operator_decision('s'),
+            AppMessage::ApproveOperator => self.operator_decision('y'),
+            AppMessage::RejectOperator => self.operator_decision('n'),
+            AppMessage::CancelOperator => self.operator_decision('x'),
             AppMessage::Quit => return Cmd::quit(),
         }
         self.request_selected_workspace_status();
@@ -4395,6 +4818,8 @@ mod tests {
                 },
                 issues: (0..issue_count)
                     .map(|index| IssueSnapshot {
+                        operator_interactions: Vec::new(),
+                        harness_capability: None,
                         identifier: format!("COE-{}", 255 + index),
                         title: format!("Issue {index}"),
                         tracker_state: "In Progress".to_owned(),
@@ -4671,6 +5096,174 @@ mod tests {
             outcome.timeout_before_live.as_deref(),
             Some("connecting to control plane")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_operator_keys_send_permission_and_question_to_gateway() {
+        use crate::opensymphony_control::SnapshotStore;
+        use crate::opensymphony_gateway::{GatewayServer, OperatorCommand};
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind, OperatorOption,
+            OperatorQuestion,
+        };
+
+        let now = Utc::now();
+        let make = |request_id: &str, kind, options, questions| OperatorInteraction {
+            request_id: request_id.into(),
+            run_id: "run-tui".into(),
+            issue_id: "issue-tui".into(),
+            issue_identifier: "COE-255".into(),
+            session_id: "session-tui".into(),
+            generation: 7,
+            rpc_id: "0".into(),
+            kind,
+            title: request_id.into(),
+            options,
+            questions,
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(2),
+        };
+        let permission = make(
+            "permission",
+            OperatorInteractionKind::Permission,
+            (0..13)
+                .map(|index| OperatorOption {
+                    id: format!("opaque-allow-{index}"),
+                    label: format!("Allow option {index}"),
+                    kind: "allow_once".into(),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        let question = make(
+            "question",
+            OperatorInteractionKind::Question,
+            Vec::new(),
+            vec![OperatorQuestion {
+                id: "region".into(),
+                prompt: "Region?".into(),
+                options: (0..13)
+                    .map(|index| OperatorOption {
+                        id: format!("west-{index}"),
+                        label: format!("Region {index}"),
+                        kind: "choice".into(),
+                    })
+                    .collect(),
+                allow_multiple: false,
+            }],
+        );
+        let mut snapshot = fixture(1, 1);
+        snapshot.snapshot.issues[0].operator_interactions = vec![permission, question];
+        let store = SnapshotStore::new(snapshot.snapshot.clone());
+        let (commands_tx, mut commands_rx) = tokio::sync::mpsc::channel::<OperatorCommand>(4);
+        let gateway = GatewayServer::new(store).with_operator_commands(commands_tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("gateway bind");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("gateway address")
+        ))
+        .expect("gateway URL");
+        let server = tokio::spawn(async move { gateway.serve(listener).await.expect("gateway") });
+
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let workspace_status = Arc::new(Mutex::new(super::WorkspaceStatusMailbox::default()));
+        let (workspace_status_tx, workspace_status_rx) = mpsc::channel();
+        drop(workspace_status_rx);
+        let mut app = OperatorApp::new(
+            bridge,
+            workspace_status,
+            workspace_status_tx,
+            None,
+            Arc::new(Mutex::new(RunOutcome::default())),
+        );
+        app.operator_url = Some(base_url);
+        app.state
+            .reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        app.update(AppMessage::NextOptionPage);
+        app.update(AppMessage::NextOptionPage);
+        let visible = app
+            .state
+            .operator_lines(80, 8)
+            .into_iter()
+            .map(|line| line.to_plain_text())
+            .collect::<Vec<_>>();
+        assert!(visible.iter().any(|line| line.contains("Options 3/4")));
+        assert!(visible.iter().any(|line| line.contains("Allow option 11")));
+        app.choose_operator_option(3);
+        let command = tokio::time::timeout(Duration::from_secs(3), commands_rx.recv())
+            .await
+            .expect("terminal permission timeout")
+            .expect("terminal permission command");
+        let OperatorCommand::Response {
+            interaction,
+            answer,
+            reply,
+            ..
+        } = command
+        else {
+            panic!("operator response command");
+        };
+        assert!(
+            matches!(answer, OperatorAnswer::Permission { ref option_id } if option_id == "opaque-allow-11")
+        );
+        assert_eq!(interaction.rpc_id, "0");
+        reply.send(Ok(())).expect("permission receipt");
+        for _ in 0..30 {
+            app.update(AppMessage::Tick);
+            if !app.operator_response_pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(app.state.status_line, "ACP operator response accepted");
+
+        app.update(AppMessage::NextOperator);
+        app.update(AppMessage::NextOptionPage);
+        app.update(AppMessage::NextOptionPage);
+        let visible = app
+            .state
+            .operator_lines(80, 8)
+            .into_iter()
+            .map(|line| line.to_plain_text())
+            .collect::<Vec<_>>();
+        assert!(visible.iter().any(|line| line.contains("Region 11")));
+        app.choose_operator_option(3);
+        assert!(app.state.operator_answers.contains_key("question"));
+        app.operator_decision('s');
+        let command = tokio::time::timeout(Duration::from_secs(3), commands_rx.recv())
+            .await
+            .expect("terminal question timeout")
+            .expect("terminal question command");
+        let OperatorCommand::Response { answer, reply, .. } = command else {
+            panic!("operator response command");
+        };
+        assert!(matches!(answer, OperatorAnswer::Question { ref answers }
+            if answers.len() == 1 && answers[0].question_id == "region"
+                && answers[0].selected_option_ids == ["west-11"]));
+        reply.send(Ok(())).expect("question receipt");
+        for _ in 0..30 {
+            app.update(AppMessage::Tick);
+            if !app.operator_response_pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(app.state.status_line, "ACP operator response accepted");
+        assert!(!app.state.operator_answers.contains_key("question"));
+        server.abort();
+    }
+
+    #[test]
+    fn snapshot_removal_discards_stale_operator_form_selections() {
+        let mut state = TuiState::default();
+        state
+            .operator_answers
+            .insert("closed-form".into(), vec![vec!["west".into()]]);
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(2, 1))));
+        assert!(state.operator_answers.is_empty());
     }
 
     #[test]

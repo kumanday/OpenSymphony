@@ -22,6 +22,9 @@ use opensymphony::opensymphony_gateway::{
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
+use opensymphony::opensymphony_gateway_schema::capability::{
+    HarnessOperationCapability, HarnessProfileCapability, HarnessRunCapability,
+};
 use opensymphony::opensymphony_gateway_schema::code_graph::{
     CodeDiffEdgeStatus, CodeDiffOverlay, CodeFileOutline, CodeGraphFreshness, CodeGraphNodeKind,
     CodeGraphSnapshot, CodeIndexReport, CodeIndexStatus, CodeRepoList, CodeSymbolDetail,
@@ -715,6 +718,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 120_000,
         },
         issues: vec![IssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: "COE-255".to_owned(),
             title: "Observability and FrankenTUI".to_owned(),
             tracker_state: "In Progress".to_owned(),
@@ -811,6 +816,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
         issues: vec![
             // Idle issue (eligible for execution)
             IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-300".to_owned(),
                 title: "Idle task".to_owned(),
                 tracker_state: "Todo".to_owned(),
@@ -860,6 +867,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Completed issue with events and modified files
             IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-301".to_owned(),
                 title: "Completed task".to_owned(),
                 tracker_state: "Done".to_owned(),
@@ -960,6 +969,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Failed issue, first attempt (no retries exhausted)
             IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-302".to_owned(),
                 title: "Failed task".to_owned(),
                 tracker_state: "In Progress".to_owned(),
@@ -1009,6 +1020,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
             IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-303".to_owned(),
                 title: "Retry queued task".to_owned(),
                 tracker_state: "In Progress".to_owned(),
@@ -1058,6 +1071,8 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
             IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-304".to_owned(),
                 title: "Blocked idle task".to_owned(),
                 tracker_state: "Todo".to_owned(),
@@ -1165,6 +1180,7 @@ fn control_plane_to_dashboard_snapshot_handles_empty_issues() {
 #[test]
 fn gateway_capabilities_json_fixture_roundtrips() {
     let caps = GatewayCapabilities {
+        harness_profiles: Vec::new(),
         schema_version: opensymphony::opensymphony_gateway_schema::version::SchemaVersion::v1(),
         gateway_version: "1.6.0".into(),
         supported_api_versions: vec!["1.0.0".into()],
@@ -1365,6 +1381,17 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
                     == Some("codex-app-server-json-rpc-v2")
                 && harness.transport.modes == vec!["stdio"])
     );
+    assert!(
+        caps_response
+            .harnesses
+            .iter()
+            .any(|harness| harness.kind == "acp"
+                && harness.available
+                && harness.approvals.human_decision
+                && harness.actions.approve
+                && harness.transport.modes == ["stdio"])
+    );
+    assert!(caps_response.harness_profiles.is_empty());
     assert!(
         caps_response
             .features
@@ -5428,6 +5455,474 @@ async fn gateway_serves_run_approvals_with_context() {
     let approvals = response["approvals"].as_array().expect("approvals array");
     assert!(approvals.is_empty());
 
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn capabilities_endpoint_exposes_profile_operation_schema_without_wire_method() {
+    let operation = HarnessOperationCapability {
+        operation_id: "fixture.echo".into(),
+        namespace: "opensymphony.test".into(),
+        version: "1".into(),
+        capability_predicate: "fixture".into(),
+        parameters_schema: serde_json::json!({"type":"object","required":["value"]}),
+        result_schema: serde_json::json!({"type":"object"}),
+        deadline_ms: 5000,
+        effect: "read_only_idempotent".into(),
+    };
+    let server =
+        GatewayServer::new(SnapshotStore::new(fixture_snapshot(0))).with_harness_profiles(vec![
+            HarnessProfileCapability {
+                harness: "acp".into(),
+                profile_id: "fixture".into(),
+                preflight_ready: true,
+                unavailable_reason: None,
+                operations: vec![operation],
+            },
+        ]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server_task = tokio::spawn(async move { server.serve(listener).await.expect("serve") });
+    let response: serde_json::Value = reqwest::get(format!("http://{address}/api/v1/capabilities"))
+        .await
+        .expect("capabilities")
+        .json()
+        .await
+        .expect("json");
+    let advertised = &response["harness_profiles"][0]["operations"][0];
+    assert_eq!(advertised["operation_id"], "fixture.echo");
+    assert_eq!(
+        advertised["parameters_schema"]["required"],
+        serde_json::json!(["value"])
+    );
+    assert!(advertised.get("method").is_none());
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn harness_operation_action_uses_registered_run_operation_and_result_receipt() {
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].harness_capability = Some(HarnessRunCapability {
+        harness: "acp".into(),
+        profile_id: "fixture".into(),
+        run_binding_id: Some("run-worker-613".into()),
+        protocol: "acp".into(),
+        protocol_version: 1,
+        rpc: "json_rpc_2_0".into(),
+        encoding: "utf-8".into(),
+        framing: "lf".into(),
+        carrier: "stdio".into(),
+        session_restore: false,
+        history_replay: false,
+        model_selection: false,
+        cancellation: true,
+        operator_responses: true,
+        operations: vec![HarnessOperationCapability {
+            operation_id: "fixture.echo".into(),
+            namespace: "opensymphony.test".into(),
+            version: "1".into(),
+            capability_predicate: "fixture".into(),
+            parameters_schema: serde_json::json!({"type":"object"}),
+            result_schema: serde_json::json!({"type":"object"}),
+            deadline_ms: 5000,
+            effect: "read_only_idempotent".into(),
+        }],
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let journal = opensymphony::opensymphony_domain::InMemoryEventJournal::new(128, 128);
+    let server = GatewayServer::with_journal(
+        SnapshotStore::new(snapshot),
+        journal.clone(),
+        opensymphony::opensymphony_domain::StreamBroker::new(journal.clone()),
+    )
+    .with_operator_commands(tx);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server_task = tokio::spawn(async move { server.serve(listener).await.expect("serve") });
+    let client = reqwest::Client::new();
+    let detail: serde_json::Value = client
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("run detail")
+        .json()
+        .await
+        .expect("run JSON");
+    assert_eq!(
+        detail["harness_capability"]["run_binding_id"],
+        "run-worker-613"
+    );
+    let action = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "echo-once".into(),
+        action_kind: ActionKind::HarnessOperation,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Run,
+            entity_id: "COE-255".into(),
+        },
+        payload: Some(
+            serde_json::json!({"run_id":"run-worker-613","operation_id":"fixture.echo","arguments":{"value":"hello"}}),
+        ),
+        idempotency_key: None,
+    };
+    for (field, value) in [
+        ("operation_id", serde_json::json!("unregistered")),
+        ("method", serde_json::json!("unsafe")),
+        ("run_id", serde_json::json!("stale-attempt")),
+    ] {
+        let mut invalid = action.clone();
+        invalid.payload.as_mut().expect("payload")[field] = value;
+        let receipt: ActionReceipt = client
+            .post(format!("http://{address}/api/v1/actions/dispatch"))
+            .json(&invalid)
+            .send()
+            .await
+            .expect("reject")
+            .json()
+            .await
+            .expect("receipt");
+        assert_eq!(receipt.status, ActionStatus::Rejected);
+        assert!(rx.try_recv().is_err());
+    }
+    let response = tokio::spawn({
+        let client = client.clone();
+        let action = action.clone();
+        async move {
+            client
+                .post(format!("http://{address}/api/v1/actions/dispatch"))
+                .json(&action)
+                .send()
+                .await
+                .expect("dispatch")
+        }
+    });
+    let command = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+        .await
+        .expect("command timeout")
+        .expect("command");
+    let opensymphony::opensymphony_gateway::OperatorCommand::HarnessOperation {
+        issue_identifier,
+        run_id,
+        operation_id,
+        arguments,
+        reply,
+        ..
+    } = command
+    else {
+        panic!("harness operation command");
+    };
+    assert_eq!(issue_identifier, "COE-255");
+    assert_eq!(run_id, "run-worker-613");
+    assert_eq!(operation_id, "fixture.echo");
+    assert_eq!(arguments, serde_json::json!({"value":"hello"}));
+    reply
+        .send(Ok(serde_json::json!({"value":"hello"})))
+        .expect("reply");
+    let receipt: ActionReceipt = response.await.expect("task").json().await.expect("receipt");
+    assert_eq!(receipt.status, ActionStatus::Accepted);
+    assert_eq!(receipt.result, Some(serde_json::json!({"value":"hello"})));
+    let events = journal.all_events().await;
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        opensymphony::opensymphony_gateway_schema::event_journal::EventKind::GatewayActionCompleted { .. }
+    ) && event.correlation_id.as_deref() == Some("echo-once")));
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn acp_operator_routes_live_permission_question_and_plan_responses() {
+    use opensymphony::opensymphony_gateway_schema::approval::{
+        OperatorAnswer, OperatorInteraction, OperatorInteractionKind, OperatorOption,
+        OperatorQuestion,
+    };
+    let now = Utc::now();
+    let make = |id: &str, kind, options, questions, plan| OperatorInteraction {
+        request_id: id.into(),
+        run_id: "run-worker-612".into(),
+        issue_id: "issue-612".into(),
+        issue_identifier: "COE-255".into(),
+        session_id: "session-612".into(),
+        generation: 3,
+        rpc_id: "0".into(),
+        kind,
+        title: id.into(),
+        options,
+        questions,
+        plan,
+        requested_at: now,
+        expires_at: now + chrono::Duration::minutes(2),
+    };
+    let option = OperatorOption {
+        id: "opaque-allow".into(),
+        label: "Allow once".into(),
+        kind: "allow_once".into(),
+    };
+    let permission = make(
+        "perm",
+        OperatorInteractionKind::Permission,
+        vec![option],
+        vec![],
+        None,
+    );
+    let mut expired_permission = permission.clone();
+    expired_permission.expires_at = now - chrono::Duration::seconds(1);
+    let question = make(
+        "question",
+        OperatorInteractionKind::Question,
+        vec![],
+        vec![OperatorQuestion {
+            id: "region".into(),
+            prompt: "Region?".into(),
+            options: vec![OperatorOption {
+                id: "west".into(),
+                label: "West".into(),
+                kind: "choice".into(),
+            }],
+            allow_multiple: false,
+        }],
+        None,
+    );
+    let plan = make(
+        "plan",
+        OperatorInteractionKind::PlanApproval,
+        vec![],
+        vec![],
+        Some("Ship".into()),
+    );
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].operator_interactions =
+        vec![permission.clone(), question.clone(), plan.clone()];
+    let store = SnapshotStore::new(snapshot);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let server = GatewayServer::new(store.clone()).with_operator_commands(tx);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server_task = tokio::spawn(async move { server.serve(listener).await.expect("serve") });
+    let client = reqwest::Client::new();
+    let approvals: serde_json::Value = client
+        .get(format!("http://{address}/api/v1/runs/COE-255/approvals"))
+        .send()
+        .await
+        .expect("approvals")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        approvals["approvals"].as_array().expect("approvals").len(),
+        2
+    );
+    let inputs: serde_json::Value = client
+        .get(format!("http://{address}/api/v1/runs/COE-255/inputs"))
+        .send()
+        .await
+        .expect("inputs")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(inputs["inputs"].as_array().expect("inputs").len(), 1);
+
+    for (interaction, kind, answer_fields, expected) in [
+        (
+            permission,
+            ActionKind::ApprovalDecision,
+            serde_json::json!({"decision":"approved","option_id":"opaque-allow"}),
+            "permission",
+        ),
+        (
+            question,
+            ActionKind::InputResponse,
+            serde_json::json!({"outcome":"answered","answers":[{"question_id":"region","selected_option_ids":["west"]}]}),
+            "question",
+        ),
+        (
+            plan,
+            ActionKind::PlanDecision,
+            serde_json::json!({"decision":"approved"}),
+            "plan",
+        ),
+    ] {
+        let mut payload = serde_json::json!({"request_id":interaction.request_id,"run_id":interaction.run_id,
+            "issue_id":interaction.issue_id,"session_id":interaction.session_id,"generation":interaction.generation,
+            "rpc_id":interaction.rpc_id});
+        payload
+            .as_object_mut()
+            .expect("object")
+            .extend(answer_fields.as_object().expect("fields").clone());
+        let action = ActionDispatch {
+            schema_version: Default::default(),
+            correlation_id: format!("corr-{expected}"),
+            action_kind: kind,
+            target_entity: ActionTarget {
+                entity_kind: EntityKind::Run,
+                entity_id: "COE-255".into(),
+            },
+            payload: Some(payload.clone()),
+            idempotency_key: None,
+        };
+        for (field, value) in [
+            ("run_id", serde_json::json!("wrong-run")),
+            ("session_id", serde_json::json!("wrong-session")),
+            ("generation", serde_json::json!(99)),
+            ("rpc_id", serde_json::json!("wrong-rpc")),
+        ] {
+            let mut wrong = action.clone();
+            wrong.payload.as_mut().expect("payload")[field] = value;
+            let receipt: ActionReceipt = client
+                .post(format!("http://{address}/api/v1/actions/dispatch"))
+                .json(&wrong)
+                .send()
+                .await
+                .expect("wrong binding response")
+                .json()
+                .await
+                .expect("wrong binding receipt");
+            assert_eq!(receipt.status, ActionStatus::Rejected, "{field}");
+            assert!(rx.try_recv().is_err(), "wrong binding reached scheduler");
+        }
+        if expected == "permission" {
+            let mut missing = action.clone();
+            missing
+                .payload
+                .as_mut()
+                .expect("payload")
+                .as_object_mut()
+                .expect("object")
+                .remove("option_id");
+            let receipt: ActionReceipt = client
+                .post(format!("http://{address}/api/v1/actions/dispatch"))
+                .json(&missing)
+                .send()
+                .await
+                .expect("missing option response")
+                .json()
+                .await
+                .expect("missing option receipt");
+            assert_eq!(receipt.status, ActionStatus::Rejected);
+            assert!(rx.try_recv().is_err(), "missing option reached scheduler");
+            let mut forged = action.clone();
+            forged.payload.as_mut().expect("payload")["option_id"] =
+                serde_json::json!("unoffered-option");
+            let receipt: ActionReceipt = client
+                .post(format!("http://{address}/api/v1/actions/dispatch"))
+                .json(&forged)
+                .send()
+                .await
+                .expect("invalid option response")
+                .json()
+                .await
+                .expect("invalid option receipt");
+            assert_eq!(receipt.status, ActionStatus::Rejected);
+            assert!(rx.try_recv().is_err(), "unoffered option reached scheduler");
+        }
+        let response = tokio::spawn({
+            let client = client.clone();
+            let url = format!("http://{address}/api/v1/actions/dispatch");
+            let action = action.clone();
+            async move { client.post(url).json(&action).send().await }
+        });
+        let command = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("command timeout")
+            .expect("command");
+        let opensymphony::opensymphony_gateway::OperatorCommand::Response {
+            interaction: command_interaction,
+            answer,
+            reply,
+            ..
+        } = command
+        else {
+            panic!("operator response command");
+        };
+        assert_eq!(command_interaction.request_id, interaction.request_id);
+        assert!(matches!(
+            (&answer, expected),
+            (OperatorAnswer::Permission { .. }, "permission")
+                | (OperatorAnswer::Question { .. }, "question")
+                | (OperatorAnswer::Plan { .. }, "plan")
+        ));
+        reply.send(Ok(())).expect("reply");
+        let receipt: ActionReceipt = response
+            .await
+            .expect("request task")
+            .expect("response")
+            .json()
+            .await
+            .expect("receipt");
+        assert_eq!(receipt.status, ActionStatus::Accepted);
+
+        let duplicate = tokio::spawn({
+            let client = client.clone();
+            let url = format!("http://{address}/api/v1/actions/dispatch");
+            let action = action.clone();
+            async move { client.post(url).json(&action).send().await }
+        });
+        let command = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("duplicate command timeout")
+            .expect("duplicate command");
+        let opensymphony::opensymphony_gateway::OperatorCommand::Response { reply, .. } = command
+        else {
+            panic!("operator response command");
+        };
+        reply
+            .send(Err("operator request is stale or already answered".into()))
+            .expect("duplicate rejection");
+        let duplicate_receipt: ActionReceipt = duplicate
+            .await
+            .expect("duplicate task")
+            .expect("duplicate response")
+            .json()
+            .await
+            .expect("duplicate receipt");
+        assert_eq!(duplicate_receipt.status, ActionStatus::Rejected);
+
+        let mut stale = action.clone();
+        stale.payload.as_mut().expect("payload")["generation"] = serde_json::json!(99);
+        let rejected: ActionReceipt = client
+            .post(format!("http://{address}/api/v1/actions/dispatch"))
+            .json(&stale)
+            .send()
+            .await
+            .expect("stale response")
+            .json()
+            .await
+            .expect("stale receipt");
+        assert_eq!(rejected.status, ActionStatus::Rejected);
+    }
+    let mut expired_snapshot = fixture_snapshot(1);
+    expired_snapshot.issues[0].operator_interactions = vec![expired_permission.clone()];
+    store.publish(expired_snapshot).await;
+    let expired_action = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr-expired".into(),
+        action_kind: ActionKind::ApprovalDecision,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Run,
+            entity_id: "COE-255".into(),
+        },
+        payload: Some(serde_json::json!({
+            "request_id": expired_permission.request_id,
+            "run_id": expired_permission.run_id,
+            "issue_id": expired_permission.issue_id,
+            "session_id": expired_permission.session_id,
+            "generation": expired_permission.generation,
+            "rpc_id": expired_permission.rpc_id,
+            "decision": "approved",
+            "option_id": "opaque-allow"
+        })),
+        idempotency_key: None,
+    };
+    let receipt: ActionReceipt = client
+        .post(format!("http://{address}/api/v1/actions/dispatch"))
+        .json(&expired_action)
+        .send()
+        .await
+        .expect("expired response")
+        .json()
+        .await
+        .expect("expired receipt");
+    assert_eq!(receipt.status, ActionStatus::Rejected);
+    assert!(rx.try_recv().is_err(), "expired option reached scheduler");
     server_task.abort();
 }
 

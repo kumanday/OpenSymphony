@@ -29,6 +29,37 @@ pub struct AcpProfile {
     pub required_capabilities: Vec<String>,
     #[serde(default)]
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub session: AcpSessionConfig,
+    #[serde(default)]
+    pub permissions: AcpPermissionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpPermissionConfig {
+    #[serde(default)]
+    pub mode: AcpPermissionPolicy,
+}
+
+/// `allow_once` is an explicit operator authorization for unattended runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpPermissionPolicy {
+    #[default]
+    Operator,
+    Deny,
+    AllowOnce,
+}
+
+/// Explicit advertised session selections. Values are opaque IDs, never credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSessionConfig {
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -124,9 +155,36 @@ impl AcpProfile {
                 "auth.method_id must be a nonempty bounded opaque identifier without control characters",
             ));
         }
-        if !self.extensions.is_empty() {
+        if self.session.options.len() > 32
+            || self
+                .session
+                .model
+                .iter()
+                .chain(self.session.mode.iter())
+                .chain(self.session.options.keys())
+                .chain(self.session.options.values())
+                .any(|value| {
+                    value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control)
+                })
+        {
             return Err(invalid(
-                "no extension handlers are implemented; extensions must be empty",
+                "session selections must be bounded nonempty opaque identifiers",
+            ));
+        }
+        if self.extensions.len() > 8
+            || self
+                .extensions
+                .iter()
+                .any(|id| !matches!(id.as_str(), "cursor@2026.09.08-6caf4ff" | "fixture_echo@1"))
+            || self
+                .extensions
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.extensions.len()
+        {
+            return Err(invalid(
+                "extensions must name distinct supported contract versions",
             ));
         }
         if self.required_capabilities.iter().any(|c| {
@@ -157,7 +215,7 @@ impl AcpConfig {
         &self,
         harness: &str,
         profile: Option<&str>,
-        model_override: bool,
+        openhands_model_profile: bool,
     ) -> Result<(), WorkflowConfigError> {
         self.validate_profiles()?;
         match (harness, profile) {
@@ -174,9 +232,9 @@ impl AcpConfig {
             }
             _ => {}
         }
-        if harness == "acp" && model_override {
+        if harness == "acp" && openhands_model_profile {
             return Err(invalid(
-                "ACP model overrides require session configuration support, which is not implemented",
+                "routing.model_profile is not supported for ACP; select an ACP session model with routing.model",
             ));
         }
         Ok(())
@@ -188,7 +246,7 @@ impl AcpConfig {
         self.validate_selection(
             &routing.harness,
             routing.harness_profile.as_deref(),
-            routing.model.is_some() || routing.model_profile.is_some(),
+            routing.model_profile.is_some(),
         )
     }
 }

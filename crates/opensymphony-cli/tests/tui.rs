@@ -60,6 +60,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 50_000,
         },
         issues: vec![IssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: "COE-271".to_owned(),
             title: "FrankenTUI operator client".to_owned(),
             tracker_state: "In Progress".to_owned(),

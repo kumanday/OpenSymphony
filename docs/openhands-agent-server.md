@@ -138,6 +138,10 @@ barrier before its primary manifest is written, its pending ownership record
 is cleared only after remote retirement succeeds or equivalent superseded
 evidence is durable; if both operations fail, the pending record remains for
 restart recovery and later cleanup.
+When the configured harness changes, daemon startup applies the same
+run/envelope binding checks to pending OpenHands ownership before deciding
+whether to initialize the OpenHands client and managed server. A valid pending
+owner is promoted for recovery; stale or incompatible ownership is ignored.
 
 ## 6. Conversation model
 
@@ -188,6 +192,10 @@ The internal `opensymphony_openhands` module owns:
 - WebSocket attach/reconcile/reconnect behavior
 - ready-state detection
 - issue session launch and reuse
+
+The local `opensymphony run` worker keeps OpenHands attach and event-poll futures
+off its shared routing stack. Attach runs in a cancellation-owned task, so an
+aborted issue run also aborts its in-flight attach before it can report launch.
 
 Harness interrupt uses `POST /api/conversations/{id}/interrupt` as the primary
 mid-turn stop request. If an older agent-server returns a missing-route status

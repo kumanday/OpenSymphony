@@ -64,12 +64,31 @@ for line in sys.stdin:
             ]
             sys.stdout.write("".join(json.dumps(frame) + "\n" for frame in frames))
             sys.stdout.flush()
+        elif mode in ("pre_response_session_update", "pre_response_authoritative_snapshot", "pre_response_wrong_session", "pre_response_updates_overflow"):
+            announced = "other-session" if mode == "pre_response_wrong_session" else session
+            send({"method": "session/update", "params": {
+                "sessionId": announced,
+                "update": {"sessionUpdate": "current_mode_update", "currentModeId": "code"}}})
+            if mode == "pre_response_updates_overflow":
+                send({"method": "session/update", "params": {
+                    "sessionId": session,
+                    "update": {"sessionUpdate": "current_mode_update", "currentModeId": "plan"}}})
+            result = {"sessionId": session}
+            if mode == "pre_response_authoritative_snapshot":
+                result["modes"] = {"currentModeId": "plan", "availableModes": [{"id": "plan", "name": "Plan"}]}
+            respond(message, result)
         else:
             respond(message, {"sessionId": session})
     elif method == "session/prompt":
         assert message["params"]["sessionId"] == session
         prompt_id = message["id"]
-        if mode == "adjacent_session_update":
+        if mode == "form_no_route":
+            send({"id": "form-no-route", "method": "elicitation/create", "params": {
+                "sessionId": session, "mode": "form", "message": "Choose region",
+                "requestedSchema": {"type": "object", "required": ["region"], "properties": {
+                    "region": {"type": "string", "enum": ["west", "east"]}}}}})
+            continue
+        if mode in ("adjacent_session_update", "pre_response_session_update", "pre_response_authoritative_snapshot"):
             respond(message, {"stopReason": "end_turn"})
             continue
         if mode.startswith("blocked_callbacks_"):
@@ -166,6 +185,10 @@ for line in sys.stdin:
             update("before cancellation response")
             send({"id": prompt_id, "result": {"stopReason": "cancelled"}})
     elif method is None:
+        if mode == "form_no_route" and message["id"] == "form-no-route":
+            assert message["result"] == {"action": "cancel"}
+            send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "paced_queue":
             assert message["error"]["code"] == -32601
             index = int(message["id"].removeprefix("queued-")) + 1

@@ -278,13 +278,11 @@ reject unauthorized alternate roots. Bind terminal IDs and file requests to the
 owning connection/session. Process supervision and callback containment are not
 a sandbox for a trusted local agent that also has direct host access.
 
-The current [gateway approvals handler](https://github.com/kumanday/OpenSymphony/blob/50d8bb777d828515ffacdcd2c2ce9bbc9d3dba52/crates/opensymphony-gateway/src/lib.rs#L5202)
-returns an empty list, and `ApprovalDecision` has no worker response path in the
-inspected CLI/orchestrator code. Therefore operator support requires real wiring:
-worker request event → orchestrator-owned pending request → snapshot/gateway →
-validated operator command → worker response channel. Reuse `ApprovalRequest`
-and `ActionReceipt` for decisions; add a separate input-request payload for
-questions. Never fake successful permission forwarding because a DTO exists.
+The operator path is worker request event → orchestrator-owned pending request →
+snapshot/gateway → validated operator command → worker response channel.
+Permissions and plans appear in `ApprovalRequest`; structured questions appear
+in the run inputs endpoint. The gateway returns an `ActionReceipt` only after
+the live worker acknowledges delivery to the original RPC responder.
 
 Define explicit profile policies: `operator`, `deny`, and `allow_once` for an
 operator-authorized unattended environment. Default to `operator`; headless
@@ -348,19 +346,20 @@ Lifecycle-changing extensions still report through scheduler-owned commands.
 
 ### Concrete vendor handling
 
-Cursor is a useful first extension qualification target. Its documentation lists
-blocking `cursor/ask_question` and `cursor/create_plan`, plus notification methods
-for todos, tasks, and generated images. The documented names omit the standard
-extension prefix. Support those exact names through a Cursor-specific
-compatibility registration after checking captured frames; do not rename their
-wire methods or weaken generic method validation. Classify each actual frame by
-the presence of an RPC ID, including `0`, because request and notification
-behavior must follow the wire envelope.
+Cursor is the first qualified extension. Its documentation lists
+`cursor/ask_question` and `cursor/create_plan` as blocking methods and describes
+todo, task, and generated-image methods as notifications. The authenticated
+pinned CLI instead emitted ID-bearing `cursor/create_plan` and
+`cursor/update_todos` requests without `params.sessionId`. The exact-version
+registration enables those observed methods and binds them to the runtime-owned
+session; question, task, image, and no-ID notification paths remain unqualified.
+Classify each actual frame by the presence of an RPC ID, including `0`, because
+request and notification behavior must follow the wire envelope.
 [Cursor ACP](https://cursor.com/docs/cli/acp).
 
-Map questions to input requests and plans to plan approval; map known
-notifications to existing activity/artifact projections. A received subagent
-notification is evidence about work, not authority to start an OpenSymphony issue.
+Map the qualified plan request to plan approval and the qualified todo request
+to bounded todo activity. A received subagent notification is evidence about
+work, not authority to start an OpenSymphony issue.
 Generic unknown-request handling must never hang the agent or auto-approve it.
 
 Devin CLI should be another profile of the same `acp` adapter. Keep its identity

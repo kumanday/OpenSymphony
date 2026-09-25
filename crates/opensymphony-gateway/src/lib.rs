@@ -4,7 +4,10 @@ use std::{
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -289,7 +292,54 @@ impl Drop for BrokerConnectionGuard {
 }
 
 /// Shared state for the gateway server.
+pub enum OperatorCommand {
+    Response {
+        interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+        answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        delivery: OperatorCommandFence,
+    },
+    HarnessOperation {
+        issue_identifier: String,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+        delivery: OperatorCommandFence,
+    },
+}
+
+/// The gateway's failure receipt and the run loop's scheduler mutation race
+/// through this fence. A queued command can never be applied after cancellation.
+#[derive(Clone, Default)]
+pub struct OperatorCommandFence(Arc<AtomicU8>);
+
+impl OperatorCommandFence {
+    pub fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+struct OperatorCommandReceiptGuard(OperatorCommandFence);
+
+impl Drop for OperatorCommandReceiptGuard {
+    fn drop(&mut self) {
+        // An HTTP handler can disappear before its explicit deadline when the
+        // client disconnects. Only a run-loop claim can outrun this cancel.
+        self.0.cancel();
+    }
+}
+
 pub struct GatewayState {
+    pub operator_commands: Option<tokio::sync::mpsc::Sender<OperatorCommand>>,
     pub store: SnapshotStore,
     pub journal: InMemoryEventJournal,
     pub broker: StreamBroker,
@@ -299,6 +349,8 @@ pub struct GatewayState {
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     pub memory_config: Option<MemoryConfig>,
+    pub harness_profiles:
+        Arc<Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>>,
     /// Normalized (trimmed, lowercased) workflow active-state names. The task
     /// graph consults these to decide whether an Idle issue is actually
     /// dispatchable — the authoritative signal the scheduler itself uses —
@@ -319,6 +371,7 @@ pub struct GatewayState {
 impl Clone for GatewayState {
     fn clone(&self) -> Self {
         Self {
+            operator_commands: self.operator_commands.clone(),
             store: self.store.clone(),
             journal: self.journal.clone(),
             broker: self.broker.clone(),
@@ -328,6 +381,7 @@ impl Clone for GatewayState {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: self.codex_readiness_cache.clone(),
@@ -590,6 +644,7 @@ impl axum::extract::FromRef<GatewayState> for PrUrls {
 /// V1 gateway server that exposes stable public DTO endpoints
 /// on top of the internal control-plane `SnapshotStore`.
 pub struct GatewayServer {
+    operator_commands: Option<tokio::sync::mpsc::Sender<OperatorCommand>>,
     store: SnapshotStore,
     journal: InMemoryEventJournal,
     broker: StreamBroker,
@@ -597,6 +652,8 @@ pub struct GatewayServer {
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     memory_config: Option<MemoryConfig>,
+    harness_profiles:
+        Arc<Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>>,
     active_states: Arc<HashSet<String>>,
     terminal_states: Arc<HashSet<String>>,
     comparison_bases: WorkspaceComparisonBases,
@@ -606,6 +663,7 @@ pub struct GatewayServer {
 impl Clone for GatewayServer {
     fn clone(&self) -> Self {
         Self {
+            operator_commands: self.operator_commands.clone(),
             store: self.store.clone(),
             journal: self.journal.clone(),
             broker: self.broker.clone(),
@@ -613,6 +671,7 @@ impl Clone for GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             comparison_bases: self.comparison_bases.clone(),
@@ -664,6 +723,7 @@ impl GatewayServer {
         let journal =
             InMemoryEventJournal::new(GATEWAY_JOURNAL_CAPACITY, GATEWAY_SUBSCRIBER_CAPACITY);
         Self {
+            operator_commands: None,
             journal: journal.clone(),
             broker: StreamBroker::new(journal.clone()),
             store,
@@ -671,6 +731,7 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            harness_profiles: Arc::new(Vec::new()),
             active_states: Arc::new(HashSet::new()),
             terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
@@ -685,6 +746,7 @@ impl GatewayServer {
         broker: StreamBroker,
     ) -> Self {
         Self {
+            operator_commands: None,
             store,
             journal,
             broker,
@@ -692,11 +754,28 @@ impl GatewayServer {
             linear_mutations: None,
             linear_task_graph: None,
             memory_config: None,
+            harness_profiles: Arc::new(Vec::new()),
             active_states: Arc::new(HashSet::new()),
             terminal_states: Arc::new(HashSet::new()),
             comparison_bases: WorkspaceComparisonBases::default(),
             terminal_ingest_handle: Mutex::new(None),
         }
+    }
+
+    pub fn with_operator_commands(
+        mut self,
+        commands: tokio::sync::mpsc::Sender<OperatorCommand>,
+    ) -> Self {
+        self.operator_commands = Some(commands);
+        self
+    }
+
+    pub fn with_harness_profiles(
+        mut self,
+        profiles: Vec<crate::opensymphony_gateway_schema::capability::HarnessProfileCapability>,
+    ) -> Self {
+        self.harness_profiles = Arc::new(profiles);
+        self
     }
 
     /// Enable serving of the built web client from the given directory.
@@ -773,6 +852,7 @@ impl GatewayServer {
     pub fn router(&self) -> Router {
         let terminal_log_store = Arc::new(tokio::sync::RwLock::new(TerminalLogStore::new()));
         let state = GatewayState {
+            operator_commands: self.operator_commands.clone(),
             store: self.store.clone(),
             journal: self.journal.clone(),
             broker: self.broker.clone(),
@@ -782,6 +862,7 @@ impl GatewayServer {
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
             memory_config: self.memory_config.clone(),
+            harness_profiles: self.harness_profiles.clone(),
             active_states: self.active_states.clone(),
             terminal_states: self.terminal_states.clone(),
             codex_readiness_cache: Arc::new(CodexReadinessCache::default()),
@@ -895,6 +976,7 @@ impl GatewayServer {
             .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
             .route("/api/v1/runs/{run_id}/validation", get(get_run_validation))
             .route("/api/v1/runs/{run_id}/approvals", get(get_run_approvals))
+            .route("/api/v1/runs/{run_id}/inputs", get(get_run_inputs))
             .route("/api/v1/runs/{run_id}/timeline", get(get_run_timeline))
             .route("/api/v1/runs/{run_id}/logs", get(get_run_logs))
             .route(
@@ -1030,6 +1112,7 @@ fn recent_event_kind_to_snapshot_event_kind(
 
 fn build_capabilities() -> GatewayCapabilities {
     GatewayCapabilities {
+        harness_profiles: Vec::new(),
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").into(),
         supported_api_versions: vec!["1.0.0".into()],
@@ -1056,6 +1139,7 @@ fn build_capabilities() -> GatewayCapabilities {
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
             HarnessCapability::codex_app_server_local(),
+            HarnessCapability::acp(),
             HarnessCapability::rust_native_future(),
         ],
         features: vec![
@@ -1156,8 +1240,10 @@ fn build_capabilities() -> GatewayCapabilities {
     }
 }
 
-async fn capabilities() -> Json<GatewayCapabilities> {
-    Json(build_capabilities())
+async fn capabilities(State(state): State<GatewayState>) -> Json<GatewayCapabilities> {
+    let mut capabilities = build_capabilities();
+    capabilities.harness_profiles = state.harness_profiles.as_ref().clone();
+    Json(capabilities)
 }
 
 pub fn model_settings_for_llm_api_key(llm_api_key: Option<&str>) -> ModelSettingsResponse {
@@ -2855,6 +2941,21 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
+async fn await_operator_delivery(
+    received: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    delivery: &OperatorCommandFence,
+    deadline: Duration,
+) -> Result<Result<(), String>, ()> {
+    tokio::pin!(received);
+    match tokio::time::timeout(deadline, &mut received).await {
+        Ok(result) => result.map_err(|_| ()),
+        Err(_) if delivery.cancel() => Err(()),
+        // The run loop has already claimed the command. Its result is now
+        // authoritative; a timeout must not report failure before application.
+        Err(_) => received.await.map_err(|_| ()),
+    }
+}
+
 /// POST /api/v1/actions/dispatch
 ///
 /// Validates the action against the current snapshot state, publishes an audit
@@ -2865,6 +2966,155 @@ async fn dispatch_action(
     Json(action): Json<ActionDispatch>,
 ) -> impl IntoResponse {
     let envelope = state.store.current().await;
+    if action.action_kind == ActionKind::HarnessOperation {
+        let reject = |reason: String| {
+            ActionReceipt::rejected(
+                uuid::Uuid::new_v4().to_string(),
+                action.correlation_id.clone(),
+                action.action_kind,
+                reason,
+            )
+        };
+        let permission = state.action_handler.permission_for_action(&action);
+        if !permission.allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    reject("permission denied for harness operation".into())
+                        .with_permission(permission),
+                ),
+            );
+        }
+        let (issue_identifier, run_id, operation_id, arguments) =
+            match harness_operation_action(&envelope, &action) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let receipt = reject(error);
+                    return (dispatch_rejection_status(&receipt), Json(receipt));
+                }
+            };
+        let Some(commands) = &state.operator_commands else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(reject("harness operation path is unavailable".into())),
+            );
+        };
+        let Ok(permit) = commands.try_reserve() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(reject("harness operation path is unavailable".into())),
+            );
+        };
+        // Reserve capacity, then validate authorization and audit before the
+        // runtime can observe an effect. The permit prevents a queue-full race.
+        let receipt = state
+            .action_handler
+            .dispatch(action.clone(), &envelope)
+            .await;
+        if receipt.status != ActionStatus::Accepted {
+            return (dispatch_rejection_status(&receipt), Json(receipt));
+        }
+        let failed = |reason: String| {
+            let mut failure = receipt.clone();
+            failure.status = ActionStatus::Rejected;
+            failure.reason = Some(reason);
+            failure.expected_followup.clear();
+            failure
+        };
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
+        let (reply, received) = tokio::sync::oneshot::channel();
+        permit.send(OperatorCommand::HarnessOperation {
+            issue_identifier,
+            run_id,
+            operation_id,
+            arguments,
+            reply,
+            delivery: receipt_guard.0.clone(),
+        });
+        let (status, final_receipt) =
+            match tokio::time::timeout(Duration::from_secs(10), received).await {
+                Ok(Ok(Ok(result))) => {
+                    let mut completed = receipt.clone();
+                    completed.result = Some(result);
+                    (StatusCode::OK, completed)
+                }
+                Ok(Ok(Err(error))) => (StatusCode::CONFLICT, failed(error)),
+                Ok(Err(_)) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    failed("harness operation path closed; outcome is unknown".into()),
+                ),
+                Err(_) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    failed("harness operation timed out; outcome is unknown".into()),
+                ),
+            };
+        if let Err(error) =
+            append_harness_operation_outcome(&state.journal, &action, &final_receipt).await
+        {
+            tracing::warn!(?error, "failed to journal harness operation outcome");
+        }
+        return (status, Json(final_receipt));
+    }
+    if matches!(
+        action.action_kind,
+        ActionKind::InputResponse | ActionKind::PlanDecision
+    ) || (action.action_kind == ActionKind::ApprovalDecision
+        && action.target_entity.entity_kind == EntityKind::Run)
+    {
+        let reject = |reason: String| {
+            ActionReceipt::rejected(
+                uuid::Uuid::new_v4().to_string(),
+                action.correlation_id.clone(),
+                action.action_kind,
+                reason,
+            )
+        };
+        let permission = state.action_handler.permission_for_action(&action);
+        if !permission.allowed {
+            let receipt = reject("permission denied for operator response".into())
+                .with_permission(permission);
+            return (StatusCode::FORBIDDEN, Json(receipt));
+        }
+        let (interaction, answer) = match operator_action(&envelope, &action) {
+            Ok(value) => value,
+            Err(error) => {
+                let receipt = reject(error);
+                return (dispatch_rejection_status(&receipt), Json(receipt));
+            }
+        };
+        let Some(commands) = &state.operator_commands else {
+            let receipt = reject("operator response path is unavailable".into());
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
+        };
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
+        let (reply, received) = tokio::sync::oneshot::channel();
+        if commands
+            .try_send(OperatorCommand::Response {
+                interaction,
+                answer,
+                reply,
+                delivery: receipt_guard.0.clone(),
+            })
+            .is_err()
+        {
+            let receipt = reject("operator response path is unavailable".into());
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
+        }
+        match await_operator_delivery(received, &receipt_guard.0, Duration::from_secs(30)).await {
+            Ok(Ok(())) => {
+                let receipt = state.action_handler.dispatch(action, &envelope).await;
+                return (StatusCode::OK, Json(receipt));
+            }
+            Ok(Err(error)) => {
+                let receipt = reject(error);
+                return (StatusCode::CONFLICT, Json(receipt));
+            }
+            Err(()) => {
+                let receipt = reject("operator response delivery timed out".into());
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(receipt));
+            }
+        }
+    }
     let receipt = state.action_handler.dispatch(action, &envelope).await;
 
     match receipt.status {
@@ -2874,6 +3124,238 @@ async fn dispatch_action(
             (status, Json(receipt))
         }
     }
+}
+
+async fn append_harness_operation_outcome(
+    journal: &InMemoryEventJournal,
+    action: &ActionDispatch,
+    receipt: &ActionReceipt,
+) -> Result<(), JournalError> {
+    let kind = if receipt.status == ActionStatus::Accepted {
+        EventKind::GatewayActionCompleted {
+            action: action.action_kind.to_string(),
+        }
+    } else {
+        EventKind::GatewayActionFailed {
+            action: action.action_kind.to_string(),
+            reason: receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "operation failed".into()),
+        }
+    };
+    journal.append(
+        EventRecord::builder()
+            .actor(EventActor::system("gateway"))
+            .correlation_id(action.correlation_id.clone())
+            .entity_ref(EntityRef {
+                kind: EntityKind::Run,
+                id: action.target_entity.entity_id.clone(),
+                identifier: None,
+            })
+            .kind(kind)
+            .summary(format!("Harness operation {}", if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" }))
+            .payload(serde_json::json!({
+                "action_id": receipt.action_id,
+                "correlation_id": action.correlation_id,
+                "status": if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" },
+                "reason": receipt.reason,
+            }))
+            .build()
+    ).await.map(|_| ())
+}
+
+fn harness_operation_action(
+    envelope: &SnapshotEnvelope,
+    action: &ActionDispatch,
+) -> Result<(String, String, String, serde_json::Value), String> {
+    if action.target_entity.entity_kind != EntityKind::Run
+        || action.idempotency_key.is_some()
+        || action.correlation_id.trim().is_empty()
+    {
+        return Err(
+            "harness operation requires a run target, correlation and no replay key".into(),
+        );
+    }
+    let payload = action
+        .payload
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or("harness operation payload is missing")?;
+    if payload.len() != 3
+        || payload
+            .keys()
+            .any(|key| !matches!(key.as_str(), "run_id" | "operation_id" | "arguments"))
+    {
+        return Err("harness operation payload contains unsupported fields".into());
+    }
+    let run_id = payload
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|run_id| !run_id.is_empty() && run_id.len() <= 1024)
+        .ok_or("run_id is missing or invalid")?;
+    let operation_id = payload
+        .get("operation_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("operation_id is missing")?;
+    let arguments = payload
+        .get("arguments")
+        .filter(|arguments| {
+            serde_json::to_vec(arguments).is_ok_and(|bytes| bytes.len() <= 16 * 1024)
+        })
+        .ok_or("operation arguments exceed limits")?;
+    let issue = find_issue_snapshot(envelope, &action.target_entity.entity_id)
+        .ok_or("target run not found")?;
+    if issue.runtime_state != ControlPlaneIssueRuntimeState::Running
+        || issue.harness_capability.as_ref().is_none_or(|capability| {
+            capability.harness != "acp"
+                || capability.run_binding_id.as_deref() != Some(run_id)
+                || !capability
+                    .operations
+                    .iter()
+                    .any(|operation| operation.operation_id == operation_id)
+        })
+    {
+        return Err("operation is not enabled on the active ACP run".into());
+    }
+    Ok((
+        issue.identifier.clone(),
+        run_id.into(),
+        operation_id.into(),
+        arguments.clone(),
+    ))
+}
+
+fn operator_action(
+    envelope: &SnapshotEnvelope,
+    action: &ActionDispatch,
+) -> Result<
+    (
+        crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+        crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+    ),
+    String,
+> {
+    use crate::opensymphony_gateway_schema::approval::{
+        OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
+    };
+    if action.target_entity.entity_kind != EntityKind::Run
+        || action.idempotency_key.is_some()
+        || action.correlation_id.trim().is_empty()
+    {
+        return Err(
+            "operator response requires a run target, unique correlation and no replay key".into(),
+        );
+    }
+    let payload = action
+        .payload
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or("operator response payload is missing")?;
+    let issue = find_issue_snapshot(envelope, &action.target_entity.entity_id)
+        .ok_or("target run not found")?;
+    let request_id = payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("request_id is missing")?;
+    let request = issue
+        .operator_interactions
+        .iter()
+        .find(|request| request.request_id == request_id)
+        .ok_or("operator request is stale or already answered")?;
+    if request.issue_id
+        != payload
+            .get("issue_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+        || request.run_id
+            != payload
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        || request.session_id
+            != payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        || Some(request.generation)
+            != payload
+                .get("generation")
+                .and_then(serde_json::Value::as_u64)
+        || payload.get("rpc_id").and_then(serde_json::Value::as_str)
+            != Some(request.rpc_id.as_str())
+        || request.expires_at <= Utc::now()
+    {
+        return Err("operator request binding is stale or expired".into());
+    }
+    let answer = match (request.kind, action.action_kind) {
+        (OperatorInteractionKind::Permission, ActionKind::ApprovalDecision) => {
+            let decision = payload
+                .get("decision")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("approval decision is missing")?;
+            if decision == "cancelled" {
+                OperatorAnswer::Cancel
+            } else {
+                if !matches!(decision, "approved" | "rejected") {
+                    return Err("invalid approval decision".into());
+                }
+                let id = payload
+                    .get("option_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("permission option_id is required")?;
+                let option = request.options.iter().find(|option| {
+                    option.id == id
+                        && match decision {
+                            "approved" => {
+                                matches!(option.kind.as_str(), "allow_once" | "allow_always")
+                            }
+                            _ => matches!(option.kind.as_str(), "reject_once" | "reject_always"),
+                        }
+                });
+                OperatorAnswer::Permission {
+                    option_id: option
+                        .ok_or("offered permission option is missing or invalid")?
+                        .id
+                        .clone(),
+                }
+            }
+        }
+        (OperatorInteractionKind::Question, ActionKind::InputResponse) => {
+            match payload
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("question outcome is missing")?
+            {
+                "answered" => OperatorAnswer::Question {
+                    answers: serde_json::from_value::<Vec<OperatorQuestionAnswer>>(
+                        payload
+                            .get("answers")
+                            .cloned()
+                            .ok_or("question answers are missing")?,
+                    )
+                    .map_err(|_| "invalid question answer structure")?,
+                },
+                "declined" => OperatorAnswer::Decline,
+                "cancelled" => OperatorAnswer::Cancel,
+                _ => return Err("invalid question outcome".into()),
+            }
+        }
+        (OperatorInteractionKind::PlanApproval, ActionKind::PlanDecision) => {
+            match payload
+                .get("decision")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("plan decision is missing")?
+            {
+                "approved" => OperatorAnswer::Plan { accepted: true },
+                "rejected" => OperatorAnswer::Plan { accepted: false },
+                "cancelled" => OperatorAnswer::Cancel,
+                _ => return Err("invalid plan decision".into()),
+            }
+        }
+        _ => return Err("response kind does not match pending interaction".into()),
+    };
+    Ok((request.clone(), answer))
 }
 
 /// Map rejection reasons to granular HTTP status codes so API consumers can
@@ -4615,6 +5097,7 @@ async fn get_run_detail(
             return (
                 StatusCode::NOT_FOUND,
                 Json(RunDetail {
+                    harness_capability: None,
                     schema_version: SchemaVersion::v1(),
                     run_id,
                     issue_id: String::new(),
@@ -4762,6 +5245,7 @@ async fn get_run_detail(
     (
         StatusCode::OK,
         Json(RunDetail {
+            harness_capability: issue.harness_capability.clone(),
             schema_version: SchemaVersion::v1(),
             run_id: issue.identifier.clone(),
             issue_id: issue.identifier.clone(),
@@ -4798,7 +5282,9 @@ async fn get_run_detail(
             // A Codex run carries a Codex thread id; report the harness so the
             // desktop opens the codex:// deep link instead of the OpenHands
             // workspace-copy fallback.
-            harness_type: if issue.codex_thread_id.is_some() {
+            harness_type: if issue.transport_target.as_deref() == Some("acp") {
+                Some("acp".into())
+            } else if issue.codex_thread_id.is_some() {
                 Some("codex_app_server".into())
             } else {
                 issue.server_base_url.as_ref().map(|_| "openhands".into())
@@ -5345,8 +5831,68 @@ async fn get_run_approvals(
         StatusCode::OK,
         Json(ApprovalListPage {
             run_id: issue.identifier.clone(),
-            approvals: Vec::new(),
+            approvals: issue
+                .operator_interactions
+                .iter()
+                .filter_map(|request| {
+                    use crate::opensymphony_gateway_schema::approval::{
+                        ApprovalKind, ApprovalStatus, OperatorInteractionKind,
+                    };
+                    let kind = match request.kind {
+                        OperatorInteractionKind::Permission => ApprovalKind::ToolUse,
+                        OperatorInteractionKind::PlanApproval => ApprovalKind::PlanPublish,
+                        OperatorInteractionKind::Question => return None,
+                    };
+                    Some(ApprovalRequest {
+                        schema_version: SchemaVersion::v1(),
+                        approval_id: request.request_id.clone(),
+                        run_id: request.run_id.clone(),
+                        issue_id: request.issue_id.clone(),
+                        kind,
+                        title: request.title.clone(),
+                        description: request
+                            .plan
+                            .clone()
+                            .unwrap_or_else(|| "ACP tool permission".into()),
+                        proposed_action: None,
+                        operator_interaction: Some(request.clone()),
+                        actor: None,
+                        target_context: None,
+                        risk_summary: None,
+                        requested_at: request.requested_at,
+                        expires_at: Some(request.expires_at),
+                        status: ApprovalStatus::Pending,
+                        correlation_id: request.request_id.clone(),
+                        decided_at: None,
+                    })
+                })
+                .collect(),
         }),
+    )
+}
+
+async fn get_run_inputs(
+    State(store): State<SnapshotStore>,
+    AxumPath(run_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let envelope = store.current().await;
+    let Some(issue) = find_issue_snapshot(&envelope, &run_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"run_id":run_id,"inputs":[]})),
+        );
+    };
+    let inputs = issue
+        .operator_interactions
+        .iter()
+        .filter(|request| {
+            request.kind
+                == crate::opensymphony_gateway_schema::approval::OperatorInteractionKind::Question
+        })
+        .collect::<Vec<_>>();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"run_id":issue.identifier,"inputs":inputs})),
     )
 }
 
@@ -5763,6 +6309,88 @@ mod tests {
         EventActor, EventKind, StreamErrorType,
     };
     use crate::opensymphony_memory::MemoryRepositorySource;
+
+    #[tokio::test]
+    async fn timed_out_gateway_command_cannot_apply_after_delayed_consume() {
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let now = Utc::now();
+        let delivery = OperatorCommandFence::default();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let (commands, mut queued) = tokio::sync::mpsc::channel(1);
+        assert!(
+            commands
+                .try_send(OperatorCommand::Response {
+                    interaction: OperatorInteraction {
+                        request_id: "queued".into(),
+                        run_id: "run".into(),
+                        issue_id: "issue".into(),
+                        issue_identifier: "COE-612".into(),
+                        session_id: "session".into(),
+                        generation: 1,
+                        rpc_id: "1".into(),
+                        kind: OperatorInteractionKind::Permission,
+                        title: "Permission".into(),
+                        options: Vec::new(),
+                        questions: Vec::new(),
+                        plan: None,
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(1),
+                    },
+                    answer: OperatorAnswer::Cancel,
+                    reply,
+                    delivery: delivery.clone(),
+                })
+                .is_ok(),
+            "queue before busy scheduler tick"
+        );
+
+        assert!(
+            await_operator_delivery(received, &delivery, Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+        let command = queued.recv().await.expect("delayed command");
+        let OperatorCommand::Response {
+            delivery, reply, ..
+        } = command
+        else {
+            panic!("response command");
+        };
+        assert!(!delivery.claim(), "a 503 fences scheduler application");
+        assert!(
+            reply.send(Ok(())).is_err(),
+            "failure receipt already closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_waits_for_ack_after_scheduler_claims_command() {
+        let delivery = OperatorCommandFence::default();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(delivery.claim());
+        let send = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            reply.send(Ok(())).expect("acknowledge claimed command");
+        });
+        assert!(
+            await_operator_delivery(received, &delivery, Duration::from_millis(1))
+                .await
+                .expect("claim waits for actual ack")
+                .is_ok()
+        );
+        send.await.expect("ack task");
+    }
+
+    #[test]
+    fn dropped_gateway_receipt_cancels_unclaimed_command() {
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
+        let delayed_command = receipt_guard.0.clone();
+        drop(receipt_guard);
+        assert!(!delayed_command.claim());
+    }
 
     #[test]
     fn completed_tasks_sort_puts_undated_rows_last_in_both_directions() {
@@ -6485,6 +7113,8 @@ exit 2
         flags: TestIssueFlags,
     ) -> ControlPlaneIssueSnapshot {
         ControlPlaneIssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: "COE-414".into(),
             title: "Test issue".into(),
             tracker_state: "in_progress".into(),

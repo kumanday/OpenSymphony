@@ -2964,8 +2964,16 @@ scheduler:
                 .as_deref(),
             Some("local")
         );
-        let local = WorkflowFrontMatter::default();
+        let mut local = WorkflowFrontMatter::default();
+        local.routing.harness = Some("codex_app_server".into());
+        local.routing.model = Some("repository-model".into());
+        let mut local_profile = resolved.workflow_front_matter.acp.profiles["local"].clone();
+        local_profile.command = "repository-command".into();
+        local.acp.profiles.insert("local".into(), local_profile);
         let merged = merge_repository_local_front_matter(resolved.workflow_front_matter, &local);
+        assert_eq!(merged.routing.harness.as_deref(), Some("acp"));
+        assert!(merged.routing.model.is_none());
+        assert_eq!(merged.acp.profiles["local"].command, "python3");
         assert_eq!(
             merged.acp.profiles["local"].env_refs["AGENT_TOKEN"],
             "ACP_TEST_TOKEN"
@@ -2990,7 +2998,7 @@ scheduler:
         for (replacement, expected) in [
             (
                 "command: python3\n      extensions: [unknown]",
-                "extensions must be empty",
+                "extensions must name distinct supported contract versions",
             ),
             (
                 "command: python3\n      protocol_versions: [2]",
@@ -3040,13 +3048,21 @@ scheduler:
                     .harness,
                 "acp"
             );
-            overrides.insert("TEST_MODEL".into(), "unsupported-model".into());
+            overrides.insert("TEST_MODEL".into(), "selected-model".into());
+            let selected = workflow
+                .resolve(repo.path(), &overrides)
+                .expect("ACP model selection is validated against the peer at launch")
+                .config
+                .routing;
+            assert_eq!(selected.model.as_deref(), Some("selected-model"));
+            assert!(selected.model_from_env);
+            overrides.insert("TEST_MODEL_PROFILE".into(), "openhands-profile".into());
             assert!(
                 workflow
                     .resolve(repo.path(), &overrides)
-                    .expect_err("resolved model override")
+                    .expect_err("OpenHands model profiles have no ACP mapping")
                     .to_string()
-                    .contains("ACP model overrides")
+                    .contains("routing.model_profile is not supported for ACP")
             );
         }
     }

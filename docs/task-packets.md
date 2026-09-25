@@ -41,6 +41,11 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 - COE-565: Implement isolated workspace materialization
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -52,5 +57,10 @@ last_memory_sync: 2026-08-31T00:07:01.088374+00:00
 - COE-565
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -197,6 +197,7 @@ mod tests {
 
     fn sample_conversation(fresh_conversation: bool) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(super::ConversationId::new("conv_260")),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
@@ -1171,6 +1172,37 @@ mod tests {
         let snapshot = execution.snapshot();
         assert_eq!(snapshot.runtime.last_event_at, Some(ts(60)));
         assert_eq!(snapshot.runtime.stalled_at, Some(ts(360)));
+    }
+
+    #[test]
+    fn delayed_operator_resolution_restarts_idle_clock_without_extending_absolute_cap() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(100),
+            Some(sample_conversation(false)),
+        ));
+        // Both an answered request and a callback closed by the peer use this
+        // transition; each may arrive after the prior idle deadline.
+        execution.observe_operator_resolution(ts(500));
+        assert_eq!(execution.snapshot().runtime.stalled_at, Some(ts(600)));
+        execution.observe_operator_resolution(ts(800));
+        assert_eq!(execution.snapshot().runtime.stalled_at, Some(ts(900)));
+
+        let mut capped = super::StallMetadata::with_runtime_cap(
+            ts(50),
+            super::DurationMs::new(100),
+            Some(super::DurationMs::new(700)),
+        );
+        capped.observe_activity(ts(500));
+        assert_eq!(capped.stalled_at, ts(600));
+        capped.observe_activity(ts(800));
+        assert_eq!(capped.stalled_at, ts(750));
     }
 
     #[test]

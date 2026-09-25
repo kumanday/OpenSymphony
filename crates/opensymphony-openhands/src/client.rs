@@ -578,7 +578,7 @@ impl RuntimeEventStream {
 
     pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
         loop {
-            if let Some(event) = self.poll_next_event_once().await? {
+            if let Some(event) = Box::pin(self.poll_next_event_once()).await? {
                 return Ok(Some(event));
             }
 
@@ -1207,10 +1207,19 @@ impl OpenHandsClient {
         conversation_id: Uuid,
         config: RuntimeStreamConfig,
     ) -> Result<RuntimeEventStream, OpenHandsError> {
-        let conversation = self.get_conversation(conversation_id).await?;
-        RuntimeEventStream::new(self.clone(), conversation_id, config, conversation)
-            .attach()
+        let client = self.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let conversation = client.get_conversation(conversation_id).await?;
+            RuntimeEventStream::new(client, conversation_id, config, conversation)
+                .attach()
+                .await
+        });
+        tasks
+            .join_next()
             .await
+            .expect("attach task exists")
+            .map_err(|error| OpenHandsError::transport("attach runtime stream", error))?
     }
 
     pub async fn attach_runtime_stream_with_recent_events(

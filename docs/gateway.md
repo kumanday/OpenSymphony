@@ -153,6 +153,11 @@ baseline, not an issue-workspace overlay.
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 - PR-196: Desktop task and diff latency plus live-refresh UX fixes
 
 ## Source refs
@@ -256,6 +261,11 @@ baseline, not an issue-workspace overlay.
 - COE-567
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 - PR-196
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

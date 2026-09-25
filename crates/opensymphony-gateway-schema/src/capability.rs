@@ -11,6 +11,8 @@ pub struct GatewayCapabilities {
     pub transports: Vec<TransportCapability>,
     #[serde(default)]
     pub harnesses: Vec<HarnessCapability>,
+    #[serde(default)]
+    pub harness_profiles: Vec<HarnessProfileCapability>,
     pub features: Vec<FeatureCapability>,
     pub auth_modes: Vec<AuthMode>,
     pub max_event_page_size: u32,
@@ -128,13 +130,15 @@ pub enum HarnessKind {
     OpenHandsAgentServer,
     CodexAppServer,
     RustNative,
+    Acp,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::OpenHandsAgentServer,
         Self::CodexAppServer,
         Self::RustNative,
+        Self::Acp,
     ];
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -142,6 +146,7 @@ impl HarnessKind {
             "openhands_agent_server" => Some(Self::OpenHandsAgentServer),
             "codex_app_server" => Some(Self::CodexAppServer),
             "rust_native" => Some(Self::RustNative),
+            "acp" => Some(Self::Acp),
             _ => None,
         }
     }
@@ -151,6 +156,7 @@ impl HarnessKind {
             Self::OpenHandsAgentServer => "openhands_agent_server",
             Self::CodexAppServer => "codex_app_server",
             Self::RustNative => "rust_native",
+            Self::Acp => "acp",
         }
     }
 
@@ -163,6 +169,7 @@ impl HarnessKind {
             Self::OpenHandsAgentServer => HarnessCapability::openhands_agent_server(),
             Self::CodexAppServer => HarnessCapability::codex_app_server_local(),
             Self::RustNative => HarnessCapability::rust_native_future(),
+            Self::Acp => HarnessCapability::acp(),
         }
     }
 }
@@ -322,6 +329,39 @@ impl HarnessCapability {
         }
     }
 
+    pub fn acp() -> Self {
+        Self {
+            kind: "acp".into(),
+            display_name: "ACP agent".into(),
+            available: true,
+            adapter_contract_version: "harness-adapter-v1".into(),
+            runtime_contract_version: Some("acp-v1".into()),
+            actions: HarnessActionCapability {
+                start_run: true, send_user_message: false, retry: true, cancel: true,
+                pause: false, resume: false, approve: true, reject: true, comment: false,
+            },
+            event_streams: HarnessEventStreamCapability {
+                runtime_events: true, terminal_frames: false, replay_from_cursor: false,
+                raw_payload_refs: true, delivery_modes: vec!["json_rpc_notifications".into()],
+            },
+            approvals: HarnessApprovalCapability { tool_approval: true, human_decision: true, policy_metadata: false },
+            model_settings: HarnessModelSettingsCapability {
+                api_compatible_settings: false, subscription_credentials: false,
+                per_run_overrides: true, credential_reference_kinds: vec!["env".into()],
+            },
+            transport: HarnessTransportCapability {
+                protocol: "json_rpc_2_0".into(), modes: vec!["stdio".into()], local: true, remote: false,
+            },
+            cancellation: HarnessCancellationCapability { cancel_run: true, force_stop: true, acknowledges_cancel: true },
+            pause_resume: HarnessPauseResumeCapability { pause: false, resume: false },
+            history: HarnessHistoryCapability {
+                fetch_history: false, reconcile_after_ready: false, reconnect_and_replay: false, preserve_unknown_events: true,
+            },
+            notes: vec!["ACP v1 host-owned stdio sessions; profile preflight and negotiated run support are separate from adapter availability.".into(), "Operator responses support offered permission options and bounded required choice forms (string and string-array enums).".into()],
+            feature_gaps: vec!["Free-text, numeric, optional, constrained, request-scoped and URL elicitation are unavailable; unsupported requests are cancelled.".into(), "Cursor vendor methods require version-tested registration in COE-613.".into(), "Context restoration requires negotiated session/load or session/resume support; uncertain prompt delivery remains fenced.".into()],
+        }
+    }
+
     pub fn codex_app_server_future() -> Self {
         Self {
             kind: "codex_app_server".into(),
@@ -470,4 +510,52 @@ pub enum AuthMode {
     ApiKey,
     BearerToken,
     SubscriptionOAuth,
+}
+
+/// A configured profile can pass local preflight without proving agent authentication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessProfileCapability {
+    pub harness: String,
+    pub profile_id: String,
+    pub preflight_ready: bool,
+    pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<HarnessOperationCapability>,
+}
+
+/// Operator-owned extension operation. Arguments omit the session and wire method;
+/// the ACP owner supplies those after binding the current run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessOperationCapability {
+    pub operation_id: String,
+    pub namespace: String,
+    pub version: String,
+    pub capability_predicate: String,
+    pub parameters_schema: serde_json::Value,
+    pub result_schema: serde_json::Value,
+    pub deadline_ms: u64,
+    pub effect: String,
+}
+
+/// Effective features negotiated for one execution; absent usage remains absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessRunCapability {
+    pub harness: String,
+    pub profile_id: String,
+    /// Opaque scheduler attempt binding required for operator operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_binding_id: Option<String>,
+    pub protocol: String,
+    pub protocol_version: u16,
+    pub rpc: String,
+    pub encoding: String,
+    pub framing: String,
+    pub carrier: String,
+    pub session_restore: bool,
+    pub history_replay: bool,
+    pub model_selection: bool,
+    pub cancellation: bool,
+    pub operator_responses: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<HarnessOperationCapability>,
 }

@@ -948,7 +948,17 @@ acp:
         AGENT_API_KEY: OPERATOR_AGENT_API_KEY
       auth:
         method_id: agent_login
+      permissions:
+        mode: operator
 ```
+
+`permissions.mode` defaults to `operator`, which waits for a live operator
+response. `deny` selects an offered `reject_once` option; `allow_once` selects
+an offered `allow_once` option for trusted unattended profiles. If the agent
+does not offer the configured kind, the callback is cancelled. Neither policy
+invents an option ID or grants lasting access. Operator-mode runs require an
+attached response path and use the callback deadline configured by the ACP
+client limits.
 
 Central configuration migration transfers `routing.harness_profile` and the full
 `acp.profiles` map from the legacy workflow before rewriting its prompt body.
@@ -965,8 +975,28 @@ launch. These host API settings are independent of profile protocol capabilities
 `SessionLaunch::require_persistence` rejects peers without negotiated load/resume
 support. The caller supplies a non-secret credential/grant revision and the
 scheduler's exact workspace identity; changes prevent session reuse.
-Production `opensymphony run` routing is a separate implementation slice; an ACP
-route currently fails scheduler capability selection before worker dispatch.
+Production `opensymphony run` selects this profile through the scheduler and
+persists the effective route under the workspace metadata directory. Recovery
+uses the route bound to the prepared `run.json` record even when the current
+default profile differs. If `routing.model` is unset, preparation resolves the
+profile's `session.model` into that route and the runtime envelope. Older run
+records may use the workspace route snapshot
+only when the durable ACP identity matches their run ID and attempt. A finished ACP
+turn reconciles a recovered run only when its durable run ID and attempt match;
+a newly prepared attempt submits its own prompt. ACP-only execution
+does not start an OpenHands server. Production retains at most 128 ACP sessions;
+the scheduler continues to enforce `agent.max_concurrent_agents`. Select a
+different profile only after the retained session can retire safely; uncertain
+submissions remain fenced. The same profile ID starts a fresh owner when its
+effective command, arguments, session options, host services, or resolved
+credential scope changes.
+Credential source names follow the host platform's environment-name rules;
+Windows aliases differing only in ASCII case resolve to the same credential
+when checking whether a retained owner must rotate.
+Managed memory run ID, attempt and project-set values are part of that scope;
+when they change, the retained ACP process is replaced so its environment
+matches the active run. ACP memory prompt guidance uses the scoped worker
+overlay that supplies the managed memory attachment.
 Central profiles remain authoritative over repository-local workflow files.
 Profile shape is validated at central load with the profile ID and specific
 validation cause. Harness/profile selection and model restrictions are validated
@@ -979,25 +1009,110 @@ distinct under host name rules; Windows rejects case-equivalent `env_refs` targe
 before launch, while POSIX preserves case-distinct variables.
 Profile arguments are literal argv entries, never shell templates. `env_refs`
 contains variable names; resolved values stay in the host-owned launch context.
+Profile preflight evaluates the resolved worker environment, including Linear
+client-credentials overrides, with the same precedence used at launch. References
+to checkout-only credential variables are unavailable to ACP profiles, including
+when an ambient value happens to exist. Unrelated non-UTF-8 ambient variables
+are ignored when assembling the launch environment.
 The selected authentication method must be an advertised agent-handled method;
 terminal/browser authentication is not advertised. Omit `auth` for agents with
 existing login state that need no `authenticate` call.
 
-Profiles reject cwd overrides, unsupported wire versions/transports, extension
-handlers, credential arguments regardless of flag casing, and invalid environment
+Profiles reject cwd overrides, unsupported wire versions/transports, unregistered
+extensions, credential arguments regardless of flag casing, and invalid environment
 references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-The current prompt API sends text. ACP model overrides are rejected until the
-session configuration implementation is available. Filesystem, terminal, MCP,
-extension, and operator permission policies are follow-on slices.
+`extensions` accepts `fixture_echo@1` for executable outbound tests and
+`cursor@2026.09.08-6caf4ff` for the pinned CLI's observed plan approval and
+todo request contracts. Cursor callbacks bind to the connection-owned active
+session even when the peer omits `sessionId`. The registration does not enable
+unobserved question, task, or image methods. Duplicate IDs and unspecified
+vendor versions fail validation.
+Registration alone grants no operation: outbound use also requires the peer's
+capability predicate and an active, bound run.
+The prompt API sends text. Explicit session selections live in each profile:
+
+```yaml
+session:
+  model: model-id
+  mode: code
+  options:
+    thought-level: high
+```
+
+`session.model` and `session.mode` select advertised config options by category;
+`session.options` selects by exact option ID, including grouped select values.
+The client applies choices before every prompt, including retained turns,
+validates the returned complete option list, and consumes subsequent config and
+mode updates. Currently supported
+model/mode prerequisites apply before dependent options, using the refreshed
+advertisements after each response. Legacy
+`session/set_mode` is used when the peer supplies modes without config options.
+Unsupported explicit choices fail setup. Boolean options and legacy experimental
+model RPCs are not advertised. `routing.model` and its configured environment override select an ACP model ID
+and take precedence over `session.model`. OpenHands `routing.model_profile` is
+rejected for ACP.
+The negotiated run capability reports model selection when the bound ACP
+session advertises a selectable model option; it updates if that capability
+changes before a retained prompt.
+
+The host supplies `LaunchContext.services: HostServices`. Its `read_files`,
+`write_files`, and `terminals` flags default to false and enable only the matching
+implemented callbacks. `mcp_servers` contains resolved host-owned scoped MCP
+attachments: stdio is baseline support, while HTTP and SSE require the peer's
+advertisement. Every supplied server is required; unsupported transports fail
+before session creation. Existing memory grants can be passed as an HTTP server
+named `opensymphony-memory` with the issued Authorization header. Resolved values
+stay out of the profile. Every stdio MCP argument value is structurally masked
+in captured requests; credential option values in separate and equals forms,
+including generic header values, are also redacted from echoed events and
+stderr. The peer receives the exact host-supplied attachment. ACP operator
+responses use the scheduler-owned pending request path; arbitrary vendor
+extensions remain separately gated.
+
+The gateway publishes each registered outbound operation's parameter and
+result schemas, version, capability predicate, deadline, and effect policy in
+profile and negotiated run capabilities. Clients invoke one through
+`POST /api/v1/actions/dispatch` with `action_kind: harness_operation`, a run
+target, and exactly `run_id`, `operation_id`, and `arguments` in the payload.
+Use `harness_capability.run_binding_id` from the current run detail or snapshot
+as `run_id`; the gateway and scheduler reject stale attempts. The owner resolves
+the wire method and session ID. At most eight outbound operations are outstanding
+per ACP session, and completion or failure is published to the event journal
+with the action correlation ID. The action rejects an
+idempotency key so replay cannot silently repeat an uncertain operation.
 
 ACP credential arguments such as `--access-token`, `--oauth2-bearer`,
 `--client-secret`, and `--pat` are rejected in separate-value and equals forms,
 including mixed case; credentials belong in `env_refs`. A top-level `acp` section
 selects the central configuration parser, so incomplete central files fail
 validation before legacy defaults can be applied.
+
+ACP callback text is bounded by both its facility limit and the complete encoded
+response budget, including JSON escaping and the request ID. A file response that
+does not fit returns a callback parameter error; terminal output retains a UTF-8
+tail and reports truncation. Scoped HTTP/SSE MCP endpoints must use HTTP or HTTPS
+without URL userinfo, fragments or query strings; pass resolved grants in headers.
+MCP attachments cannot include resolved excluded checkout credentials, including
+values aliased under another environment name, header or argument. Filesystem
+contents and terminal output remain intact on the wire and are structurally
+redacted from source history and evidence. Model and mode categories are
+resolved from each refreshed option list so prerequisite selections can reveal
+dependent options.
+
+## Qualified ACP profiles
+
+The [live qualification matrix](acp-live-qualification.md) gives pinned Cursor
+and Devin versions and executable test commands. A new compliant stdio profile
+uses the `routing.harness: acp` and `routing.harness_profile` keys shown
+above, with `command`, `args`, and optional `env_refs`; no vendor-specific
+scheduler code is needed. Profile preflight checks configuration and
+executable availability. Authentication, session load, modes, options, and
+extensions are reported from the negotiated live session. The pinned Cursor
+extension registration is limited to the observed plan and todo request
+methods.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -1181,6 +1296,11 @@ validation before legacy defaults can be applied.
 - COE-567: Implement run lifecycle and process-protocol primitives
 - COE-608: ACP Profiles And Executable Protocol Client
 - COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -1340,5 +1460,10 @@ validation before legacy defaults can be applied.
 - COE-567
 - COE-608
 - COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

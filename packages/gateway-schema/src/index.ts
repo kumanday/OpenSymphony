@@ -155,6 +155,10 @@ export type {
   ApprovalRiskLevel,
   ApprovalRiskSummary,
   ApprovalRequest,
+  OperatorInteraction,
+  OperatorOption,
+  OperatorQuestion,
+  OperatorQuestionAnswer,
   ActionStatus,
   ActionReceiptStatus,
   ExpectedFollowup,
@@ -166,7 +170,7 @@ export type {
 export type { PlanningArtifactKind, PlanningArtifact, PlanningSessionStatus, PlanningSessionSummary } from "./planning.js";
 
 // capability
-export type { AuthMode, TransportCapability, FeatureCapability, GatewayCapabilities } from "./capability.js";
+export type { AuthMode, TransportCapability, FeatureCapability, GatewayCapabilities, HarnessCapability, HarnessProfileCapability, HarnessOperationCapability, HarnessRunCapability } from "./capability.js";
 export { authStateFromError } from "./auth.js";
 export type { AuthState, AuthErrorCode } from "./auth.js";
 

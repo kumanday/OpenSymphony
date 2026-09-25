@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     time::Duration,
 };
 
@@ -16,6 +17,9 @@ use crate::opensymphony_domain::{
     TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceRecord, managed_repository_aliases,
+};
+use crate::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -55,6 +59,54 @@ const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 // requests. The runtime provider evaluates those leaves eight at a time, so
 // reserve one base timeout for each provider batch in the descendant subtree.
 const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
+
+fn validate_operator_answer(
+    request: &OperatorInteraction,
+    answer: &OperatorAnswer,
+) -> Result<(), String> {
+    match (request.kind, answer) {
+        (OperatorInteractionKind::Permission, OperatorAnswer::Permission { option_id })
+            if request.options.iter().any(|option| option.id == *option_id) =>
+        {
+            Ok(())
+        }
+        (OperatorInteractionKind::Question, OperatorAnswer::Question { answers }) => {
+            if answers.len() != request.questions.len() {
+                return Err("question answer count mismatch".into());
+            }
+            for question in &request.questions {
+                let selected = answers
+                    .iter()
+                    .filter(|answer| answer.question_id == question.id)
+                    .collect::<Vec<_>>();
+                if selected.len() != 1
+                    || selected[0].selected_option_ids.is_empty()
+                    || (!question.allow_multiple && selected[0].selected_option_ids.len() != 1)
+                    || selected[0]
+                        .selected_option_ids
+                        .iter()
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != selected[0].selected_option_ids.len()
+                    || selected[0]
+                        .selected_option_ids
+                        .iter()
+                        .any(|id| !question.options.iter().any(|option| option.id == *id))
+                {
+                    return Err("invalid structured question answer".into());
+                }
+            }
+            Ok(())
+        }
+        (OperatorInteractionKind::PlanApproval, OperatorAnswer::Plan { .. })
+        | (
+            OperatorInteractionKind::Question | OperatorInteractionKind::PlanApproval,
+            OperatorAnswer::Decline,
+        )
+        | (_, OperatorAnswer::Cancel) => Ok(()),
+        _ => Err("answer kind or option does not match pending request".into()),
+    }
+}
 
 fn parent_eligibility_timeout(provider_work_units: usize) -> Duration {
     let batches = provider_work_units
@@ -245,10 +297,12 @@ pub struct WorkerStartRequest {
     pub parent_repair: Option<ParentRepairAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessRouteDecision {
     pub task_type: String,
     pub harness_kind: String,
+    #[serde(default)]
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub reason: String,
@@ -264,8 +318,13 @@ impl HarnessRouteDecision {
             .unwrap_or("<default model profile>");
         let model = self.model.as_deref().unwrap_or("<harness default model>");
         let mode = if self.dry_run { "dry-run " } else { "" };
+        let harness_profile = self
+            .harness_profile
+            .as_deref()
+            .map(|profile| format!(" profile `{profile}`"))
+            .unwrap_or_default();
         format!(
-            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
+            "{mode}selected harness `{}`{harness_profile} with model `{model}` and profile `{profile}`: {}",
             self.harness_kind, self.reason
         )
     }
@@ -282,6 +341,14 @@ pub struct WorkerLaunch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum WorkerUpdate {
+    OperatorRequest {
+        worker_id: WorkerId,
+        interaction: OperatorInteraction,
+    },
+    OperatorClosed {
+        worker_id: WorkerId,
+        request_id: String,
+    },
     RuntimeEvent {
         worker_id: WorkerId,
         observed_at: TimestampMs,
@@ -293,6 +360,10 @@ pub enum WorkerUpdate {
     ConversationMetadataUpdate {
         worker_id: WorkerId,
         conversation: ConversationMetadata,
+    },
+    HarnessCapabilityUpdate {
+        worker_id: WorkerId,
+        capability: crate::opensymphony_gateway_schema::capability::HarnessRunCapability,
     },
     TokenUsageUpdate {
         worker_id: WorkerId,
@@ -660,6 +731,42 @@ pub trait WorkerBackend {
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error>;
 
+    async fn respond_operator_request(
+        &mut self,
+        _worker_id: &WorkerId,
+        _request_id: &str,
+        _answer: OperatorAnswer,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Enqueue the answer without waiting for a potentially slow harness
+    /// transport. The scheduler actor completes the decision after the owned
+    /// delivery receipt resolves.
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, Self::Error> {
+        let delivered = self
+            .respond_operator_request(worker_id, request_id, answer)
+            .await?;
+        Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
+    }
+
+    async fn begin_harness_operation(
+        &mut self,
+        _worker_id: &WorkerId,
+        _run_id: &str,
+        _operation_id: &str,
+        _arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, Self::Error> {
+        Ok(HarnessOperationDelivery::new(async {
+            Err("harness operations are unavailable".into())
+        }))
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -678,6 +785,36 @@ pub trait WorkerBackend {
             )),
             timed_out: false,
         })
+    }
+}
+
+pub struct OperatorResponseDelivery(
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'static>>,
+);
+
+impl OperatorResponseDelivery {
+    pub fn new(wait: impl Future<Output = Result<bool, String>> + Send + 'static) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<bool, String> {
+        self.0.await
+    }
+}
+
+pub struct HarnessOperationDelivery(
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'static>>,
+);
+
+impl HarnessOperationDelivery {
+    pub fn new(
+        wait: impl Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    ) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<serde_json::Value, String> {
+        self.0.await
     }
 }
 
@@ -711,6 +848,8 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
+    pending_operator: HashMap<String, (WorkerId, OperatorInteraction)>,
+    responding_operator: HashSet<String>,
     parent_issue_ids: HashSet<IssueId>,
     terminal_undispatched_parent_ids: HashSet<IssueId>,
     terminal_child_failure_ids: HashSet<IssueId>,
@@ -759,6 +898,8 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
+            pending_operator: HashMap::new(),
+            responding_operator: HashSet::new(),
             parent_issue_ids: HashSet::new(),
             terminal_undispatched_parent_ids: HashSet::new(),
             terminal_child_failure_ids: HashSet::new(),
@@ -2116,6 +2257,15 @@ where
         );
 
         let mut snapshot = OrchestratorSnapshot::new(generated_at, daemon, issues);
+        snapshot.operator_interactions = self
+            .pending_operator
+            .values()
+            .filter(|(_, interaction)| interaction.expires_at > Utc::now())
+            .map(|(_, interaction)| interaction.clone())
+            .collect();
+        snapshot
+            .operator_interactions
+            .sort_by(|a, b| a.request_id.cmp(&b.request_id));
         snapshot.hierarchy = self
             .hierarchy_state
             .hierarchy
@@ -2137,6 +2287,151 @@ where
         snapshot
     }
 
+    /// The scheduler owns the decision fence; the worker only delivers the
+    /// validated answer to its live ACP responder.
+    pub async fn respond_operator_request(
+        &mut self,
+        binding: &OperatorInteraction,
+        answer: OperatorAnswer,
+    ) -> Result<(), String> {
+        let delivery = self.begin_operator_response(binding, answer).await?;
+        self.complete_operator_response(binding, delivery.wait().await)
+    }
+
+    /// Bind an operator action to the scheduler's current ACP worker. The
+    /// backend and retained owner perform the profile and peer checks.
+    pub async fn begin_harness_operation(
+        &mut self,
+        issue_identifier: &str,
+        run_id: &str,
+        operation_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, String> {
+        let mut matching = self
+            .executions
+            .values()
+            .filter_map(IssueExecution::current_run)
+            .filter(|run| run.issue_identifier.as_str() == issue_identifier);
+        let run = matching.next().ok_or("operator run is not active")?;
+        if matching.next().is_some()
+            || run_id != format!("run-{}", run.worker_id)
+            || self
+                .worker_metadata
+                .get(&run.worker_id)
+                .is_none_or(|metadata| {
+                    metadata.issue_id != run.issue_id
+                        || metadata.harness_kind.as_deref() != Some("acp")
+                })
+        {
+            return Err("operator run binding is stale or ambiguous".into());
+        }
+        let worker_id = run.worker_id.clone();
+        self.worker
+            .begin_harness_operation(&worker_id, run_id, operation_id, arguments)
+            .await
+            .map_err(|error| format!("ACP operation dispatch failed: {error}"))
+    }
+
+    /// Reserve the live decision in actor-owned state and enqueue it. Waiting
+    /// for the harness flush happens outside the scheduler actor.
+    pub async fn begin_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, String> {
+        let (worker_id, current) = self
+            .pending_operator
+            .get(&binding.request_id)
+            .ok_or("operator request is stale or already answered")?;
+        if current != binding
+            || self.responding_operator.contains(&binding.request_id)
+            || current.expires_at <= Utc::now()
+            || self
+                .worker_metadata
+                .get(worker_id)
+                .is_none_or(|meta| meta.issue_id.as_str() != current.issue_id)
+            || self
+                .executions
+                .get(&IssueId::new(current.issue_id.clone()).map_err(|e| e.to_string())?)
+                .and_then(IssueExecution::current_run)
+                .is_none_or(|run| run.worker_id != *worker_id)
+        {
+            return Err("operator request binding is stale or expired".into());
+        }
+        validate_operator_answer(current, &answer)?;
+        let worker_id = worker_id.clone();
+        self.responding_operator.insert(binding.request_id.clone());
+        match self
+            .worker
+            .begin_operator_response(&worker_id, &binding.request_id, answer)
+            .await
+        {
+            Ok(delivery) => Ok(delivery),
+            Err(error) => {
+                self.responding_operator.remove(&binding.request_id);
+                Err(format!("ACP response delivery failed: {error}"))
+            }
+        }
+    }
+
+    /// Apply a completed delivery only on the orchestrator actor. A retryable
+    /// failure leaves the still-live interaction pending for another answer.
+    pub fn complete_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        delivered: Result<bool, String>,
+    ) -> Result<(), String> {
+        if !self.responding_operator.remove(&binding.request_id) {
+            return Err("operator response attempt is stale".into());
+        }
+        let current = self.pending_operator.get(&binding.request_id).cloned();
+        match delivered {
+            Ok(true) => {
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
+                Ok(())
+            }
+            Ok(false) => {
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
+                Err("ACP responder is no longer live".into())
+            }
+            Err(error) => Err(format!("ACP response delivery failed: {error}")),
+        }
+    }
+
+    fn observe_operator_resolution(
+        &mut self,
+        worker_id: &WorkerId,
+        interaction: &OperatorInteraction,
+    ) {
+        let Ok(issue_id) = IssueId::new(interaction.issue_id.clone()) else {
+            return;
+        };
+        if self
+            .worker_metadata
+            .get(worker_id)
+            .is_none_or(|metadata| metadata.issue_id != issue_id)
+        {
+            return;
+        }
+        if let Some(execution) = self.executions.get_mut(&issue_id)
+            && execution
+                .current_run()
+                .is_some_and(|run| run.worker_id == *worker_id)
+        {
+            execution.observe_operator_resolution(datetime_to_timestamp(Utc::now()));
+        }
+    }
+
     pub async fn bootstrap(
         &mut self,
         observed_at: TimestampMs,
@@ -2153,6 +2448,22 @@ where
 
         self.last_poll_at = Some(observed_at);
         self.refresh_health_from_linear_cooldown(observed_at);
+        Ok(self.snapshot(observed_at))
+    }
+
+    /// Apply queued worker reports without waiting for a tracker polling cycle.
+    pub async fn drain_worker_updates(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<OrchestratorSnapshot, SchedulerError> {
+        let updates = self
+            .worker
+            .poll_updates()
+            .await
+            .map_err(|error| SchedulerError::Worker {
+                detail: error.to_string(),
+            })?;
+        self.apply_worker_updates(updates).await?;
         Ok(self.snapshot(observed_at))
     }
 
@@ -2234,14 +2545,7 @@ where
             self.flush_pending_finished_updates().await?;
         }
 
-        let updates = self
-            .worker
-            .poll_updates()
-            .await
-            .map_err(|error| SchedulerError::Worker {
-                detail: error.to_string(),
-            })?;
-        self.apply_worker_updates(updates).await?;
+        self.drain_worker_updates(observed_at).await?;
         if !self.linear_cooldown_active(observed_at) {
             let freshly_inactive_issue_ids = pre_update_full_snapshot
                 .as_ref()
@@ -6701,6 +7005,66 @@ where
         let mut first_error = None;
         for update in updates {
             match update {
+                WorkerUpdate::OperatorRequest {
+                    worker_id,
+                    interaction,
+                } => {
+                    if let Some(meta) = self.worker_metadata.get(&worker_id)
+                        && meta.harness_kind.as_deref() == Some("acp")
+                        && interaction.issue_id == meta.issue_id.as_str()
+                        && interaction.run_id == format!("run-{worker_id}")
+                        && interaction.generation > 0
+                        && interaction.expires_at > Utc::now()
+                        && !self.pending_operator.contains_key(&interaction.request_id)
+                        && self
+                            .executions
+                            .get(&meta.issue_id)
+                            .is_some_and(|execution| {
+                                execution.status() == SchedulerStatus::Running
+                                    && execution
+                                        .current_run()
+                                        .is_some_and(|run| run.worker_id == worker_id)
+                            })
+                    {
+                        let (reason, summary) = match interaction.kind {
+                            OperatorInteractionKind::Permission => {
+                                ("permission_request", "ACP agent requested permission")
+                            }
+                            OperatorInteractionKind::Question => {
+                                ("form_request", "ACP agent requested form input")
+                            }
+                            OperatorInteractionKind::PlanApproval => {
+                                ("plan_request", "ACP agent requested plan approval")
+                            }
+                        };
+                        if let Some(execution) = self.executions.get_mut(&meta.issue_id) {
+                            execution.observe_runtime_event(
+                                datetime_to_timestamp(Utc::now()),
+                                Some(format!("acp-operator-{}", interaction.request_id)),
+                                Some("acp.waiting_for_input".into()),
+                                Some(summary.into()),
+                                Some(serde_json::json!({
+                                    "reason": reason,
+                                    "operator_responses": true,
+                                })),
+                            )?;
+                        }
+                        self.pending_operator
+                            .insert(interaction.request_id.clone(), (worker_id, interaction));
+                    }
+                }
+                WorkerUpdate::OperatorClosed {
+                    worker_id,
+                    request_id,
+                } => {
+                    if let Some((owner, interaction)) = self.pending_operator.get(&request_id)
+                        && *owner == worker_id
+                    {
+                        let interaction = interaction.clone();
+                        self.pending_operator.remove(&request_id);
+                        self.observe_operator_resolution(&worker_id, &interaction);
+                    }
+                }
                 WorkerUpdate::RuntimeEvent {
                     worker_id,
                     observed_at,
@@ -6763,6 +7127,8 @@ where
                     }
                 }
                 WorkerUpdate::Finished { worker_id, outcome } => {
+                    self.pending_operator
+                        .retain(|_, (owner, _)| *owner != worker_id);
                     let Some(metadata) = self.worker_metadata.remove(&worker_id) else {
                         continue;
                     };
@@ -6835,6 +7201,24 @@ where
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
+                        execution.update_conversation(conversation);
+                    }
+                }
+                WorkerUpdate::HarnessCapabilityUpdate {
+                    worker_id,
+                    capability,
+                } => {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id)
+                        && let Some(mut conversation) = execution.conversation().cloned()
+                    {
+                        conversation.harness_capability = Some(Box::new(capability));
                         execution.update_conversation(conversation);
                     }
                 }
@@ -6930,9 +7314,15 @@ where
                     .get(issue_id)
                     .and_then(ParentIntegrationController::current_attempt_deadline)
                     .is_some_and(|deadline| deadline <= observed_at);
+                let awaiting_input = self.pending_operator.values().any(|(worker, request)| {
+                    request.issue_id == issue_id.as_str()
+                        && request.expires_at > Utc::now()
+                        && self.worker_metadata.contains_key(worker)
+                });
                 match execution.state() {
                     crate::opensymphony_domain::SchedulerState::Running { stall, .. }
-                        if stall.stalled_at <= observed_at || absolute_timeout =>
+                        if (stall.stalled_at <= observed_at && !awaiting_input)
+                            || absolute_timeout =>
                     {
                         Some((issue_id.clone(), absolute_timeout))
                     }
@@ -8902,6 +9292,7 @@ pub fn decide_issue_route(
     Ok(HarnessRouteDecision {
         task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
         harness_kind: config.routing.harness.clone(),
+        harness_profile: config.routing.harness_profile.clone(),
         model: config.routing.model.clone(),
         model_profile: config.routing.model_profile.clone(),
         reason: routing_reason(&config.routing),
@@ -9629,6 +10020,45 @@ fn observe_parent_command_event(
     let Some(payload) = payload else {
         return Ok(());
     };
+    if kind == "acp.command_started" {
+        if let (Some(command_id), Some(command)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload.get("command").and_then(serde_json::Value::as_str),
+        ) {
+            let cwd = payload.get("cwd").and_then(serde_json::Value::as_str);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                command,
+                root,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind == "acp.command_finished" {
+        if let (Some(command_id), Some(exit_code)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                None,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
     if kind == "codex.item/started" || kind == "codex.item/completed" {
         let params = payload.get("params").unwrap_or(payload);
         let item = params.get("item").unwrap_or(params);
@@ -9923,7 +10353,7 @@ mod tests {
     }
 
     #[test]
-    fn openhands_command_events_supply_exit_and_teardown_receipts() {
+    fn runtime_command_events_supply_parent_verification_receipts() {
         let mut controller = ParentIntegrationController::new(
             IssueId::new("parent-command-events").expect("parent id"),
             1,
@@ -10033,6 +10463,49 @@ mod tests {
                 && resource.status
                     == crate::opensymphony_orchestrator::ParentResourceStatus::Released
         }));
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(30),
+            Some("acp-1-2"),
+            Some("acp.command_started"),
+            Some(&serde_json::json!({"command_id":"terminal-1","command":"cargo test","cwd":"/parent/repositories/one"})),
+        )
+        .expect("ACP command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(40),
+            Some("acp-1-4"),
+            Some("acp.command_finished"),
+            Some(&serde_json::json!({"command_id":"terminal-1","exit_code":0})),
+        )
+        .expect("ACP command finish");
+        let evidence = crate::opensymphony_domain::ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".into(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".into(),
+            command_hash: crate::opensymphony_orchestrator::parent_command_identity("cargo test"),
+            root: "checkout-one".into(),
+            repair_repository_id: None,
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt_id, &evidence)
+                .expect("ACP verification evidence")
+        );
     }
 
     #[test]

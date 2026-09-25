@@ -102,10 +102,25 @@ describe("MockGatewayTransport action methods", () => {
   });
 
   it("approvalDecision returns a receipt correlated to the approval", async () => {
+    const dispatch = jest.spyOn(transport, "dispatchAction");
     const result = await transport.approvalDecision("approval-1", "approved", "approved for test");
     assertReceiptShape(result);
     expect(result.correlation_id).toContain("approval-approval-1-");
     expect(result.status).toBe("accepted");
+    expect(dispatch.mock.calls[0][0].target_entity).toEqual({ entity_kind: "approval", entity_id: "approval-1" });
+  });
+
+  it("routes ACP approval decisions by the public issue identifier", async () => {
+    const dispatch = jest.spyOn(transport, "dispatchAction");
+    const interaction = {
+      request_id: "request-1", run_id: "run-1", issue_id: "internal-1",
+      issue_identifier: "COE-612", session_id: "session-1", generation: 1,
+      rpc_id: "7", kind: "permission" as const, title: "Permission",
+      options: [], questions: [], requested_at: "2026-09-23T00:00:00Z",
+      expires_at: "2026-09-24T00:00:00Z",
+    };
+    await transport.approvalDecision("request-1", "approved", undefined, interaction, "allow");
+    expect(dispatch.mock.calls[0][0].target_entity).toEqual({ entity_kind: "run", entity_id: "COE-612" });
   });
 
   it("setActionReceipt overrides generated receipts for a correlation id", async () => {
