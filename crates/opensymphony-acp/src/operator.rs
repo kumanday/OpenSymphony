@@ -9,6 +9,7 @@ use agent_client_protocol::schema::v1::{
     MultiSelectItems, RequestPermissionRequest,
 };
 use chrono::{Duration as ChronoDuration, Utc};
+use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     sync::atomic::{AtomicU8, Ordering},
@@ -74,6 +75,89 @@ fn no_secret_prompt(value: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CursorQuestionRequest {
+    session_id: String,
+    tool_call_id: String,
+    title: Option<String>,
+    questions: Vec<CursorQuestion>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CursorQuestion {
+    id: String,
+    prompt: String,
+    options: Vec<CursorOption>,
+    #[serde(default)]
+    allow_multiple: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorOption {
+    id: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CursorPlanRequest {
+    session_id: Option<String>,
+    tool_call_id: String,
+    name: Option<String>,
+    overview: Option<String>,
+    plan: String,
+    todos: Vec<CursorTodo>,
+    #[serde(default)]
+    is_project: bool,
+    #[serde(default)]
+    phases: Vec<CursorPhase>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorPhase {
+    name: String,
+    todos: Vec<CursorTodo>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorTodo {
+    id: String,
+    content: String,
+    status: String,
+}
+
+fn valid_cursor_meta(meta: &Option<Value>) -> bool {
+    meta.as_ref().is_none_or(|meta| {
+        meta.as_object().is_some_and(|fields| {
+            fields.len() <= 8
+                && fields.iter().all(|(key, value)| {
+                    (key.contains('/')
+                        || matches!(key.as_str(), "traceparent" | "tracestate" | "baggage"))
+                        && key.len() <= 128
+                        && serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 4096)
+                })
+        })
+    })
+}
+
+fn valid_cursor_todo(todo: &CursorTodo) -> bool {
+    bounded(&todo.id, 128)
+        && bounded(&todo.content, 2048)
+        && matches!(
+            todo.status.as_str(),
+            "pending" | "in_progress" | "completed" | "cancelled"
+        )
 }
 
 pub(super) fn same_binding_ids(safe: &OperatorInteraction, original: &OperatorInteraction) -> bool {
@@ -258,10 +342,100 @@ pub(super) fn parse_interaction(
                 None,
             )
         }
+        "cursor/ask_question" => {
+            let request: CursorQuestionRequest =
+                serde_json::from_value(params.clone()).map_err(|_| invalid())?;
+            if request.session_id != session_id
+                || !bounded(&request.tool_call_id, 128)
+                || !valid_cursor_meta(&request.meta)
+                || request.questions.is_empty()
+                || request.questions.len() > 8
+            {
+                return Err(invalid());
+            }
+            let title = request.title.unwrap_or_else(|| "Cursor question".into());
+            let mut ids = HashSet::new();
+            let mut questions = Vec::new();
+            for question in request.questions {
+                if !bounded(&question.id, 128)
+                    || !ids.insert(question.id.clone())
+                    || !bounded(&question.prompt, 2048)
+                    || !no_secret_prompt(&question.prompt)
+                    || question.options.is_empty()
+                    || question.options.len() > 32
+                {
+                    return Err(invalid());
+                }
+                let mut option_ids = HashSet::new();
+                let options = question
+                    .options
+                    .into_iter()
+                    .map(|option| {
+                        if !bounded(&option.id, 128)
+                            || !bounded(&option.label, 1024)
+                            || !no_secret_prompt(&option.label)
+                            || !option_ids.insert(option.id.clone())
+                        {
+                            return Err(invalid());
+                        }
+                        Ok(OperatorOption {
+                            id: option.id,
+                            label: option.label,
+                            kind: "choice".into(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                questions.push(OperatorQuestion {
+                    id: question.id,
+                    prompt: question.prompt,
+                    options,
+                    allow_multiple: question.allow_multiple,
+                });
+            }
+            (
+                OperatorInteractionKind::Question,
+                title,
+                Vec::new(),
+                questions,
+                None,
+            )
+        }
+        "cursor/create_plan" => {
+            let request: CursorPlanRequest =
+                serde_json::from_value(params.clone()).map_err(|_| invalid())?;
+            if request
+                .session_id
+                .as_deref()
+                .is_some_and(|id| id != session_id)
+                || !bounded(&request.tool_call_id, 128)
+                || !valid_cursor_meta(&request.meta)
+                || request.plan.trim().is_empty()
+                || request.plan.len() > 64 * 1024
+                || request.todos.len() > 128
+                || request.phases.len() > 32
+                || request.todos.iter().any(|todo| !valid_cursor_todo(todo))
+                || request.phases.iter().any(|phase| {
+                    !bounded(&phase.name, 1024)
+                        || phase.todos.len() > 128
+                        || phase.todos.iter().any(|todo| !valid_cursor_todo(todo))
+                })
+            {
+                return Err(invalid());
+            }
+            let _ = request.is_project;
+            let _ = request.overview;
+            (
+                OperatorInteractionKind::PlanApproval,
+                request.name.unwrap_or_else(|| "Cursor plan".into()),
+                Vec::new(),
+                Vec::new(),
+                Some(request.plan),
+            )
+        }
         _ => return Err(agent_client_protocol::Error::method_not_found()),
     };
     if !bounded(&title, 2048)
-        || !no_secret_prompt(&title)
+        || (kind != OperatorInteractionKind::PlanApproval && !no_secret_prompt(&title))
         || !rpc_id.is_number() && !rpc_id.is_string()
     {
         return Err(invalid());
@@ -389,6 +563,38 @@ pub(super) fn response_for(interaction: &OperatorInteraction, answer: OperatorAn
             OperatorAnswer::Plan { accepted: false } | OperatorAnswer::Decline,
         ) => json!({"outcome": {"outcome": "rejected"}}),
         (OperatorInteractionKind::PlanApproval, _) => json!({"outcome": {"outcome": "cancelled"}}),
+    }
+}
+
+/// Cursor's documented question result uses an `outcome` envelope instead of
+/// standard ACP form elicitation's `action`/`content` result.
+pub(super) fn response_for_method(
+    method: &str,
+    interaction: &OperatorInteraction,
+    answer: OperatorAnswer,
+) -> Value {
+    let response = response_for(interaction, answer);
+    if method != "cursor/ask_question" {
+        return response;
+    }
+    match response.get("action").and_then(Value::as_str) {
+        Some("accept") => {
+            let answers = interaction
+                .questions
+                .iter()
+                .map(|question| {
+                    let selected = &response["content"][&question.id];
+                    let selected_option_ids = selected
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_else(|| vec![selected.clone()]);
+                    json!({"questionId": question.id, "selectedOptionIds": selected_option_ids})
+                })
+                .collect::<Vec<_>>();
+            json!({"outcome":{"outcome":"answered","answers":answers}})
+        }
+        Some("decline") => json!({"outcome":{"outcome":"skipped"}}),
+        _ => json!({"outcome":{"outcome":"cancelled"}}),
     }
 }
 
@@ -545,6 +751,68 @@ mod tests {
             response_for(&interaction, OperatorAnswer::Decline)["action"],
             "decline"
         );
+    }
+
+    #[test]
+    fn cursor_question_and_plan_use_vendor_response_contracts() {
+        let question = parse_interaction(
+            "cursor/ask_question",
+            &json!({"sessionId":"s","toolCallId":"call-q","questions":[{"id":"mode","prompt":"Mode?","options":[{"id":"agent","label":"Agent"},{"id":"plan","label":"Plan"}]}],"_meta":{"traceparent":"trace"}}),
+            json!(0), "s", Duration::from_secs(30),
+        ).expect("Cursor question");
+        let answered = response_for_method(
+            "cursor/ask_question",
+            &question,
+            OperatorAnswer::Question {
+                answers: vec![OperatorQuestionAnswer {
+                    question_id: "mode".into(),
+                    selected_option_ids: vec!["plan".into()],
+                }],
+            },
+        );
+        assert_eq!(
+            answered,
+            json!({"outcome":{"outcome":"answered","answers":[{"questionId":"mode","selectedOptionIds":["plan"]}]}})
+        );
+        assert_eq!(
+            response_for_method("cursor/ask_question", &question, OperatorAnswer::Decline),
+            json!({"outcome":{"outcome":"skipped"}})
+        );
+        assert_eq!(
+            response_for_method("cursor/ask_question", &question, OperatorAnswer::Cancel),
+            json!({"outcome":{"outcome":"cancelled"}})
+        );
+        assert!(
+            parse_interaction(
+                "cursor/ask_question",
+                &json!({"sessionId":"other","toolCallId":"call-q","questions":[]}),
+                json!(0),
+                "s",
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
+
+        let plan = parse_interaction(
+            "cursor/create_plan",
+            &json!({"sessionId":"s","toolCallId":"call-p","plan":"1. Verify","todos":[{"id":"t1","content":"Verify","status":"pending"}]}),
+            json!(1), "s", Duration::from_secs(30),
+        ).expect("Cursor plan");
+        assert_eq!(plan.kind, OperatorInteractionKind::PlanApproval);
+        assert_eq!(
+            response_for_method(
+                "cursor/create_plan",
+                &plan,
+                OperatorAnswer::Plan { accepted: true }
+            ),
+            json!({"outcome":{"outcome":"accepted"}})
+        );
+        let credential_plan = parse_interaction(
+            "cursor/create_plan",
+            &json!({"sessionId":"s","toolCallId":"call-credentials","name":"Rotate credentials","plan":"Validate token handling","todos":[{"id":"t1","content":"Update secret storage","status":"pending"}]}),
+            json!(2), "s", Duration::from_secs(30),
+        ).expect("plan text can discuss credential-related code");
+        assert_eq!(credential_plan.title, "Rotate credentials");
     }
 
     #[test]

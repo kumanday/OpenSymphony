@@ -566,6 +566,18 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
     let rendered = serde_yaml::to_string(&resolved.extensions.acp).expect("render");
     assert!(rendered.contains("AUTH_SOURCE"));
     assert!(!rendered.contains("auth-secret"));
+    let configured = WorkflowDefinition::parse(&source.replace(
+        "args: [agent.py]",
+        "args: [agent.py]\n      extensions: [fixture_echo@1]",
+    ))
+    .expect("versioned ACP profile");
+    assert!(configured.resolve(Path::new("/repo"), &env).is_ok());
+    let qualified_cursor = WorkflowDefinition::parse(&source.replace(
+        "args: [agent.py]",
+        "args: [agent.py]\n      extensions: [cursor@2026.09.08-6caf4ff]",
+    ))
+    .expect("versioned Cursor profile");
+    assert!(qualified_cursor.resolve(Path::new("/repo"), &env).is_ok());
     for (old, new) in [
         ("harness_profile: fake", "harness_profile: missing"),
         ("args: [agent.py]", "args: ['--TOKEN=secret']"),
@@ -575,6 +587,10 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         ("args: [agent.py]", "transport: http"),
         ("args: [agent.py]", "protocol_versions: [2]"),
         ("args: [agent.py]", "extensions: [cursor]"),
+        (
+            "args: [agent.py]",
+            "extensions: [cursor@2026.09.08-unsupported]",
+        ),
         ("args: [agent.py]", "required_capabilities: [unknown]"),
         ("AUTH_SOURCE", "literal-secret-value"),
         ("args: [agent.py]", "auth: {method_id: ''}"),
@@ -1230,6 +1246,12 @@ fn acp_adapter_exposes_execution_and_explicit_gaps() {
     assert!(capability.actions.approve && capability.approvals.human_decision);
     assert!(!capability.pause_resume.resume);
     assert!(!capability.feature_gaps.is_empty());
+    let public = serde_json::to_value(capability).expect("public adapter capability");
+    assert_eq!(public["kind"], "acp");
+    assert!(
+        public.get("method").is_none(),
+        "wire methods stay inside ACP"
+    );
 }
 
 fn services_profile(mode: &str) -> AcpProfile {

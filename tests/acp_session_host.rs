@@ -1,7 +1,8 @@
+use futures_util::future::join_all;
 use opensymphony::opensymphony_gateway_schema::approval::{
     OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
 };
-use opensymphony::opensymphony_workflow::AcpPermissionPolicy;
+use opensymphony::opensymphony_workflow::{AcpAuth, AcpPermissionPolicy};
 use opensymphony::{opensymphony_acp::*, opensymphony_workspace::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -127,6 +128,574 @@ async fn retire(handle: &SessionHandle) {
         .control(SessionControl::Retire)
         .await
         .expect("quiescent retirement");
+}
+
+#[tokio::test]
+async fn registered_outbound_operation_binds_session_and_preserves_metadata() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-ECHO", "extension_echo").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    let handle = host.open(request).await.expect("open");
+    let initial = handle.inspect().await.expect("inspect");
+    assert_eq!(initial.state.enabled_operations.len(), 1);
+    let handle_for_prompt = handle.clone();
+    let prompt = tokio::spawn(async move {
+        handle_for_prompt
+            .prompt(
+                "echo-run".into(),
+                1,
+                "extension-echo".into(),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("EXTENSION-ECHO/extension-ready").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    assert!(matches!(
+        handle
+            .operation(
+                "wrong-run".into(),
+                "fixture.echo".into(),
+                serde_json::json!({"value":"hello"})
+            )
+            .await,
+        Err(HostError::IdentityMismatch)
+    ));
+    assert!(
+        handle
+            .operation(
+                "echo-run".into(),
+                "other".into(),
+                serde_json::json!({"value":"hello"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        handle
+            .operation(
+                "echo-run".into(),
+                "fixture.echo".into(),
+                serde_json::json!({"value":"hello","method":"unsafe"})
+            )
+            .await
+            .is_err()
+    );
+    let result = handle
+        .operation(
+            "echo-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+        .await
+        .expect("registered operation");
+    assert_eq!(
+        result,
+        serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}})
+    );
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn outbound_response_preceding_prompt_completion_is_never_lost() {
+    // The peer writes the operation result and prompt completion back-to-back.
+    // Repetition catches scheduling differences between SDK waiter delivery
+    // and the retained host's prompt-completion branch.
+    for trial in 0..24 {
+        let root = tempfile::tempdir().expect("temp");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let mut request = launch(root.path(), "EXTENSION-RACE", "extension_echo").await;
+        request.profile.extensions.push("fixture_echo@1".into());
+        let handle = host.open(request).await.expect("open");
+        let prompt_handle = handle.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_handle
+                .prompt(
+                    "echo-race-run".into(),
+                    1,
+                    "extension-echo".into(),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("EXTENSION-RACE/extension-ready").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("peer ready");
+        let result = handle
+            .operation(
+                "echo-race-run".into(),
+                "fixture.echo".into(),
+                serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("trial {trial} lost correlated operation result: {error}")
+            });
+        assert_eq!(result["value"], "hello", "trial {trial}");
+        assert!(
+            prompt
+                .await
+                .expect("prompt task")
+                .expect("prompt")
+                .succeeded()
+        );
+        retire(&handle).await;
+    }
+}
+
+#[tokio::test]
+async fn outbound_operation_redacts_known_secrets_in_value_and_metadata() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-SECRET", "extension_echo_secret").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    request.context.environment.insert(
+        "ACCESS_TOKEN".into(),
+        "synthetic-operation-secret-613".into(),
+    );
+    let handle = host.open(request).await.expect("open");
+    let prompt_handle = handle.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_handle
+            .prompt(
+                "echo-secret-run".into(),
+                1,
+                "extension-echo".into(),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root
+            .path()
+            .join("EXTENSION-SECRET/extension-ready")
+            .exists()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    let result = handle
+        .operation(
+            "echo-secret-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+        .await
+        .expect("registered operation");
+    assert_eq!(
+        result,
+        serde_json::json!({"value":"[redacted]","_meta":{"traceparent":"[redacted]"}})
+    );
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("result")
+            .contains("synthetic-operation-secret-613")
+    );
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    retire(&handle).await;
+}
+
+#[tokio::test]
+async fn outbound_operation_timeout_reports_unknown_without_retry() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-TIMEOUT", "extension_echo_timeout").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    request.limits.prompt_timeout = Duration::from_secs(8);
+    let handle = host.open(request).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let handle_for_prompt = handle.clone();
+    let prompt_cancel = cancellation.clone();
+    let prompt = tokio::spawn(async move {
+        handle_for_prompt
+            .prompt(
+                "echo-timeout-run".into(),
+                1,
+                "extension-echo".into(),
+                prompt_cancel,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root
+            .path()
+            .join("EXTENSION-TIMEOUT/extension-ready")
+            .exists()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    let result = handle
+        .operation(
+            "echo-timeout-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(HostError::Client(message)) if message.contains("outcome is unknown"))
+    );
+    let count = std::fs::read_to_string(
+        root.path()
+            .join("EXTENSION-TIMEOUT/extension-request-count"),
+    )
+    .expect("request marker");
+    assert_eq!(
+        count.lines().count(),
+        1,
+        "deadline must not retry a request"
+    );
+    cancellation.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(3), prompt)
+        .await
+        .expect("prompt completion");
+}
+
+#[tokio::test]
+async fn outbound_operation_inflight_limit_rejects_ninth_request() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "EXTENSION-LIMIT", "extension_echo_timeout").await;
+    request.profile.extensions.push("fixture_echo@1".into());
+    request.limits.prompt_timeout = Duration::from_secs(8);
+    let handle = host.open(request).await.expect("open");
+    let cancellation = CancellationToken::new();
+    let prompt_handle = handle.clone();
+    let prompt_cancel = cancellation.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_handle
+            .prompt(
+                "echo-limit-run".into(),
+                1,
+                "extension-echo".into(),
+                prompt_cancel,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !root.path().join("EXTENSION-LIMIT/extension-ready").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer ready");
+    let results = join_all((0..9).map(|_| {
+        handle.operation(
+            "echo-limit-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+    }))
+    .await;
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(HostError::ResourceLimit)))
+            .count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|result| matches!(result, Err(HostError::Client(message)) if message.contains("outcome is unknown"))).count(), 8);
+    let count =
+        std::fs::read_to_string(root.path().join("EXTENSION-LIMIT/extension-request-count"))
+            .expect("request marker");
+    assert_eq!(count.lines().count(), 8);
+    let later = join_all((0..8).map(|_| {
+        handle.operation(
+            "echo-limit-run".into(),
+            "fixture.echo".into(),
+            serde_json::json!({"value":"hello","_meta":{"traceparent":"trace-echo"}}),
+        )
+    }))
+    .await;
+    assert!(
+        later
+            .iter()
+            .all(|result| matches!(result, Err(HostError::ResourceLimit)))
+    );
+    let count =
+        std::fs::read_to_string(root.path().join("EXTENSION-LIMIT/extension-request-count"))
+            .expect("request marker");
+    assert_eq!(
+        count.lines().count(),
+        8,
+        "timed-out SDK replies still consume permits"
+    );
+    cancellation.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(3), prompt)
+        .await
+        .expect("prompt completion");
+}
+
+#[tokio::test]
+async fn cursor_request_id_zero_uses_vendor_plan_and_todo_results() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CURSOR-EXTENSION", "none").await;
+    request
+        .profile
+        .extensions
+        .push("cursor@2026.09.08-6caf4ff".into());
+    let handle = host.open(request).await.expect("open");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let handle_for_prompt = handle.clone();
+    let prompt = tokio::spawn(async move {
+        handle_for_prompt
+            .prompt_with_operator(
+                "cursor-run".into(),
+                1,
+                "cursor-extension".into(),
+                CancellationToken::new(),
+                Some(tx),
+            )
+            .await
+    });
+    let opened = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(AcpOperatorEvent::Opened(opened)) = rx.recv().await {
+                break opened;
+            }
+        }
+    })
+    .await
+    .expect("operator event");
+    assert_eq!(
+        opened.interaction.kind,
+        OperatorInteractionKind::PlanApproval
+    );
+    let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+    assert!(
+        opened
+            .reply
+            .send(AcpOperatorReply {
+                answer: OperatorAnswer::Plan { accepted: true },
+                acknowledgement,
+                delivery: AcpOperatorDeliveryFence::default(),
+            })
+            .is_ok()
+    );
+    assert!(delivered.await.expect("acknowledged"));
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    let methods =
+        std::fs::read_to_string(root.path().join("CURSOR-EXTENSION/methods")).expect("method log");
+    assert!(!methods.contains("None"));
+    retire(&handle).await;
+}
+
+// Manual qualification only: CI has no authenticated Cursor CLI. The fixture
+// above remains the deterministic contract regression.
+fn pinned_cursor_binary() -> String {
+    let binary = std::env::var("OPENSYMPHONY_CURSOR_AGENT_BIN")
+        .expect("set OPENSYMPHONY_CURSOR_AGENT_BIN to the authenticated pinned CLI");
+    let version = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("Cursor CLI version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("2026.09.08-6caf4ff"));
+    binary
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn pinned_cursor_live_plan_uses_production_operator_route() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CURSOR-LIVE-PLAN", "none").await;
+    request.profile.command = pinned_cursor_binary();
+    request.profile.args = vec!["acp".into()];
+    request.profile.auth = Some(AcpAuth {
+        method_id: "cursor_login".into(),
+    });
+    request
+        .profile
+        .extensions
+        .push("cursor@2026.09.08-6caf4ff".into());
+    request.profile.session.mode = Some("plan".into());
+    request
+        .context
+        .environment
+        .insert("HOME".into(), std::env::var("HOME").expect("HOME"));
+    request.limits.setup_timeout = Duration::from_secs(30);
+    request.limits.prompt_timeout = Duration::from_secs(150);
+    request.limits.callback_timeout = Duration::from_secs(90);
+    // A long plan streams many chunks after the callback; keep its source
+    // frame in the manual test's bounded history until final assertions.
+    request.limits.queued_frames = 1024;
+    request.limits.queued_bytes = 8 * 1024 * 1024;
+    request.limits.evidence_frames = 1024;
+    request.limits.evidence_bytes = 8 * 1024 * 1024;
+    let handle = host.open(request).await.expect("open authenticated CLI");
+    let owner_session = handle
+        .inspect()
+        .await
+        .expect("inspect")
+        .state
+        .session_id
+        .expect("session");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let handle_for_prompt = handle.clone();
+    let prompt = tokio::spawn(async move {
+        handle_for_prompt.prompt_with_operator(
+            "cursor-live-plan".into(), 1,
+            "Read-only ACP protocol test. Create a plan for answering a color-choice question entirely in chat. Present it through your CreatePlan tool for operator approval and wait for the result. Do not inspect or modify files, run commands, browse, or use MCP.".into(),
+            CancellationToken::new(), Some(tx),
+        ).await
+    });
+    let opened = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if let Some(AcpOperatorEvent::Opened(opened)) = rx.recv().await {
+                break opened;
+            }
+        }
+    })
+    .await
+    .expect("real plan callback");
+    assert_eq!(
+        opened.interaction.kind,
+        OperatorInteractionKind::PlanApproval
+    );
+    assert_eq!(opened.interaction.session_id, owner_session);
+    let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+    assert!(
+        opened
+            .reply
+            .send(AcpOperatorReply {
+                answer: OperatorAnswer::Plan { accepted: false },
+                acknowledgement,
+                delivery: AcpOperatorDeliveryFence::default(),
+            })
+            .is_ok()
+    );
+    assert!(delivered.await.expect("response delivered"));
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    let frames: Vec<_> = handle
+        .source_history()
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            if let SessionEvent::Source { frame, .. } = event {
+                Some(frame)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(frames.iter().any(|frame| frame.direction == "incoming"
+        && frame.payload["method"] == "cursor/create_plan"
+        && frame.payload["id"] == 0
+        && frame.payload["params"].get("sessionId").is_none()));
+    assert!(frames.iter().any(|frame| frame.direction == "outgoing"
+        && frame.payload["id"] == 0
+        && frame.payload["result"] == serde_json::json!({"outcome":{"outcome":"rejected"}})));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn pinned_cursor_live_todo_request_gets_response() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CURSOR-LIVE-TODO", "none").await;
+    request.profile.command = pinned_cursor_binary();
+    request.profile.args = vec!["acp".into()];
+    request.profile.auth = Some(AcpAuth {
+        method_id: "cursor_login".into(),
+    });
+    request
+        .profile
+        .extensions
+        .push("cursor@2026.09.08-6caf4ff".into());
+    request
+        .context
+        .environment
+        .insert("HOME".into(), std::env::var("HOME").expect("HOME"));
+    request.limits.setup_timeout = Duration::from_secs(30);
+    request.limits.prompt_timeout = Duration::from_secs(150);
+    let handle = host.open(request).await.expect("open authenticated CLI");
+    let owner_session = handle
+        .inspect()
+        .await
+        .expect("inspect")
+        .state
+        .session_id
+        .expect("session");
+    assert!(handle.prompt(
+        "cursor-live-todo".into(), 1,
+        "Read-only ACP protocol test. Use built-in todo tracking to record one todo, 'Answer the color probe', mark it completed, then answer blue. Do not inspect or modify files, run commands, browse, or use MCP.".into(),
+        CancellationToken::new(),
+    ).await.expect("prompt").succeeded());
+    let history = handle.source_history();
+    let mut projection = RuntimeProjection::default().with_cursor(true, Some(&owner_session), None);
+    let todo_updates: Vec<_> = history
+        .events
+        .iter()
+        .filter_map(|event| projection.apply(event, "cursor-live-todo"))
+        .filter(|update| update.kind == "vendor_todos")
+        .collect();
+    assert_eq!(
+        todo_updates.len(),
+        1,
+        "only the accepted response projects todos"
+    );
+    let frames: Vec<_> = history
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            if let SessionEvent::Source { frame, .. } = event {
+                Some(frame)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(frames.iter().any(|frame| frame.direction == "incoming"
+        && frame.payload["method"] == "cursor/update_todos"
+        && frame.payload["id"] == 0
+        && frame.payload["params"].get("sessionId").is_none()));
+    assert!(frames.iter().any(|frame| frame.direction == "outgoing"
+        && frame.payload["id"] == 0
+        && frame.payload["result"]["outcome"]["outcome"] == "accepted"
+        && frame.payload["result"]["outcome"]["todos"].is_array()));
+    retire(&handle).await;
 }
 async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {
     handle

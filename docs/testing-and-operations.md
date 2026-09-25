@@ -659,6 +659,25 @@ cancel responses, private large numeric peer RPC IDs with generated public
 binding tokens, disabled Cursor methods, and form-only
 capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
+The extension peer verifies a registered outbound request has the host-bound
+session ID and permitted `_meta`, returns a structured result, and rejects
+unregistered methods, stale runs, and unexpected argument keys. The peer sends
+the operation result immediately before prompt completion; a repeated host
+regression verifies all correlated results survive that ordering. Cursor
+unit and host fixture tests cover plan and todo request ID `0` without a
+peer-supplied session ID, the accepted plan and todo result shapes, mismatched
+session cancellation, owner-bound accepted-response todo projection, duplicate
+ID ambiguity across plan/todo callbacks, visible saturation failure, and
+unknown request behavior.
+Two separately ignored manual integration tests exercise the authenticated
+pinned CLI through the production `SessionHost` plan operator route and todo
+response path. These tests require local CLI authentication and are not CI gates.
+The host integration suite also checks that a peer-echoed environment credential
+is redacted in both the result value and metadata, and that a second batch of
+operations cannot bypass the eight pending-reply limit after the first batch
+times out.
+The redacted wire frames and production-path qualification are recorded in
+[ACP extension qualification evidence](acp-extension-evidence.md).
 It uses a five-minute tracker interval and processes both callbacks through
 worker-update wakeups without another tracker tick.
 An un-routed native form receives protocol cancellation without failing its

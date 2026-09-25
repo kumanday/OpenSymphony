@@ -1045,7 +1045,8 @@ choices per field. Unsupported constraints, free-text fields, URL mode, and
 secret prompts are rejected without exposing them in public snapshots. Web and
 desktop Run Detail panels use offered permission option IDs and multiple-choice
 form controls. Plan approval controls are typed for a registered extension;
-Cursor method registration is handled separately. FrankenTUI shows a pending
+The authenticated pinned Cursor `cursor/create_plan` request uses the plan
+control when the profile enables its exact version registration. FrankenTUI shows a pending
 request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
 through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
 questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
@@ -1081,6 +1082,34 @@ waits for the scheduler result instead of returning a premature timeout.
 Only requests accepted into the scheduler's live pending set emit waiting
 activity. Web and desktop retain selected form choices across live refreshes
 while the same request remains pending.
+
+Registered ACP harness operations appear in profile and active run capabilities.
+An operator invokes `harness_operation` through the gateway with a run target
+and advertised operation ID. The payload `run_id` is the current
+`harness_capability.run_binding_id` in the run detail or snapshot. The service
+binds the current run and session and
+validates arguments before sending a structured result receipt. Permission
+failure, stale binding, absent peer capability, invalid arguments, and disabled
+registration reject the action. `fixture.echo` is read-only and available only
+to `fixture_echo@1` profiles when the peer advertises
+`opensymphony.dev/fixtureEcho: 1`; it exists for executable contract tests.
+A deadline or disconnect after dispatch reports an unknown outcome, requiring
+evidence inspection before any repeat. The event journal emits a correlated
+completion or failure for each accepted dispatch. The pinned Cursor profile
+supports observed plan approvals and ID-bearing todo requests; question, task,
+image, and no-ID notification paths remain unqualified. The captured wire
+contract and production test are in
+[acp-extension-evidence.md](acp-extension-evidence.md).
+Todo activity follows the correlated accepted callback result. Duplicate
+in-flight peer IDs across plan, todo, and standard callbacks remain ambiguous
+until all matching responses drain. More than 16 unresolved todo requests or
+128 concurrent callback IDs emits a diagnostic and fences the worker.
+The outbound operation's response can complete after the prompt finishes;
+prompt completion does not cancel its separately bounded RPC wait. A deadline
+returns outcome unknown to the caller while keeping that unresolved SDK request
+inside the eight-operation limit until its reply or connection closure. Peer
+results are redacted with the session's known secrets before entering the public
+action receipt, including strings in `value` and `_meta`.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

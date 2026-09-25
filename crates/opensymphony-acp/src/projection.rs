@@ -1,5 +1,8 @@
 //! Scheduler projection of the redacted source stream; wire evidence stays on the owner.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde_json::{Value, json};
 
@@ -39,8 +42,23 @@ pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<Str
     (!reported.is_empty()).then_some(reported)
 }
 
+#[derive(Debug)]
+struct CursorTodoCandidate {
+    payload: Option<Value>,
+    todo_count: usize,
+}
+
 #[derive(Default)]
 pub struct RuntimeProjection {
+    cursor_enabled: bool,
+    cursor_session_id: Option<String>,
+    // Redacted, bounded candidates become activity only after the host's
+    // correlated accepted response. A rejected callback is not a todo update.
+    cursor_todo_candidates: BTreeMap<String, CursorTodoCandidate>,
+    cursor_todo_pending: usize,
+    cursor_rpc_counts: BTreeMap<String, usize>,
+    cursor_rpc_pending: usize,
+    cursor_callback_saturated: bool,
     last: Option<(u64, u64)>,
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
@@ -59,8 +77,23 @@ impl RuntimeProjection {
         }
     }
 
+    pub fn with_cursor(
+        mut self,
+        enabled: bool,
+        session_id: Option<&str>,
+        _workspace: Option<&Path>,
+    ) -> Self {
+        self.cursor_enabled = enabled;
+        self.cursor_session_id = session_id.map(str::to_owned);
+        self
+    }
+
     pub fn last_cursor(&self) -> Option<(u64, u64)> {
         self.last
+    }
+
+    pub fn cursor_callback_saturated(&self) -> bool {
+        self.cursor_callback_saturated
     }
 
     pub fn apply(&mut self, event: &SessionEvent, run_id: &str) -> Option<RuntimeUpdate> {
@@ -77,6 +110,13 @@ impl RuntimeProjection {
         if self.last.is_some_and(|last| cursor <= last) {
             return None;
         }
+        if self.last.is_some_and(|last| last.0 != *generation) {
+            self.cursor_todo_candidates.clear();
+            self.cursor_todo_pending = 0;
+            self.cursor_rpc_counts.clear();
+            self.cursor_rpc_pending = 0;
+            self.cursor_callback_saturated = false;
+        }
         self.last = Some(cursor);
         if *replay || source_run != run_id {
             return None;
@@ -85,11 +125,112 @@ impl RuntimeProjection {
             if frame.payload["method"] == "session/prompt" {
                 self.prompt_request = frame.payload.get("id").cloned();
             }
+            if self.cursor_enabled
+                && frame.payload.get("method").is_none()
+                && let Some(id) = frame.payload.get("id")
+                && (id.is_number() || id.is_string())
+            {
+                let key = id.to_string();
+                let mut payload = None;
+                let drained = if let Some(count) = self.cursor_rpc_counts.get_mut(&key) {
+                    *count -= 1;
+                    self.cursor_rpc_pending -= 1;
+                    *count == 0
+                } else {
+                    false
+                };
+                if drained {
+                    self.cursor_rpc_counts.remove(&key);
+                    if let Some(candidate) = self.cursor_todo_candidates.remove(&key) {
+                        self.cursor_todo_pending -= candidate.todo_count;
+                        payload = candidate.payload;
+                    }
+                }
+                if let Some(payload) = payload
+                    && frame.payload.pointer("/result/outcome/outcome") == Some(&json!("accepted"))
+                {
+                    return Some(RuntimeUpdate {
+                        sequence: frame.sequence,
+                        generation: *generation,
+                        observed_at: frame.observed_at,
+                        kind: "vendor_todos".into(),
+                        summary: Some("Cursor todos updated".into()),
+                        payload,
+                    });
+                }
+            }
             return self
                 .project_filesystem_response(*generation, frame)
                 .or_else(|| self.project_terminal_response(*generation, frame));
         }
         if frame.direction != "incoming" {
+            return None;
+        }
+        let saturation = || RuntimeUpdate {
+            sequence: frame.sequence,
+            generation: *generation,
+            observed_at: frame.observed_at,
+            kind: "cursor_todo_saturation".into(),
+            summary: Some("ACP Cursor callback projection saturated; worker fenced".into()),
+            payload: json!({"pending_limit":16,"rpc_pending_limit":128,"rpc_id_limit":128}),
+        };
+        // Track every peer request ID, including plans and standard callbacks.
+        // A concurrent plan/todo ID collision cannot be distinguished by the
+        // response envelope, so its todo candidate must remain ambiguous.
+        let cursor_request = if self.cursor_enabled
+            && self.cursor_session_id.is_some()
+            && frame
+                .payload
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some()
+            && let Some(id) = frame.payload.get("id")
+            && (id.is_number() || id.is_string())
+        {
+            let key = id.to_string();
+            if key.len() > 128 || self.cursor_rpc_pending >= 128 {
+                self.cursor_callback_saturated = true;
+                return Some(saturation());
+            }
+            let count = self.cursor_rpc_counts.entry(key.clone()).or_default();
+            let ambiguous = *count > 0;
+            *count += 1;
+            self.cursor_rpc_pending += 1;
+            if ambiguous && let Some(candidate) = self.cursor_todo_candidates.get_mut(&key) {
+                candidate.payload = None;
+            }
+            Some((key, ambiguous))
+        } else {
+            None
+        };
+        if self.cursor_enabled
+            && self.cursor_session_id.is_some()
+            && frame.payload.get("method").and_then(Value::as_str) == Some("cursor/update_todos")
+            && let Some(params) = frame.payload.get("params")
+            && params
+                .get("sessionId")
+                .is_none_or(|id| id.as_str() == self.cursor_session_id.as_deref())
+            && super::extensions::cursor_todos(params)
+            && let Some((key, ambiguous)) = cursor_request
+        {
+            if self.cursor_todo_pending >= 16 {
+                self.cursor_callback_saturated = true;
+                return Some(saturation());
+            }
+            self.cursor_todo_pending += 1;
+            if let Some(candidate) = self.cursor_todo_candidates.get_mut(&key) {
+                candidate.payload = None;
+                candidate.todo_count += 1;
+            } else {
+                self.cursor_todo_candidates.insert(
+                    key,
+                    CursorTodoCandidate {
+                        payload: (!ambiguous)
+                            .then(|| json!({"todos":params["todos"], "merge":params["merge"]})),
+                        todo_count: 1,
+                    },
+                );
+            }
             return None;
         }
         if let Some(activity) = self.project_filesystem_request(*generation, frame) {
@@ -426,6 +567,7 @@ pub fn run_capability(
     crate::opensymphony_gateway_schema::capability::HarnessRunCapability {
         harness: "acp".into(),
         profile_id: state.identity.profile_id.clone(),
+        run_binding_id: Some(state.identity.run_id.clone()),
         protocol: "acp".into(),
         protocol_version: 1,
         rpc: "json_rpc_2_0".into(),
@@ -440,6 +582,7 @@ pub fn run_capability(
         model_selection: state.model_selection,
         cancellation: true,
         operator_responses: true,
+        operations: state.enabled_operations.clone(),
     }
 }
 
@@ -505,7 +648,7 @@ fn profile_capabilities_with_environment(
                 }
                 None => value("PATH"),
             };
-            let command = std::path::Path::new(&profile.command);
+            let command = Path::new(&profile.command);
             let available = if command.components().count() > 1 {
                 command.is_absolute() && executable(command)
             } else {
@@ -543,12 +686,13 @@ fn profile_capabilities_with_environment(
                 profile_id: id.clone(),
                 preflight_ready: reason.is_none(),
                 unavailable_reason: reason.map(str::to_owned),
+                operations: super::extensions::configured_operations(profile),
             }
         })
         .collect()
 }
 
-fn executable(path: &std::path::Path) -> bool {
+fn executable(path: &Path) -> bool {
     #[cfg(windows)]
     if path.extension().is_none() && path.with_extension("exe").is_file() {
         return true;
@@ -603,6 +747,19 @@ mod tests {
         assert!(
             profile_capabilities_with_environment(&config, &environment, &BTreeSet::new())[0]
                 .preflight_ready
+        );
+        config
+            .profiles
+            .get_mut("profile")
+            .expect("profile")
+            .extensions
+            .push("fixture_echo@1".into());
+        let advertised =
+            profile_capabilities_with_environment(&config, &environment, &BTreeSet::new());
+        assert_eq!(advertised[0].operations[0].operation_id, "fixture.echo");
+        assert_eq!(
+            advertised[0].operations[0].parameters_schema["required"],
+            json!(["value"])
         );
         let profile = config.profiles.get_mut("profile").expect("profile");
         profile.env_refs.insert("PATH".into(), "MISSING".into());
@@ -764,6 +921,219 @@ mod tests {
             );
             assert!(update.is_none(), "only accepted routed requests may wait");
         }
+    }
+
+    #[test]
+    fn cursor_todo_request_projects_only_for_enabled_bound_session() {
+        let payload = |session: Option<&str>| {
+            let mut value = json!({"id":0,"method":"cursor/update_todos","params":{
+            "toolCallId":"todo-1","merge":true,
+            "todos":[{"id":"one","content":"Verify","status":"completed"}]}});
+            if let Some(session) = session {
+                value["params"]["sessionId"] = json!(session);
+            }
+            value
+        };
+        let mut disabled = RuntimeProjection::default();
+        assert!(
+            disabled
+                .apply(&callback_event(1, "incoming", payload(None)), "run")
+                .is_none()
+        );
+        let mut enabled = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        let mut wrong_session = payload(Some("other"));
+        wrong_session["id"] = json!(99);
+        assert!(
+            enabled
+                .apply(&callback_event(1, "incoming", wrong_session), "run")
+                .is_none()
+        );
+        assert!(
+            enabled
+                .apply(&callback_event(2, "incoming", payload(None)), "run")
+                .is_none()
+        );
+        let update = enabled
+            .apply(
+                &callback_event(
+                    3,
+                    "outgoing",
+                    json!({"id":0,"result":{"outcome":{"outcome":"accepted","todos":[]}}}),
+                ),
+                "run",
+            )
+            .expect("accepted bound update");
+        assert_eq!(update.kind, "vendor_todos");
+        assert_eq!(update.payload["todos"][0]["content"], "Verify");
+        assert!(enabled.apply(&callback_event(4, "incoming", json!({"method":"cursor/update_todos","params":{"toolCallId":"todo-1","merge":true,"todos":[]}})), "run").is_none());
+        assert!(enabled.apply(&callback_event(5, "incoming", json!({"id":100,"method":"cursor/update_todos","params":{"sessionId":7,"toolCallId":"todo-1","merge":false,"todos":[]}})), "run").is_none());
+        assert!(enabled.apply(&callback_event(6, "incoming", json!({"id":101,"method":"cursor/task","params":{"toolCallId":"task","description":"unqualified","prompt":"noop","subagentType":"general"}})), "run").is_none());
+        assert!(
+            enabled
+                .apply(&callback_event(7, "incoming", payload(None)), "run")
+                .is_none()
+        );
+        assert!(
+            enabled
+                .apply(
+                    &callback_event(
+                        8,
+                        "outgoing",
+                        json!({"id":0,"result":{"outcome":{"outcome":"rejected"}}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(enabled.cursor_todo_candidates.is_empty());
+        assert!(
+            enabled
+                .apply(&callback_event(9, "incoming", payload(None)), "run")
+                .is_none()
+        );
+        let mut next_generation = callback_event(
+            1,
+            "outgoing",
+            json!({"id":0,"result":{"outcome":{"outcome":"accepted"}}}),
+        );
+        if let SessionEvent::Source { generation, .. } = &mut next_generation {
+            *generation += 1;
+        }
+        assert!(enabled.apply(&next_generation, "run").is_none());
+        assert!(enabled.cursor_todo_candidates.is_empty());
+    }
+
+    #[test]
+    fn cursor_todo_candidates_are_bounded_and_duplicate_ids_are_ambiguous() {
+        let mut projection = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        for sequence in 1..=16 {
+            let request = json!({"id":sequence,"method":"cursor/update_todos","params":{
+                "toolCallId":"todo","merge":false,"todos":[]}});
+            assert!(
+                projection
+                    .apply(&callback_event(sequence, "incoming", request), "run")
+                    .is_none()
+            );
+        }
+        assert_eq!(projection.cursor_todo_candidates.len(), 16);
+        let saturated = projection.apply(&callback_event(17, "incoming", json!({"id":17,"method":"cursor/update_todos","params":{"toolCallId":"todo","merge":false,"todos":[]}})), "run").expect("visible saturation");
+        assert_eq!(saturated.kind, "cursor_todo_saturation");
+        assert_eq!(saturated.payload["pending_limit"], 16);
+        assert!(projection.cursor_callback_saturated());
+
+        let mut duplicate = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        let request = |sequence, content| {
+            callback_event(
+                sequence,
+                "incoming",
+                json!({"id":0,"method":"cursor/update_todos","params":{
+            "toolCallId":"todo","merge":false,"todos":[{"id":"one","content":content,"status":"completed"}]}}),
+            )
+        };
+        let response = |sequence| {
+            callback_event(
+                sequence,
+                "outgoing",
+                json!({"id":0,"result":{"outcome":{"outcome":"accepted"}}}),
+            )
+        };
+        assert!(duplicate.apply(&request(1, "A"), "run").is_none());
+        assert!(duplicate.apply(&request(2, "B"), "run").is_none());
+        assert!(duplicate.apply(&response(3), "run").is_none());
+        assert!(duplicate.apply(&request(4, "C"), "run").is_none());
+        assert!(duplicate.apply(&response(5), "run").is_none());
+        assert!(duplicate.apply(&response(6), "run").is_none());
+        assert_eq!(duplicate.cursor_todo_pending, 0);
+        assert!(duplicate.cursor_todo_candidates.is_empty());
+        assert!(duplicate.apply(&request(7, "D"), "run").is_none());
+        let update = duplicate
+            .apply(&response(8), "run")
+            .expect("fresh ID after full drain");
+        assert_eq!(update.payload["todos"][0]["content"], "D");
+    }
+
+    #[test]
+    fn cursor_plan_and_todo_with_same_id_cannot_cross_correlate() {
+        for plan_first in [true, false] {
+            let mut projection = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+            let plan = json!({"id":0,"method":"cursor/create_plan","params":{"toolCallId":"plan","plan":"Answer in chat","todos":[]}});
+            let todo = json!({"id":0,"method":"cursor/update_todos","params":{"toolCallId":"todo","merge":false,"todos":[{"id":"one","content":"Todo C","status":"completed"}]}});
+            let (first, second) = if plan_first {
+                (plan, todo)
+            } else {
+                (todo, plan)
+            };
+            assert!(
+                projection
+                    .apply(&callback_event(1, "incoming", first), "run")
+                    .is_none()
+            );
+            assert!(
+                projection
+                    .apply(&callback_event(2, "incoming", second), "run")
+                    .is_none()
+            );
+            assert!(
+                projection
+                    .apply(
+                        &callback_event(
+                            3,
+                            "outgoing",
+                            json!({"id":0,"result":{"outcome":{"outcome":"accepted"}}})
+                        ),
+                        "run"
+                    )
+                    .is_none()
+            );
+            assert!(
+                projection
+                    .apply(
+                        &callback_event(
+                            4,
+                            "outgoing",
+                            json!({"id":0,"result":{"outcome":{"outcome":"rejected"}}})
+                        ),
+                        "run"
+                    )
+                    .is_none()
+            );
+            assert_eq!(projection.cursor_rpc_pending, 0);
+            assert_eq!(projection.cursor_todo_pending, 0);
+            assert!(projection.cursor_todo_candidates.is_empty());
+        }
+    }
+
+    #[test]
+    fn cursor_callback_id_tracking_has_visible_global_bound() {
+        let mut projection = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        for sequence in 1..=128 {
+            assert!(
+                projection
+                    .apply(
+                        &callback_event(
+                            sequence,
+                            "incoming",
+                            json!({"id":sequence,"method":"cursor/create_plan","params":{}})
+                        ),
+                        "run"
+                    )
+                    .is_none()
+            );
+        }
+        assert_eq!(projection.cursor_rpc_pending, 128);
+        let update = projection
+            .apply(
+                &callback_event(
+                    129,
+                    "incoming",
+                    json!({"id":129,"method":"cursor/create_plan","params":{}}),
+                ),
+                "run",
+            )
+            .expect("visible global bound");
+        assert_eq!(update.kind, "cursor_todo_saturation");
+        assert_eq!(update.payload["rpc_pending_limit"], 128);
+        assert!(projection.cursor_callback_saturated());
     }
 
     #[test]

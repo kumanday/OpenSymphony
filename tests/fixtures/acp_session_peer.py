@@ -16,6 +16,7 @@ verbosity = "quiet"
 serial = 100
 abandoned_request = None
 pending_new = None
+extension_prompt = None
 
 
 def send(payload):
@@ -83,6 +84,8 @@ for line in sys.stdin:
         caps = {"loadSession": persistence == "load"}
         if persistence == "resume":
             caps["sessionCapabilities"] = {"resume": {}}
+        if mode.startswith('extension_echo'):
+            caps['_meta'] = {'opensymphony.dev/fixtureEcho': 1}
         send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": caps}})
     elif method == "session/new":
         if abandoned_request is not None:
@@ -139,6 +142,39 @@ for line in sys.stdin:
         with open(".opensymphony/conversation.json") as file:
             assert json.load(file)["acp"]["status"] == "submitted"
         text = message["params"]["prompt"][0]["text"]
+        if text == 'extension-echo':
+            extension_prompt = message['id']
+            pending = message['id']
+            open('extension-ready', 'w').close()
+            continue
+        if text == 'cursor-extension':
+            send({'id': 99, 'method': 'cursor/create_plan', 'params': {
+                'sessionId': 'wrong-session', 'toolCallId': 'malformed', 'plan': 'Nope', 'todos': []}})
+            malformed = json.loads(sys.stdin.readline())
+            assert malformed['id'] == 99 and malformed['result'] == {'outcome': {'outcome': 'cancelled'}}, malformed
+            send({'id': 0, 'method': 'cursor/create_plan', 'params': {
+                'toolCallId': 'cursor-p1', 'name': 'Choose color', 'overview': 'Answer in chat',
+                'plan': 'Answer blue in chat', 'todos': [], 'isProject': False, 'phases': []}})
+            answer = json.loads(sys.stdin.readline())
+            assert answer['id'] == 0, answer
+            assert answer['result'] == {'outcome': {'outcome': 'accepted'}}, answer
+            send({'id': 0, 'method': 'cursor/update_todos', 'params': {
+                'toolCallId': 'cursor-t1', 'merge': False,
+                'todos': [{'id': 't1', 'content': 'Verify', 'status': 'completed'}]}})
+            todo = json.loads(sys.stdin.readline())
+            assert todo['id'] == 0 and todo['result'] == {'outcome': {'outcome': 'accepted',
+                'todos': [{'id': 't1', 'content': 'Verify', 'status': 'completed'}]}}, todo
+            send({'id': 101, 'method': 'cursor/update_todos', 'params': {
+                'sessionId': 7, 'toolCallId': 'cursor-t2', 'merge': False, 'todos': []}})
+            malformed_todo = json.loads(sys.stdin.readline())
+            assert malformed_todo['id'] == 101 and malformed_todo['result'] == {'outcome': {'outcome': 'rejected'}}, malformed_todo
+            # A simulated no-ID frame gets no response; the pinned CLI did not emit one.
+            send({'method': 'cursor/update_todos', 'params': {
+                'toolCallId': 'cursor-notification', 'merge': False, 'todos': []}})
+            assert callback('cursor/ask_question', {'toolCallId': 'unqualified', 'questions': []}, error=True)['code'] == -32601
+            assert callback('cursor/unknown', {'toolCallId': 'unknown'}, error=True)['code'] == -32601
+            send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
+            continue
         if text == 'form-no-route':
             result = callback('elicitation/create', {'mode': 'form', 'message': 'Choose region',
                 'requestedSchema': {'type': 'object', 'required': ['region'], 'properties': {
@@ -260,6 +296,23 @@ for line in sys.stdin:
             continue
         update(text)
         send({"id": message["id"], "result": {"stopReason": "end_turn"}})
+    elif method == '_opensymphony.test/echo':
+        assert extension_prompt is not None, message
+        assert message['params']['sessionId'] == session, message
+        assert message['params']['value'] == 'hello', message
+        assert message['params']['_meta'] == {'traceparent': 'trace-echo'}, message
+        if mode == 'extension_echo_timeout':
+            open('extension-request-count', 'a').write('1\n')
+            continue
+        if mode == 'extension_echo_secret':
+            secret = os.environ['ACCESS_TOKEN']
+            send({'id': message['id'], 'result': {'value': secret, '_meta': {'traceparent': secret}}})
+            send({'id': extension_prompt, 'result': {'stopReason': 'end_turn'}})
+            extension_prompt = None
+            continue
+        send({'id': message['id'], 'result': {'value': 'hello', '_meta': {'traceparent': 'trace-echo'}}})
+        send({'id': extension_prompt, 'result': {'stopReason': 'end_turn'}})
+        extension_prompt = None
     elif method == "session/cancel":
         update("cancelling")
         send({"id": pending, "result": {"stopReason": "cancelled"}})

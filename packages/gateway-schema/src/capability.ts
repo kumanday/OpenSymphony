@@ -85,11 +85,24 @@ export interface HarnessProfileCapability {
   profile_id: string;
   preflight_ready: boolean;
   unavailable_reason: string | null;
+  operations?: HarnessOperationCapability[];
+}
+
+export interface HarnessOperationCapability {
+  operation_id: string;
+  namespace: string;
+  version: string;
+  capability_predicate: string;
+  parameters_schema: unknown;
+  result_schema: unknown;
+  deadline_ms: number;
+  effect: string;
 }
 
 export interface HarnessRunCapability {
   harness: string;
   profile_id: string;
+  run_binding_id?: string | null;
   protocol: string;
   protocol_version: number;
   rpc: string;
@@ -101,4 +114,5 @@ export interface HarnessRunCapability {
   model_selection: boolean;
   cancellation: boolean;
   operator_responses: boolean;
+  operations?: HarnessOperationCapability[];
 }

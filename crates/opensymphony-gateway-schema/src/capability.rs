@@ -519,6 +519,22 @@ pub struct HarnessProfileCapability {
     pub profile_id: String,
     pub preflight_ready: bool,
     pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<HarnessOperationCapability>,
+}
+
+/// Operator-owned extension operation. Arguments omit the session and wire method;
+/// the ACP owner supplies those after binding the current run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessOperationCapability {
+    pub operation_id: String,
+    pub namespace: String,
+    pub version: String,
+    pub capability_predicate: String,
+    pub parameters_schema: serde_json::Value,
+    pub result_schema: serde_json::Value,
+    pub deadline_ms: u64,
+    pub effect: String,
 }
 
 /// Effective features negotiated for one execution; absent usage remains absent.
@@ -526,6 +542,9 @@ pub struct HarnessProfileCapability {
 pub struct HarnessRunCapability {
     pub harness: String,
     pub profile_id: String,
+    /// Opaque scheduler attempt binding required for operator operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_binding_id: Option<String>,
     pub protocol: String,
     pub protocol_version: u16,
     pub rpc: String,
@@ -537,4 +556,6 @@ pub struct HarnessRunCapability {
     pub model_selection: bool,
     pub cancellation: bool,
     pub operator_responses: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<HarnessOperationCapability>,
 }

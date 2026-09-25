@@ -292,11 +292,21 @@ impl Drop for BrokerConnectionGuard {
 }
 
 /// Shared state for the gateway server.
-pub struct OperatorCommand {
-    pub interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
-    pub answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
-    pub reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-    pub delivery: OperatorCommandFence,
+pub enum OperatorCommand {
+    Response {
+        interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+        answer: crate::opensymphony_gateway_schema::approval::OperatorAnswer,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        delivery: OperatorCommandFence,
+    },
+    HarnessOperation {
+        issue_identifier: String,
+        run_id: String,
+        operation_id: String,
+        arguments: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+        delivery: OperatorCommandFence,
+    },
 }
 
 /// The gateway's failure receipt and the run loop's scheduler mutation race
@@ -2956,6 +2966,95 @@ async fn dispatch_action(
     Json(action): Json<ActionDispatch>,
 ) -> impl IntoResponse {
     let envelope = state.store.current().await;
+    if action.action_kind == ActionKind::HarnessOperation {
+        let reject = |reason: String| {
+            ActionReceipt::rejected(
+                uuid::Uuid::new_v4().to_string(),
+                action.correlation_id.clone(),
+                action.action_kind,
+                reason,
+            )
+        };
+        let permission = state.action_handler.permission_for_action(&action);
+        if !permission.allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    reject("permission denied for harness operation".into())
+                        .with_permission(permission),
+                ),
+            );
+        }
+        let (issue_identifier, run_id, operation_id, arguments) =
+            match harness_operation_action(&envelope, &action) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let receipt = reject(error);
+                    return (dispatch_rejection_status(&receipt), Json(receipt));
+                }
+            };
+        let Some(commands) = &state.operator_commands else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(reject("harness operation path is unavailable".into())),
+            );
+        };
+        let Ok(permit) = commands.try_reserve() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(reject("harness operation path is unavailable".into())),
+            );
+        };
+        // Reserve capacity, then validate authorization and audit before the
+        // runtime can observe an effect. The permit prevents a queue-full race.
+        let receipt = state
+            .action_handler
+            .dispatch(action.clone(), &envelope)
+            .await;
+        if receipt.status != ActionStatus::Accepted {
+            return (dispatch_rejection_status(&receipt), Json(receipt));
+        }
+        let failed = |reason: String| {
+            let mut failure = receipt.clone();
+            failure.status = ActionStatus::Rejected;
+            failure.reason = Some(reason);
+            failure.expected_followup.clear();
+            failure
+        };
+        let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
+        let (reply, received) = tokio::sync::oneshot::channel();
+        permit.send(OperatorCommand::HarnessOperation {
+            issue_identifier,
+            run_id,
+            operation_id,
+            arguments,
+            reply,
+            delivery: receipt_guard.0.clone(),
+        });
+        let (status, final_receipt) =
+            match tokio::time::timeout(Duration::from_secs(10), received).await {
+                Ok(Ok(Ok(result))) => {
+                    let mut completed = receipt.clone();
+                    completed.result = Some(result);
+                    (StatusCode::OK, completed)
+                }
+                Ok(Ok(Err(error))) => (StatusCode::CONFLICT, failed(error)),
+                Ok(Err(_)) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    failed("harness operation path closed; outcome is unknown".into()),
+                ),
+                Err(_) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    failed("harness operation timed out; outcome is unknown".into()),
+                ),
+            };
+        if let Err(error) =
+            append_harness_operation_outcome(&state.journal, &action, &final_receipt).await
+        {
+            tracing::warn!(?error, "failed to journal harness operation outcome");
+        }
+        return (status, Json(final_receipt));
+    }
     if matches!(
         action.action_kind,
         ActionKind::InputResponse | ActionKind::PlanDecision
@@ -2990,7 +3089,7 @@ async fn dispatch_action(
         let receipt_guard = OperatorCommandReceiptGuard(OperatorCommandFence::default());
         let (reply, received) = tokio::sync::oneshot::channel();
         if commands
-            .try_send(OperatorCommand {
+            .try_send(OperatorCommand::Response {
                 interaction,
                 answer,
                 reply,
@@ -3025,6 +3124,106 @@ async fn dispatch_action(
             (status, Json(receipt))
         }
     }
+}
+
+async fn append_harness_operation_outcome(
+    journal: &InMemoryEventJournal,
+    action: &ActionDispatch,
+    receipt: &ActionReceipt,
+) -> Result<(), JournalError> {
+    let kind = if receipt.status == ActionStatus::Accepted {
+        EventKind::GatewayActionCompleted {
+            action: action.action_kind.to_string(),
+        }
+    } else {
+        EventKind::GatewayActionFailed {
+            action: action.action_kind.to_string(),
+            reason: receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "operation failed".into()),
+        }
+    };
+    journal.append(
+        EventRecord::builder()
+            .actor(EventActor::system("gateway"))
+            .correlation_id(action.correlation_id.clone())
+            .entity_ref(EntityRef {
+                kind: EntityKind::Run,
+                id: action.target_entity.entity_id.clone(),
+                identifier: None,
+            })
+            .kind(kind)
+            .summary(format!("Harness operation {}", if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" }))
+            .payload(serde_json::json!({
+                "action_id": receipt.action_id,
+                "correlation_id": action.correlation_id,
+                "status": if receipt.status == ActionStatus::Accepted { "completed" } else { "failed" },
+                "reason": receipt.reason,
+            }))
+            .build()
+    ).await.map(|_| ())
+}
+
+fn harness_operation_action(
+    envelope: &SnapshotEnvelope,
+    action: &ActionDispatch,
+) -> Result<(String, String, String, serde_json::Value), String> {
+    if action.target_entity.entity_kind != EntityKind::Run
+        || action.idempotency_key.is_some()
+        || action.correlation_id.trim().is_empty()
+    {
+        return Err(
+            "harness operation requires a run target, correlation and no replay key".into(),
+        );
+    }
+    let payload = action
+        .payload
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or("harness operation payload is missing")?;
+    if payload.len() != 3
+        || payload
+            .keys()
+            .any(|key| !matches!(key.as_str(), "run_id" | "operation_id" | "arguments"))
+    {
+        return Err("harness operation payload contains unsupported fields".into());
+    }
+    let run_id = payload
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|run_id| !run_id.is_empty() && run_id.len() <= 1024)
+        .ok_or("run_id is missing or invalid")?;
+    let operation_id = payload
+        .get("operation_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("operation_id is missing")?;
+    let arguments = payload
+        .get("arguments")
+        .filter(|arguments| {
+            serde_json::to_vec(arguments).is_ok_and(|bytes| bytes.len() <= 16 * 1024)
+        })
+        .ok_or("operation arguments exceed limits")?;
+    let issue = find_issue_snapshot(envelope, &action.target_entity.entity_id)
+        .ok_or("target run not found")?;
+    if issue.runtime_state != ControlPlaneIssueRuntimeState::Running
+        || issue.harness_capability.as_ref().is_none_or(|capability| {
+            capability.harness != "acp"
+                || capability.run_binding_id.as_deref() != Some(run_id)
+                || !capability
+                    .operations
+                    .iter()
+                    .any(|operation| operation.operation_id == operation_id)
+        })
+    {
+        return Err("operation is not enabled on the active ACP run".into());
+    }
+    Ok((
+        issue.identifier.clone(),
+        run_id.into(),
+        operation_id.into(),
+        arguments.clone(),
+    ))
 }
 
 fn operator_action(
@@ -6123,7 +6322,7 @@ mod tests {
         let (commands, mut queued) = tokio::sync::mpsc::channel(1);
         assert!(
             commands
-                .try_send(OperatorCommand {
+                .try_send(OperatorCommand::Response {
                     interaction: OperatorInteraction {
                         request_id: "queued".into(),
                         run_id: "run".into(),
@@ -6154,12 +6353,15 @@ mod tests {
                 .is_err()
         );
         let command = queued.recv().await.expect("delayed command");
+        let OperatorCommand::Response {
+            delivery, reply, ..
+        } = command
+        else {
+            panic!("response command");
+        };
+        assert!(!delivery.claim(), "a 503 fences scheduler application");
         assert!(
-            !command.delivery.claim(),
-            "a 503 fences scheduler application"
-        );
-        assert!(
-            command.reply.send(Ok(())).is_err(),
+            reply.send(Ok(())).is_err(),
             "failure receipt already closed"
         );
     }

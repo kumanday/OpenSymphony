@@ -10407,6 +10407,36 @@ impl WorkerBackend for RuntimeWorkerBackend {
         )
     }
 
+    async fn begin_harness_operation(
+        &mut self,
+        worker_id: &crate::opensymphony_domain::WorkerId,
+        run_id: &str,
+        operation_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::opensymphony_orchestrator::HarnessOperationDelivery, Self::Error> {
+        let session = self
+            .acp_active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(worker_id.as_str())
+            .filter(|session| session.run_id == run_id)
+            .cloned()
+            .ok_or_else(|| {
+                CliWorkerError::OperatorResponseRetryable("ACP run is not active".into())
+            })?;
+        let run_id = run_id.to_owned();
+        let operation_id = operation_id.to_owned();
+        Ok(
+            crate::opensymphony_orchestrator::HarnessOperationDelivery::new(async move {
+                session
+                    .handle
+                    .operation(run_id, operation_id, arguments)
+                    .await
+                    .map_err(|error| error.to_string())
+            }),
+        )
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &crate::opensymphony_domain::WorkerId,
@@ -17807,11 +17837,20 @@ exit 64
                 .await
                 .expect("gateway command timeout")
                 .expect("command");
-            assert_eq!(command.interaction, interaction);
+            let OperatorCommand::Response {
+                interaction: command_interaction,
+                answer,
+                reply,
+                ..
+            } = command
+            else {
+                panic!("operator response command");
+            };
+            assert_eq!(command_interaction, interaction);
             let delivered = scheduler
-                .respond_operator_request(&command.interaction, command.answer)
+                .respond_operator_request(&command_interaction, answer)
                 .await;
-            command.reply.send(delivered).expect("gateway reply");
+            reply.send(delivered).expect("gateway reply");
             let receipt: ActionReceipt = response
                 .await
                 .expect("response task")

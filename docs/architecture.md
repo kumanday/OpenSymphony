@@ -533,6 +533,28 @@ advertisements. The ordered dispatch handler admits callbacks to one bounded
 connection-owned actor. File operations are serialized; terminal waits use
 bounded asynchronous responses so they cannot block RPC dispatch. Terminal
 processes use the existing process-group or Windows Job Object supervisors.
+ACP extension registrations are exact profile/version entries inside the ACP
+module. The pinned Cursor `cursor/create_plan` request uses the scheduler-owned
+plan response path; its ID-bearing `cursor/update_todos` request receives a
+bounded response and contributes todo activity only after its correlated
+accepted response. The response correlator tracks IDs across all inbound
+callback methods, so a plan response cannot accept a concurrent same-ID todo.
+A bounded pending-candidate queue fences the worker with a
+visible diagnostic on saturation. Both bind to the connection-owned
+active session without a peer-supplied session field. Unobserved Cursor question,
+task, and image methods are outside the enabled registration. Outbound operation dispatch enters
+through the gateway's operator action, binds the current run in the scheduler,
+and resolves the registered method and session inside the retained owner. The
+public run capability supplies its attempt binding; the host bounds concurrent
+requests and the gateway journals each accepted operation's outcome. An outbound
+RPC retains its own ID and deadline after prompt completion so a back-to-back
+operation result is not discarded by the prompt callback epoch.
+Negotiated peer support and profile enablement are both required. Timeouts
+report an unknown outcome, while the unresolved SDK waiter retains its permit
+until a peer response or connection closure. This caps pending replies at eight
+even across successive timeout batches. Known-secret redaction runs on the
+validated result before it can enter an operator receipt. Lifecycle state
+remains orchestrator-owned.
 Each retained prompt first retires the prior callback epoch through a bounded,
 cancellable preparation step while the owner continues servicing commands. Only
 then does it persist submission and dispatch the prompt. Session config responses
