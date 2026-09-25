@@ -14,13 +14,15 @@ OPENSYMPHONY_RELEASE_CONFIG=/absolute/path/to/candidate-config.yaml \
 ```
 
 The gate uses local temporary repositories and fake tracker, provider, and
-harness implementations. It composes the existing subsystem fixtures instead of
-copying them. The three-repository fixture creates local bare remotes with
-different instructions, retains child generations, prepares parent worktrees
-from child object stores, repairs only the selected repository, refreshes the
-provider merge result, unregisters Git worktrees, and validates generation-bound
-cleanup. Scheduler fixtures serialize durable state around intents and receipts
-and reconcile provider state before repeating a side effect.
+harness implementations. The workspace fixture creates three local bare remotes
+with different instructions, retains child generations, and prepares parent
+worktrees from child object stores. The three-repository scheduler scenario
+carries its repository IDs, child merge identities, and retained generation
+handles through one selected repair, provider PR and merge, final verification,
+capture, and bottom-up cleanup. The workspace fixture separately verifies Git
+worktree detachment and generation-bound cleanup. Scheduler fixtures serialize
+durable state around intents and receipts and reconcile provider state before
+repeating a side effect.
 
 The output `release-evidence.json` records the exact Git commit, selected config
 path and SHA-256, completion time, log path, and a `production_activation:false`
@@ -60,7 +62,8 @@ interrupted refresh transaction before accepting the parent root.
 
 ## Disposable non-production run
 
-Run the live gate only after the hermetic evidence exists for the candidate:
+The live gate runs the hermetic suite against its generated central config and
+records that config hash before starting the isolated orchestrator:
 
 ```bash
 OPENSYMPHONY_LIVE_MULTI_REPO=1 \

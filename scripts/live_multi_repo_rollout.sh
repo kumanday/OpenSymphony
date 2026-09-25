@@ -462,16 +462,25 @@ control_plane:
   bind: 127.0.0.1:${PORT}
 EOF
 
+OPENSYMPHONY_RELEASE_CONFIG="${CONFIG_PATH}" \
+OPENSYMPHONY_HERMETIC_OUTPUT_ROOT="${RUN_DIR}/hermetic" \
+  "${ROOT_DIR}/scripts/hermetic_multi_repo_lifecycle.sh" >"${LOG_DIR}/hermetic.log" 2>&1
+
 COMMIT_SHA="$(git rev-parse HEAD)"
 CONFIG_SHA="$(shasum -a 256 "${CONFIG_PATH}" | awk '{print $1}')"
+HERMETIC_EVIDENCE="$(find "${RUN_DIR}/hermetic" -name release-evidence.json -print -quit)"
+jq -e --arg commit "${COMMIT_SHA}" --arg config "${CONFIG_SHA}" \
+  '.result == "passed" and .commit_sha == $commit and .config_sha256 == $config' \
+  "${HERMETIC_EVIDENCE}" >/dev/null
 jq -n \
   --arg run_id "${RUN_ID}" \
   --arg commit_sha "${COMMIT_SHA}" \
   --arg config_sha256 "${CONFIG_SHA}" \
+  --arg hermetic_evidence "${HERMETIC_EVIDENCE}" \
   --arg project_id "${PROJECT_ID}" \
   --arg project_slug "${PROJECT_SLUG}" \
   --arg port "${PORT}" \
-  '{schema_version:1,run_id:$run_id,commit_sha:$commit_sha,config_sha256:$config_sha256,project_set:"live",linear_project:{id:$project_id,slug:$project_slug},control_plane_port:($port|tonumber),production_activation:false,result:"started"}' \
+  '{schema_version:1,run_id:$run_id,commit_sha:$commit_sha,config_sha256:$config_sha256,hermetic_evidence:$hermetic_evidence,project_set:"live",linear_project:{id:$project_id,slug:$project_slug},control_plane_port:($port|tonumber),production_activation:false,result:"started"}' \
   > "${RUN_DIR}/release-evidence.json"
 
 cargo run -- run --config "${CONFIG_PATH}" >"${LOG_DIR}/orchestrator.log" 2>&1 &

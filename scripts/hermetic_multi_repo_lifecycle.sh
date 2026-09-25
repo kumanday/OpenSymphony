@@ -41,11 +41,8 @@ run() {
   "$@" 2>&1 | tee -a "${LOG_FILE}"
 }
 
-run cargo run -- doctor --config "${CONFIG_PATH}"
-if ! grep -Fq 'parsed central config' "${LOG_FILE}"; then
-  echo "Release config must use the central project-set schema: ${CONFIG_PATH}" >&2
-  exit 1
-fi
+export OPENSYMPHONY_RELEASE_CONFIG="${CONFIG_PATH}"
+run cargo test-system-duckdb --lib release_candidate_selected_central_config_validates
 
 # H01-H03: strict configuration, legacy migration/rollback, and exclusive
 # process ownership. These are inherited matrices, run intact by prefix.
@@ -65,6 +62,7 @@ run cargo test-system-duckdb --test codex_app_server
 
 # H07-H10: one affected-repository repair, provider reconciliation, current-head
 # review policy, final refresh, capture, Git detachment, leases, and cleanup.
+# The scheduler suite includes the three-repository repair-to-capture scenario.
 run cargo test-system-duckdb --test scheduler
 run cargo test-system-duckdb --test linear_client
 run cargo test-system-duckdb --test run

@@ -1308,63 +1308,94 @@ async fn launched_parent_scheduler_with_config(
     suffix: &str,
     config: SchedulerConfig,
 ) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
+    launched_parent_scheduler_with_repositories(suffix, config, 1).await
+}
+
+async fn launched_parent_scheduler_with_repositories(
+    suffix: &str,
+    config: SchedulerConfig,
+    repository_count: usize,
+) -> (Scheduler<FakeTracker, FakeWorkspace, FakeWorker>, IssueId) {
     let parent_id = IssueId::new(format!("parent-{suffix}")).expect("parent id");
-    let child_id = IssueId::new(format!("child-{suffix}")).expect("child id");
     let parent_identifier = format!("COE-PARENT-{suffix}");
-    let child_identifier = format!("COE-CHILD-{suffix}");
     let mut parent = tracker_issue(parent_id.as_str(), &parent_identifier, "In Progress", 0);
-    parent.sub_issues = vec![TrackerIssueRef {
-        id: child_id.to_string(),
-        identifier: child_identifier,
-        title: Some("Child".to_owned()),
-        url: None,
-        state: "Done".to_owned(),
-        state_kind: TrackerIssueStateKind::Completed,
-    }];
+    let children = (0..repository_count)
+        .map(|index| {
+            let key = if repository_count == 1 {
+                suffix.to_owned()
+            } else {
+                format!("{suffix}-{index}")
+            };
+            let child_id = IssueId::new(format!("child-{key}")).expect("child id");
+            let repository_id = CanonicalRepositoryId::new(format!("github:repository:{key}"))
+                .expect("repository id");
+            let resource = LeaseResource {
+                issue_id: child_id.clone(),
+                repository_id: repository_id.clone(),
+                checkout_generation: format!("checkout-{key}"),
+            };
+            (key, child_id, repository_id, resource)
+        })
+        .collect::<Vec<_>>();
+    parent.sub_issues = children
+        .iter()
+        .map(|(key, child_id, _, _)| TrackerIssueRef {
+            id: child_id.to_string(),
+            identifier: format!("COE-CHILD-{key}"),
+            title: Some("Child".to_owned()),
+            url: None,
+            state: "Done".to_owned(),
+            state_kind: TrackerIssueStateKind::Completed,
+        })
+        .collect();
     let snapshot = HierarchySnapshot::new(&parent);
-    let repository_id =
-        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id");
-    let resource = LeaseResource {
-        issue_id: child_id.clone(),
-        repository_id: repository_id.clone(),
-        checkout_generation: format!("checkout-{suffix}"),
-    };
     let durable_state = crate::opensymphony_orchestrator::DurableOrchestratorState {
         hierarchy: BTreeMap::from([(parent_id.clone(), snapshot.clone())]),
-        leases: vec![LeaseRecord {
-            kind: LeaseKind::LeafWorker,
-            resource: resource.clone(),
-            owner: LeaseOwner::leaf_worker(&child_id),
-            hierarchy_generation: snapshot.generation,
-            acquired_at: 1,
-            expires_at: None,
-            released_at: None,
-        }],
-        terminal_orchestrator_issues: [child_id.clone()].into_iter().collect(),
+        leases: children
+            .iter()
+            .map(|(_, child_id, _, resource)| LeaseRecord {
+                kind: LeaseKind::LeafWorker,
+                resource: resource.clone(),
+                owner: LeaseOwner::leaf_worker(child_id),
+                hierarchy_generation: snapshot.generation,
+                acquired_at: 1,
+                expires_at: None,
+                released_at: None,
+            })
+            .collect(),
+        terminal_orchestrator_issues: children
+            .iter()
+            .map(|(_, child_id, _, _)| child_id.clone())
+            .collect(),
         ..Default::default()
     };
     let evidence = ParentEligibilityEvidence {
         hierarchy_generation: snapshot.generation,
-        children: vec![ChildEligibilityEvidence {
-            child_id,
-            hierarchy_generation: snapshot.generation,
-            orchestrator_terminal: true,
-            provider_merge_confirmed: true,
-            merge_required: true,
-            merge_result_commit: Some(format!("commit-{suffix}")),
-            merge_result_commits: Vec::new(),
-            merge_result_commits_by_repository: vec![RequiredMergeCommit {
-                repository_id: Some(repository_id.clone()),
-                commit: format!("commit-{suffix}"),
-            }],
-            merge_repository_id: Some(repository_id.clone()),
-            merge_repository_ids: vec![repository_id.clone()],
-            provider_evidence_at: None,
-            provider_evidence_by_issue: Vec::new(),
-            resource: Some(resource),
-            resources: Vec::new(),
-            unresolved_failure: None,
-        }],
+        children: children
+            .iter()
+            .map(
+                |(key, child_id, repository_id, resource)| ChildEligibilityEvidence {
+                    child_id: child_id.clone(),
+                    hierarchy_generation: snapshot.generation,
+                    orchestrator_terminal: true,
+                    provider_merge_confirmed: true,
+                    merge_required: true,
+                    merge_result_commit: Some(format!("commit-{key}")),
+                    merge_result_commits: Vec::new(),
+                    merge_result_commits_by_repository: vec![RequiredMergeCommit {
+                        repository_id: Some(repository_id.clone()),
+                        commit: format!("commit-{key}"),
+                    }],
+                    merge_repository_id: Some(repository_id.clone()),
+                    merge_repository_ids: vec![repository_id.clone()],
+                    provider_evidence_at: None,
+                    provider_evidence_by_issue: Vec::new(),
+                    resource: Some(resource.clone()),
+                    resources: Vec::new(),
+                    unresolved_failure: None,
+                },
+            )
+            .collect(),
     };
     let mut scheduler = Scheduler::new(
         FakeTracker {
@@ -1374,16 +1405,21 @@ async fn launched_parent_scheduler_with_config(
         },
         FakeWorkspace {
             durable_state: Some(serde_json::to_value(&durable_state).expect("durable state")),
-            parent_targets: vec![crate::opensymphony_orchestrator::ParentRepositoryTarget {
-                repository_id,
-                checkout_handle: format!("checkout-{suffix}"),
-                relative_path: PathBuf::from(format!("repositories/{suffix}")),
-                target_branch: "develop".to_owned(),
-                target_commit: format!("commit-{suffix}"),
-                instruction_path: PathBuf::from("AGENTS.md"),
-                instruction_hash: format!("instruction-{suffix}"),
-                repair_policy: test_repair_policy(),
-            }],
+            parent_targets: children
+                .iter()
+                .map(|(key, _, repository_id, resource)| {
+                    crate::opensymphony_orchestrator::ParentRepositoryTarget {
+                        repository_id: repository_id.clone(),
+                        checkout_handle: resource.checkout_generation.clone(),
+                        relative_path: PathBuf::from(format!("repositories/{key}")),
+                        target_branch: "develop".to_owned(),
+                        target_commit: format!("commit-{key}"),
+                        instruction_path: PathBuf::from("AGENTS.md"),
+                        instruction_hash: format!("instruction-{key}"),
+                        repair_policy: test_repair_policy(),
+                    }
+                })
+                .collect(),
             ..Default::default()
         },
         FakeWorker::default(),
@@ -1793,11 +1829,28 @@ async fn parent_repair_review_merge_and_refresh_follow_durable_policy() {
 async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_back_to_verification()
 {
     let suffix = "REPAIR-RUN-LOOP";
-    let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
+    let (mut scheduler, parent_id) =
+        launched_parent_scheduler_with_repositories(suffix, scheduler_config(), 3).await;
+    assert_eq!(scheduler.workspace().parent_targets.len(), 3);
+    let initial_targets = scheduler.workspace().parent_targets.clone();
+    let launched: crate::opensymphony_orchestrator::DurableOrchestratorState =
+        serde_json::from_value(scheduler.workspace().durable_state.clone().expect("state"))
+            .expect("durable state");
+    let controller = &launched.parent_integrations[&parent_id];
+    assert_eq!(controller.targets.len(), 3);
+    for target in &initial_targets {
+        assert_eq!(
+            controller.targets[&target.repository_id].target_commit, target.target_commit,
+            "the scheduler must preserve each child merge commit at parent launch"
+        );
+    }
     let repository_id = scheduler.workspace().parent_targets[0]
         .repository_id
         .clone();
-    scheduler.workspace_mut().repair_instruction_hash = Some(format!("instruction-{suffix}"));
+    let instruction_hash = scheduler.workspace().parent_targets[0]
+        .instruction_hash
+        .clone();
+    scheduler.workspace_mut().repair_instruction_hash = Some(instruction_hash);
     scheduler.tracker_mut().repair_pull_request = Some((
         "41".to_owned(),
         "https://github.com/acme/repo/pull/41".to_owned(),
@@ -1945,6 +1998,19 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
         None,
         "the post-merge turn is final verification, not repair implementation"
     );
+    let mut terminal = tracker_state_snapshot(
+        parent_id.as_str(),
+        &format!("COE-PARENT-{suffix}"),
+        "Done",
+        "completed",
+        20_000_040,
+    );
+    terminal.is_parent = true;
+    scheduler.tracker_mut().active.clear();
+    scheduler
+        .tracker_mut()
+        .states
+        .insert(parent_id.to_string(), terminal);
     enqueue_successful_parent_completion(&mut scheduler, suffix, 20_000_050);
     scheduler
         .tick(ts(20_000_050))
@@ -1959,6 +2025,35 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
         Some(crate::opensymphony_orchestrator::ParentAttemptStatus::Passed)
     );
     assert_eq!(controller.repair_attempts.len(), 1);
+    assert_eq!(controller.targets.len(), 3);
+    for target in &initial_targets[1..] {
+        assert_eq!(
+            controller.targets[&target.repository_id].target_commit, target.target_commit,
+            "repair must not refresh an unaffected repository"
+        );
+    }
+    scheduler
+        .acknowledge_terminal_capture(&[format!("COE-PARENT-{suffix}")], ts(20_000_070))
+        .await
+        .expect("capture should release all three child generations and the parent");
+    let cleaned = &scheduler.workspace().generation_cleanups;
+    assert_eq!(cleaned.len(), 4);
+    assert_eq!(
+        cleaned.last().expect("parent cleanup").issue_id,
+        parent_id.as_str()
+    );
+    for target in &initial_targets {
+        assert!(
+            scheduler
+                .workspace()
+                .cleanup_target_requests
+                .iter()
+                .any(|resource| {
+                    resource.repository_id == target.repository_id
+                        && resource.checkout_generation == target.checkout_handle
+                })
+        );
+    }
 }
 
 #[tokio::test]
@@ -2959,7 +3054,7 @@ async fn parent_repair_recovers_review_and_merge_results_without_duplicate_write
 
 fn enqueue_successful_parent_completion(
     scheduler: &mut Scheduler<FakeTracker, FakeWorkspace, FakeWorker>,
-    suffix: &str,
+    _suffix: &str,
     finished_at: u64,
 ) {
     let run = scheduler
@@ -3022,17 +3117,27 @@ fn enqueue_successful_parent_completion(
         .get(&run.issue_id)
         .expect("parent controller")
         .hierarchy_generation;
-    let repository_id =
-        CanonicalRepositoryId::new(format!("github:repository:{suffix}")).expect("repository id");
+    let repository_id = state.parent_integrations[&run.issue_id]
+        .targets
+        .keys()
+        .next()
+        .expect("parent target")
+        .clone();
     let target_commit = state.parent_integrations[&run.issue_id].targets[&repository_id]
         .target_commit
         .clone();
-    outcome.parent_verification = Some(parent_verification_evidence(
+    let mut evidence = parent_verification_evidence(
         run.worker_id.as_str(),
         hierarchy_generation,
         repository_id,
         &target_commit,
-    ));
+    );
+    evidence.repository_commits = state.parent_integrations[&run.issue_id]
+        .targets
+        .iter()
+        .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
+        .collect();
+    outcome.parent_verification = Some(evidence);
     scheduler
         .worker_mut()
         .updates
@@ -3098,6 +3203,11 @@ fn enqueue_failed_parent_repair_request(
         repository_id.clone(),
         &target_commit,
     );
+    evidence.repository_commits = state.parent_integrations[&run.issue_id]
+        .targets
+        .iter()
+        .map(|(repository_id, target)| (repository_id.clone(), target.target_commit.clone()))
+        .collect();
     evidence.repair_repository_id = Some(repository_id);
     let mut outcome = WorkerOutcomeRecord::from_run(
         &run,
