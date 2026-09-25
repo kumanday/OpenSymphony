@@ -722,13 +722,24 @@ if ! orchestrator_group_alive; then
   echo "The orchestrator process group did not start." >&2
   exit 1
 fi
-(
-  sleep "${remaining_seconds}"
-  if orchestrator_group_alive; then
-    echo "Live rollout exceeded ${MAX_SECONDS} seconds." >>"${LOG_DIR}/watchdog.log"
-    kill -TERM -- "-${ORCHESTRATOR_PID}" 2>/dev/null || true
-  fi
-) &
+python3 - "${remaining_seconds}" "${ORCHESTRATOR_PID}" "${LOG_DIR}/watchdog.log" <<'PY' &
+import os
+import signal
+import sys
+import time
+
+time.sleep(int(sys.argv[1]))
+try:
+    os.killpg(int(sys.argv[2]), 0)
+except ProcessLookupError:
+    sys.exit(0)
+with open(sys.argv[3], "a") as log:
+    log.write("Live rollout exceeded its deadline.\n")
+try:
+    os.killpg(int(sys.argv[2]), signal.SIGTERM)
+except ProcessLookupError:
+    pass
+PY
 WATCHDOG_PID=$!
 
 attach_pr() {
@@ -745,37 +756,47 @@ publish_child_if_ready() {
   local alias=(alpha beta gamma)
   local repository="${REPOSITORIES[index]}"
   local branch="feat/${SLUG}-${alias[index]}"
-  local checkout candidate path
+  local checkout candidate publisher
   checkout=""
   for candidate in "${RUN_DIR}/workspaces/${CHILD_IDENTIFIERS[index]}-"*--*; do
-    [[ -d "${candidate}/.git" ]] || continue
+    [[ -d "${candidate}/.git" && ! -L "${candidate}" && ! -L "${candidate}/.git" ]] || continue
     [[ -z "${checkout}" ]] || { echo "Multiple retained child checkouts for ${CHILD_IDENTIFIERS[index]}" >&2; return 1; }
     checkout="${candidate}"
   done
   [[ -n "${checkout}" ]] || return 0
   jq -e --arg id "${CHILD_IDS[index]}" '.issue_id == $id and .status == "succeeded"' \
     "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
-  [[ "$(cat "${checkout}/delivery.txt" 2>/dev/null || true)" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
+  [[ -f "${checkout}/delivery.txt" && ! -L "${checkout}/delivery.txt" ]] || return 0
+  [[ "$(cat "${checkout}/delivery.txt")" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
   if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
+    [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]] || return 0
     [[ "$(cat "${checkout}/reviewed.txt" 2>/dev/null || true)" == "reviewed:${RUN_ID}" ]] || return 0
   elif gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
     return 0
   fi
-  [[ "$(git -C "${checkout}" remote get-url origin)" == "https://github.com/${repository}.git" ]] || {
-    echo "Child checkout origin changed for ${CHILD_IDENTIFIERS[index]}" >&2; return 1;
-  }
-  while IFS= read -r path; do
-    [[ "${path}" == delivery.txt || "${path}" == reviewed.txt ]] || {
-      echo "Unexpected child checkout edit: ${path}" >&2; return 1;
-    }
-  done < <(git -C "${checkout}" status --porcelain --untracked-files=all | cut -c4-)
-  git -C "${checkout}" add -- delivery.txt
-  if [[ -f "${checkout}/reviewed.txt" ]]; then git -C "${checkout}" add -- reviewed.txt; fi
-  if ! git -C "${checkout}" diff --cached --quiet; then
-    git -C "${checkout}" -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' \
+  publisher="${RESOURCE_DIR}/seeds/publisher-${alias[index]}"
+  rm -rf "${publisher}"
+  git clone --quiet "https://github.com/${repository}.git" "${publisher}"
+  if git -C "${publisher}" ls-remote --exit-code --heads origin "${branch}" >/dev/null; then
+    git -C "${publisher}" fetch origin "refs/heads/${branch}" >/dev/null
+    git -C "${publisher}" checkout -B "${branch}" FETCH_HEAD >/dev/null
+  else
+    git -C "${publisher}" checkout -b "${branch}" origin/develop >/dev/null
+  fi
+  rm -f "${publisher}/delivery.txt" "${publisher}/reviewed.txt"
+  cp "${checkout}/delivery.txt" "${publisher}/delivery.txt"
+  if [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]]; then
+    cp "${checkout}/reviewed.txt" "${publisher}/reviewed.txt"
+  fi
+  git -C "${publisher}" add -- delivery.txt
+  if [[ -f "${publisher}/reviewed.txt" ]]; then git -C "${publisher}" add -- reviewed.txt; fi
+  if ! git -C "${publisher}" diff --cached --quiet; then
+    git -C "${publisher}" -c core.hooksPath=/dev/null \
+      -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' \
       commit -m "Complete ${alias[index]} disposable task" >/dev/null
   fi
-  git -C "${checkout}" push origin "HEAD:refs/heads/${branch}" >/dev/null
+  git -C "${publisher}" -c core.hooksPath=/dev/null push \
+    "https://github.com/${repository}.git" "HEAD:refs/heads/${branch}" >/dev/null
   if ! gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
     gh pr create --repo "${repository}" --base develop --head "${branch}" \
       --title "${SLUG}-${alias[index]} disposable delivery" \
@@ -970,12 +991,6 @@ jq -n \
   --argjson child_merges "$(printf '%s\n' "${CHILD_MERGED[@]}" | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')" \
   '{schema_version:1,run_id:$run_id,result:"passed",parent:$parent,child_merges:$child_merges,failed_check_sha:$failed_check_sha,parent_repair_merge:true,cleanup_handoff:true}' \
   > "${RUN_DIR}/live-rollout-summary.json"
-
-kill -TERM -- "-${ORCHESTRATOR_PID}" 2>/dev/null || true
-wait "${ORCHESTRATOR_PID}" 2>/dev/null || true
-kill "${WATCHDOG_PID}" 2>/dev/null || true
-wait "${WATCHDOG_PID}" 2>/dev/null || true
-WATCHDOG_PID=""
 
 if [[ -n "$(git status --porcelain)" || "$(git rev-parse HEAD)" != "${COMMIT_SHA}" || "$(shasum -a 256 "${CONFIG_PATH}" | awk '{print $1}')" != "${CONFIG_SHA}" ]]; then
   echo "Candidate checkout or selected config changed during the live rollout." >&2
