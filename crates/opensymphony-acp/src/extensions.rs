@@ -27,7 +27,7 @@ pub fn cursor_enabled(profile: &AcpProfile) -> bool {
     profile.extensions.iter().any(|id| id == CURSOR_VERSION)
 }
 
-pub fn cursor_notification(method: &str, params: &Value) -> bool {
+pub fn cursor_todos(params: &Value) -> bool {
     let Some(object) = params.as_object() else {
         return false;
     };
@@ -41,48 +41,32 @@ pub fn cursor_notification(method: &str, params: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty() && value.len() <= max)
     };
-    match method {
-        "cursor/update_todos" => {
-            bounded("toolCallId", 128)
-                && object
-                    .get("todos")
-                    .and_then(Value::as_array)
-                    .is_some_and(|todos| {
-                        todos.len() <= 128
-                            && todos.iter().all(|todo| {
-                                todo.get("id")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|id| !id.is_empty() && id.len() <= 128)
-                                    && todo
-                                        .get("content")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|content| content.len() <= 2048)
-                                    && todo.get("status").and_then(Value::as_str).is_some_and(
-                                        |status| {
-                                            matches!(
-                                                status,
-                                                "pending"
-                                                    | "in_progress"
-                                                    | "completed"
-                                                    | "cancelled"
-                                            )
-                                        },
+    bounded("toolCallId", 128)
+        && object
+            .get("todos")
+            .and_then(Value::as_array)
+            .is_some_and(|todos| {
+                todos.len() <= 128
+                    && todos.iter().all(|todo| {
+                        todo.get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| !id.is_empty() && id.len() <= 128)
+                            && todo
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .is_some_and(|content| content.len() <= 2048)
+                            && todo
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .is_some_and(|status| {
+                                    matches!(
+                                        status,
+                                        "pending" | "in_progress" | "completed" | "cancelled"
                                     )
-                            })
+                                })
                     })
-                && object.get("merge").is_some_and(Value::is_boolean)
-        }
-        "cursor/task" => {
-            bounded("toolCallId", 128)
-                && bounded("description", 2048)
-                && bounded("prompt", 8192)
-                && object.get("subagentType").is_some()
-        }
-        "cursor/generate_image" => {
-            bounded("toolCallId", 128) && bounded("description", 2048) && bounded("filePath", 4096)
-        }
-        _ => false,
-    }
+            })
+        && object.get("merge").is_some_and(Value::is_boolean)
 }
 
 pub fn fixture_echo_enabled(profile: &AcpProfile, initialization: &Value) -> bool {

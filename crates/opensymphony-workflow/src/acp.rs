@@ -171,18 +171,6 @@ impl AcpProfile {
                 "session selections must be bounded nonempty opaque identifiers",
             ));
         }
-        // Cursor's callback shape has not yet been captured from an
-        // authenticated pinned CLI. Keep the handler testable but refuse
-        // production configuration until that qualification is complete.
-        if self
-            .extensions
-            .iter()
-            .any(|id| id == "cursor@2026.09.08-6caf4ff")
-        {
-            return Err(invalid(
-                "Cursor extension registration awaits pinned live callback qualification",
-            ));
-        }
         if self.extensions.len() > 8
             || self
                 .extensions

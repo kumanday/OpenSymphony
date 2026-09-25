@@ -168,8 +168,8 @@ cleanup until execution risk is reconciled.
 | MCP | Required host-scoped stdio attachments; HTTP/SSE only after agent negotiation. |
 | Permission | Offered opaque choices, `operator`/`deny`/`allow_once` policy, deadline and cancellation. |
 | Structured question | Standard `elicitation/create` required string-enum and string-array-enum choice forms through gateway inputs, with accept, decline and cancel. |
-| Plan approval | Typed gateway and client control; the pinned Cursor `cursor/create_plan` handler routes through the existing operator response path, with workflow registration held until live callback qualification. |
-| ACP extensions | Exact version/profile registration, bounded Cursor handler tests with live registration held, peer-gated outbound `fixture.echo`, and advertised operation schemas and attempt binding on profile and run capabilities. |
+| Plan approval | Typed gateway and client control; the authenticated pinned Cursor `cursor/create_plan` request routes through the operator response path. |
+| ACP extensions | Exact version/profile registration for observed pinned Cursor plan and ID-bearing todo requests, peer-gated outbound `fixture.echo`, and advertised operation schemas and attempt binding on profile and run capabilities. Cursor question, task, image, and no-ID notification behavior remains unqualified. |
 | Interactive auth and elicitation | Form-only capability is advertised; free-text, numeric, optional, constrained, request-scoped and URL elicitation are unavailable. |
 
 The production worker enables file and terminal callbacks for its verified

@@ -1045,8 +1045,8 @@ choices per field. Unsupported constraints, free-text fields, URL mode, and
 secret prompts are rejected without exposing them in public snapshots. Web and
 desktop Run Detail panels use offered permission option IDs and multiple-choice
 form controls. Plan approval controls are typed for a registered extension;
-Pinned Cursor `cursor/ask_question` and `cursor/create_plan` requests use those
-controls when the profile enables their registration. FrankenTUI shows a pending
+The authenticated pinned Cursor `cursor/create_plan` request uses the plan
+control when the profile enables its exact version registration. FrankenTUI shows a pending
 request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
 through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
 questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
@@ -1095,10 +1095,11 @@ to `fixture_echo@1` profiles when the peer advertises
 `opensymphony.dev/fixtureEcho: 1`; it exists for executable contract tests.
 A deadline or disconnect after dispatch reports an unknown outcome, requiring
 evidence inspection before any repeat. The event journal emits a correlated
-completion or failure for each accepted dispatch. Image notifications project a
-relative artifact candidate only when the reported file resolves within the
-issue workspace. Cursor profile registration remains disabled pending the
-pinned live callback evidence in [acp-extension-evidence.md](acp-extension-evidence.md).
+completion or failure for each accepted dispatch. The pinned Cursor profile
+supports observed plan approvals and ID-bearing todo requests; question, task,
+image, and no-ID notification paths remain unqualified. The captured wire
+contract and production test are in
+[acp-extension-evidence.md](acp-extension-evidence.md).
 The outbound operation's response can complete after the prompt finishes;
 prompt completion does not cancel its separately bounded RPC wait. A deadline
 returns outcome unknown to the caller while keeping that unresolved SDK request

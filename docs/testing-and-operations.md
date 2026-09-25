@@ -663,18 +663,18 @@ The extension peer verifies a registered outbound request has the host-bound
 session ID and permitted `_meta`, returns a structured result, and rejects
 unregistered methods, stale runs, and unexpected argument keys. The peer sends
 the operation result immediately before prompt completion; a repeated host
-regression verifies all correlated results survive that ordering. Cursor-shaped
-unit tests cover request ID `0`, the documented `answered` result, todo
-notification projection, and unknown request behavior. The Cursor host fixture
-remains ignored while workflow registration is held. A pinned real Cursor CLI
-probe is required before claiming vendor
-compatibility: record CLI version, redacted envelopes, authentication state,
-and the observed callback response separately from deterministic fixture tests.
+regression verifies all correlated results survive that ordering. Cursor
+unit and host fixture tests cover plan and todo request ID `0` without a
+peer-supplied session ID, the accepted plan and todo result shapes, mismatched
+session cancellation, owner-bound todo projection, and unknown request behavior.
+Two separately ignored manual integration tests exercise the authenticated
+pinned CLI through the production `SessionHost` plan operator route and todo
+response path. These tests require local CLI authentication and are not CI gates.
 The host integration suite also checks that a peer-echoed environment credential
 is redacted in both the result value and metadata, and that a second batch of
 operations cannot bypass the eight pending-reply limit after the first batch
 times out.
-The current redacted probe and its authentication boundary are recorded in
+The redacted wire frames and production-path qualification are recorded in
 [ACP extension qualification evidence](acp-extension-evidence.md).
 It uses a five-minute tracker interval and processes both callbacks through
 worker-update wakeups without another tracker tick.

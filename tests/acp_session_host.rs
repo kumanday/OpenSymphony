@@ -2,7 +2,7 @@ use futures_util::future::join_all;
 use opensymphony::opensymphony_gateway_schema::approval::{
     OperatorAnswer, OperatorInteractionKind, OperatorQuestionAnswer,
 };
-use opensymphony::opensymphony_workflow::AcpPermissionPolicy;
+use opensymphony::opensymphony_workflow::{AcpAuth, AcpPermissionPolicy};
 use opensymphony::{opensymphony_acp::*, opensymphony_workspace::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -454,8 +454,7 @@ async fn outbound_operation_inflight_limit_rejects_ninth_request() {
 }
 
 #[tokio::test]
-#[ignore = "Cursor workflow registration awaits an authenticated pinned callback capture"]
-async fn cursor_request_id_zero_uses_vendor_result_and_notification_has_no_response() {
+async fn cursor_request_id_zero_uses_vendor_plan_and_todo_results() {
     let root = tempfile::tempdir().expect("temp");
     let host = SessionHost::new(RetentionPolicy::default()).expect("host");
     let mut request = launch(root.path(), "CURSOR-EXTENSION", "none").await;
@@ -486,18 +485,16 @@ async fn cursor_request_id_zero_uses_vendor_result_and_notification_has_no_respo
     })
     .await
     .expect("operator event");
-    assert_eq!(opened.interaction.kind, OperatorInteractionKind::Question);
+    assert_eq!(
+        opened.interaction.kind,
+        OperatorInteractionKind::PlanApproval
+    );
     let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
     assert!(
         opened
             .reply
             .send(AcpOperatorReply {
-                answer: OperatorAnswer::Question {
-                    answers: vec![OperatorQuestionAnswer {
-                        question_id: "mode".into(),
-                        selected_option_ids: vec!["plan".into()],
-                    }],
-                },
+                answer: OperatorAnswer::Plan { accepted: true },
                 acknowledgement,
                 delivery: AcpOperatorDeliveryFence::default(),
             })
@@ -513,10 +510,191 @@ async fn cursor_request_id_zero_uses_vendor_result_and_notification_has_no_respo
     );
     let methods =
         std::fs::read_to_string(root.path().join("CURSOR-EXTENSION/methods")).expect("method log");
-    assert!(
-        !methods.contains("None"),
-        "notifications must not prompt a peer response"
+    assert!(!methods.contains("None"));
+    retire(&handle).await;
+}
+
+// Manual qualification only: CI has no authenticated Cursor CLI. The fixture
+// above remains the deterministic contract regression.
+fn pinned_cursor_binary() -> String {
+    let binary = std::env::var("OPENSYMPHONY_CURSOR_AGENT_BIN")
+        .expect("set OPENSYMPHONY_CURSOR_AGENT_BIN to the authenticated pinned CLI");
+    let version = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("Cursor CLI version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("2026.09.08-6caf4ff"));
+    binary
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn pinned_cursor_live_plan_uses_production_operator_route() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CURSOR-LIVE-PLAN", "none").await;
+    request.profile.command = pinned_cursor_binary();
+    request.profile.args = vec!["acp".into()];
+    request.profile.auth = Some(AcpAuth {
+        method_id: "cursor_login".into(),
+    });
+    request
+        .profile
+        .extensions
+        .push("cursor@2026.09.08-6caf4ff".into());
+    request.profile.session.mode = Some("plan".into());
+    request
+        .context
+        .environment
+        .insert("HOME".into(), std::env::var("HOME").expect("HOME"));
+    request.limits.setup_timeout = Duration::from_secs(30);
+    request.limits.prompt_timeout = Duration::from_secs(150);
+    request.limits.callback_timeout = Duration::from_secs(90);
+    // A long plan streams many chunks after the callback; keep its source
+    // frame in the manual test's bounded history until final assertions.
+    request.limits.queued_frames = 1024;
+    request.limits.queued_bytes = 8 * 1024 * 1024;
+    request.limits.evidence_frames = 1024;
+    request.limits.evidence_bytes = 8 * 1024 * 1024;
+    let handle = host.open(request).await.expect("open authenticated CLI");
+    let owner_session = handle
+        .inspect()
+        .await
+        .expect("inspect")
+        .state
+        .session_id
+        .expect("session");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let handle_for_prompt = handle.clone();
+    let prompt = tokio::spawn(async move {
+        handle_for_prompt.prompt_with_operator(
+            "cursor-live-plan".into(), 1,
+            "Read-only ACP protocol test. Create a plan for answering a color-choice question entirely in chat. Present it through your CreatePlan tool for operator approval and wait for the result. Do not inspect or modify files, run commands, browse, or use MCP.".into(),
+            CancellationToken::new(), Some(tx),
+        ).await
+    });
+    let opened = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if let Some(AcpOperatorEvent::Opened(opened)) = rx.recv().await {
+                break opened;
+            }
+        }
+    })
+    .await
+    .expect("real plan callback");
+    assert_eq!(
+        opened.interaction.kind,
+        OperatorInteractionKind::PlanApproval
     );
+    assert_eq!(opened.interaction.session_id, owner_session);
+    let (acknowledgement, delivered) = tokio::sync::oneshot::channel();
+    assert!(
+        opened
+            .reply
+            .send(AcpOperatorReply {
+                answer: OperatorAnswer::Plan { accepted: false },
+                acknowledgement,
+                delivery: AcpOperatorDeliveryFence::default(),
+            })
+            .is_ok()
+    );
+    assert!(delivered.await.expect("response delivered"));
+    assert!(
+        prompt
+            .await
+            .expect("prompt task")
+            .expect("prompt")
+            .succeeded()
+    );
+    let frames: Vec<_> = handle
+        .source_history()
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            if let SessionEvent::Source { frame, .. } = event {
+                Some(frame)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(frames.iter().any(|frame| frame.direction == "incoming"
+        && frame.payload["method"] == "cursor/create_plan"
+        && frame.payload["id"] == 0
+        && frame.payload["params"].get("sessionId").is_none()));
+    assert!(frames.iter().any(|frame| frame.direction == "outgoing"
+        && frame.payload["id"] == 0
+        && frame.payload["result"] == serde_json::json!({"outcome":{"outcome":"rejected"}})));
+    retire(&handle).await;
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn pinned_cursor_live_todo_request_gets_response() {
+    let root = tempfile::tempdir().expect("temp");
+    let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+    let mut request = launch(root.path(), "CURSOR-LIVE-TODO", "none").await;
+    request.profile.command = pinned_cursor_binary();
+    request.profile.args = vec!["acp".into()];
+    request.profile.auth = Some(AcpAuth {
+        method_id: "cursor_login".into(),
+    });
+    request
+        .profile
+        .extensions
+        .push("cursor@2026.09.08-6caf4ff".into());
+    request
+        .context
+        .environment
+        .insert("HOME".into(), std::env::var("HOME").expect("HOME"));
+    request.limits.setup_timeout = Duration::from_secs(30);
+    request.limits.prompt_timeout = Duration::from_secs(150);
+    let handle = host.open(request).await.expect("open authenticated CLI");
+    let owner_session = handle
+        .inspect()
+        .await
+        .expect("inspect")
+        .state
+        .session_id
+        .expect("session");
+    assert!(handle.prompt(
+        "cursor-live-todo".into(), 1,
+        "Read-only ACP protocol test. Use built-in todo tracking to record one todo, 'Answer the color probe', mark it completed, then answer blue. Do not inspect or modify files, run commands, browse, or use MCP.".into(),
+        CancellationToken::new(),
+    ).await.expect("prompt").succeeded());
+    let history = handle.source_history();
+    let mut projection = RuntimeProjection::default().with_cursor(true, Some(&owner_session), None);
+    let todo_updates: Vec<_> = history
+        .events
+        .iter()
+        .filter_map(|event| projection.apply(event, "cursor-live-todo"))
+        .filter(|update| update.kind == "vendor_todos")
+        .collect();
+    assert_eq!(
+        todo_updates.len(),
+        1,
+        "only the accepted response projects todos"
+    );
+    let frames: Vec<_> = history
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            if let SessionEvent::Source { frame, .. } = event {
+                Some(frame)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(frames.iter().any(|frame| frame.direction == "incoming"
+        && frame.payload["method"] == "cursor/update_todos"
+        && frame.payload["id"] == 0
+        && frame.payload["params"].get("sessionId").is_none()));
+    assert!(frames.iter().any(|frame| frame.direction == "outgoing"
+        && frame.payload["id"] == 0
+        && frame.payload["result"]["outcome"]["outcome"] == "accepted"
+        && frame.payload["result"]["outcome"]["todos"].is_array()));
     retire(&handle).await;
 }
 async fn prompt(handle: &SessionHandle, run: &str, text: &str) -> TurnReport {

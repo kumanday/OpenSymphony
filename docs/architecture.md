@@ -534,10 +534,12 @@ connection-owned actor. File operations are serialized; terminal waits use
 bounded asynchronous responses so they cannot block RPC dispatch. Terminal
 processes use the existing process-group or Windows Job Object supervisors.
 ACP extension registrations are exact profile/version entries inside the ACP
-module. Cursor request handlers reuse the scheduler-owned question and plan
-response path; known notifications contribute bounded activity or artifact
-evidence without authorizing new work. Cursor workflow registration remains
-disabled until an authenticated pinned callback is captured. Outbound operation dispatch enters
+module. The pinned Cursor `cursor/create_plan` request uses the scheduler-owned
+plan response path; its ID-bearing `cursor/update_todos` request receives a
+bounded response and contributes todo activity only after its correlated
+accepted response. Both bind to the connection-owned
+active session without a peer-supplied session field. Unobserved Cursor question,
+task, and image methods are outside the enabled registration. Outbound operation dispatch enters
 through the gateway's operator action, binds the current run in the scheduler,
 and resolves the registered method and session inside the retained owner. The
 public run capability supplies its attempt binding; the host bounds concurrent

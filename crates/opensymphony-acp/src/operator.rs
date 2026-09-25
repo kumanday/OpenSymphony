@@ -108,7 +108,7 @@ struct CursorOption {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CursorPlanRequest {
-    session_id: String,
+    session_id: Option<String>,
     tool_call_id: String,
     name: Option<String>,
     overview: Option<String>,
@@ -403,7 +403,10 @@ pub(super) fn parse_interaction(
         "cursor/create_plan" => {
             let request: CursorPlanRequest =
                 serde_json::from_value(params.clone()).map_err(|_| invalid())?;
-            if request.session_id != session_id
+            if request
+                .session_id
+                .as_deref()
+                .is_some_and(|id| id != session_id)
                 || !bounded(&request.tool_call_id, 128)
                 || !valid_cursor_meta(&request.meta)
                 || request.plan.trim().is_empty()

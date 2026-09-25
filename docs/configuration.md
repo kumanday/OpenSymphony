@@ -1024,11 +1024,12 @@ references. Optional
 `required_capabilities` supports `prompt.image`, `prompt.audio`, and
 `prompt.embedded_context`; each requirement is checked before session creation,
 and a failed check names the missing capability.
-`extensions` accepts `fixture_echo@1` for executable outbound tests. The
-`cursor@2026.09.08-6caf4ff` handler is implemented against the documented
-contract but workflow validation rejects its registration until an authenticated
-pinned CLI supplies a captured callback and response. Duplicate IDs and
-unspecified vendor versions fail validation.
+`extensions` accepts `fixture_echo@1` for executable outbound tests and
+`cursor@2026.09.08-6caf4ff` for the pinned CLI's observed plan approval and
+todo request contracts. Cursor callbacks bind to the connection-owned active
+session even when the peer omits `sessionId`. The registration does not enable
+unobserved question, task, or image methods. Duplicate IDs and unspecified
+vendor versions fail validation.
 Registration alone grants no operation: outbound use also requires the peer's
 capability predicate and an active, bound run.
 The prompt API sends text. Explicit session selections live in each profile:

@@ -1,7 +1,7 @@
 //! Scheduler projection of the redacted source stream; wire evidence stays on the owner.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use serde_json::{Value, json};
@@ -42,30 +42,13 @@ pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<Str
     (!reported.is_empty()).then_some(reported)
 }
 
-fn safe_artifact_path(workspace: &Path, reported: &str) -> Option<String> {
-    if reported.is_empty() || reported.len() > 4096 || reported.chars().any(char::is_control) {
-        return None;
-    }
-    let root = workspace.canonicalize().ok()?;
-    let candidate = Path::new(reported);
-    let candidate = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        root.join(candidate)
-    };
-    let resolved = candidate.canonicalize().ok()?;
-    if !resolved.is_file() {
-        return None;
-    }
-    let relative = resolved.strip_prefix(root).ok()?.to_str()?;
-    (!relative.is_empty()).then(|| relative.to_owned())
-}
-
 #[derive(Default)]
 pub struct RuntimeProjection {
     cursor_enabled: bool,
     cursor_session_id: Option<String>,
-    cursor_workspace: Option<PathBuf>,
+    // Redacted, bounded candidates become activity only after the host's
+    // correlated accepted response. A rejected callback is not a todo update.
+    cursor_todo_candidates: BTreeMap<String, Option<Value>>,
     last: Option<(u64, u64)>,
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
@@ -88,11 +71,10 @@ impl RuntimeProjection {
         mut self,
         enabled: bool,
         session_id: Option<&str>,
-        workspace: Option<&Path>,
+        _workspace: Option<&Path>,
     ) -> Self {
         self.cursor_enabled = enabled;
         self.cursor_session_id = session_id.map(str::to_owned);
-        self.cursor_workspace = workspace.map(Path::to_path_buf);
         self
     }
 
@@ -114,6 +96,9 @@ impl RuntimeProjection {
         if self.last.is_some_and(|last| cursor <= last) {
             return None;
         }
+        if self.last.is_some_and(|last| last.0 != *generation) {
+            self.cursor_todo_candidates.clear();
+        }
         self.last = Some(cursor);
         if *replay || source_run != run_id {
             return None;
@@ -121,6 +106,22 @@ impl RuntimeProjection {
         if frame.direction == "outgoing" {
             if frame.payload["method"] == "session/prompt" {
                 self.prompt_request = frame.payload.get("id").cloned();
+            }
+            if self.cursor_enabled
+                && frame.payload.get("method").is_none()
+                && let Some(id) = frame.payload.get("id")
+                && (id.is_number() || id.is_string())
+                && let Some(Some(payload)) = self.cursor_todo_candidates.remove(&id.to_string())
+                && frame.payload.pointer("/result/outcome/outcome") == Some(&json!("accepted"))
+            {
+                return Some(RuntimeUpdate {
+                    sequence: frame.sequence,
+                    generation: *generation,
+                    observed_at: frame.observed_at,
+                    kind: "vendor_todos".into(),
+                    summary: Some("Cursor todos updated".into()),
+                    payload,
+                });
             }
             return self
                 .project_filesystem_response(*generation, frame)
@@ -130,48 +131,29 @@ impl RuntimeProjection {
             return None;
         }
         if self.cursor_enabled
-            && self.cursor_session_id.as_deref()
-                == frame
-                    .payload
-                    .pointer("/params/sessionId")
-                    .and_then(Value::as_str)
-            && let Some(method) = frame.payload.get("method").and_then(Value::as_str)
+            && self.cursor_session_id.is_some()
+            && frame.payload.get("method").and_then(Value::as_str) == Some("cursor/update_todos")
             && let Some(params) = frame.payload.get("params")
-            && super::extensions::cursor_notification(method, params)
-            && frame.payload.get("id").is_none()
+            && params
+                .get("sessionId")
+                .is_none_or(|id| id.as_str() == self.cursor_session_id.as_deref())
+            && super::extensions::cursor_todos(params)
+            && let Some(id) = frame.payload.get("id")
+            && (id.is_number() || id.is_string())
+            && id.to_string().len() <= 128
         {
-            let (kind, summary, payload) = match method {
-                "cursor/update_todos" => (
-                    "vendor_todos",
-                    "Cursor todos updated",
-                    json!({"todos": params["todos"], "merge": params["merge"]}),
-                ),
-                "cursor/task" => (
-                    "vendor_task",
-                    "Cursor subagent task reported",
-                    json!({"toolCallId": params["toolCallId"], "description": params["description"]}),
-                ),
-                "cursor/generate_image" => {
-                    let relative = safe_artifact_path(
-                        self.cursor_workspace.as_deref()?,
-                        params["filePath"].as_str()?,
-                    )?;
-                    (
-                        "artifact_candidate",
-                        "Cursor image output reported",
-                        json!({"toolCallId": params["toolCallId"], "relativePath": relative, "verified": false}),
-                    )
-                }
-                _ => unreachable!("validated Cursor notification"),
-            };
-            return Some(RuntimeUpdate {
-                sequence: frame.sequence,
-                generation: *generation,
-                observed_at: frame.observed_at,
-                kind: kind.into(),
-                summary: Some(summary.into()),
-                payload,
-            });
+            let key = id.to_string();
+            if let Some(candidate) = self.cursor_todo_candidates.get_mut(&key) {
+                *candidate = None;
+            } else if self.cursor_todo_candidates.len() < 16 {
+                self.cursor_todo_candidates.insert(
+                    key,
+                    Some(json!({
+                        "todos": params["todos"], "merge": params["merge"]
+                    })),
+                );
+            }
+            return None;
         }
         if let Some(activity) = self.project_filesystem_request(*generation, frame) {
             return Some(activity);
@@ -864,37 +846,131 @@ mod tests {
     }
 
     #[test]
-    fn cursor_notification_projects_only_for_enabled_bound_session() {
-        let payload = |session: &str| {
-            json!({"method":"cursor/update_todos","params":{
-            "sessionId":session,"toolCallId":"todo-1","merge":true,
-            "todos":[{"id":"one","content":"Verify","status":"completed"}]}})
+    fn cursor_todo_request_projects_only_for_enabled_bound_session() {
+        let payload = |session: Option<&str>| {
+            let mut value = json!({"id":0,"method":"cursor/update_todos","params":{
+            "toolCallId":"todo-1","merge":true,
+            "todos":[{"id":"one","content":"Verify","status":"completed"}]}});
+            if let Some(session) = session {
+                value["params"]["sessionId"] = json!(session);
+            }
+            value
         };
         let mut disabled = RuntimeProjection::default();
         assert!(
             disabled
-                .apply(&callback_event(1, "incoming", payload("s")), "run")
+                .apply(&callback_event(1, "incoming", payload(None)), "run")
                 .is_none()
         );
         let mut enabled = RuntimeProjection::default().with_cursor(true, Some("s"), None);
         assert!(
             enabled
-                .apply(&callback_event(1, "incoming", payload("other")), "run")
+                .apply(
+                    &callback_event(1, "incoming", payload(Some("other"))),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            enabled
+                .apply(&callback_event(2, "incoming", payload(None)), "run")
                 .is_none()
         );
         let update = enabled
-            .apply(&callback_event(2, "incoming", payload("s")), "run")
-            .expect("bound update");
+            .apply(
+                &callback_event(
+                    3,
+                    "outgoing",
+                    json!({"id":0,"result":{"outcome":{"outcome":"accepted","todos":[]}}}),
+                ),
+                "run",
+            )
+            .expect("accepted bound update");
         assert_eq!(update.kind, "vendor_todos");
         assert_eq!(update.payload["todos"][0]["content"], "Verify");
+        assert!(enabled.apply(&callback_event(4, "incoming", json!({"method":"cursor/update_todos","params":{"toolCallId":"todo-1","merge":true,"todos":[]}})), "run").is_none());
+        assert!(enabled.apply(&callback_event(5, "incoming", json!({"id":0,"method":"cursor/update_todos","params":{"sessionId":7,"toolCallId":"todo-1","merge":false,"todos":[]}})), "run").is_none());
+        assert!(enabled.apply(&callback_event(6, "incoming", json!({"id":0,"method":"cursor/task","params":{"toolCallId":"task","description":"unqualified","prompt":"noop","subagentType":"general"}})), "run").is_none());
+        assert!(
+            enabled
+                .apply(&callback_event(7, "incoming", payload(None)), "run")
+                .is_none()
+        );
         assert!(
             enabled
                 .apply(
                     &callback_event(
-                        3,
+                        8,
+                        "outgoing",
+                        json!({"id":0,"result":{"outcome":{"outcome":"rejected"}}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(enabled.cursor_todo_candidates.is_empty());
+        assert!(
+            enabled
+                .apply(&callback_event(9, "incoming", payload(None)), "run")
+                .is_none()
+        );
+        let mut next_generation = callback_event(
+            1,
+            "outgoing",
+            json!({"id":0,"result":{"outcome":{"outcome":"accepted"}}}),
+        );
+        if let SessionEvent::Source { generation, .. } = &mut next_generation {
+            *generation += 1;
+        }
+        assert!(enabled.apply(&next_generation, "run").is_none());
+        assert!(enabled.cursor_todo_candidates.is_empty());
+    }
+
+    #[test]
+    fn cursor_todo_candidates_are_bounded_and_duplicate_ids_are_ambiguous() {
+        let mut projection = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        for sequence in 1..=17 {
+            let request = json!({"id":sequence,"method":"cursor/update_todos","params":{
+                "toolCallId":"todo","merge":false,"todos":[]}});
+            assert!(
+                projection
+                    .apply(&callback_event(sequence, "incoming", request), "run")
+                    .is_none()
+            );
+        }
+        assert_eq!(projection.cursor_todo_candidates.len(), 16);
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        18,
+                        "outgoing",
+                        json!({"id":17,"result":{"outcome":{"outcome":"accepted"}}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        19,
                         "incoming",
-                        json!({"id":0,"method":"cursor/update_todos","params":{
-            "sessionId":"s","toolCallId":"todo-1","merge":true,"todos":[]}})
+                        json!({"id":1,"method":"cursor/update_todos","params":{
+            "toolCallId":"todo","merge":false,"todos":[]}})
+                    ),
+                    "run"
+                )
+                .is_none()
+        );
+        assert!(
+            projection
+                .apply(
+                    &callback_event(
+                        20,
+                        "outgoing",
+                        json!({"id":1,"result":{"outcome":{"outcome":"accepted"}}})
                     ),
                     "run"
                 )
@@ -1285,41 +1361,5 @@ mod tests {
         assert_eq!(projected.kind, "session_update");
         assert_eq!(projected.payload["truncated"], true);
         assert!(serde_json::to_vec(&projected.payload).expect("JSON").len() < 1024);
-    }
-
-    #[test]
-    fn cursor_image_artifact_stays_inside_workspace_and_uses_relative_path() {
-        let root = tempfile::tempdir().expect("workspace");
-        let outside = tempfile::tempdir().expect("outside");
-        std::fs::create_dir(root.path().join("images")).expect("images");
-        std::fs::write(root.path().join("images/result.png"), b"image").expect("image");
-        std::fs::write(outside.path().join("private.png"), b"private").expect("outside image");
-        assert_eq!(
-            safe_artifact_path(root.path(), "images/result.png"),
-            Some("images/result.png".into())
-        );
-        assert_eq!(
-            safe_artifact_path(
-                root.path(),
-                outside.path().join("private.png").to_str().expect("path")
-            ),
-            None
-        );
-        assert_eq!(safe_artifact_path(root.path(), "../private.png"), None);
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(
-                outside.path().join("private.png"),
-                root.path().join("images/link.png"),
-            )
-            .expect("symlink");
-            assert_eq!(safe_artifact_path(root.path(), "images/link.png"), None);
-        }
-        let mut projection =
-            RuntimeProjection::default().with_cursor(true, Some("s"), Some(root.path()));
-        let projected = projection.apply(&callback_event(1, "incoming", json!({"method":"cursor/generate_image","params":{"sessionId":"s","toolCallId":"image-1","description":"Result","filePath":"images/result.png"}})), "run").expect("artifact candidate");
-        assert_eq!(projected.payload["relativePath"], "images/result.png");
-        assert!(projected.payload.get("filePath").is_none());
-        assert!(projection.apply(&callback_event(2, "incoming", json!({"method":"cursor/generate_image","params":{"sessionId":"s","toolCallId":"image-2","description":"Result","filePath":outside.path().join("private.png")}})), "run").is_none());
     }
 }

@@ -572,16 +572,12 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
     ))
     .expect("versioned ACP profile");
     assert!(configured.resolve(Path::new("/repo"), &env).is_ok());
-    let unqualified_cursor = WorkflowDefinition::parse(&source.replace(
+    let qualified_cursor = WorkflowDefinition::parse(&source.replace(
         "args: [agent.py]",
         "args: [agent.py]\n      extensions: [cursor@2026.09.08-6caf4ff]",
     ))
     .expect("versioned Cursor profile");
-    assert!(
-        unqualified_cursor
-            .resolve(Path::new("/repo"), &env)
-            .is_err()
-    );
+    assert!(qualified_cursor.resolve(Path::new("/repo"), &env).is_ok());
     for (old, new) in [
         ("harness_profile: fake", "harness_profile: missing"),
         ("args: [agent.py]", "args: ['--TOKEN=secret']"),
@@ -591,6 +587,10 @@ fn acp_workflow_profiles_validate_and_preserve_environment_references() {
         ("args: [agent.py]", "transport: http"),
         ("args: [agent.py]", "protocol_versions: [2]"),
         ("args: [agent.py]", "extensions: [cursor]"),
+        (
+            "args: [agent.py]",
+            "extensions: [cursor@2026.09.08-unsupported]",
+        ),
         ("args: [agent.py]", "required_capabilities: [unknown]"),
         ("AUTH_SOURCE", "literal-secret-value"),
         ("args: [agent.py]", "auth: {method_id: ''}"),

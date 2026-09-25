@@ -1170,10 +1170,41 @@ async fn run_connection(
                                     fatal.cancel();
                                 });
                         }
+                        if cursor_enabled && request.method == "cursor/update_todos" {
+                            // The pinned CLI sends this as an ID-bearing request without
+                            // sessionId. Bind it to the connection's active session and
+                            // prompt epoch, never to an asserted peer session.
+                            let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            let active = operator_router
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref()
+                                .is_some_and(|(_, epoch)| !epoch.is_cancelled());
+                            let bound = session.is_some()
+                                && request.params.get("sessionId")
+                                    .is_none_or(|id| id.as_str() == session.as_deref());
+                            let response = Ok(if active && bound
+                                && extensions::cursor_todos(&request.params)
+                            {
+                                json!({"outcome":{"outcome":"accepted","todos":request.params["todos"]}})
+                            } else {
+                                json!({"outcome":{"outcome":"rejected"}})
+                            });
+                            let frame = serde_json::to_string(&RawJsonRpcMessage::response(
+                                responder.id().clone(), response.clone(),
+                            ))?;
+                            let mut output = callback_output.lock().unwrap_or_else(|e| e.into_inner());
+                            if !output.admit(frame, &limits) {
+                                resource_failure.store(true, Ordering::Release);
+                                fatal.cancel();
+                                return Err(agent_client_protocol::Error::internal_error());
+                            }
+                            return responder.respond_with_result(response);
+                        }
                         let operator_method = matches!(request.method.as_str(),
                             "session/request_permission" | "elicitation/create")
                             || (cursor_enabled && matches!(request.method.as_str(),
-                                "cursor/ask_question" | "cursor/create_plan"));
+                                "cursor/create_plan"));
                         if operator_method {
                             let session = active_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let rpc_id = serde_json::to_value(responder.id())?;

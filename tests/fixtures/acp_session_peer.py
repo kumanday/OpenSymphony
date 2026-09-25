@@ -148,22 +148,30 @@ for line in sys.stdin:
             open('extension-ready', 'w').close()
             continue
         if text == 'cursor-extension':
-            send({'id': 99, 'method': 'cursor/ask_question', 'params': {
-                'sessionId': session, 'toolCallId': 'malformed', 'questions': []}})
+            send({'id': 99, 'method': 'cursor/create_plan', 'params': {
+                'sessionId': 'wrong-session', 'toolCallId': 'malformed', 'plan': 'Nope', 'todos': []}})
             malformed = json.loads(sys.stdin.readline())
             assert malformed['id'] == 99 and malformed['result'] == {'outcome': {'outcome': 'cancelled'}}, malformed
-            send({'id': 0, 'method': 'cursor/ask_question', 'params': {
-                'sessionId': session, 'toolCallId': 'cursor-q1', 'title': 'Choose mode',
-                'questions': [{'id': 'mode', 'prompt': 'Which mode?', 'options': [
-                    {'id': 'agent', 'label': 'Agent'}, {'id': 'plan', 'label': 'Plan'}]}],
-                '_meta': {'traceparent': 'trace-cursor'}}})
+            send({'id': 0, 'method': 'cursor/create_plan', 'params': {
+                'toolCallId': 'cursor-p1', 'name': 'Choose color', 'overview': 'Answer in chat',
+                'plan': 'Answer blue in chat', 'todos': [], 'isProject': False, 'phases': []}})
             answer = json.loads(sys.stdin.readline())
             assert answer['id'] == 0, answer
-            assert answer['result'] == {'outcome': {'outcome': 'answered', 'answers': [
-                {'questionId': 'mode', 'selectedOptionIds': ['plan']}]}}, answer
-            send({'method': 'cursor/update_todos', 'params': {'sessionId': session,
-                'toolCallId': 'cursor-t1', 'merge': True,
+            assert answer['result'] == {'outcome': {'outcome': 'accepted'}}, answer
+            send({'id': 0, 'method': 'cursor/update_todos', 'params': {
+                'toolCallId': 'cursor-t1', 'merge': False,
                 'todos': [{'id': 't1', 'content': 'Verify', 'status': 'completed'}]}})
+            todo = json.loads(sys.stdin.readline())
+            assert todo['id'] == 0 and todo['result'] == {'outcome': {'outcome': 'accepted',
+                'todos': [{'id': 't1', 'content': 'Verify', 'status': 'completed'}]}}, todo
+            send({'id': 101, 'method': 'cursor/update_todos', 'params': {
+                'sessionId': 7, 'toolCallId': 'cursor-t2', 'merge': False, 'todos': []}})
+            malformed_todo = json.loads(sys.stdin.readline())
+            assert malformed_todo['id'] == 101 and malformed_todo['result'] == {'outcome': {'outcome': 'rejected'}}, malformed_todo
+            # A simulated no-ID frame gets no response; the pinned CLI did not emit one.
+            send({'method': 'cursor/update_todos', 'params': {
+                'toolCallId': 'cursor-notification', 'merge': False, 'todos': []}})
+            assert callback('cursor/ask_question', {'toolCallId': 'unqualified', 'questions': []}, error=True)['code'] == -32601
             assert callback('cursor/unknown', {'toolCallId': 'unknown'}, error=True)['code'] == -32601
             send({'id': message['id'], 'result': {'stopReason': 'end_turn'}})
             continue
