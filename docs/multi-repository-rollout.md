@@ -66,18 +66,17 @@ Run the live gate only after the hermetic evidence exists for the candidate:
 OPENSYMPHONY_LIVE_MULTI_REPO=1 \
 OPENSYMPHONY_LIVE_GITHUB_OWNER=<disposable-owner> \
 OPENSYMPHONY_LIVE_LINEAR_TEAM_ID=<non-production-team-id> \
-OPENSYMPHONY_LIVE_REVIEW_TOKEN=<different-reviewer-token> \
 OPENSYMPHONY_LIVE_MODEL=<bounded-model> \
   scripts/live_multi_repo_rollout.sh
 ```
 
 The script creates uniquely named private repositories, a uniquely named Linear
 project and hierarchy, isolated state/workspace/catalog roots, and a unique
-loopback port. It caps runtime, task count, retry count, model turns, and review
-requests. The second GitHub identity is required because GitHub does not allow a
-pull-request author to submit the requested-change and approval evidence used by
-the repair loop. That identity must be able to accept a read-level collaborator
-invitation to each disposable repository. The script tears down processes,
+loopback port. It caps runtime, task count, retry count, and model turns. The
+alpha fixture uses a required GitHub Actions check to exercise a
+failed-check rework loop on the same PR branch. Repository code review follows
+the configured automated OpenHands or Codex integration; the fixture does not
+require a separate reviewer account. The script tears down processes,
 branches, pull requests,
 issues, project, repositories, port ownership, credential copies, and local
 roots, then writes a teardown inventory. A missing cleanup receipt fails the

@@ -6,7 +6,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_ROOT="${OPENSYMPHONY_HERMETIC_OUTPUT_ROOT:-${ROOT_DIR}/target/multi-repo-lifecycle}"
 RUN_DIR="${OUTPUT_ROOT%/}/${RUN_ID}"
 LOG_FILE="${RUN_DIR}/gate.log"
-CONFIG_PATH="${OPENSYMPHONY_RELEASE_CONFIG:-${ROOT_DIR}/config.yaml}"
+CONFIG_PATH="${OPENSYMPHONY_RELEASE_CONFIG:-}"
 
 mkdir -p "${RUN_DIR}"
 cd "${ROOT_DIR}"
@@ -18,8 +18,8 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-if [[ ! -f "${CONFIG_PATH}" ]]; then
-  echo "Release config does not exist: ${CONFIG_PATH}" >&2
+if [[ -z "${CONFIG_PATH}" || ! -f "${CONFIG_PATH}" ]]; then
+  echo "Set OPENSYMPHONY_RELEASE_CONFIG to the selected central config file." >&2
   exit 1
 fi
 
@@ -40,6 +40,12 @@ run() {
   printf '\n[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "${LOG_FILE}"
   "$@" 2>&1 | tee -a "${LOG_FILE}"
 }
+
+run cargo run -- doctor --config "${CONFIG_PATH}"
+if ! grep -Fq 'parsed central config' "${LOG_FILE}"; then
+  echo "Release config must use the central project-set schema: ${CONFIG_PATH}" >&2
+  exit 1
+fi
 
 # H01-H03: strict configuration, legacy migration/rollback, and exclusive
 # process ownership. These are inherited matrices, run intact by prefix.

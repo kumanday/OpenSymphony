@@ -32,7 +32,6 @@ required_env=(
   LINEAR_API_KEY
   OPENSYMPHONY_LIVE_GITHUB_OWNER
   OPENSYMPHONY_LIVE_LINEAR_TEAM_ID
-  OPENSYMPHONY_LIVE_REVIEW_TOKEN
   OPENSYMPHONY_LIVE_MODEL
 )
 
@@ -53,11 +52,6 @@ if [[ ! "${MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${POLL_SECONDS}" =~ ^[1-9][0-9]*
   exit 1
 fi
 
-if [[ "${GH_TOKEN}" == "${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" ]]; then
-  echo "OPENSYMPHONY_LIVE_REVIEW_TOKEN must belong to a different GitHub identity." >&2
-  exit 1
-fi
-
 for command in cargo codex git gh jq lsof python3 shasum; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "Missing required command: ${command}" >&2
@@ -72,13 +66,6 @@ fi
 
 if ! codex login status 2>&1 | grep -Eq 'Logged in (using|with) ChatGPT'; then
   echo "The Codex app-server harness requires an active ChatGPT login." >&2
-  exit 1
-fi
-
-AUTHOR_LOGIN="$(gh api user --jq .login)"
-REVIEWER_LOGIN="$(GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh api user --jq .login)"
-if [[ "${AUTHOR_LOGIN}" == "${REVIEWER_LOGIN}" ]]; then
-  echo "The live reviewer must differ from the repository/PR author." >&2
   exit 1
 fi
 
@@ -133,7 +120,9 @@ delete_linear_resource() {
   local id="$2"
   local vars="${RUN_DIR}/delete-${query}-${id}.json"
   write_json "${vars}" --arg id "${id}" '{id:$id}'
-  linear "${query}.graphql" "${vars}" >/dev/null 2>&1 || return 1
+  local result
+  result="$(linear "${query}.graphql" "${vars}")" || return 1
+  jq -e '.data | [.[] | .success] == [true]' <<<"${result}" >/dev/null
 }
 
 cleanup() {
@@ -198,7 +187,7 @@ cleanup() {
     return 1
   fi
 }
-trap cleanup EXIT
+trap 'status=$?; trap - EXIT; cleanup || status=1; exit "${status}"' EXIT
 
 PORT="$(python3 - <<'PY'
 import socket
@@ -215,12 +204,7 @@ create_repository() {
   gh repo create "${repository}" --private --disable-issues --disable-wiki >/dev/null
   REPOSITORIES+=("${repository}")
   REPOSITORY_IDS+=("$(gh api "repos/${repository}" --jq '.id | tostring')")
-  gh api -X PUT "repos/${repository}/collaborators/${REVIEWER_LOGIN}" -f permission=pull >/dev/null
-  invitation_id="$(GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh api user/repository_invitations --jq ".[] | select(.repository.full_name == \"${repository}\") | .id" | head -1)"
-  if [[ -n "${invitation_id}" ]]; then
-    GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh api -X PATCH "user/repository_invitations/${invitation_id}" >/dev/null
-  fi
-  mkdir -p "${seed}/scripts"
+  mkdir -p "${seed}/scripts" "${seed}/.github/workflows"
   git -C "${seed}" init -b develop >/dev/null
   cat > "${seed}/AGENTS.md" <<EOF
 # Disposable OpenSymphony live fixture: ${alias}
@@ -240,9 +224,34 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 test "\$(cat component.txt)" = "component=${alias}"
-test -f delivery.txt
+test "\$(cat delivery.txt)" = "delivered:${alias}:${RUN_ID}"
 EOF
+  if [[ "${alias}" == "alpha" ]]; then
+    cat >> "${seed}/scripts/check.sh" <<EOF
+if [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then
+  test "\$(cat reviewed.txt 2>/dev/null)" = "reviewed:${RUN_ID}" || {
+    echo "Create reviewed.txt containing reviewed:${RUN_ID}, then push the same PR branch." >&2
+    exit 1
+  }
+fi
+EOF
+  fi
   chmod +x "${seed}/scripts/check.sh"
+  cat > "${seed}/.github/workflows/check.yml" <<'EOF'
+name: fixture-check
+on:
+  pull_request:
+    branches: [develop]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check.sh
+EOF
   git -C "${seed}" add .
   git -C "${seed}" -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' commit -m 'Initialize disposable fixture' >/dev/null
   git -C "${seed}" remote add origin "https://github.com/${repository}.git"
@@ -254,29 +263,6 @@ for alias in alpha beta gamma; do
   create_repository "${alias}"
 done
 record_manifest
-
-state_vars="${RUN_DIR}/team-states.json"
-write_json "${state_vars}" --arg id "${PARENT_ID}" '{id:$id}'
-state_result="$(linear issue_team_states.graphql "${state_vars}")"
-state_id() {
-  local name="$1"
-  jq -er --arg name "${name}" '.data.issue.team.states.nodes[] | select(.name == $name) | .id' <<<"${state_result}"
-}
-TODO_STATE="$(state_id Todo)"
-HUMAN_REVIEW_STATE="$(state_id 'Human Review')"
-REWORK_STATE="$(state_id Rework)"
-DONE_STATE="$(state_id Done)"
-
-move_issue() {
-  local issue_id="$1"
-  local target_state="$2"
-  local vars="${RUN_DIR}/move-${issue_id}.json"
-  write_json "${vars}" --arg id "${issue_id}" --arg state "${target_state}" '{id:$id,stateId:$state}'
-  linear issue_move_to_state.graphql "${vars}" >/dev/null
-}
-for issue_id in "${ISSUE_IDS[@]}"; do
-  move_issue "${issue_id}" "${TODO_STATE}"
-done
 
 project_vars="${RUN_DIR}/project-create.json"
 write_json "${project_vars}" \
@@ -347,6 +333,29 @@ for index in 0 1 2; do
   CHILD_IDENTIFIERS+=("${child_identifier}")
 done
 record_manifest
+
+state_vars="${RUN_DIR}/team-states.json"
+write_json "${state_vars}" --arg id "${PARENT_ID}" '{id:$id}'
+state_result="$(linear issue_team_states.graphql "${state_vars}")"
+state_id() {
+  local name="$1"
+  jq -er --arg name "${name}" '.data.issue.team.states.nodes[] | select(.name == $name) | .id' <<<"${state_result}"
+}
+TODO_STATE="$(state_id Todo)"
+HUMAN_REVIEW_STATE="$(state_id 'Human Review')"
+REWORK_STATE="$(state_id Rework)"
+DONE_STATE="$(state_id Done)"
+
+move_issue() {
+  local issue_id="$1"
+  local target_state="$2"
+  local vars="${RUN_DIR}/move-${issue_id}.json"
+  write_json "${vars}" --arg id "${issue_id}" --arg state "${target_state}" '{id:$id,stateId:$state}'
+  linear issue_move_to_state.graphql "${vars}" >/dev/null
+}
+for issue_id in "${ISSUE_IDS[@]}"; do
+  move_issue "${issue_id}" "${TODO_STATE}"
+done
 
 cat > "${RUN_DIR}/integration.md" <<EOF
 # Disposable integration instructions
@@ -423,7 +432,7 @@ review_profiles:
     provider: github
     credential: github-review-token
     required_checks: true
-    required_review: true
+    required_review: false
     merge_method: squash
 workspace:
   root: ${RUN_DIR}/workspaces
@@ -488,16 +497,29 @@ attach_pr() {
 checks_are_green() {
   local repository="$1"
   local number="$2"
-  gh pr view "${number}" --repo "${repository}" --json statusCheckRollup \
-    --jq '[.statusCheckRollup[] | if .__typename == "CheckRun" then .conclusion else .state end | select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")] | length == 0'
+  gh pr view "${number}" --repo "${repository}" --json statusCheckRollup | jq -r '
+    [.statusCheckRollup[] | if .__typename == "CheckRun" then .conclusion else .state end] as $checks
+    | ($checks | length) > 0 and all($checks[]; . == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED")
+  '
+}
+
+checks_have_failed() {
+  local repository="$1"
+  local number="$2"
+  gh pr view "${number}" --repo "${repository}" --json statusCheckRollup | jq -r '
+    any(.statusCheckRollup[]; if .__typename == "CheckRun" then
+      .conclusion == "FAILURE"
+    else
+      .state == "FAILURE" or .state == "ERROR"
+    end)
+  '
 }
 
 declare -a CHILD_ATTACHED=(0 0 0)
 declare -a CHILD_MERGED=(0 0 0)
-ALPHA_CHANGE_REQUESTED=0
-ALPHA_REQUESTED_SHA=""
+ALPHA_REWORK_REQUIRED=0
+ALPHA_FAILED_SHA=""
 PARENT_ATTACHED=0
-PARENT_APPROVED=0
 PARENT_MERGED=0
 START_SECONDS="${SECONDS}"
 
@@ -538,15 +560,16 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       CHILD_ATTACHED[index]=1
     fi
 
-    if (( index == 0 && ALPHA_CHANGE_REQUESTED == 0 )); then
-      GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh pr review "${pr_number}" --repo "${repository}" \
-        --request-changes --body "Create reviewed.txt with the exact content reviewed:${RUN_ID}; leave answer.txt unchanged."
-      ALPHA_CHANGE_REQUESTED=1
-      ALPHA_REQUESTED_SHA="${pr_sha}"
+    if (( index == 0 && ALPHA_REWORK_REQUIRED == 0 )); then
+      if [[ "$(checks_have_failed "${repository}" "${pr_number}")" != "true" ]]; then
+        continue
+      fi
+      ALPHA_REWORK_REQUIRED=1
+      ALPHA_FAILED_SHA="${pr_sha}"
       move_issue "${CHILD_IDS[index]}" "${REWORK_STATE}"
       continue
     fi
-    if (( index == 0 )) && [[ "${pr_sha}" == "${ALPHA_REQUESTED_SHA}" ]]; then
+    if (( index == 0 )) && [[ "${pr_sha}" == "${ALPHA_FAILED_SHA}" ]]; then
       continue
     fi
     if (( index == 0 )); then
@@ -559,7 +582,6 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     if [[ "$(checks_are_green "${repository}" "${pr_number}")" != "true" ]]; then
       continue
     fi
-    GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh pr review "${pr_number}" --repo "${repository}" --approve --body 'Disposable live gate approval.'
     gh pr merge "${pr_number}" --repo "${repository}" --squash --delete-branch
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"
     CHILD_MERGED[index]=1
@@ -575,10 +597,6 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       if (( PARENT_ATTACHED == 0 )); then
         attach_pr "${PARENT_ID}" "$(jq -er .url <<<"${pr}")" "$(jq -er .title <<<"${pr}")"
         PARENT_ATTACHED=1
-      fi
-      if [[ "${pr_state}" == "OPEN" && "${PARENT_APPROVED}" == "0" && "$(checks_are_green "${repository}" "${pr_number}")" == "true" ]]; then
-        GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh pr review "${pr_number}" --repo "${repository}" --approve --body 'Disposable parent repair approval.'
-        PARENT_APPROVED=1
       fi
       if [[ "${pr_state}" == "MERGED" ]] && parent_controller_is_complete; then
         jq --arg parent_id "${PARENT_ID}" '.parent_integrations[$parent_id]' \
@@ -602,7 +620,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
   sleep "${POLL_SECONDS}"
 done
 
-if (( PARENT_MERGED != 1 || ALPHA_CHANGE_REQUESTED != 1 )); then
+if (( PARENT_MERGED != 1 || ALPHA_REWORK_REQUIRED != 1 )); then
   echo "The bounded live lifecycle did not complete before its deadline." >&2
   exit 1
 fi
@@ -626,9 +644,9 @@ done
 jq -n \
   --arg run_id "${RUN_ID}" \
   --arg parent "${PARENT_IDENTIFIER}" \
-  --arg requested_change_sha "${ALPHA_REQUESTED_SHA}" \
+  --arg failed_check_sha "${ALPHA_FAILED_SHA}" \
   --argjson child_merges "$(printf '%s\n' "${CHILD_MERGED[@]}" | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')" \
-  '{schema_version:1,run_id:$run_id,result:"passed",parent:$parent,child_merges:$child_merges,requested_change_sha:$requested_change_sha,parent_repair_merge:true,cleanup_handoff:true}' \
+  '{schema_version:1,run_id:$run_id,result:"passed",parent:$parent,child_merges:$child_merges,failed_check_sha:$failed_check_sha,parent_repair_merge:true,cleanup_handoff:true}' \
   > "${RUN_DIR}/live-rollout-summary.json"
 
 kill -TERM "${ORCHESTRATOR_PID}" 2>/dev/null || true
