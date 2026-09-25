@@ -282,6 +282,33 @@ async fn acp_rejects_early_update_for_another_session() {
     );
 }
 
+#[tokio::test]
+async fn acp_bounds_updates_before_new_session_response() {
+    let root = tempfile::tempdir().expect("temp");
+    let run = run_turn(
+        &profile("pre_response_updates_overflow"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        None,
+        ClientLimits {
+            queued_frames: 1,
+            ..limits()
+        },
+    )
+    .await
+    .expect("launch");
+    assert_eq!(
+        run.outcome
+            .expect_err("early update queue must remain bounded"),
+        ClientError::ResourceLimit { submitted: false }
+    );
+    assert!(run.process_reaped);
+    assert!(!run.evidence.iter().any(|frame| {
+        frame.direction == "outgoing" && frame.payload["method"] == "session/prompt"
+    }));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn acp_bounds_callback_output_before_sdk_enqueue_when_stdin_is_blocked() {
     for mode in [

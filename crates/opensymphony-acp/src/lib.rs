@@ -586,6 +586,51 @@ impl Capture {
 
 type SharedCapture = Arc<Mutex<Capture>>;
 
+#[derive(Default)]
+struct PendingSessionUpdates {
+    frames: Vec<(String, Value)>,
+    bytes: usize,
+}
+impl PendingSessionUpdates {
+    fn push(&mut self, id: &str, update: &Value, limits: &ClientLimits) -> bool {
+        let bytes = id.len() + update.to_string().len();
+        let Some(total) = self.bytes.checked_add(bytes) else {
+            return false;
+        };
+        if self.frames.len() >= limits.queued_frames || total > limits.queued_bytes {
+            return false;
+        }
+        self.frames.push((id.to_owned(), update.clone()));
+        self.bytes = total;
+        true
+    }
+
+    fn drain(&mut self) -> Vec<(String, Value)> {
+        self.bytes = 0;
+        std::mem::take(&mut self.frames)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn pending_session_updates_bound_bytes_and_reset_after_drain() {
+    let update = json!({"sessionUpdate":"current_mode_update","currentModeId":"code"});
+    let mut limits = ClientLimits {
+        queued_frames: 2,
+        queued_bytes: ("session".len() + update.to_string().len()) * 2 - 1,
+        ..ClientLimits::default()
+    };
+    let mut pending = PendingSessionUpdates::default();
+    assert!(pending.push("session", &update, &limits));
+    assert!(!pending.push("session", &update, &limits));
+    assert_eq!(pending.drain().len(), 1);
+    assert_eq!(pending.bytes, 0);
+    assert!(pending.push("session", &update, &limits));
+    limits.queued_bytes += 1;
+    assert!(pending.push("session", &update, &limits));
+    assert!(!pending.push("session", &update, &limits));
+}
+
 /// Memory access belongs to the run-scoped worker overlay, never the daemon's
 /// ambient environment. This also protects terminal callbacks, which inherit
 /// the validated ACP child environment.
@@ -1136,7 +1181,7 @@ async fn run_connection(
     let active_session = Arc::new(Mutex::new(None::<String>));
     // Some ACP peers announce initial configuration before replying to session/new.
     // Keep those updates bounded until the response supplies the authoritative ID.
-    let pending_session_updates = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let pending_session_updates = Arc::new(Mutex::new(PendingSessionUpdates::default()));
     let setup_updates = updates.clone();
     let client = Client.builder().on_receive_dispatch(
         {
@@ -1406,16 +1451,11 @@ async fn run_connection(
                                 let mut pending = pending_session_updates
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                let used: usize = pending.iter().map(|(id, value)| id.len() + value.to_string().len()).sum();
-                                let bytes = id.len() + update.to_string().len();
-                                if pending.len() >= limits.queued_frames
-                                    || used.checked_add(bytes).is_none_or(|total| total > limits.queued_bytes)
-                                {
+                                if !pending.push(id, update, &limits) {
                                     resource_failure.store(true, Ordering::Release);
                                     fatal.cancel();
                                     return Err(agent_client_protocol::Error::internal_error());
                                 }
-                                pending.push((id.to_owned(), update.clone()));
                                 return Ok(());
                             }
                             if bound_session.as_deref() != Some(id) {
@@ -1576,7 +1616,8 @@ async fn run_connection(
                                 let session_id = session.session_id.0.to_string();
                                 let snapshot = serde_json::to_value(session)?;
                                 session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&snapshot);
-                                for (id, update) in std::mem::take(&mut *pending_session_updates.lock().unwrap_or_else(|e| e.into_inner())) {
+                                let early_updates = pending_session_updates.lock().unwrap_or_else(|e| e.into_inner()).drain();
+                                for (id, update) in early_updates {
                                     if id != session_id {
                                         fatal.cancel();
                                         return Err(agent_client_protocol::Error::invalid_params());

@@ -62,7 +62,7 @@ supported extension methods. See
 
 | Contract | Executable evidence | Qualification |
 | --- | --- | --- |
-| New-session update ordering | `tests/acp.rs` pre-response update, authoritative response, and foreign-session cases | Devin-compatible setup retains omitted fields and rejects a mismatched session before prompt submission. A bounded queue applies before the response. |
+| New-session update ordering | `tests/acp.rs` pre-response update, authoritative response, foreign-session, and overflow cases | Devin-compatible setup retains omitted fields and rejects a mismatched session before prompt submission. The pre-response queue tracks frame and byte budgets incrementally and resets its charge after drain. |
 | Cross-session operator and callback safety | `tests/acp.rs`, `tests/acp_session_host.rs`, and live tracked Cursor plan test | Wrong-session replies and updates cannot reach another session. An accepted operator receipt requires callback delivery. |
 | Cancellation and cleanup | Live tracked Cursor cancel; ACP host and worker cancellation tests | Acknowledgement follows the matching stopped prompt response. Unknown/uncertain submission fences cleanup and retry; owner retirement requires quiescence. |
 | Continuation and restart | `tests/acp_session_host.rs` load/resume/none recovery and live Cursor/Devin load test; `crates/opensymphony-cli` worker recovery tests | Known-finished context restores only through advertised methods. No ambiguous prompt resend; absent persistence starts fresh with the full prompt. |
