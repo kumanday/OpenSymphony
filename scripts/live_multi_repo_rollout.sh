@@ -71,6 +71,18 @@ fi
 
 mkdir -p "${RESOURCE_DIR}" "${LOG_DIR}"
 cd "${ROOT_DIR}"
+write_intent() {
+  jq -n --arg run_id "${RUN_ID}" --arg slug "${SLUG}" \
+    --arg owner "${OPENSYMPHONY_LIVE_GITHUB_OWNER}" \
+    --arg team "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" \
+    '{schema_version:1,run_id:$run_id,slug:$slug,github_owner:$owner,linear_team_id:$team,
+      repositories:(["alpha","beta","gamma"] | map($owner + "/" + $slug + "-" + .)),
+      project_name:$slug,
+      label_names:(["alpha","beta","gamma"] | map("repo:" + $slug + "-" + .)),
+      issue_titles:(["parent","alpha","beta","gamma"] | map($slug + "-" + .))}' \
+    > "${RUN_DIR}/intent.json"
+}
+write_intent
 export GIT_CONFIG_GLOBAL=/dev/null
 cat > "${RESOURCE_DIR}/git-askpass.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -125,6 +137,36 @@ delete_linear_resource() {
   jq -e '.data | [.[] | .success] == [true]' <<<"${result}" >/dev/null
 }
 
+repository_is_absent() {
+  local response
+  response="$(gh api -i "repos/$1" 2>&1)"
+  grep -Eq '^HTTP/[0-9.]+ 404 ' <<<"${response}"
+}
+
+reconcile_linear_resources() {
+  local result id alias vars
+  vars="${RUN_DIR}/reconcile-project.json"
+  write_json "${vars}" --arg name "${SLUG}" '{name:$name}'
+  result="$(linear project_by_name.graphql "${vars}")" || return 1
+  id="$(jq -r '.data.projects.nodes[0].id // empty' <<<"${result}")"
+  if [[ -n "${id}" ]]; then PROJECT_ID="${id}"; fi
+  for alias in alpha beta gamma; do
+    vars="${RUN_DIR}/reconcile-label-${alias}.json"
+    write_json "${vars}" --arg name "repo:${SLUG}-${alias}" --arg team "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" '{name:$name,teamId:$team,first:2}'
+    result="$(linear issue_label_by_name.graphql "${vars}")" || return 1
+    id="$(jq -r '.data.issueLabels.nodes[0].id // empty' <<<"${result}")"
+    if [[ -n "${id}" && ! " ${LABEL_IDS[*]:-} " =~ " ${id} " ]]; then LABEL_IDS+=("${id}"); fi
+  done
+  for alias in parent alpha beta gamma; do
+    vars="${RUN_DIR}/reconcile-issue-${alias}.json"
+    write_json "${vars}" --arg title "${SLUG}-${alias}" --arg team "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" '{title:$title,teamId:$team}'
+    result="$(linear issue_by_title.graphql "${vars}")" || return 1
+    id="$(jq -r '.data.issues.nodes[0].id // empty' <<<"${result}")"
+    if [[ -n "${id}" && ! " ${ISSUE_IDS[*]:-} " =~ " ${id} " ]]; then ISSUE_IDS+=("${id}"); fi
+  done
+  record_manifest
+}
+
 cleanup() {
   local cleanup_failed=0
   set +e
@@ -142,6 +184,9 @@ cleanup() {
     wait "${ORCHESTRATOR_PID}" 2>/dev/null
   fi
 
+  # Reconcile deterministic names before deleting: a create can succeed remotely
+  # even when its response never reaches this process.
+  reconcile_linear_resources || cleanup_failed=1
   for ((index=${#ISSUE_IDS[@]}-1; index>=0; index--)); do
     delete_linear_resource issue_delete "${ISSUE_IDS[index]}" || cleanup_failed=1
   done
@@ -152,13 +197,13 @@ cleanup() {
     delete_linear_resource project_delete "${PROJECT_ID}" || cleanup_failed=1
   fi
   for ((index=${#REPOSITORIES[@]}-1; index>=0; index--)); do
-    gh repo delete "${REPOSITORIES[index]}" --yes >/dev/null 2>&1 || cleanup_failed=1
+    gh repo delete "${REPOSITORIES[index]}" --yes >/dev/null 2>&1 || {
+      repository_is_absent "${REPOSITORIES[index]}" || cleanup_failed=1
+    }
   done
   for repository in "${REPOSITORIES[@]:-}"; do
     [[ -z "${repository}" ]] && continue
-    if gh repo view "${repository}" >/dev/null 2>&1; then
-      cleanup_failed=1
-    fi
+    repository_is_absent "${repository}" || cleanup_failed=1
   done
 
   rm -rf "${RESOURCE_DIR}/seeds" "${RUN_DIR}/state" "${RUN_DIR}/workspaces" "${RUN_DIR}/catalog"
@@ -201,8 +246,9 @@ create_repository() {
   local alias="$1"
   local repository="${OPENSYMPHONY_LIVE_GITHUB_OWNER}/${SLUG}-${alias}"
   local seed="${RESOURCE_DIR}/seeds/${alias}"
-  gh repo create "${repository}" --private --disable-issues --disable-wiki >/dev/null
   REPOSITORIES+=("${repository}")
+  record_manifest
+  gh repo create "${repository}" --private --disable-issues --disable-wiki >/dev/null
   REPOSITORY_IDS+=("$(gh api "repos/${repository}" --jq '.id | tostring')")
   mkdir -p "${seed}/scripts" "${seed}/.github/workflows"
   git -C "${seed}" init -b develop >/dev/null
@@ -210,9 +256,9 @@ create_repository() {
 # Disposable OpenSymphony live fixture: ${alias}
 
 Work only in this repository. Create delivery.txt with the exact content
-delivered:${alias}:${RUN_ID}, run ./scripts/check.sh, commit, push branch
-feat/${SLUG}-${alias}, and open one pull request to develop. Put
-${SLUG}-${alias} in the pull-request title. Do not merge the pull request.
+delivered:${alias}:${RUN_ID} and run ./scripts/check.sh. Leave the edit in
+this checkout for the rollout controller to commit, push, and open the pull
+request. Do not perform Git or provider side effects.
 EOF
   printf 'component=%s\n' "${alias}" > "${seed}/component.txt"
   if [[ "${alias}" == "alpha" ]]; then
@@ -351,7 +397,7 @@ move_issue() {
   local target_state="$2"
   local vars="${RUN_DIR}/move-${issue_id}.json"
   write_json "${vars}" --arg id "${issue_id}" --arg state "${target_state}" '{id:$id,stateId:$state}'
-  linear issue_move_to_state.graphql "${vars}" >/dev/null
+  linear issue_move_to_state.graphql "${vars}" | jq -e '.data.issueUpdate.success == true' >/dev/null
 }
 for issue_id in "${ISSUE_IDS[@]}"; do
   move_issue "${issue_id}" "${TODO_STATE}"
@@ -500,7 +546,50 @@ attach_pr() {
   local title="$3"
   local vars="${RUN_DIR}/attach-${issue_id}.json"
   write_json "${vars}" --arg issue "${issue_id}" --arg url "${url}" --arg title "${title}" '{issueId:$issue,url:$url,title:$title}'
-  linear attachment_link_github_pr.graphql "${vars}" >/dev/null
+  linear attachment_link_github_pr.graphql "${vars}" | jq -e '.data.attachmentLinkGitHubPR.success == true' >/dev/null
+}
+
+publish_child_if_ready() {
+  local index="$1"
+  local alias=(alpha beta gamma)
+  local repository="${REPOSITORIES[index]}"
+  local branch="feat/${SLUG}-${alias[index]}"
+  local checkout candidate path
+  checkout=""
+  for candidate in "${RUN_DIR}/workspaces/${CHILD_IDENTIFIERS[index]}-"*--*; do
+    [[ -d "${candidate}/.git" ]] || continue
+    [[ -z "${checkout}" ]] || { echo "Multiple retained child checkouts for ${CHILD_IDENTIFIERS[index]}" >&2; return 1; }
+    checkout="${candidate}"
+  done
+  [[ -n "${checkout}" ]] || return 0
+  jq -e --arg id "${CHILD_IDS[index]}" '.issue_id == $id and .status == "succeeded"' \
+    "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
+  [[ "$(cat "${checkout}/delivery.txt" 2>/dev/null || true)" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
+  if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
+    [[ "$(cat "${checkout}/reviewed.txt" 2>/dev/null || true)" == "reviewed:${RUN_ID}" ]] || return 0
+  elif gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
+    return 0
+  fi
+  [[ "$(git -C "${checkout}" remote get-url origin)" == "https://github.com/${repository}.git" ]] || {
+    echo "Child checkout origin changed for ${CHILD_IDENTIFIERS[index]}" >&2; return 1;
+  }
+  while IFS= read -r path; do
+    [[ "${path}" == delivery.txt || "${path}" == reviewed.txt ]] || {
+      echo "Unexpected child checkout edit: ${path}" >&2; return 1;
+    }
+  done < <(git -C "${checkout}" status --porcelain --untracked-files=all | cut -c4-)
+  git -C "${checkout}" add -- delivery.txt
+  if [[ -f "${checkout}/reviewed.txt" ]]; then git -C "${checkout}" add -- reviewed.txt; fi
+  if ! git -C "${checkout}" diff --cached --quiet; then
+    git -C "${checkout}" -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' \
+      commit -m "Complete ${alias[index]} disposable task" >/dev/null
+  fi
+  git -C "${checkout}" push origin "HEAD:refs/heads/${branch}" >/dev/null
+  if ! gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
+    gh pr create --repo "${repository}" --base develop --head "${branch}" \
+      --title "${SLUG}-${alias[index]} disposable delivery" \
+      --body "Disposable isolated lifecycle fixture for ${CHILD_IDENTIFIERS[index]}." >/dev/null
+  fi
 }
 
 checks_are_green() {
@@ -529,6 +618,7 @@ declare -a CHILD_MERGED=(0 0 0)
 ALPHA_REWORK_REQUIRED=0
 ALPHA_FAILED_SHA=""
 PARENT_ATTACHED=0
+PARENT_DONE=0
 PARENT_MERGED=0
 START_SECONDS="${SECONDS}"
 
@@ -544,6 +634,18 @@ parent_controller_is_complete() {
   ' "${state_path}" >/dev/null
 }
 
+parent_final_verification_passed() {
+  local state_path="${RUN_DIR}/workspaces/.opensymphony-orchestrator-state.json"
+  [[ -f "${state_path}" ]] || return 1
+  jq -e --arg parent_id "${PARENT_ID}" '
+    .parent_integrations[$parent_id] as $controller
+    | $controller.state == "integrating"
+      and $controller.attempts[-1].status == "passed"
+      and ($controller.repair_attempts | length) == 1
+      and all($controller.repair_attempts[]; .status == "completed")
+  ' "${state_path}" >/dev/null
+}
+
 while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
   if ! kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
     echo "OpenSymphony exited before the live lifecycle completed." >&2
@@ -553,6 +655,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
 
   for index in 0 1 2; do
     (( CHILD_MERGED[index] == 0 )) || continue
+    publish_child_if_ready "${index}"
     alias=(alpha beta gamma)
     repository="${REPOSITORIES[index]}"
     branch="feat/${SLUG}-${alias[index]}"
@@ -576,6 +679,11 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       ALPHA_REWORK_REQUIRED=1
       ALPHA_FAILED_SHA="${pr_sha}"
       move_issue "${CHILD_IDS[index]}" "${REWORK_STATE}"
+      feedback_vars="${RUN_DIR}/alpha-rework-comment.json"
+      write_json "${feedback_vars}" --arg id "${CHILD_IDS[index]}" \
+        --arg body "The fixture-check GitHub Actions job failed on this PR. Read its log, create reviewed.txt containing reviewed:${RUN_ID}, rerun ./scripts/check.sh, and leave the edit in this checkout for the rollout controller to publish to the same PR branch." \
+        '{issueId:$id,body:$body}'
+      linear comment_create.graphql "${feedback_vars}" | jq -e '.data.commentCreate.success == true' >/dev/null
       continue
     fi
     if (( index == 0 )) && [[ "${pr_sha}" == "${ALPHA_FAILED_SHA}" ]]; then
@@ -607,11 +715,14 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
         attach_pr "${PARENT_ID}" "$(jq -er .url <<<"${pr}")" "$(jq -er .title <<<"${pr}")"
         PARENT_ATTACHED=1
       fi
+      if [[ "${pr_state}" == "MERGED" ]] && (( PARENT_DONE == 0 )) && parent_final_verification_passed; then
+        move_issue "${PARENT_ID}" "${DONE_STATE}"
+        PARENT_DONE=1
+      fi
       if [[ "${pr_state}" == "MERGED" ]] && parent_controller_is_complete; then
         jq --arg parent_id "${PARENT_ID}" '.parent_integrations[$parent_id]' \
           "${RUN_DIR}/workspaces/.opensymphony-orchestrator-state.json" \
           > "${RUN_DIR}/parent-controller-complete.json"
-        move_issue "${PARENT_ID}" "${DONE_STATE}"
         PARENT_MERGED=1
       fi
     fi
@@ -619,7 +730,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
 
   if (( PARENT_MERGED == 1 )); then
     for _ in $(seq 1 120); do
-      if [[ ! -d "${RUN_DIR}/workspaces" ]] || [[ -z "$(find "${RUN_DIR}/workspaces" -mindepth 1 -print -quit)" ]]; then
+      if [[ ! -d "${RUN_DIR}/workspaces" ]] || [[ -z "$(find "${RUN_DIR}/workspaces" -mindepth 1 -maxdepth 1 ! -name '.*' -print -quit)" ]]; then
         break
       fi
       sleep 1
@@ -634,7 +745,7 @@ if (( PARENT_MERGED != 1 || ALPHA_REWORK_REQUIRED != 1 )); then
   exit 1
 fi
 
-if [[ -d "${RUN_DIR}/workspaces" ]] && [[ -n "$(find "${RUN_DIR}/workspaces" -mindepth 1 -print -quit)" ]]; then
+if [[ -d "${RUN_DIR}/workspaces" ]] && [[ -n "$(find "${RUN_DIR}/workspaces" -mindepth 1 -maxdepth 1 ! -name '.*' -print -quit)" ]]; then
   echo "OpenSymphony did not complete eligible workspace cleanup." >&2
   exit 1
 fi

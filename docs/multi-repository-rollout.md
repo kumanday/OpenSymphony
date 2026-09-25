@@ -79,7 +79,11 @@ loopback port. It caps runtime, task count, retry count, and model turns. The
 alpha fixture uses a required GitHub Actions check to exercise a
 failed-check rework loop on the same PR branch. Repository code review follows
 the configured automated OpenHands or Codex integration; the fixture does not
-require a separate reviewer account. The script tears down processes,
+require a separate reviewer account. The rollout controller publishes child
+edits after a successful worker run using its own GitHub credential; the
+worker never receives the checkout credential. Resource names are recorded
+before creation and reconciled during teardown if a provider response is lost.
+The script tears down processes,
 branches, pull requests,
 issues, project, repositories, port ownership, credential copies, and local
 roots, then writes a teardown inventory. A missing cleanup receipt fails the

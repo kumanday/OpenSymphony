@@ -36,6 +36,9 @@ sha256_file() {
   fi
 }
 
+CANDIDATE_COMMIT="$(git rev-parse HEAD)"
+CANDIDATE_CONFIG_SHA="$(sha256_file "${CONFIG_PATH}")"
+
 run() {
   printf '\n[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "${LOG_FILE}"
   "$@" 2>&1 | tee -a "${LOG_FILE}"
@@ -90,8 +93,12 @@ run npx jest packages/gateway-schema/__tests__/fixtures.test.ts packages/api-cli
 run npm run build --workspace=@opensymphony/web
 run npm run build --workspace=@opensymphony/desktop
 
-COMMIT_SHA="$(git rev-parse HEAD)"
-CONFIG_SHA="$(sha256_file "${CONFIG_PATH}")"
+if [[ -n "$(git status --porcelain)" || "$(git rev-parse HEAD)" != "${CANDIDATE_COMMIT}" || "$(sha256_file "${CONFIG_PATH}")" != "${CANDIDATE_CONFIG_SHA}" ]]; then
+  echo "Release candidate changed while the hermetic gate was running." >&2
+  exit 1
+fi
+COMMIT_SHA="${CANDIDATE_COMMIT}"
+CONFIG_SHA="${CANDIDATE_CONFIG_SHA}"
 CONFIG_PATH="$(cd -- "$(dirname -- "${CONFIG_PATH}")" && pwd)/$(basename -- "${CONFIG_PATH}")"
 jq -n \
   --arg run_id "${RUN_ID}" \
