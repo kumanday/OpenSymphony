@@ -14,6 +14,7 @@ CONFIG_PATH="${RUN_DIR}/config.yaml"
 MANIFEST_PATH="${RUN_DIR}/resources.json"
 TEARDOWN_PATH="${RUN_DIR}/teardown.json"
 MAX_SECONDS="${OPENSYMPHONY_LIVE_MAX_SECONDS:-3600}"
+CLEANUP_MAX_SECONDS="${OPENSYMPHONY_LIVE_CLEANUP_MAX_SECONDS:-300}"
 POLL_SECONDS="${OPENSYMPHONY_LIVE_POLL_SECONDS:-10}"
 
 REPOSITORIES=()
@@ -26,6 +27,7 @@ PROJECT_SLUG=""
 ORCHESTRATOR_PID=""
 WATCHDOG_PID=""
 HERMETIC_SUPERVISOR_PID=""
+PORT_RESERVER_PID=""
 SCENARIO_PASSED=0
 
 required_env=(
@@ -48,8 +50,8 @@ for variable in "${required_env[@]}"; do
   fi
 done
 
-if [[ ! "${MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${POLL_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Live timeout and poll interval must be positive integer seconds." >&2
+if [[ ! "${MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${CLEANUP_MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${POLL_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Live, cleanup, and poll intervals must be positive integer seconds." >&2
   exit 1
 fi
 
@@ -100,7 +102,12 @@ export GIT_TERMINAL_PROMPT=0
 START_SECONDS="${SECONDS}"
 DEADLINE_ACTIVE=1
 deadline_command() {
-  local remaining=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
+  local remaining
+  if (( DEADLINE_ACTIVE )); then
+    remaining=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
+  else
+    remaining=$((CLEANUP_MAX_SECONDS - (SECONDS - CLEANUP_START_SECONDS)))
+  fi
   if (( remaining <= 0 )); then
     echo "Live rollout deadline expired." >&2
     return 124
@@ -140,25 +147,19 @@ PY
 }
 
 gh() {
-  if (( DEADLINE_ACTIVE )); then deadline_command gh "$@"; else command gh "$@"; fi
+  deadline_command gh "$@"
 }
 
 git() {
-  if (( DEADLINE_ACTIVE )); then deadline_command git "$@"; else command git "$@"; fi
+  deadline_command git "$@"
 }
 
 linear() {
   local query_file="$1"
   local variables_file="$2"
-  if (( DEADLINE_ACTIVE )); then
-    deadline_command python3 "${LINEAR_HELPER}" \
-      --query-file "${LINEAR_QUERIES}/${query_file}" \
-      --variables-file "${variables_file}"
-  else
-    python3 "${LINEAR_HELPER}" \
-      --query-file "${LINEAR_QUERIES}/${query_file}" \
-      --variables-file "${variables_file}"
-  fi
+  deadline_command python3 "${LINEAR_HELPER}" \
+    --query-file "${LINEAR_QUERIES}/${query_file}" \
+    --variables-file "${variables_file}"
 }
 
 write_json() {
@@ -224,27 +225,36 @@ reconcile_linear_resources() {
   record_manifest
 }
 
+orchestrator_group_alive() {
+  [[ -n "${ORCHESTRATOR_PID}" ]] && kill -0 -- "-${ORCHESTRATOR_PID}" 2>/dev/null
+}
+
 cleanup() {
   local cleanup_failed=0
   set +e
   DEADLINE_ACTIVE=0
+  CLEANUP_START_SECONDS="${SECONDS}"
   if [[ -n "${HERMETIC_SUPERVISOR_PID}" ]] && kill -0 "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null; then
     kill -TERM "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null
     wait "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null
+  fi
+  if [[ -n "${PORT_RESERVER_PID}" ]] && kill -0 "${PORT_RESERVER_PID}" 2>/dev/null; then
+    kill -TERM "${PORT_RESERVER_PID}" 2>/dev/null
+    wait "${PORT_RESERVER_PID}" 2>/dev/null
   fi
   if [[ -n "${WATCHDOG_PID}" ]] && kill -0 "${WATCHDOG_PID}" 2>/dev/null; then
     kill "${WATCHDOG_PID}" 2>/dev/null
     wait "${WATCHDOG_PID}" 2>/dev/null
   fi
-  if [[ -n "${ORCHESTRATOR_PID}" ]] && kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
-    kill -TERM "${ORCHESTRATOR_PID}" 2>/dev/null
+  if orchestrator_group_alive; then
+    kill -TERM -- "-${ORCHESTRATOR_PID}" 2>/dev/null
     for _ in $(seq 1 20); do
-      kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null || break
+      orchestrator_group_alive || break
       sleep 1
     done
-    kill -KILL "${ORCHESTRATOR_PID}" 2>/dev/null
-    wait "${ORCHESTRATOR_PID}" 2>/dev/null
+    if orchestrator_group_alive; then kill -KILL -- "-${ORCHESTRATOR_PID}" 2>/dev/null; fi
   fi
+  if [[ -n "${ORCHESTRATOR_PID}" ]]; then wait "${ORCHESTRATOR_PID}" 2>/dev/null; fi
 
   # Reconcile deterministic names before deleting: a create can succeed remotely
   # even when its response never reaches this process.
@@ -278,7 +288,7 @@ cleanup() {
     fi
   done
   local remaining_processes=0
-  if [[ -n "${ORCHESTRATOR_PID}" ]] && kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
+  if orchestrator_group_alive; then
     remaining_processes=1
     cleanup_failed=1
   fi
@@ -302,6 +312,17 @@ cleanup() {
     echo "Live rollout teardown was incomplete: ${TEARDOWN_PATH}" >&2
     return 1
   fi
+  if (( SCENARIO_PASSED == 1 )); then
+    if ! jq --arg completed_at "$(date -u +%FT%TZ)" \
+      '.result="passed" | .completed_at=$completed_at' \
+      "${RUN_DIR}/release-evidence.json" > "${RUN_DIR}/release-evidence.tmp" ||
+       ! mv "${RUN_DIR}/release-evidence.tmp" "${RUN_DIR}/release-evidence.json"; then
+      echo "Could not publish passing release evidence after teardown." >&2
+      return 1
+    fi
+    echo "Disposable live rollout and teardown passed."
+    echo "Evidence: ${RUN_DIR}/release-evidence.json"
+  fi
 }
 trap 'status=$?; trap - EXIT; cleanup || status=1; exit "${status}"' EXIT
 trap 'exit 143' TERM
@@ -319,13 +340,34 @@ HUMAN_REVIEW_STATE="$(state_id 'Human Review')"
 REWORK_STATE="$(state_id Rework)"
 DONE_STATE="$(state_id Done)"
 
-PORT="$(python3 - <<'PY'
+PORT_FILE="${RUN_DIR}/reserved-port"
+python3 - "${PORT_FILE}" <<'PY' &
+import os
+from pathlib import Path
+import signal
 import socket
+import sys
+
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
+    port_file = Path(sys.argv[1])
+    temporary = port_file.with_suffix(".tmp")
+    temporary.write_text(str(sock.getsockname()[1]))
+    os.replace(temporary, port_file)
+    signal.pause()
 PY
-)"
+PORT_RESERVER_PID=$!
+for _ in $(seq 1 50); do
+  [[ -s "${PORT_FILE}" ]] && break
+  kill -0 "${PORT_RESERVER_PID}" 2>/dev/null || break
+  sleep 0.1
+done
+if [[ ! -s "${PORT_FILE}" ]]; then
+  echo "Could not reserve a control-plane port." >&2
+  exit 1
+fi
+PORT="$(cat "${PORT_FILE}")"
 create_repository() {
   local alias="$1"
   local repository="${OPENSYMPHONY_LIVE_GITHUB_OWNER}/${SLUG}-${alias}"
@@ -656,18 +698,35 @@ jq -n \
   '{schema_version:1,run_id:$run_id,commit_sha:$commit_sha,config_sha256:$config_sha256,hermetic_evidence:$hermetic_evidence,project_set:"live",linear_project:{id:$project_id,slug:$project_slug},control_plane_port:($port|tonumber),production_activation:false,result:"started"}' \
   > "${RUN_DIR}/release-evidence.json"
 
-cargo run -- run --config "${CONFIG_PATH}" >"${LOG_DIR}/orchestrator.log" 2>&1 &
-ORCHESTRATOR_PID=$!
+if ! kill -0 "${PORT_RESERVER_PID}" 2>/dev/null; then
+  echo "The reserved control-plane port was lost before launch." >&2
+  exit 1
+fi
+kill -TERM "${PORT_RESERVER_PID}"
+wait "${PORT_RESERVER_PID}"
+PORT_RESERVER_PID=""
 remaining_seconds=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
 if (( remaining_seconds <= 0 )); then
   echo "Live rollout deadline expired before orchestrator start." >&2
   exit 1
 fi
+python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+  cargo run -- run --config "${CONFIG_PATH}" >"${LOG_DIR}/orchestrator.log" 2>&1 &
+ORCHESTRATOR_PID=$!
+for _ in $(seq 1 50); do
+  orchestrator_group_alive && break
+  kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null || break
+  sleep 0.1
+done
+if ! orchestrator_group_alive; then
+  echo "The orchestrator process group did not start." >&2
+  exit 1
+fi
 (
   sleep "${remaining_seconds}"
-  if kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
+  if orchestrator_group_alive; then
     echo "Live rollout exceeded ${MAX_SECONDS} seconds." >>"${LOG_DIR}/watchdog.log"
-    kill -TERM "${ORCHESTRATOR_PID}" 2>/dev/null || true
+    kill -TERM -- "-${ORCHESTRATOR_PID}" 2>/dev/null || true
   fi
 ) &
 WATCHDOG_PID=$!
@@ -782,8 +841,8 @@ managed_workspaces_remaining() {
   [[ -d "${root}" ]] || return 0
   find "${root}" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name parents -print
   if [[ -d "${root}/parents" ]]; then
-    find "${root}/parents" -mindepth 2 -maxdepth 2 ! -type d -print
-    find "${root}/parents" -mindepth 3 -print
+    find "${root}/parents" -mindepth 1 -maxdepth 1 ! -type d -print
+    find "${root}/parents" -mindepth 2 -print
   fi
 }
 
@@ -912,9 +971,8 @@ jq -n \
   '{schema_version:1,run_id:$run_id,result:"passed",parent:$parent,child_merges:$child_merges,failed_check_sha:$failed_check_sha,parent_repair_merge:true,cleanup_handoff:true}' \
   > "${RUN_DIR}/live-rollout-summary.json"
 
-kill -TERM "${ORCHESTRATOR_PID}" 2>/dev/null || true
+kill -TERM -- "-${ORCHESTRATOR_PID}" 2>/dev/null || true
 wait "${ORCHESTRATOR_PID}" 2>/dev/null || true
-ORCHESTRATOR_PID=""
 kill "${WATCHDOG_PID}" 2>/dev/null || true
 wait "${WATCHDOG_PID}" 2>/dev/null || true
 WATCHDOG_PID=""
@@ -925,11 +983,3 @@ if [[ -n "$(git status --porcelain)" || "$(git rev-parse HEAD)" != "${COMMIT_SHA
 fi
 
 SCENARIO_PASSED=1
-jq \
-  --arg completed_at "$(date -u +%FT%TZ)" \
-  '.result="passed" | .completed_at=$completed_at' \
-  "${RUN_DIR}/release-evidence.json" > "${RUN_DIR}/release-evidence.tmp"
-mv "${RUN_DIR}/release-evidence.tmp" "${RUN_DIR}/release-evidence.json"
-
-echo "Disposable live rollout passed; teardown will now remove all resources."
-echo "Evidence: ${RUN_DIR}/release-evidence.json"

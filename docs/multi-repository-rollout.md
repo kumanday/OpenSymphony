@@ -65,6 +65,11 @@ interrupted refresh transaction before accepting the parent root.
 The live gate runs the hermetic suite against its generated central config and
 records that config hash before starting the isolated orchestrator:
 
+Provide `GH_TOKEN` for the configured GitHub owner with permission to create
+private repositories, push workflow files, and delete those repositories.
+`LINEAR_API_KEY` is also required. The GitHub token provisions and tears down
+the fixture; it is not a reviewer credential.
+
 ```bash
 OPENSYMPHONY_LIVE_MULTI_REPO=1 \
 OPENSYMPHONY_LIVE_GITHUB_OWNER=<disposable-owner> \
@@ -82,9 +87,10 @@ alpha fixture uses a required GitHub Actions check to exercise a failed-check
 rework loop on the same PR branch. The rework requirement is placed in the
 issue title so the resumed worker receives it in continuation guidance. A
 parent-only integration command checks `answer=42` in each verified checkout,
-making alpha's seeded defect observable before repair. Repository code review follows
-the configured automated OpenHands or Codex integration; the fixture does not
-require a separate reviewer account. The rollout controller publishes child
+making alpha's seeded defect observable before repair. The disposable repositories
+exercise failed-check rework, not an automated PR-review webhook. Review of this
+repository's PR follows the configured OpenHands or Codex integration; the fixture
+does not require a separate reviewer account. The rollout controller publishes child
 edits after a successful worker run using its own GitHub credential; the
 worker never receives the checkout credential. Resource names are recorded
 before creation and reconciled during teardown if a provider response is lost.

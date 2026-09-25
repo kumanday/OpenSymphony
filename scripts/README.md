@@ -12,6 +12,7 @@ Current scripts:
   writes immutable commit/config-hash evidence below
   `target/multi-repo-lifecycle/<run-id>/`.
 - `live_multi_repo_rollout.sh`: opt-in bounded rollout against uniquely named
-  private GitHub repositories and a disposable Linear project. It uses the
-  configured automated review provider and records teardown evidence below
+  private GitHub repositories and a disposable Linear project. It exercises
+  failed-check rework; automated review of this repository's PR follows
+  `WORKFLOW.md`. It records teardown evidence below
   `target/live-multi-repo/<run-id>/`.

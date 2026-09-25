@@ -93,6 +93,10 @@ run npx jest packages/gateway-schema/__tests__/fixtures.test.ts packages/api-cli
 run npm run build --workspace=@opensymphony/web
 run npm run build --workspace=@opensymphony/desktop
 
+# Release packaging uses the bundled DuckDB feature set, not the development alias.
+run cargo clippy --all-targets -- -D warnings
+run cargo test --workspace
+
 if [[ -n "$(git status --porcelain)" || "$(git rev-parse HEAD)" != "${CANDIDATE_COMMIT}" || "$(sha256_file "${CONFIG_PATH}")" != "${CANDIDATE_CONFIG_SHA}" ]]; then
   echo "Release candidate changed while the hermetic gate was running." >&2
   exit 1
