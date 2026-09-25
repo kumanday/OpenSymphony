@@ -354,9 +354,9 @@ cat > "${RUN_DIR}/integration.md" <<EOF
 Operate only on the three verified repository handles. Run each repository's
 ./scripts/check.sh. The final integrated value in each answer.txt must be
 answer=42. Alpha is intentionally seeded with answer=41: repair only alpha,
-use branch fix/${SLUG}-alpha-answer, and open one pull request to develop. Do
-not modify beta or gamma. Re-run all three checks before reporting
-completion.
+leave the verified checkout changes for OpenSymphony to publish, and do not
+perform Git or provider side effects yourself. Do not modify beta or gamma.
+Re-run all three checks before reporting completion.
 EOF
 
 cat > "${CONFIG_PATH}" <<EOF
@@ -497,8 +497,21 @@ declare -a CHILD_MERGED=(0 0 0)
 ALPHA_CHANGE_REQUESTED=0
 ALPHA_REQUESTED_SHA=""
 PARENT_ATTACHED=0
+PARENT_APPROVED=0
 PARENT_MERGED=0
 START_SECONDS="${SECONDS}"
+
+parent_controller_is_complete() {
+  local state_path="${RUN_DIR}/workspaces/.opensymphony-orchestrator-state.json"
+  [[ -f "${state_path}" ]] || return 1
+  jq -e --arg parent_id "${PARENT_ID}" '
+    .parent_integrations[$parent_id] as $controller
+    | $controller.state == "completed"
+      and $controller.final_evidence != null
+      and ($controller.repair_attempts | length) == 1
+      and all($controller.repair_attempts[]; .status == "completed")
+  ' "${state_path}" >/dev/null
+}
 
 while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
   if ! kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
@@ -554,17 +567,23 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
 
   if (( CHILD_MERGED[0] == 1 && CHILD_MERGED[1] == 1 && CHILD_MERGED[2] == 1 && PARENT_MERGED == 0 )); then
     repository="${REPOSITORIES[0]}"
-    branch="fix/${SLUG}-alpha-answer"
-    if pr="$(gh pr view "${branch}" --repo "${repository}" --json number,url,title,state,statusCheckRollup 2>/dev/null)"; then
+    pr="$(gh pr list --repo "${repository}" --state all --base develop --json number,url,title,headRefName,state,statusCheckRollup \
+      --jq '[.[] | select(.headRefName | startswith("fix/"))][0]')"
+    if [[ "${pr}" != "null" ]]; then
       pr_number="$(jq -er .number <<<"${pr}")"
+      pr_state="$(jq -er .state <<<"${pr}")"
       if (( PARENT_ATTACHED == 0 )); then
         attach_pr "${PARENT_ID}" "$(jq -er .url <<<"${pr}")" "$(jq -er .title <<<"${pr}")"
-        move_issue "${PARENT_ID}" "${HUMAN_REVIEW_STATE}"
         PARENT_ATTACHED=1
       fi
-      if [[ "$(checks_are_green "${repository}" "${pr_number}")" == "true" ]]; then
+      if [[ "${pr_state}" == "OPEN" && "${PARENT_APPROVED}" == "0" && "$(checks_are_green "${repository}" "${pr_number}")" == "true" ]]; then
         GH_TOKEN="${OPENSYMPHONY_LIVE_REVIEW_TOKEN}" gh pr review "${pr_number}" --repo "${repository}" --approve --body 'Disposable parent repair approval.'
-        gh pr merge "${pr_number}" --repo "${repository}" --squash --delete-branch
+        PARENT_APPROVED=1
+      fi
+      if [[ "${pr_state}" == "MERGED" ]] && parent_controller_is_complete; then
+        jq --arg parent_id "${PARENT_ID}" '.parent_integrations[$parent_id]' \
+          "${RUN_DIR}/workspaces/.opensymphony-orchestrator-state.json" \
+          > "${RUN_DIR}/parent-controller-complete.json"
         move_issue "${PARENT_ID}" "${DONE_STATE}"
         PARENT_MERGED=1
       fi
