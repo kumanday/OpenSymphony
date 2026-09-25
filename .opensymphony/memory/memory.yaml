@@ -38,6 +38,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -107,9 +108,11 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:orchestrator
       - area:runtime
+      - area:testing
       - area:ui
       - area:workspace
       linear_milestones:
@@ -370,6 +373,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -447,6 +451,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -639,6 +644,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -719,6 +725,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -892,6 +899,7 @@ areas:
       - area:cli
       - area:configuration
       - area:data-contracts
+      - area:docs
       - area:evidence
       - area:experiments
       - area:gateway
@@ -939,6 +947,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1345,6 +1354,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1518,6 +1528,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:evidence
       - area:experiments
       - area:gateway
@@ -1558,6 +1569,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:experiments
       - area:gateway
       - area:harness
@@ -1596,6 +1608,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1765,6 +1778,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1834,6 +1848,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -2431,6 +2446,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2730,6 +2746,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2992,6 +3009,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -3030,6 +3048,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3117,6 +3136,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -3148,6 +3168,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -3179,12 +3200,14 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:orchestrator
       - area:provider
       - area:recovery
       - area:review
       - area:runtime
+      - area:testing
       - area:ui
       - area:workspace
       - area:workspace-lifecycle
@@ -3204,6 +3227,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:evidence
       - area:experiments
       - area:gateway
@@ -3252,6 +3276,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3321,10 +3346,12 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:orchestrator
       - area:recovery
       - area:runtime
+      - area:testing
       - area:ui
       - area:workspace
       - area:workspace-lifecycle
@@ -3351,6 +3378,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3440,11 +3468,13 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:orchestrator
       - area:recovery
       - area:review
       - area:runtime
+      - area:testing
       - area:ui
       - area:workspace
       - area:workspace-lifecycle
@@ -3472,6 +3502,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3541,6 +3572,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -3670,6 +3702,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3740,6 +3773,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -3905,6 +3939,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3975,6 +4010,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -4012,6 +4048,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4213,6 +4250,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4290,6 +4328,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4556,6 +4595,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -4593,6 +4633,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4684,6 +4725,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4754,6 +4796,7 @@ areas:
       - area:acp
       - area:cli
       - area:configuration
+      - area:docs
       - area:gateway
       - area:harness
       - area:memory
@@ -4806,6 +4849,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence

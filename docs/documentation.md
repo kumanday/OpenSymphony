@@ -96,6 +96,8 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-610: ACP Client Callbacks And Session Configuration
 - COE-611: ACP Execution Routing And Worker Integration
 - COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -162,5 +164,7 @@ last_memory_sync: 2026-07-02T03:46:15.373329+00:00
 - COE-610
 - COE-611
 - COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
