@@ -2056,8 +2056,24 @@ async fn scheduler_tick_drives_failed_parent_verification_through_repair_and_bac
     }
 }
 
-#[tokio::test]
-async fn terminal_parent_between_repair_turns_cancels_and_persists_its_controller() {
+#[test]
+fn terminal_parent_between_repair_turns_cancels_and_persists_its_controller() {
+    // This composed durable-state fixture needs more than the Linux test thread's 2 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(terminal_parent_cancellation_case());
+        })
+        .expect("test thread")
+        .join()
+        .expect("test thread should not panic");
+}
+
+async fn terminal_parent_cancellation_case() {
     let suffix = "REPAIR-WAIT-CANCEL";
     let (mut scheduler, parent_id) = launched_parent_scheduler(suffix).await;
     let repository_id = scheduler.workspace().parent_targets[0]

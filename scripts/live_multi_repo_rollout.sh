@@ -5,7 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"/.. && pwd)"
 LINEAR_HELPER="${ROOT_DIR}/.agents/skills/linear/scripts/linear_graphql.py"
 LINEAR_QUERIES="${ROOT_DIR}/.agents/skills/linear/queries"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-SLUG="osym-live-$(printf '%s' "${RUN_ID}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+SLUG="osym-live-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 OUTPUT_ROOT="${OPENSYMPHONY_LIVE_OUTPUT_ROOT:-${ROOT_DIR}/target/live-multi-repo}"
 RUN_DIR="${OUTPUT_ROOT%/}/${RUN_ID}"
 RESOURCE_DIR="${RUN_DIR}/resources"
@@ -25,6 +25,7 @@ PROJECT_ID=""
 PROJECT_SLUG=""
 ORCHESTRATOR_PID=""
 WATCHDOG_PID=""
+HERMETIC_SUPERVISOR_PID=""
 SCENARIO_PASSED=0
 
 required_env=(
@@ -96,12 +97,68 @@ chmod 700 "${RESOURCE_DIR}/git-askpass.sh"
 export GIT_ASKPASS="${RESOURCE_DIR}/git-askpass.sh"
 export GIT_TERMINAL_PROMPT=0
 
+START_SECONDS="${SECONDS}"
+DEADLINE_ACTIVE=1
+deadline_command() {
+  local remaining=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
+  if (( remaining <= 0 )); then
+    echo "Live rollout deadline expired." >&2
+    return 124
+  fi
+  python3 - "${remaining}" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+def interrupted(signum, _frame):
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+child = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    sys.exit(child.wait(timeout=int(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    print("Live rollout deadline expired during external command.", file=sys.stderr)
+    sys.exit(124)
+finally:
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+PY
+}
+
+gh() {
+  if (( DEADLINE_ACTIVE )); then deadline_command gh "$@"; else command gh "$@"; fi
+}
+
+git() {
+  if (( DEADLINE_ACTIVE )); then deadline_command git "$@"; else command git "$@"; fi
+}
+
 linear() {
   local query_file="$1"
   local variables_file="$2"
-  python3 "${LINEAR_HELPER}" \
-    --query-file "${LINEAR_QUERIES}/${query_file}" \
-    --variables-file "${variables_file}"
+  if (( DEADLINE_ACTIVE )); then
+    deadline_command python3 "${LINEAR_HELPER}" \
+      --query-file "${LINEAR_QUERIES}/${query_file}" \
+      --variables-file "${variables_file}"
+  else
+    python3 "${LINEAR_HELPER}" \
+      --query-file "${LINEAR_QUERIES}/${query_file}" \
+      --variables-file "${variables_file}"
+  fi
 }
 
 write_json() {
@@ -170,6 +227,11 @@ reconcile_linear_resources() {
 cleanup() {
   local cleanup_failed=0
   set +e
+  DEADLINE_ACTIVE=0
+  if [[ -n "${HERMETIC_SUPERVISOR_PID}" ]] && kill -0 "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null; then
+    kill -TERM "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null
+    wait "${HERMETIC_SUPERVISOR_PID}" 2>/dev/null
+  fi
   if [[ -n "${WATCHDOG_PID}" ]] && kill -0 "${WATCHDOG_PID}" 2>/dev/null; then
     kill "${WATCHDOG_PID}" 2>/dev/null
     wait "${WATCHDOG_PID}" 2>/dev/null
@@ -242,6 +304,8 @@ cleanup() {
   fi
 }
 trap 'status=$?; trap - EXIT; cleanup || status=1; exit "${status}"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 state_vars="${RUN_DIR}/team-states.json"
 write_json "${state_vars}" --arg id "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" '{id:$id}'
@@ -262,8 +326,6 @@ with socket.socket() as sock:
     print(sock.getsockname()[1])
 PY
 )"
-START_SECONDS="${SECONDS}"
-
 create_repository() {
   local alias="$1"
   local repository="${OPENSYMPHONY_LIVE_GITHUB_OWNER}/${SLUG}-${alias}"
@@ -539,27 +601,43 @@ if (( remaining_seconds <= 0 )); then
 fi
 OPENSYMPHONY_RELEASE_CONFIG="${CONFIG_PATH}" \
 OPENSYMPHONY_HERMETIC_OUTPUT_ROOT="${RUN_DIR}/hermetic" \
-  python3 - "${remaining_seconds}" "${ROOT_DIR}/scripts/hermetic_multi_repo_lifecycle.sh" "${LOG_DIR}/hermetic.log" <<'PY'
+  python3 - "${remaining_seconds}" "${ROOT_DIR}/scripts/hermetic_multi_repo_lifecycle.sh" "${LOG_DIR}/hermetic.log" <<'PY' &
 import os
 import signal
 import subprocess
 import sys
 
+def interrupted(signum, _frame):
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
 with open(sys.argv[3], "wb") as log:
     gate = subprocess.Popen([sys.argv[2]], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         result = gate.wait(timeout=int(sys.argv[1]))
     except subprocess.TimeoutExpired:
-        os.killpg(gate.pid, signal.SIGTERM)
-        try:
-            gate.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(gate.pid, signal.SIGKILL)
-            gate.wait()
         print("Hermetic gate exceeded the overall live rollout deadline.", file=sys.stderr)
         sys.exit(124)
+    finally:
+        if gate.poll() is None:
+            try:
+                os.killpg(gate.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                gate.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(gate.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                gate.wait()
     sys.exit(result)
 PY
+HERMETIC_SUPERVISOR_PID=$!
+wait "${HERMETIC_SUPERVISOR_PID}"
+HERMETIC_SUPERVISOR_PID=""
 
 COMMIT_SHA="$(git rev-parse HEAD)"
 CONFIG_SHA="$(shasum -a 256 "${CONFIG_PATH}" | awk '{print $1}')"
@@ -699,6 +777,16 @@ parent_final_verification_passed() {
   ' "${state_path}" >/dev/null
 }
 
+managed_workspaces_remaining() {
+  local root="${RUN_DIR}/workspaces"
+  [[ -d "${root}" ]] || return 0
+  find "${root}" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name parents -print
+  if [[ -d "${root}/parents" ]]; then
+    find "${root}/parents" -mindepth 2 -maxdepth 2 ! -type d -print
+    find "${root}/parents" -mindepth 3 -print
+  fi
+}
+
 while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
   if ! kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
     echo "OpenSymphony exited before the live lifecycle completed." >&2
@@ -784,7 +872,8 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
 
   if (( PARENT_MERGED == 1 )); then
     for _ in $(seq 1 120); do
-      if [[ ! -d "${RUN_DIR}/workspaces" ]] || [[ -z "$(find "${RUN_DIR}/workspaces" -mindepth 1 -maxdepth 1 ! -name '.*' -print -quit)" ]]; then
+      if (( SECONDS - START_SECONDS >= MAX_SECONDS )); then break; fi
+      if [[ -z "$(managed_workspaces_remaining)" ]]; then
         break
       fi
       sleep 1
@@ -799,7 +888,7 @@ if (( PARENT_MERGED != 1 || ALPHA_REWORK_REQUIRED != 1 )); then
   exit 1
 fi
 
-if [[ -d "${RUN_DIR}/workspaces" ]] && [[ -n "$(find "${RUN_DIR}/workspaces" -mindepth 1 -maxdepth 1 ! -name '.*' -print -quit)" ]]; then
+if [[ -n "$(managed_workspaces_remaining)" ]]; then
   echo "OpenSymphony did not complete eligible workspace cleanup." >&2
   exit 1
 fi
@@ -829,6 +918,11 @@ ORCHESTRATOR_PID=""
 kill "${WATCHDOG_PID}" 2>/dev/null || true
 wait "${WATCHDOG_PID}" 2>/dev/null || true
 WATCHDOG_PID=""
+
+if [[ -n "$(git status --porcelain)" || "$(git rev-parse HEAD)" != "${COMMIT_SHA}" || "$(shasum -a 256 "${CONFIG_PATH}" | awk '{print $1}')" != "${CONFIG_SHA}" ]]; then
+  echo "Candidate checkout or selected config changed during the live rollout." >&2
+  exit 1
+fi
 
 SCENARIO_PASSED=1
 jq \
