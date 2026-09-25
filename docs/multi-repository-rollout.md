@@ -75,9 +75,14 @@ OPENSYMPHONY_LIVE_MODEL=<bounded-model> \
 
 The script creates uniquely named private repositories, a uniquely named Linear
 project and hierarchy, isolated state/workspace/catalog roots, and a unique
-loopback port. It caps runtime, task count, retry count, and model turns. The
-alpha fixture uses a required GitHub Actions check to exercise a
-failed-check rework loop on the same PR branch. Repository code review follows
+loopback port. It preflights the team's `Todo`, `Human Review`, `Rework`, and
+`Done` states before provisioning and starts the overall deadline before the
+first remote write. It caps task count, retry count, and model turns. The
+alpha fixture uses a required GitHub Actions check to exercise a failed-check
+rework loop on the same PR branch. The rework requirement is placed in the
+issue title so the resumed worker receives it in continuation guidance. A
+parent-only integration command checks `answer=42` in each verified checkout,
+making alpha's seeded defect observable before repair. Repository code review follows
 the configured automated OpenHands or Codex integration; the fixture does not
 require a separate reviewer account. The rollout controller publishes child
 edits after a successful worker run using its own GitHub credential; the

@@ -206,7 +206,15 @@ cleanup() {
     repository_is_absent "${repository}" || cleanup_failed=1
   done
 
-  rm -rf "${RESOURCE_DIR}/seeds" "${RUN_DIR}/state" "${RUN_DIR}/workspaces" "${RUN_DIR}/catalog"
+  local remaining_local_roots=0
+  local local_root
+  for local_root in "${RESOURCE_DIR}/seeds" "${RUN_DIR}/state" "${RUN_DIR}/workspaces" "${RUN_DIR}/catalog"; do
+    rm -rf "${local_root}" || cleanup_failed=1
+    if [[ -e "${local_root}" || -L "${local_root}" ]]; then
+      remaining_local_roots=$((remaining_local_roots + 1))
+      cleanup_failed=1
+    fi
+  done
   local remaining_processes=0
   if [[ -n "${ORCHESTRATOR_PID}" ]] && kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
     remaining_processes=1
@@ -223,8 +231,9 @@ cleanup() {
     --argjson cleanup_failed "${cleanup_failed}" \
     --argjson remaining_processes "${remaining_processes}" \
     --argjson remaining_port_owner "${remaining_port_owner}" \
+    --argjson remaining_local_roots "${remaining_local_roots}" \
     --arg completed_at "$(date -u +%FT%TZ)" \
-    '{schema_version:1,run_id:$run_id,scenario_passed:($scenario_passed == 1),cleanup_complete:($cleanup_failed == 0),remaining_processes:$remaining_processes,remaining_port_owner:$remaining_port_owner,remaining_local_roots:0,credential_copies:0,completed_at:$completed_at}' \
+    '{schema_version:1,run_id:$run_id,scenario_passed:($scenario_passed == 1),cleanup_complete:($cleanup_failed == 0),remaining_processes:$remaining_processes,remaining_port_owner:$remaining_port_owner,remaining_local_roots:$remaining_local_roots,credential_copies:0,completed_at:$completed_at}' \
     > "${TEARDOWN_PATH}"
   set -e
   if (( cleanup_failed != 0 )); then
@@ -234,6 +243,18 @@ cleanup() {
 }
 trap 'status=$?; trap - EXIT; cleanup || status=1; exit "${status}"' EXIT
 
+state_vars="${RUN_DIR}/team-states.json"
+write_json "${state_vars}" --arg id "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" '{id:$id}'
+state_result="$(linear team_states.graphql "${state_vars}")"
+state_id() {
+  local name="$1"
+  jq -er --arg name "${name}" '.data.team.states.nodes[] | select(.name == $name) | .id' <<<"${state_result}"
+}
+TODO_STATE="$(state_id Todo)"
+HUMAN_REVIEW_STATE="$(state_id 'Human Review')"
+REWORK_STATE="$(state_id Rework)"
+DONE_STATE="$(state_id Done)"
+
 PORT="$(python3 - <<'PY'
 import socket
 with socket.socket() as sock:
@@ -241,6 +262,7 @@ with socket.socket() as sock:
     print(sock.getsockname()[1])
 PY
 )"
+START_SECONDS="${SECONDS}"
 
 create_repository() {
   local alias="$1"
@@ -272,6 +294,11 @@ set -euo pipefail
 test "\$(cat component.txt)" = "component=${alias}"
 test "\$(cat delivery.txt)" = "delivered:${alias}:${RUN_ID}"
 EOF
+  cat > "${seed}/scripts/check-integration.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+test "$(cat answer.txt)" = 'answer=42'
+EOF
   if [[ "${alias}" == "alpha" ]]; then
     cat >> "${seed}/scripts/check.sh" <<EOF
 if [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then
@@ -282,7 +309,7 @@ if [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then
 fi
 EOF
   fi
-  chmod +x "${seed}/scripts/check.sh"
+  chmod +x "${seed}/scripts/check.sh" "${seed}/scripts/check-integration.sh"
   cat > "${seed}/.github/workflows/check.yml" <<'EOF'
 name: fixture-check
 on:
@@ -380,24 +407,19 @@ for index in 0 1 2; do
 done
 record_manifest
 
-state_vars="${RUN_DIR}/team-states.json"
-write_json "${state_vars}" --arg id "${PARENT_ID}" '{id:$id}'
-state_result="$(linear issue_team_states.graphql "${state_vars}")"
-state_id() {
-  local name="$1"
-  jq -er --arg name "${name}" '.data.issue.team.states.nodes[] | select(.name == $name) | .id' <<<"${state_result}"
-}
-TODO_STATE="$(state_id Todo)"
-HUMAN_REVIEW_STATE="$(state_id 'Human Review')"
-REWORK_STATE="$(state_id Rework)"
-DONE_STATE="$(state_id Done)"
-
 move_issue() {
   local issue_id="$1"
   local target_state="$2"
   local vars="${RUN_DIR}/move-${issue_id}.json"
   write_json "${vars}" --arg id "${issue_id}" --arg state "${target_state}" '{id:$id,stateId:$state}'
   linear issue_move_to_state.graphql "${vars}" | jq -e '.data.issueUpdate.success == true' >/dev/null
+}
+update_issue_title() {
+  local issue_id="$1"
+  local title="$2"
+  local vars="${RUN_DIR}/title-${issue_id}.json"
+  write_json "${vars}" --arg id "${issue_id}" --arg title "${title}" '{id:$id,input:{title:$title}}'
+  linear issue_update.graphql "${vars}" | jq -e '.data.issueUpdate.success == true' >/dev/null
 }
 for issue_id in "${ISSUE_IDS[@]}"; do
   move_issue "${issue_id}" "${TODO_STATE}"
@@ -406,12 +428,14 @@ done
 cat > "${RUN_DIR}/integration.md" <<EOF
 # Disposable integration instructions
 
-Operate only on the three verified repository handles. Run each repository's
-./scripts/check.sh. The final integrated value in each answer.txt must be
-answer=42. Alpha is intentionally seeded with answer=41: repair only alpha,
-leave the verified checkout changes for OpenSymphony to publish, and do not
-perform Git or provider side effects yourself. Do not modify beta or gamma.
-Re-run all three checks before reporting completion.
+Operate only on the three verified repository handles. In each verified
+checkout, run ./scripts/check.sh and ./scripts/check-integration.sh. The latter
+is the bounded parent verification command: it requires answer=42 in that
+checkout. Alpha is intentionally seeded with answer=41. Observe its failing
+integration command, repair only alpha, and leave the verified checkout edit
+for OpenSymphony to publish. Do not perform Git or provider side effects
+yourself. Do not modify beta or gamma. Re-run both commands in all three
+checkouts before reporting completion.
 EOF
 
 cat > "${CONFIG_PATH}" <<EOF
@@ -508,9 +532,34 @@ control_plane:
   bind: 127.0.0.1:${PORT}
 EOF
 
+remaining_seconds=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
+if (( remaining_seconds <= 0 )); then
+  echo "Live rollout deadline expired during provisioning." >&2
+  exit 1
+fi
 OPENSYMPHONY_RELEASE_CONFIG="${CONFIG_PATH}" \
 OPENSYMPHONY_HERMETIC_OUTPUT_ROOT="${RUN_DIR}/hermetic" \
-  "${ROOT_DIR}/scripts/hermetic_multi_repo_lifecycle.sh" >"${LOG_DIR}/hermetic.log" 2>&1
+  python3 - "${remaining_seconds}" "${ROOT_DIR}/scripts/hermetic_multi_repo_lifecycle.sh" "${LOG_DIR}/hermetic.log" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+with open(sys.argv[3], "wb") as log:
+    gate = subprocess.Popen([sys.argv[2]], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        result = gate.wait(timeout=int(sys.argv[1]))
+    except subprocess.TimeoutExpired:
+        os.killpg(gate.pid, signal.SIGTERM)
+        try:
+            gate.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(gate.pid, signal.SIGKILL)
+            gate.wait()
+        print("Hermetic gate exceeded the overall live rollout deadline.", file=sys.stderr)
+        sys.exit(124)
+    sys.exit(result)
+PY
 
 COMMIT_SHA="$(git rev-parse HEAD)"
 CONFIG_SHA="$(shasum -a 256 "${CONFIG_PATH}" | awk '{print $1}')"
@@ -531,8 +580,13 @@ jq -n \
 
 cargo run -- run --config "${CONFIG_PATH}" >"${LOG_DIR}/orchestrator.log" 2>&1 &
 ORCHESTRATOR_PID=$!
+remaining_seconds=$((MAX_SECONDS - (SECONDS - START_SECONDS)))
+if (( remaining_seconds <= 0 )); then
+  echo "Live rollout deadline expired before orchestrator start." >&2
+  exit 1
+fi
 (
-  sleep "${MAX_SECONDS}"
+  sleep "${remaining_seconds}"
   if kill -0 "${ORCHESTRATOR_PID}" 2>/dev/null; then
     echo "Live rollout exceeded ${MAX_SECONDS} seconds." >>"${LOG_DIR}/watchdog.log"
     kill -TERM "${ORCHESTRATOR_PID}" 2>/dev/null || true
@@ -620,7 +674,6 @@ ALPHA_FAILED_SHA=""
 PARENT_ATTACHED=0
 PARENT_DONE=0
 PARENT_MERGED=0
-START_SECONDS="${SECONDS}"
 
 parent_controller_is_complete() {
   local state_path="${RUN_DIR}/workspaces/.opensymphony-orchestrator-state.json"
@@ -678,6 +731,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       fi
       ALPHA_REWORK_REQUIRED=1
       ALPHA_FAILED_SHA="${pr_sha}"
+      update_issue_title "${CHILD_IDS[index]}" "${SLUG}-alpha: CI failed; create reviewed.txt containing reviewed:${RUN_ID}"
       move_issue "${CHILD_IDS[index]}" "${REWORK_STATE}"
       feedback_vars="${RUN_DIR}/alpha-rework-comment.json"
       write_json "${feedback_vars}" --arg id "${CHILD_IDS[index]}" \
