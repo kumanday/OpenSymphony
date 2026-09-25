@@ -382,9 +382,11 @@ create_repository() {
 # Disposable OpenSymphony live fixture: ${alias}
 
 Work only in this repository. Create delivery.txt with the exact content
-delivered:${alias}:${RUN_ID} and run ./scripts/check.sh. Leave the edit in
-this checkout for the rollout controller to commit, push, and open the pull
-request. Do not perform Git or provider side effects.
+delivered:${alias}:${RUN_ID} and run ./scripts/complete.sh as your last action.
+That script checks the edit and moves this issue to Human Review, so the
+orchestrator does not schedule another turn before the rollout controller
+publishes it. Leave the edit in this checkout for the controller to commit,
+push, and open the pull request. Do not perform Git or GitHub side effects.
 EOF
   printf 'component=%s\n' "${alias}" > "${seed}/component.txt"
   if [[ "${alias}" == "alpha" ]]; then
@@ -476,7 +478,7 @@ create_issue() {
   local description="Run the bounded disposable task described by this repository's AGENTS.md. Do not touch another repository."
   if [[ "${alias}" == "parent" ]]; then
     title="${SLUG}-parent"
-    description="Integrate all three terminal children. Run the checked-in integration instructions, repair only alpha's seeded answer defect, and leave beta and gamma unchanged."
+    description="Integrate all three terminal children. Observe alpha's seeded integration failure and request its repair without editing the initial checkout. On the active repair continuation, fix only alpha and leave beta and gamma unchanged."
   fi
   jq -n \
     --arg team "${OPENSYMPHONY_LIVE_LINEAR_TEAM_ID}" \
@@ -511,6 +513,31 @@ for index in 0 1 2; do
 done
 record_manifest
 
+# A successful leaf leaves the active tracker set before its harness turn
+# ends, preventing the one-second continuation from replacing its run receipt.
+for index in 0 1 2; do
+  alias=(alpha beta gamma)
+  seed="${RESOURCE_DIR}/seeds/${alias[index]}"
+  cp "${LINEAR_HELPER}" "${seed}/scripts/linear_graphql.py"
+  cp "${LINEAR_QUERIES}/issue_move_to_state.graphql" "${seed}/scripts/issue_move_to_state.graphql"
+  cat > "${seed}/scripts/complete.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "\$(dirname -- "\$0")/.."
+./scripts/check.sh
+python3 scripts/linear_graphql.py \
+  --query-file scripts/issue_move_to_state.graphql \
+  --variables '{"id":"${CHILD_IDS[index]}","stateId":"${HUMAN_REVIEW_STATE}"}' \
+  | jq -e --arg id "${CHILD_IDS[index]}" \
+      '.data.issueUpdate.success == true and .data.issueUpdate.issue.id == \$id and .data.issueUpdate.issue.state.name == "Human Review"' >/dev/null
+EOF
+  chmod +x "${seed}/scripts/complete.sh"
+  git -C "${seed}" add scripts/complete.sh scripts/linear_graphql.py scripts/issue_move_to_state.graphql
+  git -C "${seed}" -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' \
+    commit -m 'Add leaf completion transition' >/dev/null
+  git -C "${seed}" push origin develop >/dev/null
+done
+
 move_issue() {
   local issue_id="$1"
   local target_state="$2"
@@ -535,11 +562,13 @@ cat > "${RUN_DIR}/integration.md" <<EOF
 Operate only on the three verified repository handles. In each verified
 checkout, run ./scripts/check.sh and ./scripts/check-integration.sh. The latter
 is the bounded parent verification command: it requires answer=42 in that
-checkout. Alpha is intentionally seeded with answer=41. Observe its failing
-integration command, repair only alpha, and leave the verified checkout edit
-for OpenSymphony to publish. Do not perform Git or provider side effects
-yourself. Do not modify beta or gamma. Re-run both commands in all three
-checkouts before reporting completion.
+checkout. Alpha is intentionally seeded with answer=41. On the initial turn,
+observe its failing integration command and request alpha through the
+verification receipt's repair_repository_id without editing any checkout.
+On the active repair continuation, fix only alpha and leave the verified
+checkout edit for OpenSymphony to publish. Do not perform Git or provider
+side effects yourself. Do not modify beta or gamma. Re-run both commands in
+all three checkouts before reporting the completed repair.
 EOF
 
 cat > "${CONFIG_PATH}" <<EOF
@@ -859,11 +888,22 @@ parent_final_verification_passed() {
 
 managed_workspaces_remaining() {
   local root="${RUN_DIR}/workspaces"
+  if [[ -L "${root}" ]]; then printf '%s\n' "${root}"; return; fi
+  if [[ -e "${root}" && ! -d "${root}" ]]; then printf '%s\n' "${root}"; return; fi
   [[ -d "${root}" ]] || return 0
-  find "${root}" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name parents -print
-  if [[ -d "${root}/parents" ]]; then
-    find "${root}/parents" -mindepth 1 -maxdepth 1 ! -type d -print
-    find "${root}/parents" -mindepth 2 -print
+  find "${root}" -mindepth 1 -maxdepth 1 \
+    ! -name '.opensymphony-orchestrator-state.json' \
+    ! \( -name '.opensymphony-staging' -type d \) \
+    ! \( -name parents -type d \) -print || printf 'scan-error:%s\n' "${root}"
+  if [[ -L "${root}/.opensymphony-orchestrator-state.json" ]]; then
+    printf '%s\n' "${root}/.opensymphony-orchestrator-state.json"
+  fi
+  if [[ -d "${root}/.opensymphony-staging" && ! -L "${root}/.opensymphony-staging" ]]; then
+    find "${root}/.opensymphony-staging" -mindepth 1 -print || printf 'scan-error:%s\n' "${root}/.opensymphony-staging"
+  fi
+  if [[ -d "${root}/parents" && ! -L "${root}/parents" ]]; then
+    find "${root}/parents" -mindepth 1 -maxdepth 1 ! -type d -print || printf 'scan-error:%s\n' "${root}/parents"
+    find "${root}/parents" -mindepth 2 -print || printf 'scan-error:%s\n' "${root}/parents"
   fi
 }
 

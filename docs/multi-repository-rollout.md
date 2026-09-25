@@ -90,9 +90,11 @@ parent-only integration command checks `answer=42` in each verified checkout,
 making alpha's seeded defect observable before repair. The disposable repositories
 exercise failed-check rework, not an automated PR-review webhook. Review of this
 repository's PR follows the configured OpenHands or Codex integration; the fixture
-does not require a separate reviewer account. After a successful worker run,
-the rollout controller publishes child edits from a fresh controller-owned
-checkout using its GitHub credential;
+does not require a separate reviewer account. Each child calls its checked-in
+completion helper as its last action to verify the edit and move its own issue
+to `Human Review` before a scheduler continuation can replace the completed
+run receipt. The rollout controller then publishes child edits from a fresh
+controller-owned checkout using its GitHub credential;
 the worker never receives the checkout credential. Resource names are recorded
 before creation and reconciled during teardown if a provider response is lost.
 The script tears down processes,
