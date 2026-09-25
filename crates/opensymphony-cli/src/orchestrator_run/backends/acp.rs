@@ -824,11 +824,11 @@ async fn try_run(
             },
             event = receiver.recv() => match event {
                 Ok(SessionEvent::Gap { .. }) => return Err("ACP source stream lost an oversized frame; submission remains fenced".into()),
-                Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates),
+                Ok(event) => project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates)?,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let history = handle.source_history();
                     if !history.covers_since(projection.last_cursor().unwrap_or(baseline)) { return Err("ACP worker source stream exceeded retention; submission remains fenced".into()); }
-                    for event in history.events { project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates); }
+                    for event in history.events { project_event(&event, &mut projection, &mut capability, &manifest.run_id, &run.worker_id, updates)?; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break Err(crate::opensymphony_acp::HostError::Unavailable),
             }
@@ -847,7 +847,7 @@ async fn try_run(
                 &manifest.run_id,
                 &run.worker_id,
                 updates,
-            ),
+            )?,
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 let history = handle.source_history();
                 if !history.covers_since(projection.last_cursor().unwrap_or(baseline)) {
@@ -861,7 +861,7 @@ async fn try_run(
                         &manifest.run_id,
                         &run.worker_id,
                         updates,
-                    );
+                    )?;
                 }
             }
             Err(_) => break,
@@ -898,7 +898,7 @@ fn project_event(
     run_id: &str,
     worker_id: &crate::opensymphony_domain::WorkerId,
     updates: &mpsc::UnboundedSender<WorkerUpdate>,
-) {
+) -> Result<(), String> {
     if let SessionEvent::State { snapshot } = event
         && snapshot.state.identity.run_id == run_id
     {
@@ -922,6 +922,10 @@ fn project_event(
             payload,
         });
     }
+    if projection.cursor_todo_saturated() {
+        return Err("ACP Cursor todo projection saturated; submission remains fenced".into());
+    }
+    Ok(())
 }
 
 fn forward_operator_response(
@@ -951,6 +955,54 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn cursor_todo_projection_saturation_emits_diagnostic_and_fails_run() {
+        let mut projection = RuntimeProjection::default().with_cursor(true, Some("session"), None);
+        let mut capability = serde_json::from_value(serde_json::json!({
+            "harness":"acp","profile_id":"cursor","protocol":"acp","protocol_version":1,
+            "rpc":"json_rpc","encoding":"json","framing":"line_delimited","carrier":"stdio",
+            "session_restore":false,"history_replay":false,"model_selection":false,
+            "cancellation":true,"operator_responses":true
+        }))
+        .expect("capability");
+        let worker = crate::opensymphony_domain::WorkerId::new("worker-cursor").expect("worker");
+        let (updates, mut received) = mpsc::unbounded_channel();
+        for sequence in 1..=17 {
+            let event = SessionEvent::Source {
+                generation: 1,
+                run_id: "run".into(),
+                replay: false,
+                frame: crate::opensymphony_acp::SourceFrame {
+                    sequence,
+                    direction: "incoming".into(),
+                    observed_at: chrono::Utc::now(),
+                    payload: serde_json::json!({"id":sequence,"method":"cursor/update_todos","params":{
+                        "toolCallId":"todo","merge":false,"todos":[]}}),
+                },
+            };
+            let result = project_event(
+                &event,
+                &mut projection,
+                &mut capability,
+                "run",
+                &worker,
+                &updates,
+            );
+            if sequence < 17 {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    result
+                        .expect_err("saturation fails run")
+                        .contains("saturated")
+                );
+            }
+        }
+        assert!(
+            matches!(received.try_recv(), Ok(WorkerUpdate::RuntimeEvent { event_kind: Some(kind), .. }) if kind == "acp.cursor_todo_saturation")
+        );
+    }
 
     #[tokio::test]
     async fn expired_operator_ack_fences_delayed_worker_consume() {

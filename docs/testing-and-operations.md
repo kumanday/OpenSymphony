@@ -666,7 +666,8 @@ the operation result immediately before prompt completion; a repeated host
 regression verifies all correlated results survive that ordering. Cursor
 unit and host fixture tests cover plan and todo request ID `0` without a
 peer-supplied session ID, the accepted plan and todo result shapes, mismatched
-session cancellation, owner-bound todo projection, and unknown request behavior.
+session cancellation, owner-bound accepted-response todo projection, duplicate
+ID ambiguity, visible saturation failure, and unknown request behavior.
 Two separately ignored manual integration tests exercise the authenticated
 pinned CLI through the production `SessionHost` plan operator route and todo
 response path. These tests require local CLI authentication and are not CI gates.

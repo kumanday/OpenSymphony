@@ -537,7 +537,8 @@ ACP extension registrations are exact profile/version entries inside the ACP
 module. The pinned Cursor `cursor/create_plan` request uses the scheduler-owned
 plan response path; its ID-bearing `cursor/update_todos` request receives a
 bounded response and contributes todo activity only after its correlated
-accepted response. Both bind to the connection-owned
+accepted response. A bounded pending-candidate queue fences the worker with a
+visible diagnostic on saturation. Both bind to the connection-owned
 active session without a peer-supplied session field. Unobserved Cursor question,
 task, and image methods are outside the enabled registration. Outbound operation dispatch enters
 through the gateway's operator action, binds the current run in the scheduler,

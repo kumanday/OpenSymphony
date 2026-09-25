@@ -1100,6 +1100,9 @@ supports observed plan approvals and ID-bearing todo requests; question, task,
 image, and no-ID notification paths remain unqualified. The captured wire
 contract and production test are in
 [acp-extension-evidence.md](acp-extension-evidence.md).
+Todo activity follows the correlated accepted callback result. Duplicate
+in-flight peer IDs remain ambiguous until all matching responses drain; more
+than 16 unresolved todo requests emits a diagnostic and fences the worker.
 The outbound operation's response can complete after the prompt finishes;
 prompt completion does not cancel its separately bounded RPC wait. A deadline
 returns outcome unknown to the caller while keeping that unresolved SDK request

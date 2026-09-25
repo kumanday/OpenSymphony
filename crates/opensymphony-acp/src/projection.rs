@@ -42,13 +42,21 @@ pub(super) fn reported_turn_usage(payload: &Value) -> Option<serde_json::Map<Str
     (!reported.is_empty()).then_some(reported)
 }
 
+#[derive(Debug)]
+struct CursorTodoCandidate {
+    payload: Option<Value>,
+    outstanding: usize,
+}
+
 #[derive(Default)]
 pub struct RuntimeProjection {
     cursor_enabled: bool,
     cursor_session_id: Option<String>,
     // Redacted, bounded candidates become activity only after the host's
     // correlated accepted response. A rejected callback is not a todo update.
-    cursor_todo_candidates: BTreeMap<String, Option<Value>>,
+    cursor_todo_candidates: BTreeMap<String, CursorTodoCandidate>,
+    cursor_todo_pending: usize,
+    cursor_todo_saturated: bool,
     last: Option<(u64, u64)>,
     tools: BTreeMap<String, Value>,
     tool_bytes: usize,
@@ -82,6 +90,10 @@ impl RuntimeProjection {
         self.last
     }
 
+    pub fn cursor_todo_saturated(&self) -> bool {
+        self.cursor_todo_saturated
+    }
+
     pub fn apply(&mut self, event: &SessionEvent, run_id: &str) -> Option<RuntimeUpdate> {
         let SessionEvent::Source {
             generation,
@@ -98,6 +110,8 @@ impl RuntimeProjection {
         }
         if self.last.is_some_and(|last| last.0 != *generation) {
             self.cursor_todo_candidates.clear();
+            self.cursor_todo_pending = 0;
+            self.cursor_todo_saturated = false;
         }
         self.last = Some(cursor);
         if *replay || source_run != run_id {
@@ -111,17 +125,33 @@ impl RuntimeProjection {
                 && frame.payload.get("method").is_none()
                 && let Some(id) = frame.payload.get("id")
                 && (id.is_number() || id.is_string())
-                && let Some(Some(payload)) = self.cursor_todo_candidates.remove(&id.to_string())
-                && frame.payload.pointer("/result/outcome/outcome") == Some(&json!("accepted"))
             {
-                return Some(RuntimeUpdate {
-                    sequence: frame.sequence,
-                    generation: *generation,
-                    observed_at: frame.observed_at,
-                    kind: "vendor_todos".into(),
-                    summary: Some("Cursor todos updated".into()),
-                    payload,
-                });
+                let key = id.to_string();
+                let mut finished = false;
+                let mut payload = None;
+                if let Some(candidate) = self.cursor_todo_candidates.get_mut(&key) {
+                    candidate.outstanding -= 1;
+                    self.cursor_todo_pending -= 1;
+                    if candidate.outstanding == 0 {
+                        payload = candidate.payload.take();
+                        finished = true;
+                    }
+                }
+                if finished {
+                    self.cursor_todo_candidates.remove(&key);
+                }
+                if let Some(payload) = payload
+                    && frame.payload.pointer("/result/outcome/outcome") == Some(&json!("accepted"))
+                {
+                    return Some(RuntimeUpdate {
+                        sequence: frame.sequence,
+                        generation: *generation,
+                        observed_at: frame.observed_at,
+                        kind: "vendor_todos".into(),
+                        summary: Some("Cursor todos updated".into()),
+                        payload,
+                    });
+                }
             }
             return self
                 .project_filesystem_response(*generation, frame)
@@ -143,14 +173,28 @@ impl RuntimeProjection {
             && id.to_string().len() <= 128
         {
             let key = id.to_string();
+            if self.cursor_todo_pending >= 16 {
+                self.cursor_todo_saturated = true;
+                return Some(RuntimeUpdate {
+                    sequence: frame.sequence,
+                    generation: *generation,
+                    observed_at: frame.observed_at,
+                    kind: "cursor_todo_saturation".into(),
+                    summary: Some("ACP Cursor todo projection saturated; worker fenced".into()),
+                    payload: json!({"pending_limit":16}),
+                });
+            }
+            self.cursor_todo_pending += 1;
             if let Some(candidate) = self.cursor_todo_candidates.get_mut(&key) {
-                *candidate = None;
-            } else if self.cursor_todo_candidates.len() < 16 {
+                candidate.payload = None;
+                candidate.outstanding += 1;
+            } else {
                 self.cursor_todo_candidates.insert(
                     key,
-                    Some(json!({
-                        "todos": params["todos"], "merge": params["merge"]
-                    })),
+                    CursorTodoCandidate {
+                        payload: Some(json!({"todos":params["todos"], "merge":params["merge"]})),
+                        outstanding: 1,
+                    },
                 );
             }
             return None;
@@ -929,7 +973,7 @@ mod tests {
     #[test]
     fn cursor_todo_candidates_are_bounded_and_duplicate_ids_are_ambiguous() {
         let mut projection = RuntimeProjection::default().with_cursor(true, Some("s"), None);
-        for sequence in 1..=17 {
+        for sequence in 1..=16 {
             let request = json!({"id":sequence,"method":"cursor/update_todos","params":{
                 "toolCallId":"todo","merge":false,"todos":[]}});
             assert!(
@@ -939,43 +983,40 @@ mod tests {
             );
         }
         assert_eq!(projection.cursor_todo_candidates.len(), 16);
-        assert!(
-            projection
-                .apply(
-                    &callback_event(
-                        18,
-                        "outgoing",
-                        json!({"id":17,"result":{"outcome":{"outcome":"accepted"}}})
-                    ),
-                    "run"
-                )
-                .is_none()
-        );
-        assert!(
-            projection
-                .apply(
-                    &callback_event(
-                        19,
-                        "incoming",
-                        json!({"id":1,"method":"cursor/update_todos","params":{
-            "toolCallId":"todo","merge":false,"todos":[]}})
-                    ),
-                    "run"
-                )
-                .is_none()
-        );
-        assert!(
-            projection
-                .apply(
-                    &callback_event(
-                        20,
-                        "outgoing",
-                        json!({"id":1,"result":{"outcome":{"outcome":"accepted"}}})
-                    ),
-                    "run"
-                )
-                .is_none()
-        );
+        let saturated = projection.apply(&callback_event(17, "incoming", json!({"id":17,"method":"cursor/update_todos","params":{"toolCallId":"todo","merge":false,"todos":[]}})), "run").expect("visible saturation");
+        assert_eq!(saturated.kind, "cursor_todo_saturation");
+        assert_eq!(saturated.payload["pending_limit"], 16);
+        assert!(projection.cursor_todo_saturated());
+
+        let mut duplicate = RuntimeProjection::default().with_cursor(true, Some("s"), None);
+        let request = |sequence, content| {
+            callback_event(
+                sequence,
+                "incoming",
+                json!({"id":0,"method":"cursor/update_todos","params":{
+            "toolCallId":"todo","merge":false,"todos":[{"id":"one","content":content,"status":"completed"}]}}),
+            )
+        };
+        let response = |sequence| {
+            callback_event(
+                sequence,
+                "outgoing",
+                json!({"id":0,"result":{"outcome":{"outcome":"accepted"}}}),
+            )
+        };
+        assert!(duplicate.apply(&request(1, "A"), "run").is_none());
+        assert!(duplicate.apply(&request(2, "B"), "run").is_none());
+        assert!(duplicate.apply(&response(3), "run").is_none());
+        assert!(duplicate.apply(&request(4, "C"), "run").is_none());
+        assert!(duplicate.apply(&response(5), "run").is_none());
+        assert!(duplicate.apply(&response(6), "run").is_none());
+        assert_eq!(duplicate.cursor_todo_pending, 0);
+        assert!(duplicate.cursor_todo_candidates.is_empty());
+        assert!(duplicate.apply(&request(7, "D"), "run").is_none());
+        let update = duplicate
+            .apply(&response(8), "run")
+            .expect("fresh ID after full drain");
+        assert_eq!(update.payload["todos"][0]["content"], "D");
     }
 
     #[test]
