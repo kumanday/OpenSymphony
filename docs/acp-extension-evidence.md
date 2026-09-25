@@ -52,7 +52,8 @@ rejected result, and completed the prompt. The todo test received the real ID
 list, and completed the prompt. Invalid or unbound todo requests receive the
 observed rejected result shape. Scheduler todo activity is projected only from
 the correlated accepted response; a rejected request creates no todo update.
-Duplicate in-flight IDs remain ambiguous until every matching response drains.
+Duplicate in-flight IDs remain ambiguous until every matching response drains,
+including collisions between plan, todo, and standard callback methods.
 At 16 unresolved todo requests, another request emits a bounded saturation
 diagnostic and fences the worker rather than silently dropping accepted activity.
 Both use disposable issue workspaces, are
@@ -60,7 +61,7 @@ ignored in unauthenticated CI, and passed when invoked manually:
 
 ```text
 OPENSYMPHONY_CURSOR_AGENT_BIN=/path/to/pinned/agent cargo test-system-duckdb --test acp_session_host pinned_cursor_live -- --ignored --nocapture
-  2 passed; 0 failed; finished in 12.19s
+  2 passed; 0 failed; finished in 14.85s
 ```
 
 `tests/fixtures/acp_session_peer.py` gives repeatable plan and todo ID `0`

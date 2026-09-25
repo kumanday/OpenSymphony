@@ -922,8 +922,8 @@ fn project_event(
             payload,
         });
     }
-    if projection.cursor_todo_saturated() {
-        return Err("ACP Cursor todo projection saturated; submission remains fenced".into());
+    if projection.cursor_callback_saturated() {
+        return Err("ACP Cursor callback projection saturated; submission remains fenced".into());
     }
     Ok(())
 }
