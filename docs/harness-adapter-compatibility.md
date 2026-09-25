@@ -101,6 +101,19 @@ Known gaps:
   tokens in OpenSymphony workspaces or browser payloads.
 - Hosted Codex worker pools and remote routing remain future work.
 
+## ACP live profile matrix
+
+[ACP live qualification](acp-live-qualification.md) records the pinned Cursor
+and Devin stdio profiles, negotiated ACP v1 methods, authentication, real
+tracked-issue outcomes, and optional-feature limits. Both advertise
+`loadSession` and omit `resumeSession`; profile preflight does not claim
+either. Cursor alone has a qualified pinned extension registration for
+observed `cursor/create_plan` and `cursor/update_todos` ID-bearing requests.
+Devin requires no custom scheduler path; its before-response session updates
+are bound by the common ACP client. The public capabilities response exposes
+generic adapter support, configured profile readiness, and negotiated run
+support as distinct states.
+
 ## Rust-Native Harness
 
 A Rust-native or in-process harness fits the same contract by implementing

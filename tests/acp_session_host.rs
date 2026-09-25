@@ -529,6 +529,85 @@ fn pinned_cursor_binary() -> String {
 }
 
 #[tokio::test]
+#[ignore = "requires authenticated pinned vendor CLI"]
+async fn pinned_live_acp_session_load_restores_without_prompt_resend() {
+    for (env_name, issue) in [
+        ("OPENSYMPHONY_CURSOR_AGENT_BIN", "CURSOR-LIVE-RESTORE"),
+        ("OPENSYMPHONY_DEVIN_BIN", "DEVIN-LIVE-RESTORE"),
+    ] {
+        let binary = std::env::var(env_name).expect("pinned vendor CLI path");
+        let root = tempfile::tempdir().expect("temp");
+        let host = SessionHost::new(RetentionPolicy::default()).expect("host");
+        let configure = |mut request: SessionLaunch| {
+            request.profile.command = binary.clone();
+            request.profile.args = vec!["acp".into()];
+            if env_name == "OPENSYMPHONY_CURSOR_AGENT_BIN" {
+                request.profile.auth = Some(AcpAuth {
+                    method_id: "cursor_login".into(),
+                });
+                request
+                    .profile
+                    .extensions
+                    .push("cursor@2026.09.08-6caf4ff".into());
+            }
+            request
+                .context
+                .environment
+                .insert("HOME".into(), std::env::var("HOME").expect("HOME"));
+            request.limits.setup_timeout = Duration::from_secs(30);
+            request.limits.prompt_timeout = Duration::from_secs(120);
+            request
+        };
+        let first = host
+            .open(configure(launch(root.path(), issue, "none").await))
+            .await
+            .expect("open vendor CLI");
+        assert!(
+            prompt(
+                &first,
+                "first",
+                "Answer with one word: blue. Do not use tools or inspect files."
+            )
+            .await
+            .succeeded()
+        );
+        let original = first
+            .inspect()
+            .await
+            .expect("inspect")
+            .state
+            .session_id
+            .expect("session");
+        retire(&first).await;
+        let restored = host
+            .open(configure(launch(root.path(), issue, "none").await))
+            .await
+            .expect("restore vendor CLI");
+        let state = restored.inspect().await.expect("restored state").state;
+        assert_eq!(state.recovery, AcpRecovery::RestoredLoad);
+        assert_eq!(state.session_id.as_deref(), Some(original.as_str()));
+        let history = restored.source_history();
+        assert!(history.events.iter().any(|event| {
+            matches!(event, SessionEvent::Source { frame, .. } if frame.direction == "outgoing" && frame.payload["method"] == "session/load")
+        }));
+        assert!(!history.events.iter().any(|event| {
+            matches!(event, SessionEvent::Source { frame, .. } if frame.direction == "outgoing" && frame.payload["method"] == "session/prompt")
+        }));
+        assert!(
+            prompt(
+                &restored,
+                "second",
+                "Answer with one word: green. Do not use tools or inspect files."
+            )
+            .await
+            .succeeded()
+        );
+        retire(&restored).await;
+        println!("{issue}: session/load restored the bound session without prompt resend");
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires authenticated pinned Cursor CLI"]
 async fn pinned_cursor_live_plan_uses_production_operator_route() {
     let root = tempfile::tempdir().expect("temp");

@@ -566,6 +566,16 @@ silently drop the expiry signal. A receiver that stops draining fails the turn;
 worker completion clears its pending interactions. No
 OpenHands server or client participates in this launch path.
 
+## ACP live interoperability
+
+The [ACP live qualification](acp-live-qualification.md) records production
+`opensymphony run` paths for pinned Cursor and Devin stdio CLIs. Both use the
+same scheduler-owned routing and issue workspace; vendor-specific behavior
+stays inside the ACP client/registered extension boundary. Devin may announce
+configuration before the `session/new` response, so the client buffers those
+bounded announcements until it can bind the authoritative session ID. The
+response wins for fields it supplies.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

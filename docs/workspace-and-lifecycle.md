@@ -1061,6 +1061,17 @@ retires accepted restoration work before creating a fresh session.
 path, so editor-like extension requests cannot replace cwd, environment, callbacks
 or MCP grants.
 
+## ACP live restoration boundary
+
+The [pinned live qualification](acp-live-qualification.md) restored
+known-finished Cursor and Devin sessions through `session/load` after retiring
+the first process. The second process kept the same bound session ID and did
+not resend the first prompt. For a peer without advertised persistence,
+restoration starts a fresh session and uses the full prompt when the old
+workflow context has not been preserved. A submitted prompt with unknown
+outcome remains fenced; a stopped owner alone is insufficient evidence for
+automatic prompt replay or workspace removal.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

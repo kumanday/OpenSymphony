@@ -1111,6 +1111,18 @@ inside the eight-operation limit until its reply or connection closure. Peer
 results are redacted with the session's known secrets before entering the public
 action receipt, including strings in `value` and `_meta`.
 
+## ACP live qualification and recovery
+
+Run the ignored authenticated tests in [ACP live
+qualification](acp-live-qualification.md) after checking both pinned CLI
+versions and local login status. The report separates the local profile
+preflight result from a completed tracked issue run. Cursor and Devin both
+advertised `session/load` and restored a known-finished session; neither
+advertised `session/resume` in this qualification. An unadvertised optional
+method must not be assumed. A credential or option failure before prompt
+submission is a setup failure; a possibly submitted prompt is fenced from
+automatic resend and cleanup until reconciled.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
