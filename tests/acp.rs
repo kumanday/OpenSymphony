@@ -227,6 +227,62 @@ async fn acp_binds_new_session_before_adjacent_update_dispatch() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acp_binds_updates_announced_before_new_session_response() {
+    for (mode, expected_mode) in [
+        ("pre_response_session_update", "code"),
+        ("pre_response_authoritative_snapshot", "plan"),
+    ] {
+        let root = tempfile::tempdir().expect("temp");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let run = run_turn(
+            &profile(mode),
+            context(root.path()),
+            "hello".into(),
+            CancellationToken::new(),
+            Some(tx),
+            limits(),
+        )
+        .await
+        .expect("launch");
+        let report = run.outcome.expect("bound early update");
+        assert!(report.succeeded());
+        assert_eq!(
+            report.configuration.current_mode.as_deref(),
+            Some(expected_mode)
+        );
+        let update = rx.recv().await.expect("early update");
+        assert_eq!(update.session_id, "opaque/session:zero");
+        assert_eq!(update.update["currentModeId"], "code");
+    }
+}
+
+#[tokio::test]
+async fn acp_rejects_early_update_for_another_session() {
+    let root = tempfile::tempdir().expect("temp");
+    let run = run_turn(
+        &profile("pre_response_wrong_session"),
+        context(root.path()),
+        "hello".into(),
+        CancellationToken::new(),
+        None,
+        limits(),
+    )
+    .await
+    .expect("launch");
+    assert_eq!(
+        run.outcome.expect_err("foreign session update must fail"),
+        ClientError::Protocol { submitted: false }
+    );
+    assert!(run.process_reaped);
+    assert!(
+        !run.evidence
+            .iter()
+            .any(|frame| frame.direction == "outgoing"
+                && frame.payload["method"] == "session/prompt")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_bounds_callback_output_before_sdk_enqueue_when_stdin_is_blocked() {
     for mode in [
         "blocked_callbacks_unknown",

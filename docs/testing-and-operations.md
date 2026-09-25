@@ -788,6 +788,18 @@ TypeScript capability fixture; native OpenHands and Codex regression suites rema
 required. Unset ambient `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` for fake
 tracker suites so local OAuth configuration does not override fixture credentials.
 
+## ACP live acceptance
+
+[ACP live qualification](acp-live-qualification.md) contains reproducible
+commands and redacted outcomes for two independent vendor CLIs through tracked
+`opensymphony run` paths. The ignored tests assert workspace edits, Cursor
+operator decision and cancellation acknowledgement, plus live Cursor/Devin
+`session/load` without prompt resend. `cargo test-system-duckdb --test acp`
+covers the Devin-observed pre-response update ordering, authoritative
+snapshot, and wrong-session rejection. Keep these manual tests separate from
+unauthenticated CI and run the full system-DuckDB and Rust/TypeScript schema
+checks for changes to the adapter.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

@@ -172,6 +172,296 @@ async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
     terminate_child(&mut child).await;
 }
 
+// Manual qualification: these tests require locally authenticated vendor CLIs.
+// They drive the same tracked-issue `opensymphony run` route as the fake peer.
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_edits_workspace() {
+    live_acp_tracked_issue_edit(
+        "OPENSYMPHONY_CURSOR_AGENT_BIN",
+        "2026.09.08-6caf4ff",
+        "cursor",
+        "      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Devin CLI"]
+async fn live_devin_acp_tracked_issue_edits_workspace() {
+    live_acp_tracked_issue_edit("OPENSYMPHONY_DEVIN_BIN", "3000.10.21", "devin", "").await;
+}
+
+async fn live_acp_tracked_issue_edit(
+    binary_env: &str,
+    version: &str,
+    profile: &str,
+    profile_extra: &str,
+) {
+    let binary = std::env::var(binary_env).expect("set vendor CLI path for manual test");
+    let output = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("vendor CLI version");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains(version));
+
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: {profile}\nacp:\n  profiles:\n    {profile}:\n      command: {binary}\n      args: [acp]\n      permissions:\n        mode: allow_once\n{profile_extra}polling:\n  interval_ms: 50\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "In the current issue workspace, create a file named acp-live-proof.txt containing exactly `ACP tracked issue proof` followed by a newline. Do not edit another file. After writing it, reply Done.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let result = loop {
+        if let Ok(raw) = std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
+            && let Ok(run) = serde_json::from_str::<Value>(&raw)
+            && matches!(
+                run["status"].as_str(),
+                Some("succeeded" | "failed" | "cancelled")
+            )
+        {
+            break run;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "vendor run timed out");
+        sleep(Duration::from_millis(100)).await;
+    };
+    terminate_child(&mut child).await;
+    assert_eq!(result["status"], "succeeded", "vendor tracked run failed");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("acp-live-proof.txt")).expect("workspace edit"),
+        "ACP tracked issue proof\n"
+    );
+    let route: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join(".opensymphony/harness-route.json"))
+            .expect("route"),
+    )
+    .expect("route JSON");
+    assert_eq!(route["harness_profile"], profile);
+    assert_eq!(route["harness_kind"], "acp");
+    println!("{profile}: tracked issue succeeded; workspace edit and ACP route verified");
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_returns_operator_plan_decision() {
+    let binary = pinned_cursor_binary();
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: cursor\nacp:\n  profiles:\n    cursor:\n      command: {binary}\n      args: [acp]\n      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n      session:\n        mode: plan\npolling:\n  interval_ms: 50\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "Read-only protocol test. Use CreatePlan to propose answering a color question entirely in chat. Wait for the operator decision, then reply blue. Do not inspect or edit files, run commands, browse, or use MCP.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let interaction = loop {
+        if let Ok(response) = client
+            .get(format!("http://{bind}/api/v1/runs/COE-429/approvals"))
+            .send()
+            .await
+            && let Ok(body) = response.json::<Value>().await
+            && let Some(interaction) = body["approvals"].as_array().and_then(|approvals| {
+                approvals.iter().find_map(|approval| {
+                    let interaction = &approval["operator_interaction"];
+                    (interaction["kind"] == "plan_approval").then(|| interaction.clone())
+                })
+            })
+        {
+            break interaction;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "Cursor plan callback timed out");
+        sleep(Duration::from_millis(100)).await;
+    };
+    let mut payload = json!({
+        "request_id": interaction["request_id"],
+        "run_id": interaction["run_id"],
+        "issue_id": interaction["issue_id"],
+        "session_id": interaction["session_id"],
+        "generation": interaction["generation"],
+        "rpc_id": interaction["rpc_id"],
+        "decision": "rejected"
+    });
+    let dispatch = |payload: Value| {
+        json!({
+            "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+            "action_kind": "plan_decision",
+            "target_entity": { "entity_kind": "run", "entity_id": "COE-429" },
+            "payload": payload
+        })
+    };
+    payload["session_id"] = json!("wrong-session");
+    let rejected: Value = client
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&dispatch(payload.clone()))
+        .send()
+        .await
+        .expect("wrong-session reply")
+        .json()
+        .await
+        .expect("wrong-session receipt");
+    assert_eq!(rejected["status"], "rejected");
+    payload["session_id"] = interaction["session_id"].clone();
+    let accepted: Value = client
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&dispatch(payload))
+        .send()
+        .await
+        .expect("bound plan reply")
+        .json()
+        .await
+        .expect("plan receipt");
+    assert_eq!(accepted["status"], "accepted");
+    terminate_child(&mut child).await;
+    println!(
+        "cursor: tracked issue rejected cross-session reply and acknowledged bound plan decision"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated pinned Cursor CLI"]
+async fn live_cursor_acp_tracked_issue_cancel_acknowledgement() {
+    let binary = pinned_cursor_binary();
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("project");
+    let bind = reserve_socket_addr();
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        "http://127.0.0.1:9",
+        format!("control_plane:\n  bind: {bind}\nmemory:\n  auto_capture: false\n  serve: false\n"),
+        &format!(
+            "routing:\n  harness: acp\n  harness_profile: cursor\nacp:\n  profiles:\n    cursor:\n      command: {binary}\n      args: [acp]\n      auth:\n        method_id: cursor_login\n      extensions: [cursor@2026.09.08-6caf4ff]\n      permissions:\n        mode: allow_once\npolling:\n  interval_ms: 5000\n"
+        ),
+    );
+    let workflow_path = project.path().join("WORKFLOW.md");
+    let workflow = std::fs::read_to_string(&workflow_path).expect("workflow");
+    std::fs::write(
+        workflow_path,
+        workflow.replace(
+            "Run the scheduler.",
+            "Controlled cancellation test: run `sleep 90` in the current issue workspace, then reply Done. Do not edit files or run any other command.",
+        ),
+    )
+    .expect("workflow prompt");
+    write_memory_config(project.path());
+    let mut child = spawn_run_child(project.path(), &[]);
+    let workspace = project.path().join("var/workspaces/COE-429");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(workspace.join(".opensymphony/conversation.json"))
+            && let Ok(state) = serde_json::from_str::<Value>(&raw)
+            && state["acp"]["status"] == "submitted"
+        {
+            break;
+        }
+        assert!(
+            child.try_wait().expect("run status").is_none(),
+            "run exited"
+        );
+        assert!(Instant::now() < deadline, "Cursor prompt not submitted");
+        sleep(Duration::from_millis(100)).await;
+    }
+    sleep(Duration::from_secs(2)).await;
+    let receipt: Value = reqwest::Client::new()
+        .post(format!("http://{bind}/api/v1/actions/dispatch"))
+        .json(&json!({
+            "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+            "action_kind": "cancel",
+            "target_entity": { "entity_kind": "run", "entity_id": "COE-429" },
+            "idempotency_key": "cancel-COE-429"
+        }))
+        .send()
+        .await
+        .expect("cancel action")
+        .json()
+        .await
+        .expect("cancel receipt");
+    assert_eq!(receipt["status"], "accepted");
+    loop {
+        if let Ok(response) = reqwest::get(format!("http://{bind}/api/v1/snapshot")).await
+            && let Ok(snapshot) = response.json::<Value>().await
+            && snapshot["snapshot"]["issues"][0]["recent_events"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "scheduler.interrupt_acknowledged"
+                            && event["summary"]
+                                .as_str()
+                                .is_some_and(|summary| summary == "ACP prompt stopped: cancelled")
+                    })
+                })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cursor cancellation not acknowledged"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+    terminate_child(&mut child).await;
+    println!("cursor: tracked issue cancellation acknowledged by matching prompt response");
+}
+
+fn pinned_cursor_binary() -> String {
+    let binary = std::env::var("OPENSYMPHONY_CURSOR_AGENT_BIN").expect("pinned Cursor CLI");
+    let version = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("Cursor CLI version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("2026.09.08-6caf4ff"));
+    binary
+}
+
 #[tokio::test]
 async fn run_auto_detects_config_and_workflow_from_project_directory() {
     let openhands = FakeOpenHandsServer::start()

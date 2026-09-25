@@ -1134,9 +1134,14 @@ async fn run_connection(
         }
     });
     let active_session = Arc::new(Mutex::new(None::<String>));
+    // Some ACP peers announce initial configuration before replying to session/new.
+    // Keep those updates bounded until the response supplies the authoritative ID.
+    let pending_session_updates = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let setup_updates = updates.clone();
     let client = Client.builder().on_receive_dispatch(
         {
             let active_session = active_session.clone();
+            let pending_session_updates = pending_session_updates.clone();
             let callback_output = callback_output.clone();
             let limits = limits.clone();
             let resource_failure = resource_failure.clone();
@@ -1393,12 +1398,27 @@ async fn run_connection(
                                 fatal.cancel();
                                 return Err(agent_client_protocol::Error::invalid_params());
                             };
-                            if active_session
+                            let bound_session = active_session
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .as_deref()
-                                != Some(id)
-                            {
+                                .clone();
+                            if bound_session.is_none() {
+                                let mut pending = pending_session_updates
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                let used: usize = pending.iter().map(|(id, value)| id.len() + value.to_string().len()).sum();
+                                let bytes = id.len() + update.to_string().len();
+                                if pending.len() >= limits.queued_frames
+                                    || used.checked_add(bytes).is_none_or(|total| total > limits.queued_bytes)
+                                {
+                                    resource_failure.store(true, Ordering::Release);
+                                    fatal.cancel();
+                                    return Err(agent_client_protocol::Error::internal_error());
+                                }
+                                pending.push((id.to_owned(), update.clone()));
+                                return Ok(());
+                            }
+                            if bound_session.as_deref() != Some(id) {
                                 fatal.cancel();
                                 return Err(agent_client_protocol::Error::invalid_params());
                             }
@@ -1543,14 +1563,46 @@ async fn run_connection(
                 let session_id = if let Some(session_id) = restored_id { session_id.into() } else {
                     let (session_tx, session_rx) = oneshot::channel();
                     let active_session = active_session.clone();
+                    let pending_session_updates = pending_session_updates.clone();
                     let session_configuration = configuration.clone();
+                    let redactor = capture_state.clone();
+                    let updates = setup_updates.clone();
+                    let resource_failure = resource_failure.clone();
+                    let fatal = fatal.clone();
                     // Bind in ordered response dispatch before any adjacent session update.
                     connection.send_request(NewSessionRequest::new(cwd.clone()).mcp_servers(context.services.mcp_servers.clone()))
                         .on_receiving_result(async move |result| {
                             if let Ok(session) = &result {
-                                *active_session.lock().unwrap_or_else(|e| e.into_inner()) =
-                                    Some(session.session_id.0.to_string());
-                                session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&serde_json::to_value(session)?);
+                                let session_id = session.session_id.0.to_string();
+                                let snapshot = serde_json::to_value(session)?;
+                                session_configuration.lock().unwrap_or_else(|e| e.into_inner()).initial(&snapshot);
+                                for (id, update) in std::mem::take(&mut *pending_session_updates.lock().unwrap_or_else(|e| e.into_inner())) {
+                                    if id != session_id {
+                                        fatal.cancel();
+                                        return Err(agent_client_protocol::Error::invalid_params());
+                                    }
+                                    // The response is authoritative where it supplies a field;
+                                    // an omitted field keeps its earlier announced value.
+                                    SessionConfiguration::default().update(&update)?;
+                                    let covered = match update.get("sessionUpdate").and_then(Value::as_str) {
+                                        Some("config_option_update") => snapshot.get("configOptions").is_some(),
+                                        Some("current_mode_update") => snapshot.pointer("/modes/currentModeId").is_some(),
+                                        _ => false,
+                                    };
+                                    if !covered {
+                                        session_configuration.lock().unwrap_or_else(|e| e.into_inner()).update(&update)?;
+                                    }
+                                    if let Some(tx) = &updates {
+                                        let mut safe_update = update;
+                                        redactor.lock().unwrap_or_else(|e| e.into_inner()).redact(&mut safe_update, false);
+                                        tx.try_send(SessionUpdate { session_id: id, update: safe_update }).map_err(|_| {
+                                            resource_failure.store(true, Ordering::Release);
+                                            fatal.cancel();
+                                            agent_client_protocol::Error::internal_error()
+                                        })?;
+                                    }
+                                }
+                                *active_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session_id);
                             }
                             let _ = session_tx.send(result);
                             Ok(())

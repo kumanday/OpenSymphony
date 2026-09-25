@@ -1102,6 +1102,18 @@ redacted from source history and evidence. Model and mode categories are
 resolved from each refreshed option list so prerequisite selections can reveal
 dependent options.
 
+## Qualified ACP profiles
+
+The [live qualification matrix](acp-live-qualification.md) gives pinned Cursor
+and Devin versions and executable test commands. A new compliant stdio profile
+uses the `routing.harness: acp` and `routing.harness_profile` keys shown
+above, with `command`, `args`, and optional `env_refs`; no vendor-specific
+scheduler code is needed. Profile preflight checks configuration and
+executable availability. Authentication, session load, modes, options, and
+extensions are reported from the negotiated live session. The pinned Cursor
+extension registration is limited to the observed plan and todo request
+methods.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

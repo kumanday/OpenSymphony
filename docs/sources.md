@@ -261,6 +261,18 @@ through [Rust OpenOptionsExt](https://doc.rust-lang.org/std/os/windows/fs/trait.
 No-follow handles are checked before mutation, and ancestor handles exclude
 write/delete sharing until file I/O or terminal spawn finishes.
 
+## ACP vendor pins and observed contract
+
+The [live qualification report](acp-live-qualification.md) pins Cursor CLI
+`2026.09.08-6caf4ff` and Devin CLI `3000.10.21 (611c1cba)` as observed on
+2026-09-25. Both negotiated ACP v1 over local stdio and advertised
+`loadSession`; neither advertised `resumeSession`. Devin emitted configuration
+updates before `session/new` replied. These are observed runtime contracts,
+not assumptions about newer CLI releases. Re-run the ignored tests and revise
+the pin before claiming another version. The supported Cursor extension shapes
+and response observations are in [ACP extension
+evidence](acp-extension-evidence.md).
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
