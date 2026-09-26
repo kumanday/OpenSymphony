@@ -873,6 +873,33 @@ checks_have_failed() {
     any(.check_runs[]; .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required")'
 }
 
+retire_published_child_edit() {
+  local index="$1"
+  local repository="$2"
+  local alias=(alpha beta gamma)
+  local checkout="" candidate count=0 expected_status
+  for candidate in "${RUN_DIR}/workspaces/${CHILD_IDENTIFIERS[index]}-"*--*; do
+    [[ -d "${candidate}" ]] || continue
+    checkout="${candidate}"
+    count=$((count + 1))
+  done
+  [[ "${count}" == 1 ]] || return 1
+  [[ -f "${checkout}/delivery.txt" && ! -L "${checkout}/delivery.txt" ]] || return 1
+  [[ "$(cat "${checkout}/delivery.txt")" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 1
+  [[ "$(gh api "repos/${repository}/contents/delivery.txt?ref=develop" --jq .content | tr -d '\n' | decode_base64)" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 1
+  expected_status='?? delivery.txt'
+  if (( index == 0 )); then
+    [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]] || return 1
+    [[ "$(cat "${checkout}/reviewed.txt")" == "reviewed:${RUN_ID}" ]] || return 1
+    [[ "$(gh api "repos/${repository}/contents/reviewed.txt?ref=develop" --jq .content | tr -d '\n' | decode_base64)" == "reviewed:${RUN_ID}" ]] || return 1
+    expected_status+=$'\n?? reviewed.txt'
+  fi
+  [[ "$(git -C "${checkout}" status --porcelain --untracked-files=all)" == "${expected_status}" ]] || return 1
+  rm -- "${checkout}/delivery.txt"
+  if (( index == 0 )); then rm -- "${checkout}/reviewed.txt"; fi
+  [[ -z "$(git -C "${checkout}" status --porcelain --untracked-files=all)" ]]
+}
+
 declare -a CHILD_ATTACHED=(0 0 0)
 declare -a CHILD_MERGED=(0 0 0)
 declare -a CHILD_REVIEW_TRANSITIONED=(0 0 0)
@@ -985,6 +1012,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=merge -f sha="${pr_sha}" |
       jq -e '.merged == true' >/dev/null
     gh api -X DELETE "repos/${repository}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+    retire_published_child_edit "${index}" "${repository}"
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"
     CHILD_MERGED[index]=1
   done
