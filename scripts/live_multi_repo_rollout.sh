@@ -780,6 +780,16 @@ attach_pr() {
   linear attachment_link_github_pr.graphql "${vars}" | jq -e '.data.attachmentLinkGitHubPR.success == true' >/dev/null
 }
 
+pr_by_branch() {
+  local repository="$1"
+  local branch="$2"
+  gh api "repos/${repository}/pulls?state=all&head=${OPENSYMPHONY_LIVE_GITHUB_OWNER}:${branch}&base=develop&per_page=100" |
+    jq -cer --arg branch "${branch}" '
+      [.[] | select(.head.ref == $branch and .base.ref == "develop")][0]
+      | {number,url:.html_url,title,headRefOid:.head.sha,
+         state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}'
+}
+
 publish_child_if_ready() {
   local index="$1"
   local alias=(alpha beta gamma)
@@ -800,7 +810,7 @@ publish_child_if_ready() {
   if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
     [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]] || return 0
     [[ "$(cat "${checkout}/reviewed.txt" 2>/dev/null || true)" == "reviewed:${RUN_ID}" ]] || return 0
-  elif gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
+  elif pr_by_branch "${repository}" "${branch}" >/dev/null 2>&1; then
     return 0
   fi
   publisher="${RESOURCE_DIR}/seeds/publisher-${alias[index]}"
@@ -826,33 +836,31 @@ publish_child_if_ready() {
   fi
   git -C "${publisher}" -c core.hooksPath=/dev/null push \
     "https://github.com/${repository}.git" "HEAD:refs/heads/${branch}" >/dev/null
-  if ! gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
-    gh pr create --repo "${repository}" --base develop --head "${branch}" \
-      --title "${SLUG}-${alias[index]} disposable delivery" \
-      --body "Disposable isolated lifecycle fixture for ${CHILD_IDENTIFIERS[index]}." >/dev/null ||
-      gh pr view "${branch}" --repo "${repository}" >/dev/null
+  if ! pr_by_branch "${repository}" "${branch}" >/dev/null 2>&1; then
+    gh api -X POST "repos/${repository}/pulls" -f base=develop -f head="${branch}" \
+      -f title="${SLUG}-${alias[index]} disposable delivery" \
+      -f body="Disposable isolated lifecycle fixture for ${CHILD_IDENTIFIERS[index]}." >/dev/null ||
+      pr_by_branch "${repository}" "${branch}" >/dev/null
   fi
 }
 
 checks_are_green() {
   local repository="$1"
   local number="$2"
-  gh pr view "${number}" --repo "${repository}" --json statusCheckRollup | jq -r '
-    [.statusCheckRollup[] | if .__typename == "CheckRun" then .conclusion else .state end] as $checks
-    | ($checks | length) > 0 and all($checks[]; . == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED")
-  '
+  local sha
+  sha="$(gh api "repos/${repository}/pulls/${number}" --jq .head.sha)"
+  gh api "repos/${repository}/commits/${sha}/check-runs?per_page=100" | jq -r '
+    (.check_runs | length) > 0 and all(.check_runs[];
+      .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))'
 }
 
 checks_have_failed() {
   local repository="$1"
   local number="$2"
-  gh pr view "${number}" --repo "${repository}" --json statusCheckRollup | jq -r '
-    any(.statusCheckRollup[]; if .__typename == "CheckRun" then
-      .conclusion == "FAILURE"
-    else
-      .state == "FAILURE" or .state == "ERROR"
-    end)
-  '
+  local sha
+  sha="$(gh api "repos/${repository}/pulls/${number}" --jq .head.sha)"
+  gh api "repos/${repository}/commits/${sha}/check-runs?per_page=100" | jq -r '
+    any(.check_runs[]; .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required")'
 }
 
 declare -a CHILD_ATTACHED=(0 0 0)
@@ -921,7 +929,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     alias=(alpha beta gamma)
     repository="${REPOSITORIES[index]}"
     branch="feat/${SLUG}-${alias[index]}"
-    if ! pr="$(gh pr view "${branch}" --repo "${repository}" --json number,url,title,headRefOid,state 2>/dev/null)"; then
+    if ! pr="$(pr_by_branch "${repository}" "${branch}" 2>/dev/null)"; then
       continue
     fi
     pr_number="$(jq -er .number <<<"${pr}")"
@@ -962,15 +970,19 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     if [[ "$(checks_are_green "${repository}" "${pr_number}")" != "true" ]]; then
       continue
     fi
-    gh pr merge "${pr_number}" --repo "${repository}" --squash --delete-branch
+    gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=squash |
+      jq -e '.merged == true' >/dev/null
+    gh api -X DELETE "repos/${repository}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"
     CHILD_MERGED[index]=1
   done
 
   if (( CHILD_MERGED[0] == 1 && CHILD_MERGED[1] == 1 && CHILD_MERGED[2] == 1 && PARENT_MERGED == 0 )); then
     repository="${REPOSITORIES[0]}"
-    pr="$(gh pr list --repo "${repository}" --state all --base develop --json number,url,title,headRefName,state,statusCheckRollup \
-      --jq '[.[] | select(.headRefName | startswith("fix/"))][0]')"
+    pr="$(gh api "repos/${repository}/pulls?state=all&base=develop&per_page=100" | jq -c '
+      [.[] | select(.head.ref | startswith("fix/")) |
+        {number,url:.html_url,title,headRefName:.head.ref,
+         state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}][0]')"
     if [[ "${pr}" != "null" ]]; then
       pr_number="$(jq -er .number <<<"${pr}")"
       pr_state="$(jq -er .state <<<"${pr}")"
