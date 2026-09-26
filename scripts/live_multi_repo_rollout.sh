@@ -829,7 +829,8 @@ publish_child_if_ready() {
   if ! gh pr view "${branch}" --repo "${repository}" >/dev/null 2>&1; then
     gh pr create --repo "${repository}" --base develop --head "${branch}" \
       --title "${SLUG}-${alias[index]} disposable delivery" \
-      --body "Disposable isolated lifecycle fixture for ${CHILD_IDENTIFIERS[index]}." >/dev/null
+      --body "Disposable isolated lifecycle fixture for ${CHILD_IDENTIFIERS[index]}." >/dev/null ||
+      gh pr view "${branch}" --repo "${repository}" >/dev/null
   fi
 }
 
