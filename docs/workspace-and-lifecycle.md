@@ -543,6 +543,11 @@ Use for:
 
 Runs before workspace deletion for terminal issues.
 
+Remote-only harnesses use evidence-only workspaces. Their issue manifest records
+`evidence_only: true`, and cleanup skips `before_remove` for those workspaces,
+including after restart or during generation-bound cleanup. No repository
+checkout is present for the hook to operate on.
+
 Use for:
 
 - final log or artifact collection
