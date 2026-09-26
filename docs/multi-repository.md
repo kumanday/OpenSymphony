@@ -1,9 +1,9 @@
 # Multi-repository projects
 
-OpenSymphony can run one Linear project across several source repositories. A
-terminal issue names one repository with a `repo:<alias>` label. A parent issue
-has no repository label: it waits for its children to merge, then checks their
-combined result in a separate integration workspace.
+OpenSymphony can run one Linear project across several source repositories.
+Each implementation sub-issue names one repository with a `repo:<alias>` label.
+Its parent has no repository label: it waits for the sub-issues to merge, then
+checks their combined result in a separate integration workspace.
 
 The single-repository setup still works. Multi-repository routing is an explicit
 choice in the central configuration, and each project set lists the projects
@@ -43,7 +43,7 @@ flowchart LR
    path. The [configuration model](specs/multi-repo-orchestration-spec.md#8-configuration-model)
    shows how these sections fit together. Keep credential values in environment
    variables referenced by `credentials`.
-3. Label every terminal implementation issue with exactly one managed
+3. Label every implementation sub-issue with exactly one managed
    `repo:<alias>` label. Use an alias allowed by its Linear project. Leave
    parent issues unlabeled. A missing, duplicate, unknown, or out-of-scope
    binding is shown as a routing blocker; OpenSymphony does not choose a

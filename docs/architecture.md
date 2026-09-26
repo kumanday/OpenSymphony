@@ -10,7 +10,7 @@ The system must preserve these boundaries:
 
 - the orchestrator is the source of truth for scheduling state
 - the tracker is polled and reconciled by the orchestrator
-- each terminal issue executes in its bound repository workspace
+- each repository-bound work issue executes in its own checkout
 - a multi-repository parent uses a separate integration workspace after its
   children merge
 - `WORKFLOW.md` remains the repo-owned policy and prompt contract
@@ -100,7 +100,7 @@ including when a subtree no longer requires merge evidence. Reopening or
 recovering nonterminal work invalidates its durable success receipt before
 batched launch preparation.
 
-Repository routing is also orchestrator-owned: terminal child metadata carries
+Repository routing is also orchestrator-owned: repository-bound child metadata carries
 one alias, the central inventory resolves it to a canonical provider identity,
 and the scheduler persists that identity plus its config and inventory
 generations before claiming work. Project associations are validation scope,

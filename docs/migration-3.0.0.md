@@ -29,8 +29,8 @@ workflow can continue with `legacy_single` routing and its current harness.
 
 Add an active project set, repository inventory, credentials, and review
 profiles to the central config. Set `routing.mode: project_set` only after
-every terminal issue has exactly one valid `repo:<alias>` label and every
-parent is repository-neutral. Keep repository-specific instructions in each
+every implementation sub-issue has exactly one valid `repo:<alias>` label and
+its parent has no repository label. Keep repository-specific instructions in each
 checkout and integration instructions in the project set. Follow the
 [multi-repository guide](multi-repository.md) for the run flow and the
 [configuration model](configuration.md#central-configuration) for the full
