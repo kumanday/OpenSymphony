@@ -280,7 +280,7 @@ cleanup() {
 
   local remaining_local_roots=0
   local local_root
-  for local_root in "${RESOURCE_DIR}/seeds" "${RUN_DIR}/state" "${RUN_DIR}/workspaces" "${RUN_DIR}/catalog"; do
+  for local_root in "${RESOURCE_DIR}/seeds" "${RUN_DIR}/state" "${RUN_DIR}/workspaces"; do
     rm -rf "${local_root}" || cleanup_failed=1
     if [[ -e "${local_root}" || -L "${local_root}" ]]; then
       remaining_local_roots=$((remaining_local_roots + 1))
@@ -642,7 +642,7 @@ workspace:
   retain_failed: true
   cleanup_after_parent_finalization: true
 memory:
-  catalog_root: ${RUN_DIR}/catalog
+  catalog_root: ${RUN_DIR}/state/memory
   auto_capture: true
   auto_archive: false
   serve: false
