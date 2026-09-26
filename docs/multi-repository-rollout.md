@@ -1,5 +1,9 @@
 # Multi-repository release gate and isolated rollout
 
+This is the validation procedure for the
+[multi-repository project guide](multi-repository.md). Start there for issue
+labels, repository inventory, and parent integration.
+
 Strict multi-repository routing stays disabled for production projects until the
 hermetic gate and one disposable non-production run pass at the same immutable
 commit, with each selected central config identified by its SHA-256.
