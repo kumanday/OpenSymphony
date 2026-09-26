@@ -388,6 +388,12 @@ turn, moves the issue to Human Review, and publishes the edit. Leave the edit
 in this checkout for the controller to commit, push, and open the pull request.
 Do not perform Git, GitHub, or Linear side effects.
 EOF
+  if [[ "${alias}" == "alpha" ]]; then
+    cat >> "${seed}/AGENTS.md" <<'EOF'
+Leave reviewed.txt absent on the first turn. Create it only after the PR check
+fails and the issue requests a repair.
+EOF
+  fi
   printf 'component=%s\n' "${alias}" > "${seed}/component.txt"
   if [[ "${alias}" == "alpha" ]]; then
     printf 'answer=41\n' > "${seed}/answer.txt"
@@ -842,7 +848,8 @@ publish_child_if_ready() {
   fi
   rm -f "${publisher}/delivery.txt" "${publisher}/reviewed.txt"
   cp "${checkout}/delivery.txt" "${publisher}/delivery.txt"
-  if [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]]; then
+  # Keep the first alpha PR red even if its worker anticipated the repair marker.
+  if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
     cp "${checkout}/reviewed.txt" "${publisher}/reviewed.txt"
   fi
   git -C "${publisher}" add -- delivery.txt
