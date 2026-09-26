@@ -12,6 +12,9 @@ mkdir -p "${RUN_DIR}"
 cd "${ROOT_DIR}"
 export GIT_CONFIG_GLOBAL=/dev/null
 export RUST_TEST_THREADS=1
+if [[ -n "${TMPDIR:-}" ]]; then
+  export TMPDIR="$(cd -- "${TMPDIR}" && pwd -P)/"
+fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "Release evidence requires a clean Git worktree." >&2
