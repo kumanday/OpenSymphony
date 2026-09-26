@@ -14,7 +14,8 @@ workflow can continue with `legacy_single` routing and its current harness.
    review its findings, and then apply the migration:
 
    ```bash
-   opensymphony migrate preflight --repo /path/to/target-repo
+   opensymphony migrate preflight --repo /path/to/target-repo \
+     --output /absolute/path/to/config.yaml
    opensymphony migrate apply --repo /path/to/target-repo \
      --output /absolute/path/to/config.yaml
    ```
