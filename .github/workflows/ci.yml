@@ -21,6 +21,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+  acp-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: ACP Windows process ownership regressions
+        run: python scripts/validation/check-acp-windows.py
   typescript:
     runs-on: ubuntu-latest
     steps:

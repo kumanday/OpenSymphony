@@ -61,6 +61,8 @@ pub struct WorkflowFrontMatter {
     #[serde(default)]
     pub routing: RoutingFrontMatter,
     #[serde(default)]
+    pub acp: super::acp::AcpConfig,
+    #[serde(default)]
     pub codex: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(default)]
     pub logging: Option<BTreeMap<String, serde_yaml::Value>>,
@@ -120,6 +122,7 @@ pub struct AgentFrontMatter {
 #[serde(deny_unknown_fields)]
 pub struct RoutingFrontMatter {
     pub harness: Option<String>,
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub harness_env: Option<String>,
@@ -271,6 +274,7 @@ pub struct WorkflowConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowExtensions {
+    pub acp: super::acp::AcpConfig,
     pub openhands: OpenHandsConfig,
 }
 
@@ -324,6 +328,7 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingConfig {
     pub harness: String,
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub harness_env: String,

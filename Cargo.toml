@@ -27,6 +27,9 @@ duckdb-prebuilt = []
 openhands-subscription-credentials = []
 
 [dependencies]
+agent-client-protocol = "=2.2.0"
+agent-client-protocol-schema = "=1.9.1"
+aho-corasick = "=1.1.4"
 async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -68,16 +71,23 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "=10.0.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.97.1"
-version = "2.11.3"
+version = "3.0.0"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
-unsafe_code = "forbid"
+unsafe_code = "deny"
 unused_lifetimes = "warn"
 unused_macro_rules = "warn"
 unused_qualifications = "warn"
@@ -117,7 +127,7 @@ thiserror = "2"
 time = "=0.3.47"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "codec"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

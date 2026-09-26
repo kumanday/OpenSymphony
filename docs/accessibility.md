@@ -79,12 +79,23 @@ last_memory_sync: 2026-07-02T03:46:15.369986+00:00
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -134,11 +145,22 @@ last_memory_sync: 2026-07-02T03:46:15.369986+00:00
 - COE-549
 - COE-550
 - COE-551
+- COE-553
+- COE-554
+- COE-555
+- COE-556
 - COE-562
 - COE-563
 - COE-564
 - COE-565
 - COE-566
 - COE-567
+- COE-608
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
     time::Duration,
@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome};
+use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome, WorkspaceRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutRepository {
@@ -23,6 +23,8 @@ pub struct CheckoutRepository {
     pub credential_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_credential_env: Option<String>,
     pub instructions_path: PathBuf,
     #[serde(default)]
     pub policy_generation: String,
@@ -31,24 +33,25 @@ pub struct CheckoutRepository {
     pub review_provider: String,
     #[serde(default)]
     pub review_policy_generation: String,
+    #[serde(default)]
+    pub required_checks: bool,
+    #[serde(default)]
+    pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
 }
 
 pub const SSH_AUTH_SOCK_ENV: &str = "SSH_AUTH_SOCK";
 
-pub fn environment_variable_names_equal(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(right)
-    } else {
-        left == right
-    }
-}
-
 pub fn checkout_credential_environment_variables(
     repositories: &BTreeMap<String, CheckoutRepository>,
-) -> std::collections::BTreeSet<String> {
-    let mut variables = std::collections::BTreeSet::new();
+) -> BTreeSet<String> {
+    let mut variables = BTreeSet::new();
     for repository in repositories.values() {
         if let Some(variable) = repository.credential_env.as_ref() {
+            variables.insert(variable.clone());
+        }
+        if let Some(variable) = repository.review_credential_env.as_ref() {
             variables.insert(variable.clone());
         }
         if repository.credential_kind == "ssh-agent" {
@@ -102,6 +105,8 @@ pub struct TerminalRuntimeEnvelope {
     pub target_commit: String,
     pub instruction: InstructionProvenance,
     pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session: Option<AcpSessionIdentity>,
     pub model_profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -110,6 +115,127 @@ pub struct TerminalRuntimeEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_binding: Option<String>,
     pub cleanup_intent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentCheckoutRequest {
+    pub issue_id: String,
+    pub repository_id: String,
+    pub checkout_generation: String,
+    pub lease_owner: String,
+    #[serde(default)]
+    pub required_merge_commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRetainedCheckout {
+    pub issue_id: String,
+    pub identifier: String,
+    pub checkout_generation: String,
+    pub lease_owner: String,
+    pub child_branch: String,
+    pub child_head: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentIntegrationCheckout {
+    pub checkout_handle: String,
+    pub repository_id: String,
+    pub safe_remote_fingerprint: String,
+    pub relative_path: PathBuf,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub storage_source_generation: String,
+    pub retained_checkouts: Vec<ParentRetainedCheckout>,
+    pub required_merge_commits: Vec<String>,
+    pub instruction: InstructionProvenance,
+    #[serde(default)]
+    pub review_profile: String,
+    #[serde(default)]
+    pub review_provider: String,
+    #[serde(default)]
+    pub review_policy_generation: String,
+    #[serde(default)]
+    pub required_checks: bool,
+    #[serde(default)]
+    pub required_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentChildCheckoutMap {
+    pub schema_version: u32,
+    pub hierarchy_generation: u64,
+    pub repositories: BTreeMap<String, ParentIntegrationCheckout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentExecutionManifest {
+    pub schema_version: u32,
+    pub parent_issue_id: String,
+    pub parent_identifier: String,
+    pub hierarchy_generation: u64,
+    pub workspace_path: PathBuf,
+    pub child_checkout_map: PathBuf,
+    pub integration_plan: PathBuf,
+    pub evidence_directory: PathBuf,
+    pub repositories_directory: PathBuf,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRuntimeCheckout {
+    pub repository_id: String,
+    pub checkout_handle: String,
+    pub relative_path: PathBuf,
+    pub target_branch: String,
+    pub target_commit: String,
+    pub instruction_path: PathBuf,
+    pub instruction_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRuntimeEnvelope {
+    pub parent_issue_id: String,
+    pub parent_identifier: String,
+    pub run_id: String,
+    pub attempt: u32,
+    pub hierarchy_generation: u64,
+    pub workspace_path: PathBuf,
+    pub checkouts: BTreeMap<String, ParentRuntimeCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_instruction_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_instruction_hash: Option<String>,
+    pub harness: String,
+    pub model_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub requested_execution_scope: String,
+    pub effective_containment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_binding: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRuntimeDescriptor {
+    pub run_id: String,
+    pub attempt: u32,
+    pub integration_instruction: Option<(PathBuf, String)>,
+    pub harness: String,
+    pub model_profile: String,
+    pub model: Option<String>,
+    pub effective_containment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentExecutionRoot {
+    pub handle: WorkspaceHandle,
+    pub manifest: ParentExecutionManifest,
+    pub child_checkout_map: ParentChildCheckoutMap,
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,6 +643,8 @@ pub struct RunDescriptor {
     pub normal_retry_count: u32,
     pub repository_binding: Option<RepositoryBinding>,
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    pub acp_route: Option<AcpRunRoute>,
 }
 
 impl RunDescriptor {
@@ -527,6 +655,8 @@ impl RunDescriptor {
             normal_retry_count: 0,
             repository_binding: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
+            acp_route: None,
         }
     }
 
@@ -550,6 +680,33 @@ impl RunDescriptor {
         self.runtime_envelope = runtime_envelope;
         self
     }
+
+    pub fn with_parent_runtime_envelope(
+        mut self,
+        parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    ) -> Self {
+        self.parent_runtime_envelope = parent_runtime_envelope;
+        self
+    }
+
+    pub fn with_acp_route(mut self, acp_route: Option<AcpRunRoute>) -> Self {
+        self.acp_route = acp_route;
+        self
+    }
+}
+
+/// The ACP route selected for this run. Stored with the prepared run so recovery
+/// cannot take model or profile choices from a prior turn's workspace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpRunRoute {
+    pub task_type: String,
+    pub harness_kind: String,
+    pub harness_profile: Option<String>,
+    pub model: Option<String>,
+    pub model_profile: Option<String>,
+    pub reason: String,
+    pub dry_run: bool,
+    pub user_override: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,6 +836,18 @@ impl WorkspaceHandle {
         self.metadata_dir().join("checkout.json")
     }
 
+    pub fn parent_manifest_path(&self) -> PathBuf {
+        self.workspace_path.join("parent-manifest.json")
+    }
+
+    pub fn child_checkouts_path(&self) -> PathBuf {
+        self.workspace_path.join("child-checkouts.json")
+    }
+
+    pub fn parent_runtime_envelope_path(&self) -> PathBuf {
+        self.metadata_dir().join("parent-runtime.json")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.metadata_dir().join("logs")
     }
@@ -790,10 +959,83 @@ pub enum CleanupDecision {
     Remove,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupTerminalOutcome {
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupRequest {
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub remove: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupTarget {
+    pub issue_id: String,
+    pub identifier: String,
+    pub workspace: WorkspaceRecord,
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupIntent {
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub requested_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_integration_worktrees: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl CleanupIntent {
+    pub fn new(request: &CleanupRequest) -> Self {
+        Self {
+            generation: request.generation.clone(),
+            outcome: request.outcome,
+            requested_at: Utc::now(),
+            before_remove: None,
+            removed_integration_worktrees: BTreeSet::new(),
+            deletion_started_at: None,
+            retry_count: 0,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupTombstone {
+    pub schema_version: u32,
+    pub issue_id: String,
+    pub identifier: String,
+    pub sanitized_workspace_key: String,
+    pub workspace_path: PathBuf,
+    pub generation: String,
+    pub outcome: CleanupTerminalOutcome,
+    pub deletion_started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_remove: Option<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupOutcome {
     pub decision: CleanupDecision,
     pub before_remove: Option<HookExecutionRecord>,
+    pub tombstone: Option<CleanupTombstone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -902,6 +1144,10 @@ pub struct RunManifest {
     pub repository_binding: Option<RepositoryBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_route: Option<AcpRunRoute>,
     pub attempt: u32,
     #[serde(default)]
     pub normal_retry_count: u32,
@@ -918,12 +1164,22 @@ pub struct RunManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
     pub status: RunStatus,
+    /// True only when the harness adapter observed a terminal runtime state or
+    /// a reconciled interrupt acknowledgement. A failed transport alone does
+    /// not prove the remote turn stopped.
+    #[serde(default)]
+    pub harness_stopped: bool,
     pub created_at: DateTime<Utc>,
+    /// Durable boundary for fencing provider evidence after a run restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
     #[serde(default)]
     pub hooks: Vec<HookExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_intent: Option<CleanupIntent>,
 }
 
 impl RunManifest {
@@ -937,6 +1193,8 @@ impl RunManifest {
             workspace_path: workspace.workspace_path().to_path_buf(),
             repository_binding: run.repository_binding.clone(),
             runtime_envelope: run.runtime_envelope.clone(),
+            parent_runtime_envelope: run.parent_runtime_envelope.clone(),
+            acp_route: run.acp_route.clone(),
             attempt: run.attempt,
             normal_retry_count: run.normal_retry_count,
             pending_retry: false,
@@ -946,11 +1204,93 @@ impl RunManifest {
             retry_error: None,
             interrupt_reason: None,
             status: RunStatus::Preparing,
+            harness_stopped: false,
             created_at: now,
+            started_at: None,
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+            cleanup_intent: None,
         }
+    }
+}
+
+/// Host-owned ACP identity. Credential scope is an opaque grant revision, never
+/// a credential value; the profile fingerprint hashes secret-free configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionIdentity {
+    pub profile_id: String,
+    pub profile_fingerprint: String,
+    pub credential_scope: String,
+    pub workspace_path: PathBuf,
+    pub repository_binding: Option<RepositoryBinding>,
+    pub checkout_generation: Option<String>,
+    pub generation: u64,
+    pub run_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpSessionStatus {
+    Ready,
+    Submitted,
+    Finished,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpRecovery {
+    Fresh,
+    LiveAttach,
+    RestoredLoad,
+    RestoredResume,
+    TranscriptOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpProcessState {
+    LaunchPending,
+    Running {
+        pid: u32,
+    },
+    #[default]
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionState {
+    pub harness: String,
+    pub identity: AcpSessionIdentity,
+    pub session_id: Option<String>,
+    /// Negotiated initialization metadata, redacted by the protocol client.
+    pub initialization: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_operations:
+        Vec<crate::opensymphony_gateway_schema::capability::HarnessOperationCapability>,
+    /// Whether this session advertised a selectable model configuration option.
+    #[serde(default)]
+    pub model_selection: bool,
+    pub status: AcpSessionStatus,
+    pub stop_reason: Option<String>,
+    /// Independent of status, which returns to Ready when a new run claims the session.
+    /// None identifies a pre-migration manifest whose prior terminal state must be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_prompt_seeded: Option<bool>,
+    pub recovery: AcpRecovery,
+    pub owner_id: String,
+    #[serde(default)]
+    pub process: AcpProcessState,
+}
+
+impl AcpSessionState {
+    pub fn workflow_prompt_seeded(&self) -> bool {
+        self.workflow_prompt_seeded.unwrap_or(
+            self.status != AcpSessionStatus::Ready
+                && self.stop_reason.as_deref() != Some("cancelled_before_prompt"),
+        )
     }
 }
 
@@ -970,6 +1310,10 @@ pub struct ConversationManifest {
     pub runtime_contract_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpSessionState>,
 }
 
 impl ConversationManifest {
@@ -992,6 +1336,8 @@ impl ConversationManifest {
             reset_reason: None,
             runtime_contract_version: runtime_contract_version.into(),
             runtime_envelope: None,
+            parent_runtime_envelope: None,
+            acp: None,
         }
     }
 }
@@ -1241,7 +1587,35 @@ impl SessionContextArtifact {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_runtime_diagnostic;
+    use super::{ParentIntegrationCheckout, redact_runtime_diagnostic};
+
+    #[test]
+    fn schema_one_parent_checkout_without_review_fields_remains_readable() {
+        let checkout: ParentIntegrationCheckout = serde_json::from_value(serde_json::json!({
+            "checkout_handle": "checkout-a",
+            "repository_id": "github:repository:a",
+            "safe_remote_fingerprint": "github:repository:a",
+            "relative_path": "repositories/a",
+            "target_branch": "develop",
+            "target_commit": "abc123",
+            "storage_source_generation": "generation-a",
+            "retained_checkouts": [],
+            "required_merge_commits": [],
+            "instruction": {
+                "path": "AGENTS.md",
+                "content_hash": "sha256:abc",
+                "source_commit": "abc123",
+                "source": "configured"
+            }
+        }))
+        .expect("schema-one checkout remains readable");
+
+        assert!(checkout.review_profile.is_empty());
+        assert!(checkout.review_provider.is_empty());
+        assert!(!checkout.required_checks);
+        assert!(!checkout.required_review);
+        assert_eq!(checkout.merge_method, None);
+    }
 
     #[test]
     fn runtime_diagnostics_redact_common_credentials_and_url_userinfo() {

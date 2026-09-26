@@ -87,6 +87,12 @@ pub struct ControlPlaneMetricsSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlPlaneIssueSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_interactions:
+        Vec<crate::opensymphony_gateway_schema::approval::OperatorInteraction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_capability:
+        Option<crate::opensymphony_gateway_schema::capability::HarnessRunCapability>,
     pub identifier: String,
     pub title: String,
     pub tracker_state: String,
@@ -132,6 +138,10 @@ pub struct ControlPlaneIssueSnapshot {
     pub runtime_seconds: u64,
     pub blocked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_binding: Option<RepositoryBindingOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
@@ -174,6 +184,112 @@ pub struct ControlPlaneIssueSnapshot {
     pub cancel_timed_out: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
+    /// Sanitized multi-repository and lifecycle facts. Missing means the
+    /// authoritative runtime has not provided that fact; clients must not
+    /// infer completion or containment from its absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<ControlPlaneOperatorSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneOperatorSnapshot {
+    pub routing_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_project_set: Vec<String>,
+    pub linear_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_status: Option<String>,
+    pub parent: Option<ControlPlaneParentSnapshot>,
+    pub repository: Option<ControlPlaneRepositorySnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leases: Vec<ControlPlaneLeaseSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repairs: Vec<ControlPlaneRepairSnapshot>,
+    pub memory: Option<ControlPlaneMemorySnapshot>,
+    pub containment: Option<ControlPlaneContainmentSnapshot>,
+    pub provider: Option<ControlPlaneProviderSnapshot>,
+    pub verification: Option<ControlPlaneVerificationSnapshot>,
+    pub cleanup: Option<ControlPlaneCleanupSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneRepositorySnapshot {
+    pub canonical_id: String,
+    pub display_alias: String,
+    pub safe_remote_fingerprint: Option<String>,
+    pub config_generation: Option<String>,
+    pub inventory_generation: Option<String>,
+    pub checkout_generation: Option<String>,
+    pub target_branch: Option<String>,
+    pub target_commit: Option<String>,
+    pub instruction_source: Option<String>,
+    pub instruction_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneParentSnapshot {
+    pub parent_id: String,
+    pub state: Option<String>,
+    pub hierarchy_generation: Option<u64>,
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descendant_repositories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkout_handles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneLeaseSnapshot {
+    pub owner_id: String,
+    pub owner_kind: String,
+    pub repository_id: String,
+    pub checkout_generation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneRepairSnapshot {
+    pub id: String,
+    pub repository_id: Option<String>,
+    pub status: String,
+    pub pull_request_url: Option<String>,
+    pub target_commit: Option<String>,
+    pub instruction_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneMemorySnapshot {
+    pub scope: String,
+    pub source_freshness: Option<String>,
+    pub degraded: bool,
+    pub overlay_provenance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneContainmentSnapshot {
+    pub requested_scope: Option<String>,
+    pub effective_containment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneProviderSnapshot {
+    pub provider: String,
+    pub step: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneVerificationSnapshot {
+    pub attempts: u32,
+    pub status: String,
+    pub final_evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneCleanupSnapshot {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+    pub retry_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

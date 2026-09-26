@@ -1,6 +1,16 @@
 # Operations
 
+For first-time multi-repository setup, use the
+[multi-repository guide](multi-repository.md). For a local ACP agent, use the
+[ACP harness guide](acp.md). This page covers the detailed commands and
+failure handling after the route is configured.
+
 This document covers the current local operator workflow for OpenSymphony.
+
+Run detail and TUI projections expose sanitized repository, target commit,
+instruction hash, lease, repair, verification, and cleanup facts when those
+facts are authoritative. Blocked and cleaning states remain distinct from
+completed, and remote views do not expose unrestricted local paths.
 
 Packaging note: crates.io publishes one package, `opensymphony`. The internal
 `crates/opensymphony-*` directories are module trees inside that package, not
@@ -18,6 +28,29 @@ Recommended CLI commands:
 - `opensymphony tui`
 - `opensymphony doctor`
 - `opensymphony rehydrate <issue-id> --reason "..."`
+
+During restart recovery, `opensymphony run` loads the scheduler-owned
+hierarchy and lease artifact before reconciling terminal workspaces. The
+artifact is an internal durable record; operators should not edit it manually.
+Recovery rebuilds ancestor retention before cleanup, and cleanup remains
+blocked while any owner-identified lease for the checkout generation is active.
+For a captured terminal parent, recovery also resumes its durable subtree
+cleanup intent. The persisted order is parent worktree detachment, release of
+that parent's lease owners, deepest-first descendant deletion, and parent-root
+deletion. A higher-ancestor lease or an unexpired diagnostic hold keeps the
+affected generation pending. Cleanup errors remain in the controller and are
+retried on later ticks; operators should correct the reported hook, Git, or
+filesystem condition rather than delete the path manually. A surviving
+terminal descendant already named by an incomplete subtree-cleanup intent stays
+under that intent during bootstrap; recovery does not reacquire a leaf lease or
+route it through generic terminal cleanup.
+Claimed, running, and retry-queued executions fence their exact workspace
+generation. An unavailable OpenHands conversation store or a failed durable
+lease/completion receipt also leaves cleanup pending for the next tick.
+Cleanup refreshes the full tracker snapshot before retrying deletion, so a
+newly reopened descendant is fenced before its workspace generation is
+resolved. Missing generation-bound conversation evidence also blocks removal
+unless a preparation-failed run proves that no conversation binding existed.
 
 ## 2. First-run flow
 
@@ -447,9 +480,14 @@ Operational implications:
 - `opensymphony run` keeps its local worker/snapshot tick every 5s, while
   Linear reads use cheaper internal cadences: running state every 30s,
   dispatch discovery every 60s, terminal cleanup every 5 minutes, and full
-  issue details hourly after startup/dispatch
+  issue details hourly after startup/dispatch. When all required children of a
+  waiting parent have terminal orchestrator outcomes, full details refresh on
+  the 5-minute terminal cadence so parent eligibility can use a complete
+  hierarchy observation
 - if Linear returns a long rate-limit reset, the scheduler pauses all Linear
   reads behind one shared cooldown but continues processing worker updates; the
+  same cooldown also suppresses later parent-provider eligibility lookups in
+  the current dispatch pass without discarding prepared leaf launches. The
   Linear client only sleeps inline for short rate-limit retry windows up to the
   lower of `tracker.retry_policy.max_backoff` and 30 seconds
 - the checked-in helper lives at
@@ -519,6 +557,17 @@ downloaded fallback `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`
 aliases. Treat that native dependency as part of the hosted deployment threat
 model before enabling memory in a multi-tenant service.
 Memory capture does not archive Linear issues.
+When automatic capture completes a terminal parent capsule, `opensymphony run`
+persists a capture acknowledgement before allowing subtree cleanup. A failed
+capture is not acknowledged, so the parent evidence and protecting leases stay
+available for the next capture attempt. If acknowledgement-state persistence
+fails, the scheduler rolls back the in-memory cleanup intent so the next
+automatic capture retries before any evidence is removed. Cleanup also remains
+fenced while a parent repair provider intent lacks its terminal receipt.
+After acknowledged parent cleanup removes the runtime root, the completed
+cleanup intent remains the restart-safe automatic-capture marker. A malformed
+conversation manifest on any generation-bound cleanup target blocks removal
+until its archival evidence is repaired.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema
@@ -699,6 +748,100 @@ manually reset a quarantined checkout into service. The runtime envelope also
 records that current local containment is process `cwd` containment on a
 trusted host, not a sandbox boundary.
 
+Parent runs publish a separate generation-scoped root below
+`workspace.root/parents/`. Inspect `parent-manifest.json`,
+`child-checkouts.json`, and `.opensymphony/parent-runtime.json` together when a
+parent cannot launch. The workspace manager also keeps the authoritative copy
+of each generation's checkout map below
+`workspace.root/.opensymphony-parent-pins/`; a mismatch means the runtime copy
+was modified and must not be repaired in place. Preparation blocks before a repository operation when a
+required child subtree lacks an active ancestor lease, a retained generation is
+stale or dirty, merge evidence is ambiguous across repositories, a remote no
+longer matches policy, or a contained worktree fails its shared-storage and
+path checks. Parent preparation also rejects retained-checkout local/worktree
+HTTP, credential, transport, SSH-command, protocol, and URL-rewrite settings
+before an authenticated fetch; remove or reconcile those settings before
+retrying. Checkout-controlled process filters are rejected before integration
+worktree creation, while retained hooks and host-level Git configuration are
+disabled for that operation. Do not repair generated parent files or substitute
+a filesystem path for the recorded opaque handle; reconcile the hierarchy/lease
+evidence or retained checkout and rematerialize the generation. A configured
+`after_create` hook is required for parent roots too; its failure rolls back the
+incomplete root, a hook-created root-level Git repository also fails and rolls
+back, and reuse requires the hook completion receipt. Parent paths include a
+stable issue-identity digest after the sanitized identifier.
+
+For a blocked parent repair, inspect the repair attempt's provider-operation
+ledger before intervening. A pending operation is an intent whose provider
+result must be reconciled first; do not create another branch or PR manually.
+`provider_unavailable`, `failed_checks`, `review_rejected`,
+`externally_closed`, `force_pushed`, and `merge_conflict` preserve the attempt
+for retry or operator repair. Requested changes return the same attempt to its
+recorded branch and PR. A stage-specific failure is stored as a bounded,
+redacted repair diagnostic and retried without stopping the rest of the
+scheduler tick. For a Codex review profile, the PR-open scan is the
+initial request and later requested-change heads use an exact `@codex review`
+comment; only completion and findings associated with the current pushed head
+affect automated-review eligibility. Crash recovery accepts a trigger comment
+only from the identity behind the configured review credential. Review findings
+come from unresolved provider threads. Every unresolved non-Codex human thread,
+including a `COMMENTED` review or a thread retained from an earlier head, blocks
+merge until it is resolved; its bounded body and location are persisted for the
+credential-scrubbed repair continuation. Resolving a thread after accepted
+pushback removes it from the current finding set without requiring a no-op
+commit. When the central profile requires review,
+a clean Codex scan and a current human approval are both required, and a current
+human change request remains authoritative. The same child merge-evidence gate
+rejects every unresolved human review thread before parent integration. At most
+seven later triggers are posted, so the initial scan plus retriggers cannot
+exceed eight; remediation
+after that ceiling records a durable `review_budget_exhausted` operator state
+and uses the documented exact-commit local review path. Before
+posting a later trigger, the scheduler persists the highest observed provider
+comment ID so crash recovery can find the exact write despite GitHub's
+second-precision timestamps. Recovery
+keeps the cursor captured before the pending trigger instead of replacing it
+with a later reconciliation snapshot. The
+scheduler applies a fresh provider snapshot immediately before merge and returns
+to review if approval, checks, or mergeability are no longer current. A merged
+provider snapshot advances only when the pushed head and policy evidence remain
+current and the durable ledger contains the orchestrator's pending merge intent
+for that exact head. A replacement repair push supersedes older pending merge
+intents; an external merge that bypasses those facts is blocked for operator
+recovery. Repair
+provider writes remain pending whenever a fresh tracker snapshot does not list
+the parent in its active set, the controller is terminal, or the current
+hierarchy generation is fenced. A
+terminal or canceled tracker transition also persists controller cancellation
+while the repair is between harness turns in pull-request, review, merge, or
+refresh processing; no harness interrupt is emitted when no turn is running. A
+repair implementation interrupted by restart remains in `fixing` for cleanup and
+retry instead of entering the final-verification refresh path. A failed parent
+verification selects the repository but does not publish immediately: the
+scheduler creates the repair branch, resumes the same parent conversation for an
+observed implementation-and-check turn, and only then commits and pushes through
+the workspace owner. If that turn leaves no commit beyond the recorded target,
+the scheduler clears its completion marker and queues another implementation
+continuation. A repair request is accepted only when its receipt selects
+a completed command observed by the harness before the attempt deadline. Repair
+implementation retries stop at the configured scheduler limit, and provider
+rate-limit responses defer all repair lookups until their retry delay expires.
+While a parent is refreshing repositories, the scheduler requests complete
+tracker details on the terminal refresh cadence so a failed verification can
+retry without waiting for the hourly background scan.
+After a provider merge, refresh fetches the configured target, proves the
+recorded merge-result commit and every retained child merge result are
+reachable, and refreshes complete instruction provenance before final
+verification runs again. The configured repair merge
+call selects merge, squash, or rebase centrally. Historical child merge evidence
+can prove a merge commit from its multi-parent topology; GitHub does not expose
+enough evidence to distinguish squash from rebase by a single-parent commit
+alone, so an ambiguous result remains ineligible.
+Child merge evidence accepts either Linear's suggested head branch or a stable
+semantic branch beginning with the child's issue identifier, such as
+`feat/COE-666-delivery`. Linear can change its suggested branch when the issue
+title changes; an unrelated issue's branch remains ineligible.
+
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
 creating a replacement conversation. If that envelope differs from the
@@ -753,9 +896,254 @@ Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback
 record.
 
+Before enabling strict routing for any project set, follow
+`docs/multi-repository-rollout.md`. The hermetic gate must pass at the clean
+candidate commit and selected config hash. The first enabled set must be the
+script-created disposable non-production set; its process, provider, tracker,
+port, credential-copy, and workspace cleanup receipts are part of the release
+evidence. Production project sets are enabled only by a later operator decision.
+
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.
+
+## ACP client validation and limits
+
+`cargo test-system-duckdb --test acp` launches the reusable Python fake peer through
+`opensymphony_acp::run_turn`, the same executable client API intended for host
+integration. It requires Python 3, no provider credential, and creates a distinct
+issue checkout inside a temporary workspace root. These subprocess tests establish
+the client contract; real vendor qualification remains OSYM-906.
+
+The default limits are 1 MiB per frame, 128 queued incoming frames with a
+cumulative 4 MiB wire-byte budget, 128 outstanding callback responses with an
+independent 4 MiB encoded-byte budget, 256 retained source frames with a cumulative
+1 MiB serialized evidence budget, 16 KiB stderr, 30 seconds for setup, an
+300-second prompt deadline by default for direct client callers, 10 seconds
+for cancellation acknowledgement, and one 5-second
+deadline for process termination and reaping. Windows launches enter a kill-on-close Job Object before
+the child resumes, so dropping the turn future also terminates descendants. Unix
+launches retain process-group ownership for the same drop path. Callers
+may pass validated `ClientLimits`; a zero `prompt_timeout` disables only the
+client's wall-clock prompt deadline. A supplied update channel must be drained
+concurrently; saturation or receiver loss fails the run visibly. Incoming queue
+charges are released when each frame reaches SDK dispatch. Its byte budget is
+independent of frame count, ranges from 256 bytes to 64 MiB, and rejects a single
+frame that exceeds it even when the per-frame limit is larger. Callback output
+reserves count and encoded bytes (including LF) before SDK enqueue and releases
+these only after stdin writes flush. Its count ranges from 1 to 4,096 and its byte
+budget from 256 bytes to 64 MiB. Saturation fails promptly with ResourceLimit and
+reaps the child, including when the peer stops reading stdin. Session creation
+binds the new session ID in an ordered SDK response callback before subsequent
+updates or permission requests are dispatched. Evidence capture
+marks truncation when either the frame count or byte budget is exhausted. The byte
+budget includes redacted payloads and source metadata, can be configured up to
+16 MiB, and can be zero to disable retention. Frames that exceed the remaining
+budget are omitted while protocol processing continues. Capture redacts secrets
+and sensitive fields, including normalized account-identity keys; diagnostic
+string previews are limited to 512 characters. Live update content preserves
+whitespace and complete strings while removing known secrets and sensitive
+fields; it does not use diagnostic preview normalization. Stderr overflow is replaced with a
+limit marker while the pipe continues draining. SDK wire tracing is disabled for
+this connection to prevent bypassing the redacted evidence surface. Known secrets
+use one multi-pattern scan per string; matcher inputs are limited to 1,024 distinct
+values and 1 MiB combined. Generic diagnostic normalization examines at most 2,048
+characters after full known-secret redaction and emits a 512-character preview.
+Non-authentication RPC errors retain the request method, numeric code, submission
+state and bounded redacted message even when source-frame retention is disabled.
+
+Cancellation before prompt submission interrupts setup and tears down the child;
+an already-cancelled token prevents launch. The complete serialized prompt frame
+must pass its size bound before submission becomes uncertain. Authentication
+errors retain that submission state, so a mid-turn token failure cannot be
+treated as a safe pre-submission login failure. Opaque session IDs remain
+available for correlation and are omitted from diagnostic `Debug` output.
+
+Only an original prompt response with `stopReason: cancelled` acknowledges a
+requested cancellation. Sending `session/cancel`, killing a process, or receiving
+an unrelated stop reason does not establish that acknowledgement. Prompt failures
+after possible submission are uncertain and are never retried by this client.
+
+
+ACP client facilities add independent defaults of 256 KiB per text file, 64 KiB
+of retained output per terminal, 16 terminal handles/processes, 64 pending
+callbacks, and a 300-second callback deadline. Pending callbacks also share a
+`queued_bytes` byte budget independent of transport ingress. Callback response
+reservations remain charged until stdin flush. An exceeded admission budget
+fails the run visibly and tears down owned processes. Host policy disables all
+filesystem and terminal callbacks by default. Output discards oldest characters
+at UTF-8 boundaries; zero output retention is allowed. Scoped MCP headers,
+environment values and credential option arguments join the redactor before any
+wire frame is captured. Configuration RPC failures retain method, error code and
+redacted context; authentication failures retain their dedicated classification.
+
+Retained ACP ownership is available through `SessionHost`. A finished worker may
+borrow the same live process again; nonpersistent agents remain attachable while
+that process is alive. Owner loss allows only capability-gated restoration of a
+known-finished session. `uncertain` prompt outcomes and launch-checkpoint gaps
+require execution-risk reconciliation before another process can launch. Do not
+clear a manifest marker merely because a local process exited: delegated remote
+work can remain active.
+
+An opted-in control server accepts a dedicated bearer token (at least 32
+non-whitespace characters). `POST /api/v1/acp/{owner_id}` accepts generation-bound
+`inspect`, `attach`, `renew`, and `release` actions. Observation leases grant no
+prompt authority. `GET /api/v1/acp/{owner_id}/events?generation=N` returns private
+SSE state/source events and explicit history-gap events when a bounded buffer or
+subscriber loses data. Tokens belong in the Authorization header. Source frames
+preserve redacted content and unknown payloads, with connection generation,
+arrival sequence, run binding and replay origin. Recorded history is bounded by
+the client's queue count and byte budgets. IDE writer handoff is a separate
+integration slice.
+
+### Production ACP routing
+
+Configure `routing.harness: acp`, a named `routing.harness_profile`, and its
+`acp.profiles` entry, then use `opensymphony run`. The gateway publishes profile
+preflight readiness separately from negotiated run support. An unavailable
+executable or missing credential reference is reported without exposing its value.
+Retained profile identity survives a default-profile change on restart. A known
+ACP profile and model are bound to the prepared run manifest. Recovery rejects
+an older unbound prepared run when its workspace route snapshot belongs to a
+different ACP run. Claims for a new run clear the old terminal result before launch,
+so a crash at that checkpoint cannot complete the new run from the prior turn.
+A known terminal prompt is reconciled without sending it again; a possibly submitted
+prompt remains uncertain and blocks automatic retry and workspace removal.
+Recovered finished turns reconcile only the matching run ID and attempt; a
+prepared later run receives its own scoped memory environment and prompt.
+An unfamiliar but nonempty bounded ACP `stopReason` is preserved as a finished
+peer response and reported as an unsuccessful, non-retryable outcome. Known
+credential values in the reason are redacted before durable storage and worker
+status projection. The reason does not become an uncertain submission merely
+because it is new.
+The bound model includes a profile's `session.model` when no routing override is
+set. Changes to managed memory run ID, attempt or project set rotate the retained
+ACP process so child environment and memory evidence remain scoped to the run.
+For an authoritative parent continuation, that rotation archives the old owner
+but keeps the conversation manifest and session ID. The new process must
+negotiate load or resume; an unavailable restore fails before another prompt
+instead of creating a different parent session. A grant change that requires a
+fresh conversation is rejected before parent retirement.
+After a revoked memory grant requires a fresh owner, the revocation marker clears
+when that owner reports a successful launch; failed setup leaves it in place.
+ACP prompt guidance reads the managed worker overlay, not inherited shell scope.
+The ACP child and its terminal callbacks receive memory variables only from the
+run-scoped managed grant; ambient and workflow `OPENSYMPHONY_MEMORY_*` values are
+discarded. Profiles cannot remap credentials into or out of that reserved namespace.
+Repository-neutral ACP parents receive project, authorized-repository, run, and
+attempt guidance from that overlay without an execution-repository default.
+Production ACP turns have no fixed client prompt deadline. When configured,
+`agent.stall_timeout_ms` applies the scheduler's activity-based stall policy;
+the interrupt path handles an operator or scheduler stop request.
+Unknown, redacted `session/update` variants produce bounded generic scheduler
+activity. After a subscriber lag, the worker replays retained source frames when
+they cover every frame after its processed cursor; an actual gap fences the run.
+Supported filesystem callback requests and their responses produce payload-free
+scheduler activity without recording file paths or contents.
+Running terminal output polls and successful responses with a null exit status
+likewise advance the idle deadline through payload-free activity; only an
+observed exit code records command completion.
+An ACP session restored through `session/load` receives the full workflow prompt
+when its durable state has never seeded that prompt. A seeded session receives
+continuation guidance even when the new run's claim has reset its status to
+`ready`.
+An exact-run `cancelled_before_prompt` checkpoint reports a cancelled worker
+outcome on recovery.
+Cleanup after a known-finished owner loss acquires the durable owner lock and
+verifies the prior process is absent before recording its stop. Setup failures
+before submission permit scheduler retry. Cancellation is accepted after
+matching live or durable stopped-state observation. If the owner closes during
+pre-submission cancellation, the scheduler verifies matching durable identity,
+stopped process state and a `ready` or `finished` status before acknowledging.
+Scheduled ACP interrupts identify the active worker by issue ID and issue
+identifier, then verify its current owner, generation, run and conversation
+before cancellation.
+
+ACP permission and standard `elicitation/create` choice-form requests appear as
+pending interactions for the selected run. Form capability advertises only the
+form mode; URL elicitation is disabled. The supported form schema has one to
+eight required string enum or string-array enum fields, with at most 32 offered
+choices per field. Unsupported constraints, free-text fields, URL mode, and
+secret prompts are rejected without exposing them in public snapshots. Web and
+desktop Run Detail panels use offered permission option IDs and multiple-choice
+form controls. Plan approval controls are typed for a registered extension;
+The authenticated pinned Cursor `cursor/create_plan` request uses the plan
+control when the profile enables its exact version registration. FrankenTUI shows a pending
+request at the top of Issue Detail: `o` cycles requests, `,` and `.` page
+through offered options, `1`–`4` selects a visible option, `[` and `]` cycle
+questions, `s` submits complete answers, and `x` cancels. Question `n` declines.
+The gateway exposes permissions and plans at `/api/v1/runs/{run_id}/approvals`, questions at
+`/api/v1/runs/{run_id}/inputs`, and accepts bound responses through
+`/api/v1/actions/dispatch`. A response must carry the live request, run,
+issue, session, generation, and RPC binding token. The ACP responder retains the
+original peer RPC ID privately; clients echo a generated public token. Stale,
+duplicate, expired, and invalid option/answer submissions are rejected. A waiting interaction pauses
+stall detection only until its deadline. Disconnect, cancellation, completion,
+and restart clear the live responder; operators must wait for a fresh request.
+Automatic `allow_once` and `deny` permission decisions require the same active
+turn and are cancelled when a peer asks after its prompt has completed.
+Callback arrivals and closures publish updated snapshots without waiting for
+the next tracker poll. Timed-out callbacks retain their closure notification
+through bounded channel backpressure, so pending requests clear when the worker
+drains the queue.
+An un-routed form request receives an ACP `cancel` response so a direct client
+turn can continue. An operator-policy permission request without a route fails
+the turn. A worker response that misses its acknowledgement deadline is fenced
+before a failure receipt and remains pending for another answer attempt. An
+answer already claimed by the ACP callback waits until the response frame is
+flushed to the peer's input sink; a write failure returns a failed receipt.
+The scheduler actor enqueues the response and applies the resulting receipt
+when its worker-completion message arrives, so a slow peer does not hold up
+tracker ticks, other issue updates, or shutdown. The terminal client waits for
+the authoritative receipt without a total HTTP timeout; it bounds connection
+establishment separately. Web and desktop invalidate an in-flight detail refresh
+when a local operator answer is accepted, keeping answered controls removed.
+The gateway also fences its queued command when its HTTP delivery deadline
+expires or the handler closes. Once the run loop claims a command, the gateway
+waits for the scheduler result instead of returning a premature timeout.
+Only requests accepted into the scheduler's live pending set emit waiting
+activity. Web and desktop retain selected form choices across live refreshes
+while the same request remains pending.
+
+Registered ACP harness operations appear in profile and active run capabilities.
+An operator invokes `harness_operation` through the gateway with a run target
+and advertised operation ID. The payload `run_id` is the current
+`harness_capability.run_binding_id` in the run detail or snapshot. The service
+binds the current run and session and
+validates arguments before sending a structured result receipt. Permission
+failure, stale binding, absent peer capability, invalid arguments, and disabled
+registration reject the action. `fixture.echo` is read-only and available only
+to `fixture_echo@1` profiles when the peer advertises
+`opensymphony.dev/fixtureEcho: 1`; it exists for executable contract tests.
+A deadline or disconnect after dispatch reports an unknown outcome, requiring
+evidence inspection before any repeat. The event journal emits a correlated
+completion or failure for each accepted dispatch. The pinned Cursor profile
+supports observed plan approvals and ID-bearing todo requests; question, task,
+image, and no-ID notification paths remain unqualified. The captured wire
+contract and production test are in
+[acp-extension-evidence.md](acp-extension-evidence.md).
+Todo activity follows the correlated accepted callback result. Duplicate
+in-flight peer IDs across plan, todo, and standard callbacks remain ambiguous
+until all matching responses drain. More than 16 unresolved todo requests or
+128 concurrent callback IDs emits a diagnostic and fences the worker.
+The outbound operation's response can complete after the prompt finishes;
+prompt completion does not cancel its separately bounded RPC wait. A deadline
+returns outcome unknown to the caller while keeping that unresolved SDK request
+inside the eight-operation limit until its reply or connection closure. Peer
+results are redacted with the session's known secrets before entering the public
+action receipt, including strings in `value` and `_meta`.
+
+## ACP live qualification and recovery
+
+Run the ignored authenticated tests in [ACP live
+qualification](acp-live-qualification.md) after checking both pinned CLI
+versions and local login status. The report separates the local profile
+preflight result from a completed tracked issue run. Cursor and Devin both
+advertised `session/load` and restored a known-finished session; neither
+advertised `session/resume` in this qualification. An unadvertised optional
+method must not be assumed. A credential or option failure before prompt
+submission is a setup failure; a possibly submitted prompt is fenced from
+automatic resend and cleanup until reconciled.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -938,12 +1326,23 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -1102,11 +1501,22 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-549
 - COE-550
 - COE-551
+- COE-553
+- COE-554
+- COE-555
+- COE-556
 - COE-562
 - COE-563
 - COE-564
 - COE-565
 - COE-566
 - COE-567
+- COE-608
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

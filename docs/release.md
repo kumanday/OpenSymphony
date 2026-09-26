@@ -77,12 +77,23 @@ last_memory_sync: 2026-07-04T03:35:18.210566+00:00
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -130,14 +141,59 @@ last_memory_sync: 2026-07-04T03:35:18.210566+00:00
 - COE-549
 - COE-550
 - COE-551
+- COE-553
+- COE-554
+- COE-555
+- COE-556
 - COE-562
 - COE-563
 - COE-564
 - COE-565
 - COE-566
 - COE-567
+- COE-608
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## 3.0.0 multi-repository and ACP release boundary
+
+Version 3.0.0 includes explicit `project_set` routing and a production local
+ACP v1 worker route. Existing `legacy_single` routing remains available. The
+[multi-repository guide](multi-repository.md), [ACP guide](acp.md), and
+[3.0 upgrade guide](migration-3.0.0.md) explain selection and recovery for
+operators new to these paths.
+
+Before shipping the multi-repository route for a project set, run
+`scripts/hermetic_multi_repo_lifecycle.sh` against the selected config at a
+clean commit, then run the opt-in disposable live gate. Record the same commit
+and selected config SHA-256 in both artifacts, verify exact-head CI, and check
+that teardown left no disposable resources. The procedure and bounded rollout
+conditions are in [multi-repository rollout](multi-repository-rollout.md).
+
+Before claiming an ACP vendor profile is qualified, check the executable
+version and login, then run the authenticated tracked-issue and restoration
+tests in [ACP live qualification](acp-live-qualification.md). Profile preflight
+alone does not prove authentication or optional protocol support. The pinned
+Cursor and Devin runs qualified `session/load`; neither advertised
+`session/resume` in that run.
+
+Keep the root crate, desktop package, Tauri metadata, and both Cargo lockfiles
+at `3.0.0`. The root `package-lock.json` must record the desktop package at
+the same version. Run the default bundled-mode Clippy and tests, frontend
+build, and the desktop parity guard before tagging or publishing:
+
+```bash
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+The dry run checks desktop version parity without writing release assets.
+
 ## 2.11 Rust toolchain boundary
 
 OpenSymphony 2.11.0 requires Rust 1.97.1 for the root CLI and desktop crate and

@@ -118,6 +118,7 @@ Preferred crate and trait boundaries:
 - `opensymphony-linear`
 - `opensymphony-openhands`
 - `opensymphony-codex`
+- `opensymphony-acp`
 - `opensymphony-orchestrator`
 - `opensymphony-control`
 - `opensymphony-cli`
@@ -156,10 +157,18 @@ The runtime client must:
 ### Keep harness capability discovery public
 
 - Public harness metadata belongs in `opensymphony-gateway-schema::capability::HarnessCapability` and the `/api/v1/capabilities` response.
-- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, and `rust_native`; do not expose private adapter type names to clients.
+- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, `acp`, and `rust_native`; do not expose private adapter type names to clients.
 - Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, or future in-process protocol details inside their adapter modules.
 - Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
 - When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
+
+The ACP harness uses named profiles through the production `opensymphony run`
+worker backend and the retained `opensymphony_acp::SessionHost`. Keep protocol
+ownership inside that module and scheduling decisions in the orchestrator.
+Persist the selected profile and route for recovery; never replay an uncertain
+submission. ACP-only execution must not start an OpenHands server. Public ACP
+capabilities distinguish adapter support, profile preflight and negotiated run
+support; see `docs/harness-adapter-compatibility.md`.
 
 The local Codex app-server harness uses the `opensymphony_codex` internal module
 boundary and is advertised as an available local stdio capability. Keep Codex

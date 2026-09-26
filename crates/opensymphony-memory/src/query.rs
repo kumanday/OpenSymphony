@@ -422,11 +422,20 @@ pub fn docs_for_area_with_scope(
         if scoped.repo.is_none() {
             scoped.repo = selected_repository.clone();
         }
+        // A topic document is a materialized aggregate. Determine every row
+        // that contributes to this repository's copy before applying the
+        // caller's project or authorization bounds; otherwise one authorized
+        // row could be used as an existence gate for a document that also
+        // contains unauthorized rows.
+        let document_scope = MemoryScopeFilter {
+            repo: scoped.repo.clone(),
+            ..MemoryScopeFilter::default()
+        };
         let area_issues = issues
             .iter()
             .filter(|issue| {
                 issue
-                    .areas_for_scope(config, &scoped)
+                    .areas_for_scope(config, &document_scope)
                     .iter()
                     .any(|candidate| candidate == &area.slug)
             })
@@ -438,8 +447,10 @@ pub fn docs_for_area_with_scope(
                     .iter()
                     .copied()
                     .filter(|issue| {
-                        let mut repository_scope = scoped.clone();
-                        repository_scope.repo = Some(repository_id.to_string());
+                        let repository_scope = MemoryScopeFilter {
+                            repo: Some(repository_id.to_string()),
+                            ..MemoryScopeFilter::default()
+                        };
                         indexed_issue_matches_scope(config, issue, &repository_scope)
                     })
                     .collect::<Vec<_>>()
@@ -454,13 +465,16 @@ pub fn docs_for_area_with_scope(
                 area.slug
             )));
         }
-        if (scope.project.is_some() || scope.project_set.is_some())
+        if (scope.project.is_some()
+            || scope.project_set.is_some()
+            || scope.authorized_repositories.is_some()
+            || scope.authorized_work_items.is_some())
             && scoped_area_issues
                 .iter()
                 .any(|issue| !indexed_issue_matches_scope(config, issue, &scoped))
         {
             return Err(MemoryError::InvalidInput(format!(
-                "topic doc for area `{}` contains memory outside the requested project scope",
+                "topic doc for area `{}` contains memory outside the requested scope",
                 area.slug
             )));
         }
@@ -474,6 +488,8 @@ fn docs_scope_requires_index_check(scope: &MemoryScopeFilter) -> bool {
         || scope.issue.is_some()
         || scope.milestone.is_some()
         || scope.repo.is_some()
+        || scope.authorized_repositories.is_some()
+        || scope.authorized_work_items.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,6 +1027,11 @@ fn indexed_issue_matches_scope(
     {
         return false;
     }
+    if let Some(authorized_work_items) = &scope.authorized_work_items
+        && !indexed_issue_matches_authorized_work_items(issue, authorized_work_items)
+    {
+        return false;
+    }
     if let Some(issue_key) = scope.issue.as_ref().map(|issue| normalize_issue_key(issue))
         && issue.issue_key != issue_key
     {
@@ -1068,6 +1089,28 @@ fn indexed_issue_matches_scope(
     true
 }
 
+fn indexed_issue_matches_authorized_work_items(
+    issue: &IndexedIssue,
+    authorized_work_items: &BTreeSet<String>,
+) -> bool {
+    if authorized_work_items.is_empty() {
+        return false;
+    }
+    std::iter::once(issue.issue_key.as_str())
+        .chain(
+            issue
+                .scope_refs
+                .iter()
+                .filter(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
+                .map(|scope| scope.id.as_str()),
+        )
+        .all(|work_item| {
+            authorized_work_items
+                .iter()
+                .any(|authorized| authorized.eq_ignore_ascii_case(work_item))
+        })
+}
+
 fn indexed_issue_matches_authorized_repositories(
     issue: &IndexedIssue,
     authorized_repositories: &BTreeSet<String>,
@@ -1088,9 +1131,12 @@ fn indexed_issue_matches_authorized_repositories(
             .map(|scope| scope.id.as_str()),
     );
     !repositories.is_empty()
-        && repositories
-            .iter()
-            .any(|repository| authorized_repositories.contains(*repository))
+        && repositories.iter().all(|repository| {
+            authorized_repositories.contains(*repository)
+                || repository
+                    .rsplit_once('@')
+                    .is_some_and(|(base, _)| authorized_repositories.contains(base))
+        })
 }
 
 fn indexed_issue_matches_project(

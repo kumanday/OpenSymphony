@@ -57,6 +57,8 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                 .iter()
                 .enumerate()
                 .map(|(index, identifier)| IssueSnapshot {
+                    operator_interactions: Vec::new(),
+                    harness_capability: None,
                     identifier: identifier.clone(),
                     title: format!("Issue {identifier}"),
                     tracker_state: "In Progress".to_owned(),
@@ -81,6 +83,8 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     max_turns: 0,
                     runtime_seconds: 0,
                     blocked: false,
+                    hierarchy_generation: None,
+                    hierarchy_blocked_reason: None,
                     repository_binding: None,
                     blocked_by: Vec::new(),
                     server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -99,6 +103,7 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     cancel_failed: false,
                     cancel_timed_out: false,
                     cancel_reason: None,
+                    operator: None,
                     detached: false,
                 })
                 .collect(),
@@ -118,6 +123,8 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
         .iter()
         .enumerate()
         .map(|(index, identifier)| IssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: (*identifier).to_owned(),
             title: format!("Issue {index}"),
             tracker_state: "In Progress".to_owned(),
@@ -142,6 +149,8 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -160,6 +169,7 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
             detached: false,
         })
         .collect();

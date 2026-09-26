@@ -246,6 +246,10 @@ of dead bridge code.
 - COE-506: Invert CodeIntelIndex trait ownership after AST memory integration
 - COE-507: Deduplicate query-pack assets for grammar variants
 - COE-508: Cache code-intel parsers and compiled query packs
+- COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 
 ## Source refs
 
@@ -307,5 +311,9 @@ of dead bridge code.
 - COE-506
 - COE-507
 - COE-508
+- COE-553
+- COE-554
+- COE-555
+- COE-556
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -859,6 +859,12 @@ pub struct IssueEvidence {
     /// envelope. Project association is only a fallback for legacy captures.
     #[serde(default)]
     pub repository_id: Option<String>,
+    /// Internal marker that prevents a repository-neutral parent capture from
+    /// inheriting leaf ownership through project or default-repository hints.
+    #[serde(skip)]
+    pub parent_integration: bool,
+    #[serde(default)]
+    pub verified_repository_commits: BTreeMap<String, String>,
     #[serde(default)]
     pub execution_run_id: Option<String>,
     #[serde(default)]
@@ -1062,6 +1068,11 @@ pub struct MemoryScopeFilter {
     /// manufacture or widen its repository set through query arguments.
     #[serde(skip)]
     pub authorized_repositories: Option<BTreeSet<String>>,
+    /// Work-item authorization supplied by a worker grant. Like repository
+    /// authorization, this is an internal upper bound rather than a caller
+    /// controlled query field.
+    #[serde(skip)]
+    pub authorized_work_items: Option<BTreeSet<String>>,
     /// `public` narrows a worker read to public records. A private grant is
     /// allowed to read both private and public records.
     #[serde(skip)]
@@ -3379,6 +3390,11 @@ Reviews are triggered when you open a pull request for review.
                     id: "repository-1".to_string(),
                     label: Some("Repo One".to_string()),
                 },
+                KnowledgeScope {
+                    kind: KnowledgeScopeKind::WorkItem,
+                    id: "COE-CHILD".to_string(),
+                    label: Some("Child work item".to_string()),
+                },
             ],
             source_scope_refs: BTreeMap::new(),
             source_refs: Vec::new(),
@@ -3408,6 +3424,66 @@ Reviews are triggered when you open a pull request for review.
             &issue,
             &MemoryScopeFilter {
                 authorized_repositories: Some(BTreeSet::from(["repository-2".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        let mut multi_repository_issue = issue.clone();
+        multi_repository_issue.scope_refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::Repository,
+            id: "repository-2@run-17".to_string(),
+            label: Some("Repo Two exact run".to_string()),
+        });
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &multi_repository_issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from(["repository-1".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &multi_repository_issue,
+            &MemoryScopeFilter {
+                authorized_repositories: Some(BTreeSet::from([
+                    "repository-1".to_string(),
+                    "repository-2".to_string(),
+                ])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["coe-123".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["coe-child".to_string()])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from([
+                    "coe-123".to_string(),
+                    "coe-child".to_string(),
+                ])),
+                ..MemoryScopeFilter::default()
+            }
+        ));
+        assert!(!indexed_issue_matches_scope(
+            &config,
+            &issue,
+            &MemoryScopeFilter {
+                authorized_work_items: Some(BTreeSet::from(["COE-OUTSIDER".to_string()])),
                 ..MemoryScopeFilter::default()
             }
         ));
@@ -3660,6 +3736,49 @@ Reviews are triggered when you open a pull request for review.
                 .issue_count,
             1
         );
+        let authorized_work_item = MemoryScopeFilter {
+            authorized_work_items: Some(BTreeSet::from(["COE-123".to_string()])),
+            ..scoped.clone()
+        };
+        let unrelated_work_item = MemoryScopeFilter {
+            authorized_work_items: Some(BTreeSet::from(["COE-999".to_string()])),
+            ..scoped.clone()
+        };
+        assert_eq!(
+            search_with_scope(&config, "websocket", 10, &authorized_work_item)
+                .expect("authorized work-item search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            search_with_scope(&config, "websocket", 10, &unrelated_work_item)
+                .expect("unrelated work-item search")
+                .len(),
+            0
+        );
+        assert_eq!(
+            related_by_area_with_scope(&config, "openhands-runtime", 10, &unrelated_work_item,)
+                .expect("unrelated work-item area lookup")
+                .len(),
+            0
+        );
+        assert_eq!(
+            related_by_paths_with_scope(
+                &config,
+                &[PathBuf::from("crates/opensymphony-openhands/src/client.rs")],
+                10,
+                &unrelated_work_item,
+            )
+            .expect("unrelated work-item path lookup")
+            .len(),
+            0
+        );
+        assert_eq!(
+            status_with_scope(&config, &IssueSelection::default(), &unrelated_work_item,)
+                .expect("unrelated work-item status")
+                .issue_count,
+            0
+        );
         assert_eq!(
             search_with_scope(
                 &config,
@@ -3747,11 +3866,21 @@ Reviews are triggered when you open a pull request for review.
             labels: vec!["runtime".to_string()],
             ..IssueEvidence::default()
         });
+        source.issues.push(IssueEvidence {
+            identifier: "COE-125".to_string(),
+            title: "Same repository runtime record".to_string(),
+            labels: vec!["runtime".to_string()],
+            ..IssueEvidence::default()
+        });
         let plan = plan_capture(
             &config,
             &source,
             &IssueSelection {
-                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                identifiers: vec![
+                    "COE-123".to_string(),
+                    "COE-124".to_string(),
+                    "COE-125".to_string(),
+                ],
                 ..IssueSelection::default()
             },
             true,
@@ -3801,6 +3930,12 @@ Reviews are triggered when you open a pull request for review.
             .expect("repo-b scope refs");
         connection
             .execute(
+                "UPDATE issues SET scope_refs_json = ? WHERE issue_key = ?",
+                duckdb::params![repo_a_scopes, "COE-125"],
+            )
+            .expect("same-doc repo-a scope refs");
+        connection
+            .execute(
                 "INSERT INTO issue_areas (issue_key, area, source_id) VALUES (?, ?, ?)",
                 duckdb::params!["COE-123", "area-b-only", "repo-b:public_docs"],
             )
@@ -3827,6 +3962,21 @@ Reviews are triggered when you open a pull request for review.
         .expect("repository-local docs should ignore other repository records");
 
         assert!(docs.contains("# OpenHands Runtime"));
+        let docs_error = docs_for_area_with_scope(
+            &selected_config,
+            "openhands-runtime",
+            &MemoryScopeFilter {
+                repo: Some("repo-a".to_string()),
+                authorized_work_items: Some(BTreeSet::from(["COE-123".to_string()])),
+                ..MemoryScopeFilter::default()
+            },
+        )
+        .expect_err("aggregate docs must reject unauthorized same-document contributors");
+        assert!(
+            docs_error
+                .to_string()
+                .contains("outside the requested scope")
+        );
         let search = search_with_scope(
             &selected_config,
             "WebSocket",

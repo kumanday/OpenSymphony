@@ -26,7 +26,14 @@ pub struct ValidatedAction {
 pub struct ActionHandler {
     journal: InMemoryEventJournal,
     permission_checker: Option<Arc<dyn PermissionChecker>>,
-    idempotency_guard: Arc<RwLock<LruCache<String, ()>>>,
+    idempotency_guard: Arc<RwLock<LruCache<String, IdempotencyRecord>>>,
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyRecord {
+    fingerprint: String,
+    permission: PermissionResult,
+    receipt: ActionReceipt,
 }
 
 impl Clone for ActionHandler {
@@ -95,22 +102,51 @@ impl ActionHandler {
         // lock to prevent TOCTOU races under concurrent load.
         if let Some(key) = action.idempotency_key.clone() {
             let mut guard = self.idempotency_guard.write().await;
-            if guard.get(&key).is_some() {
+            let permission = self.permission_for(&action);
+            if !permission.allowed {
+                return permission_denied_receipt(&action, permission);
+            }
+            let fingerprint = action_fingerprint(&action);
+            if let Some(record) = guard.get(&key) {
+                if record.fingerprint == fingerprint && record.permission == permission {
+                    return record.receipt.clone();
+                }
                 return ActionReceipt::rejected(
                     Uuid::new_v4().to_string(),
-                    action.correlation_id,
+                    action.correlation_id.clone(),
                     action.action_kind,
-                    "duplicate idempotency key",
-                );
+                    "duplicate idempotency key: different action or authorization context",
+                )
+                .with_permission(permission);
             }
-            let receipt = self.dispatch_unlocked(action, snapshot).await;
+            let receipt = self
+                .dispatch_unlocked(action, snapshot, permission.clone())
+                .await;
             if receipt.status == ActionStatus::Accepted {
-                guard.put(key, ());
+                guard.put(
+                    key,
+                    IdempotencyRecord {
+                        fingerprint,
+                        permission,
+                        receipt: receipt.clone(),
+                    },
+                );
             }
             return receipt;
         }
 
-        self.dispatch_unlocked(action, snapshot).await
+        let permission = self.permission_for(&action);
+        self.dispatch_unlocked(action, snapshot, permission).await
+    }
+
+    fn permission_for(&self, action: &ActionDispatch) -> PermissionResult {
+        self.permission_checker
+            .as_ref()
+            .map_or_else(PermissionResult::local, |checker| checker.check(action))
+    }
+
+    pub fn permission_for_action(&self, action: &ActionDispatch) -> PermissionResult {
+        self.permission_for(action)
     }
 
     /// Core dispatch logic without idempotency locking.
@@ -118,24 +154,10 @@ impl ActionHandler {
         &self,
         action: ActionDispatch,
         snapshot: &SnapshotEnvelope,
+        permission: PermissionResult,
     ) -> ActionReceipt {
-        let permission = self
-            .permission_checker
-            .as_ref()
-            .map_or_else(PermissionResult::local, |checker| checker.check(&action));
-
         if !permission.allowed {
-            let mut receipt = ActionReceipt::rejected(
-                Uuid::new_v4().to_string(),
-                action.correlation_id.clone(),
-                action.action_kind,
-                format!(
-                    "permission denied: required role {}",
-                    permission.required_role
-                ),
-            );
-            receipt = receipt.with_permission(permission);
-            return receipt;
+            return permission_denied_receipt(&action, permission);
         }
 
         let issue = match action.target_entity.entity_kind {
@@ -150,6 +172,7 @@ impl ActionHandler {
         let validated = match action.action_kind {
             ActionKind::Retry => validate_retry(&action, issue.as_ref(), &action_id),
             ActionKind::Cancel => validate_cancel(&action, issue.as_ref(), &action_id),
+            ActionKind::Replan => validate_replan(&action, issue.as_ref(), &action_id),
             ActionKind::Rehydrate => validate_rehydrate(&action, issue.as_ref(), &action_id),
             ActionKind::Comment => validate_comment(&action, issue.as_ref(), &action_id),
             ActionKind::Pause => validate_pause(&action, issue.as_ref(), &action_id),
@@ -159,6 +182,10 @@ impl ActionHandler {
             ActionKind::TransitionIssue => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::CreateFollowup => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::ApprovalDecision => validate_generic(&action, issue.as_ref(), &action_id),
+            ActionKind::InputResponse | ActionKind::PlanDecision => {
+                validate_generic(&action, issue.as_ref(), &action_id)
+            }
+            ActionKind::HarnessOperation => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::PublishPlan => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::TaskGraphMilestone => validate_task_graph(&action, &action_id),
             ActionKind::TaskGraphIssue => validate_task_graph(&action, &action_id),
@@ -187,6 +214,29 @@ impl ActionHandler {
     }
 }
 
+fn permission_denied_receipt(
+    action: &ActionDispatch,
+    permission: PermissionResult,
+) -> ActionReceipt {
+    ActionReceipt::rejected(
+        Uuid::new_v4().to_string(),
+        action.correlation_id.clone(),
+        action.action_kind,
+        format!(
+            "permission denied: required role {}",
+            permission.required_role
+        ),
+    )
+    .with_permission(permission)
+}
+
+fn action_fingerprint(action: &ActionDispatch) -> String {
+    let mut action = action.clone();
+    action.idempotency_key = None;
+    action.correlation_id.clear();
+    serde_json::to_string(&action).expect("action dispatch should be serializable")
+}
+
 fn find_issue_by_id(
     snapshot: &ControlPlaneDaemonSnapshot,
     entity_id: &str,
@@ -208,6 +258,7 @@ fn is_run_action_safe(issue: &ControlPlaneIssueSnapshot, action: RunAction) -> b
         RunAction::Cancel => safe.cancel,
         RunAction::Rehydrate => safe.rehydrate,
         RunAction::Detach => safe.detach,
+        RunAction::Replan => safe.replan,
         // Pause and Resume are validated by their own dedicated validators
         // (validate_pause and validate_resume) and are never routed here.
         // Comment, follow-up, workspace, and debug are not gated by SafeActions;
@@ -288,6 +339,59 @@ fn validate_cancel(
         issue,
         EventKind::GatewayActionDispatched {
             action: "cancel".into(),
+        },
+    )
+}
+
+fn validate_replan(
+    action: &ActionDispatch,
+    issue: Option<&ControlPlaneIssueSnapshot>,
+    action_id: &str,
+) -> ValidatedAction {
+    let Some(issue) = issue else {
+        return reject(action, action_id, "target issue not found in snapshot");
+    };
+    let has_hierarchy_generation = action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("hierarchy_generation"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some();
+    if !has_hierarchy_generation {
+        return reject(
+            action,
+            action_id,
+            "replan requires a numeric hierarchy_generation payload",
+        );
+    }
+    if !is_run_action_safe(issue, RunAction::Replan) {
+        return reject(
+            action,
+            action_id,
+            format!(
+                "replan unsafe for issue {}; only a HierarchyChanged parent may be replanned",
+                issue.identifier
+            ),
+        );
+    }
+    let accepted_generation = action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("hierarchy_generation"))
+        .and_then(serde_json::Value::as_u64);
+    if accepted_generation != issue.hierarchy_generation {
+        return reject(
+            action,
+            action_id,
+            "replan hierarchy_generation does not match the current run contract",
+        );
+    }
+    accepted(
+        action,
+        action_id,
+        issue,
+        EventKind::GatewayActionDispatched {
+            action: "replan".into(),
         },
     )
 }
@@ -390,11 +494,9 @@ fn validate_resume(
 /// Generic action validation for actions that do not require runtime state gating.
 ///
 /// Actions validated here (`OpenWorkspace`, `Debug`, `TransitionIssue`, `CreateFollowup`,
-/// `ApprovalDecision`, `PublishPlan`) are inherently safe because they operate on the
-/// issue tracker, planning layer, or local UI rather than the active harness runtime.
-/// They do not mutate scheduler state and are therefore accepted for any valid issue
-/// snapshot. If a future action needs runtime state gating, it should be promoted from
-/// `validate_generic` to a dedicated validator (e.g., `validate_pause`, `validate_resume`).
+/// `ApprovalDecision`, `InputResponse`, `PlanDecision`, `PublishPlan`) have no
+/// intrinsic runtime-state requirement here. The ACP operator path performs its
+/// live request/answer validation and worker delivery before this audit receipt.
 fn validate_generic(
     action: &ActionDispatch,
     issue: Option<&ControlPlaneIssueSnapshot>,
@@ -601,6 +703,7 @@ fn build_audit_event(
                 "kind": format!("{:?}", action.target_entity.entity_kind).to_lowercase(),
                 "id": action.target_entity.entity_id,
             },
+            "payload": action.payload,
         }))
         .build()
 }

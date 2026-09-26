@@ -825,7 +825,7 @@ async fn update_gateway_connection(
 }
 
 async fn set_gateway_connected_for_url(
-    state: &tauri::State<'_, RwLock<GatewayConnection>>,
+    state: &RwLock<GatewayConnection>,
     base_url: &str,
     connected: bool,
 ) {
@@ -882,6 +882,14 @@ async fn gateway_post_json(
 
 async fn gateway_request_json(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
+    method: reqwest::Method,
+    path: &str,
+) -> CommandResult<serde_json::Value> {
+    gateway_request_json_from_connection(&state, method, path).await
+}
+
+async fn gateway_request_json_from_connection(
+    state: &RwLock<GatewayConnection>,
     method: reqwest::Method,
     path: &str,
 ) -> CommandResult<serde_json::Value> {
@@ -1379,6 +1387,19 @@ pub async fn run_approvals(
     .await
 }
 
+/// Get structured operator input requests.
+#[command]
+pub async fn run_inputs(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}/inputs", urlencoding::encode(&run_id)),
+    )
+    .await
+}
+
 /// Get run events with cursor support.
 #[command]
 pub async fn run_events(
@@ -1477,12 +1498,7 @@ fn profile_is_current_gateway_available(
 // ─── Gateway Local Stream Transport (COE-410) ──────────────────────────────
 
 use crate::opensymphony_gateway_schema::{
-    capability::{
-        AuthMode, FeatureCapability as GatewayFeatureCapability, GatewayCapabilities,
-        HarnessCapability, TransportCapability as GatewayTransportCapability,
-    },
-    envelope::GatewayEnvelope,
-    version::SchemaVersion,
+    capability::GatewayCapabilities, envelope::GatewayEnvelope,
 };
 
 /// Request to subscribe to the gateway event stream via Tauri channel.
@@ -1525,48 +1541,20 @@ pub struct GatewayConnectionInfo {
 /// Query gateway capabilities.
 /// Used by the frontend transport factory to select the optimal profile.
 #[command]
-pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
-    // Desktop exposes the same loopback gateway capability truth consumed by
-    // the frontend. Harness execution still routes through the gateway/runtime,
-    // not a separate desktop-side Codex launcher.
-    Ok(GatewayCapabilities {
-        schema_version: SchemaVersion::v1(),
-        gateway_version: env!("CARGO_PKG_VERSION").to_string(),
-        supported_api_versions: vec!["1.0.0".to_string()],
-        transports: vec![GatewayTransportCapability {
-            transport: "loopback_http".to_string(),
-            modes: vec!["json".to_string()],
-            supported_encodings: vec!["utf-8".to_string()],
-            bidirectional: false,
-        }],
-        harnesses: vec![
-            HarnessCapability::openhands_agent_server(),
-            HarnessCapability::codex_app_server_local(),
-            HarnessCapability::rust_native_future(),
-        ],
-        features: vec![
-            GatewayFeatureCapability {
-                feature: "task_graph".to_string(),
-                available: true,
-                requires_auth: false,
-                requires_plan: None,
-            },
-            GatewayFeatureCapability {
-                feature: "terminal_stream".to_string(),
-                available: false,
-                requires_auth: false,
-                requires_plan: None,
-            },
-            GatewayFeatureCapability {
-                feature: "tauri_channel".to_string(),
-                available: false,
-                requires_auth: false,
-                requires_plan: None,
-            },
-        ],
-        auth_modes: vec![AuthMode::None, AuthMode::ApiKey],
-        max_event_page_size: 1000,
-        max_terminal_frame_batch: 500,
+pub async fn gateway_capabilities(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+) -> CommandResult<GatewayCapabilities> {
+    gateway_capabilities_from_connection(&state).await
+}
+
+async fn gateway_capabilities_from_connection(
+    state: &RwLock<GatewayConnection>,
+) -> CommandResult<GatewayCapabilities> {
+    let value =
+        gateway_request_json_from_connection(state, reqwest::Method::GET, "/api/v1/capabilities")
+            .await?;
+    serde_json::from_value(value).map_err(|error| DesktopError::Gateway {
+        message: format!("Invalid gateway capabilities: {error}"),
     })
 }
 
@@ -1767,30 +1755,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_capabilities_advertises_http_only_native_transport() {
-        let capabilities = gateway_capabilities().await.unwrap();
-        let transports: Vec<&str> = capabilities
-            .transports
-            .iter()
-            .map(|transport| transport.transport.as_str())
-            .collect();
+    async fn gateway_capabilities_reflects_attached_gateway_acp_profile() {
+        use crate::opensymphony_gateway_schema::{
+            capability::{
+                AuthMode, HarnessCapability, HarnessProfileCapability, TransportCapability,
+            },
+            version::SchemaVersion,
+        };
+        use std::io::{BufRead, BufReader, Write};
 
-        assert_eq!(transports, vec!["loopback_http"]);
-
-        let harnesses: Vec<(&str, bool)> = capabilities
-            .harnesses
-            .iter()
-            .map(|harness| (harness.kind.as_str(), harness.available))
-            .collect();
-
-        assert_eq!(
-            harnesses,
-            vec![
-                ("openhands_agent_server", true),
-                ("codex_app_server", true),
-                ("rust_native", false),
-            ]
-        );
+        let advertised = GatewayCapabilities {
+            schema_version: SchemaVersion::v1(),
+            gateway_version: "configured-gateway".into(),
+            supported_api_versions: vec!["1.0.0".into()],
+            transports: vec![TransportCapability {
+                transport: "loopback_http".into(),
+                modes: vec!["json".into()],
+                supported_encodings: vec!["utf-8".into()],
+                bidirectional: false,
+            }],
+            harnesses: vec![HarnessCapability::acp()],
+            harness_profiles: vec![HarnessProfileCapability {
+                harness: "acp".into(),
+                profile_id: "local-acp".into(),
+                preflight_ready: true,
+                unavailable_reason: None,
+            }],
+            features: Vec::new(),
+            auth_modes: vec![AuthMode::None],
+            max_event_page_size: 1000,
+            max_terminal_frame_batch: 500,
+        };
+        let body = serde_json::to_string(&advertised).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(!line.is_empty(), "gateway request closed before headers");
+                if line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            assert!(request.starts_with("GET /api/v1/capabilities "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token"));
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let state = RwLock::new(GatewayConnection {
+            base_url,
+            auth_token: Some("test-token".into()),
+            ..GatewayConnection::default()
+        });
+        let actual = gateway_capabilities_from_connection(&state).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(actual, advertised);
+        assert!(state.read().await.connected);
     }
 
     #[test]

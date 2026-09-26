@@ -114,6 +114,7 @@ mod tests {
             title: None,
             url: None,
             state: state.to_string(),
+            state_kind: TrackerIssueStateKind::from_tracker_name(state),
         }
     }
 
@@ -135,6 +136,7 @@ mod tests {
             state_kind: TrackerIssueStateKind::Started,
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             labels: Vec::new(),
             project_id: None,
             project_slug: None,

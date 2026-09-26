@@ -38,7 +38,11 @@ state:
   that advance the frontier (`last + 1`). Events at or below the frontier are
   suppressed as duplicates.
 - **Idempotency keys.** Mutations carry an idempotency key so retries after a
-  disconnect do not double-apply. Action dispatches include `correlation_id`.
+  disconnect do not double-apply. Run lifecycle helpers (`retryRun`, `cancelRun`,
+  `resumeRun`, and `rehydrateRun`) generate a fresh operation ID per invocation.
+  Pass the same optional `operationId` when retrying one request after a lost
+  response; use a new ID for a later lifecycle attempt. Action dispatches include
+  `correlation_id`.
 - **Action receipts.** Every action returns an `ActionReceipt` with
   `correlation_id` and `expected_followup`. `StreamCorrelator` links streamed
   follow-up events back to their originating receipt by `correlation_id`.

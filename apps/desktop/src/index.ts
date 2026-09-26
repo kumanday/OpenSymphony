@@ -310,6 +310,12 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     ).then((response) => response.approvals ?? []);
   }
 
+  runInputs(runId: string): ReturnType<GatewayTransport["runInputs"]> {
+    return this.invokeOrHttp<{ inputs?: Awaited<ReturnType<GatewayTransport["runInputs"]>> }>(
+      "run_inputs", { runId }, async () => ({ inputs: await this.inner.runInputs(runId) }),
+    ).then((response) => response.inputs ?? []);
+  }
+
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
     return this.invokeOrHttp("run_validation", { runId }, () => this.inner.runValidation(runId));
   }
@@ -334,20 +340,28 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.actionInner.dispatchAction(action);
   }
 
-  cancelRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.cancelRun(runId);
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.cancelRun(runId, operationId);
   }
 
-  retryRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.retryRun(runId);
+  replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId?: string,
+  ): Promise<ActionReceipt> {
+    return this.actionInner.replanParent(parentId, hierarchyGeneration, operationId);
   }
 
-  resumeRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.resumeRun(runId);
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.retryRun(runId, operationId);
   }
 
-  rehydrateRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.rehydrateRun(runId);
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.resumeRun(runId, operationId);
+  }
+
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.actionInner.rehydrateRun(runId, operationId);
   }
 
   commentRun(runId: string, text: string): Promise<ActionReceipt> {
@@ -362,8 +376,10 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: import("@opensymphony/gateway-schema").OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
-    return this.actionInner.approvalDecision(approvalId, decision, explanation);
+    return this.actionInner.approvalDecision(approvalId, decision, explanation, interaction, optionId);
   }
 
   openWorkspace(runId: string): Promise<ActionReceipt> {

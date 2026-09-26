@@ -23,6 +23,7 @@ use crate::opensymphony_workflow::{
 };
 use crate::opensymphony_workspace::{
     CheckoutRepository, SSH_AUTH_SOCK_ENV, environment_variable_names_equal,
+    normalize_secret_field_name, runtime_field_is_sensitive,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,8 @@ struct RunConfigFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentralConfigFile {
+    #[serde(default)]
+    acp: crate::opensymphony_workflow::AcpConfig,
     #[serde(default)]
     schema_version: u32,
     instance: CentralInstanceFile,
@@ -101,6 +104,8 @@ struct CentralInstanceFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentralRoutingFile {
+    #[serde(default)]
+    harness_profile: Option<String>,
     mode: String,
     #[serde(default)]
     active_project_set: Option<String>,
@@ -392,6 +397,11 @@ pub enum CentralConfigError {
     EmptyField { field: &'static str },
     #[error("central config reference `{field}` does not resolve")]
     InvalidReference { field: String },
+    #[error("invalid central ACP configuration: {source}")]
+    InvalidAcp {
+        #[source]
+        source: crate::opensymphony_workflow::WorkflowConfigError,
+    },
     #[error("central config aliases must be unique: `{alias}`")]
     DuplicateAlias { alias: String },
     #[error(
@@ -483,6 +493,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) memory_catalog_root: Option<PathBuf>,
     pub(super) memory_sources: BTreeMap<String, ResolvedMemorySource>,
     pub(super) project_set_id: Option<String>,
+    pub(super) integration_instructions: Option<ResolvedIntegrationInstructions>,
     pub(super) retain_failed: bool,
     pub(super) preserve_terminal_workspaces: bool,
     pub(super) memory: RunMemoryConfig,
@@ -503,6 +514,7 @@ pub(super) async fn resolve_runtime_config(
         central_memory_catalog_root,
         central_memory_sources,
         central_project_set_id,
+        central_integration_instructions,
         central_repository_instruction_path,
         central_workflow_front_matter,
         retry_max_attempts,
@@ -519,11 +531,7 @@ pub(super) async fn resolve_runtime_config(
                     })?;
             if looks_like_central_config(&raw) {
                 let central = resolve_central_config(path, &raw)?;
-                let repository_checkouts = matches!(
-                    central.repository_routing.mode,
-                    RepositoryRoutingMode::ProjectSet
-                )
-                .then_some(central.repository_checkouts);
+                let repository_checkouts = Some(central.repository_checkouts);
                 (
                     central.runtime,
                     central.generation,
@@ -534,6 +542,7 @@ pub(super) async fn resolve_runtime_config(
                     central.memory_catalog_root,
                     central.memory_sources,
                     central.project_set_id,
+                    central.integration_instructions,
                     central.repository_instruction_path,
                     Some(central.workflow_front_matter),
                     central.retry_max_attempts,
@@ -556,6 +565,7 @@ pub(super) async fn resolve_runtime_config(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
         }
@@ -568,6 +578,7 @@ pub(super) async fn resolve_runtime_config(
             None,
             None,
             BTreeMap::new(),
+            None,
             None,
             None,
             None,
@@ -715,6 +726,7 @@ pub(super) async fn resolve_runtime_config(
         memory_catalog_root: central_memory_catalog_root,
         memory_sources: central_memory_sources,
         project_set_id: central_project_set_id,
+        integration_instructions: central_integration_instructions,
         retain_failed: central_retain_failed.unwrap_or(true),
         preserve_terminal_workspaces: central_preserve_terminal_workspaces.unwrap_or(true),
         memory,
@@ -738,6 +750,7 @@ pub(crate) fn select_config_path(cwd: &Path, explicit: Option<&Path>) -> Option<
 }
 
 const CENTRAL_CONFIG_KEYS: &[&str] = &[
+    "acp",
     "instance",
     "routing",
     "tracker_profiles",
@@ -1092,7 +1105,16 @@ fn resolve_central_config(
             });
         }
         if let Some(merge_method) = profile.merge_method.as_deref() {
-            required_literal(merge_method, "review_profiles.merge_method")?;
+            let merge_method = required_literal(merge_method, "review_profiles.merge_method")?;
+            let known_method = matches!(
+                merge_method.to_ascii_lowercase().as_str(),
+                "merge" | "squash" | "rebase"
+            );
+            if !known_method {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{profile_id}.merge_method"),
+                });
+            }
         }
         let _ = (profile.required_checks, profile.required_review);
     }
@@ -1334,6 +1356,50 @@ fn resolve_central_config(
         }
     }
     validate_active_repository_aliases(&config, &active_repositories)?;
+    for repository_id in &active_repositories {
+        let repository = config.repositories.get(repository_id).ok_or_else(|| {
+            CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}"),
+            }
+        })?;
+        let review_profile = config
+            .review_profiles
+            .get(&repository.review_profile)
+            .ok_or_else(|| CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.review_profile"),
+            })?;
+        let github_merge_evidence_required = mode == CentralRoutingMode::ProjectSet
+            || repository.remote.provider.eq_ignore_ascii_case("github")
+            || review_profile.required_checks
+            || review_profile.required_review;
+        let github_backed_review = matches!(
+            review_profile.provider.to_ascii_lowercase().as_str(),
+            "github" | "codex"
+        );
+        if github_backed_review && !repository.remote.provider.eq_ignore_ascii_case("github") {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("repositories.{repository_id}.remote.provider"),
+            });
+        }
+        if github_merge_evidence_required && !github_backed_review {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("review_profiles.{}.provider", repository.review_profile),
+            });
+        }
+        if repository.remote.provider.eq_ignore_ascii_case("github") || github_backed_review {
+            let credential = config
+                .credentials
+                .get(&review_profile.credential)
+                .ok_or_else(|| CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}.credential", repository.review_profile),
+                })?;
+            if credential.kind != "environment" || credential.variable.is_none() {
+                return Err(CentralConfigError::InvalidReference {
+                    field: format!("review_profiles.{}.credential", repository.review_profile),
+                });
+            }
+        }
+    }
 
     let legacy_repository_instruction_path = if mode == CentralRoutingMode::LegacySingle {
         let repository = config
@@ -1373,6 +1439,12 @@ fn resolve_central_config(
     )?;
     let repository_checkouts = build_repository_checkouts(&config)?;
     let memory_sources = resolve_memory_sources(&config, config_root, &repository_routing)?;
+    // Selection depends on harness/model environment overrides. The workflow
+    // resolver validates it after those values resolve; central load checks shape.
+    config
+        .acp
+        .validate_profiles()
+        .map_err(|source| CentralConfigError::InvalidAcp { source })?;
     let workflow_front_matter = central_workflow_front_matter(&config, Some(&workspace_root))?;
     let repository_instruction_path = legacy_repository_instruction_path;
     Ok(ResolvedCentralConfig {
@@ -1402,12 +1474,21 @@ fn reject_checkout_credential_env_reuse(
     let mut checkout_variables = config
         .repositories
         .values()
-        .filter_map(|repository| {
-            config
-                .credentials
-                .get(&repository.credential)
-                .and_then(|credential| credential.variable.as_deref())
-                .map(str::to_owned)
+        .flat_map(|repository| {
+            [
+                config
+                    .credentials
+                    .get(&repository.credential)
+                    .and_then(|credential| credential.variable.as_deref()),
+                config
+                    .review_profiles
+                    .get(&repository.review_profile)
+                    .and_then(|profile| config.credentials.get(&profile.credential))
+                    .and_then(|credential| credential.variable.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
         })
         .collect::<BTreeSet<_>>();
     if config.repositories.values().any(|repository| {
@@ -1437,6 +1518,18 @@ fn reject_checkout_credential_env_reuse(
         }
     }
 
+    for (profile_id, profile) in &config.acp.profiles {
+        if profile.env_refs.iter().any(|(target, source)| {
+            checkout_variables.iter().any(|checkout| {
+                environment_variable_names_equal(checkout, target)
+                    || environment_variable_names_equal(checkout, source)
+            })
+        }) {
+            return Err(CentralConfigError::InvalidReference {
+                field: format!("acp.profiles.{profile_id}.env_refs"),
+            });
+        }
+    }
     let mut non_checkout_variables = BTreeMap::new();
     if let Some(variable) = config.openhands.transport_session_api_key_env.as_deref() {
         non_checkout_variables.insert(
@@ -1590,6 +1683,10 @@ fn build_repository_checkouts(
                     field: format!("review_profiles.{}", repository.review_profile),
                 }
             })?);
+        let review_credential_env = config
+            .credentials
+            .get(&review_profile.credential)
+            .and_then(|credential| credential.variable.clone());
         let checkout = CheckoutRepository {
             provider: repository.remote.provider.clone(),
             provider_id: repository.remote.provider_id.clone(),
@@ -1606,11 +1703,19 @@ fn build_repository_checkouts(
                 .get(&repository.credential)
                 .and_then(|credential| credential.reference.clone()),
             credential_env,
+            review_credential_env,
             instructions_path: PathBuf::from(&repository.instructions.path),
             policy_generation: policy_generation.clone(),
             review_profile: repository.review_profile.clone(),
             review_provider: review_profile.provider.clone(),
             review_policy_generation,
+            required_checks: review_profile.required_checks,
+            required_review: review_profile.required_review,
+            merge_method: review_profile
+                .merge_method
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase),
         };
         if checkouts
             .insert(identity.to_string(), checkout.clone())
@@ -1941,7 +2046,9 @@ fn central_workflow_front_matter(
                 })
                 .transpose()?,
         },
+        acp: config.acp.clone(),
         routing: RoutingFrontMatter {
+            harness_profile: config.routing.harness_profile.clone(),
             harness: config.routing.harness.clone(),
             model: config.routing.model.clone(),
             model_profile: config.routing.model_profile.clone(),
@@ -2360,7 +2467,7 @@ fn openhands_yaml_value_has_literal_secret(value: &serde_yaml::Value) -> bool {
                 normalize_secret_field_name(key) == "command"
                     && openhands_command_has_literal_secret(value)
             });
-            let secret_name = key.as_str().is_some_and(openhands_secret_field_name)
+            let secret_name = key.as_str().is_some_and(runtime_field_is_sensitive)
                 && match value.as_str() {
                     Some(value) => !is_central_credential_reference(value),
                     None => !value.is_null(),
@@ -2421,67 +2528,6 @@ fn validate_openhands_env_references(
         }
     }
     Ok(())
-}
-
-fn openhands_secret_field_name(name: &str) -> bool {
-    // OpenHands emits some identity headers with hyphens (for example,
-    // `chatgpt-account-id`) even though most serialized config uses
-    // underscore-separated keys. Normalize the separator before applying the
-    // secret-shaped field rules so both spellings fail closed.
-    let name = normalize_secret_field_name(name);
-    [
-        "access_token",
-        "api_key",
-        "apikey",
-        "authorization",
-        "access_key",
-        "accesskey",
-        "account_id",
-        "accountid",
-        "account_identifier",
-        "account_identity",
-        "chatgpt_account_id",
-        "credential",
-        "password",
-        "pat",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|part| name == *part || name.ends_with(&format!("_{part}")))
-}
-
-fn normalize_secret_field_name(name: &str) -> String {
-    let characters = name.chars().collect::<Vec<_>>();
-    let mut normalized = String::with_capacity(name.len());
-    for (index, character) in characters.iter().copied().enumerate() {
-        if character == '-' {
-            if !normalized.ends_with('_') {
-                normalized.push('_');
-            }
-            continue;
-        }
-        if character.is_ascii_uppercase() {
-            let previous_is_lower_or_digit = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit());
-            let previous_is_acronym_boundary = characters
-                .get(index.wrapping_sub(1))
-                .is_some_and(|previous| previous.is_ascii_uppercase())
-                && characters
-                    .get(index + 1)
-                    .is_some_and(|next| next.is_ascii_lowercase());
-            if (previous_is_lower_or_digit || previous_is_acronym_boundary)
-                && !normalized.ends_with('_')
-            {
-                normalized.push('_');
-            }
-            normalized.push(character.to_ascii_lowercase());
-        } else {
-            normalized.push(character.to_ascii_lowercase());
-        }
-    }
-    normalized
 }
 
 fn validate_active_repository_aliases(
@@ -2741,6 +2787,24 @@ fn non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn release_candidate_selected_central_config_validates() {
+        let Some(path) = env::var_os("OPENSYMPHONY_RELEASE_CONFIG") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let raw = fs::read_to_string(&path)
+            .await
+            .expect("selected config must be readable");
+        assert!(
+            looks_like_central_config(&raw),
+            "release candidate must select a central config"
+        );
+        load_central_config(&path)
+            .await
+            .expect("selected central config must validate");
+    }
+
     #[test]
     fn memory_bootstrap_is_required_when_auto_capture_is_enabled() {
         let repo = tempfile::tempdir().expect("temp repo should exist");
@@ -2873,13 +2937,16 @@ credentials:
     variable: LINEAR_API_KEY
   github-ssh:
     kind: ssh-agent
+  github-review:
+    kind: environment
+    variable: GITHUB_TOKEN
 review_profiles:
   github-standard:
     provider: github
-    credential: github-ssh
+    credential: github-review
     required_checks: true
     required_review: true
-    merge_method: squash
+    merge_method: merge
 workspace:
   root: {root}/workspace
 memory:
@@ -2891,6 +2958,131 @@ scheduler:
 "#,
             root = root.display()
         )
+    }
+
+    #[test]
+    fn acp_central_profiles_remain_authoritative_and_validate_references() {
+        let repo = tempfile::tempdir().expect("temp root");
+        std::fs::write(
+            repo.path().join("integration.md"),
+            "Integration instructions",
+        )
+        .expect("instructions");
+        let source = central_fixture(repo.path()).replace(
+            "  mode: project_set",
+            "  harness: acp\n  harness_profile: local\n  mode: project_set",
+        ) + "acp:\n  profiles:\n    local:\n      command: python3\n      env_refs: {AGENT_TOKEN: ACP_TEST_TOKEN}\n";
+        let resolved = resolve_central_config(&repo.path().join("config.yaml"), &source)
+            .expect("ACP central config");
+        assert_eq!(
+            resolved
+                .workflow_front_matter
+                .routing
+                .harness_profile
+                .as_deref(),
+            Some("local")
+        );
+        let mut local = WorkflowFrontMatter::default();
+        local.routing.harness = Some("codex_app_server".into());
+        local.routing.model = Some("repository-model".into());
+        let mut local_profile = resolved.workflow_front_matter.acp.profiles["local"].clone();
+        local_profile.command = "repository-command".into();
+        local.acp.profiles.insert("local".into(), local_profile);
+        let merged = merge_repository_local_front_matter(resolved.workflow_front_matter, &local);
+        assert_eq!(merged.routing.harness.as_deref(), Some("acp"));
+        assert!(merged.routing.model.is_none());
+        assert_eq!(merged.acp.profiles["local"].command, "python3");
+        assert_eq!(
+            merged.acp.profiles["local"].env_refs["AGENT_TOKEN"],
+            "ACP_TEST_TOKEN"
+        );
+        let env = BTreeMap::from([("LINEAR_API_KEY".into(), "test-key".into())]);
+        let absent = resolve_central_config(
+            &repo.path().join("config.yaml"),
+            &source.replace("harness_profile: local", "harness_profile: absent"),
+        )
+        .expect("selection is resolved with workflow environment");
+        let workflow = WorkflowDefinition {
+            front_matter: absent.workflow_front_matter,
+            prompt_template: "Prompt".into(),
+        };
+        assert!(
+            workflow
+                .resolve(repo.path(), &env)
+                .expect_err("unknown profile")
+                .to_string()
+                .contains("routing.harness_profile")
+        );
+        for (replacement, expected) in [
+            (
+                "command: python3\n      extensions: [unknown]",
+                "extensions must name distinct supported contract versions",
+            ),
+            (
+                "command: python3\n      protocol_versions: [2]",
+                "protocol_versions",
+            ),
+            (
+                "command: python3\n      auth: {method_id: ''}",
+                "auth.method_id",
+            ),
+        ] {
+            let error = resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("command: python3", replacement),
+            )
+            .expect_err("invalid ACP shape")
+            .to_string();
+            assert!(
+                error.contains("profile `local`") && error.contains(expected),
+                "{error}"
+            );
+        }
+        // Central loading preserves the selection until workflow environment
+        // overrides are available, including configurable override variable names.
+        for raw_harness in [
+            "harness: openhands_agent_server",
+            "harness: $ACP_HARNESS",
+            "",
+        ] {
+            let central = resolve_central_config(
+                &repo.path().join("config.yaml"),
+                &source.replace("harness: acp", raw_harness),
+            )
+            .expect("central config");
+            let workflow = WorkflowDefinition {
+                front_matter: central.workflow_front_matter,
+                prompt_template: "Prompt".into(),
+            };
+            let mut overrides = env.clone();
+            overrides.insert("TEST_HARNESS".into(), "acp".into());
+            overrides.insert("ACP_HARNESS".into(), "openhands_agent_server".into());
+            assert_eq!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect("resolved ACP override")
+                    .config
+                    .routing
+                    .harness,
+                "acp"
+            );
+            overrides.insert("TEST_MODEL".into(), "selected-model".into());
+            let selected = workflow
+                .resolve(repo.path(), &overrides)
+                .expect("ACP model selection is validated against the peer at launch")
+                .config
+                .routing;
+            assert_eq!(selected.model.as_deref(), Some("selected-model"));
+            assert!(selected.model_from_env);
+            overrides.insert("TEST_MODEL_PROFILE".into(), "openhands-profile".into());
+            assert!(
+                workflow
+                    .resolve(repo.path(), &overrides)
+                    .expect_err("OpenHands model profiles have no ACP mapping")
+                    .to_string()
+                    .contains("routing.model_profile is not supported for ACP")
+            );
+        }
     }
 
     #[test]
@@ -3193,6 +3385,26 @@ scheduler:
     }
 
     #[test]
+    fn central_config_rejects_review_credential_reuse_by_runtime_env() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(
+            root.path().join("integration.md"),
+            "integration instructions\n",
+        )
+        .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace("    variable: GITHUB_TOKEN", "    variable: LLM_API_KEY");
+
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("review credentials must not reuse runtime environment variables");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "openhands.implicit_llm_env"
+        ));
+    }
+
+    #[test]
     fn central_config_rejects_ssh_agent_socket_reuse_by_routing_selector() {
         let root = tempfile::tempdir().expect("central config root should exist");
         std::fs::write(root.path().join("integration.md"), "integration\n")
@@ -3397,6 +3609,7 @@ scheduler:
             .expect("base checkout should exist");
         assert_eq!(base_checkout.review_profile, "github-standard");
         assert_eq!(base_checkout.review_provider, "github");
+        assert_eq!(base_checkout.merge_method.as_deref(), Some("merge"));
         assert_ne!(
             base_checkout.policy_generation,
             base.repository_routing.config_generation
@@ -3443,10 +3656,9 @@ scheduler:
             scheduler_checkout.review_policy_generation
         );
 
-        let review_source = base_source.replace(
-            "review_profiles:\n  github-standard:\n    provider: github",
-            "review_profiles:\n  github-standard:\n    provider: gitlab",
-        );
+        let review_source = base_source
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
         let review = resolve_central_config(&root.path().join("review.yaml"), &review_source)
             .expect("review policy edit should resolve");
         let review_checkout = review
@@ -3462,7 +3674,25 @@ scheduler:
             base_checkout.review_policy_generation,
             review_checkout.review_policy_generation
         );
-        assert_eq!(review_checkout.review_provider, "gitlab");
+        assert_eq!(review_checkout.review_provider, "github");
+    }
+
+    #[test]
+    fn central_config_canonicalizes_case_variant_merge_methods() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source =
+            central_fixture(root.path()).replace("merge_method: merge", "merge_method: ' Squash '");
+
+        let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect("case-variant merge method should resolve");
+        let checkout = resolved
+            .repository_checkouts
+            .values()
+            .next()
+            .expect("checkout should exist");
+        assert_eq!(checkout.merge_method.as_deref(), Some("squash"));
     }
 
     #[test]
@@ -3529,6 +3759,30 @@ scheduler:
         let resolved = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect("zero automatic retries should be valid");
         assert_eq!(resolved.retry_max_attempts, Some(0));
+    }
+
+    #[tokio::test]
+    async fn acp_only_central_config_fails_closed_before_legacy_resolution() {
+        let root = tempfile::tempdir().expect("config root");
+        let path = root.path().join("config.yaml");
+        for raw in [
+            "schema_version: 1\nacp: {}\n",
+            "acp:\n  profiles: [broken\n",
+        ] {
+            std::fs::write(&path, raw).expect("write config");
+            assert!(looks_like_central_config(raw));
+            let error = resolve_runtime_config(&RunArgs {
+                config: Some(path.clone()),
+                dry_run: true,
+            })
+            .await
+            .err()
+            .expect("incomplete central config must fail");
+            assert!(
+                matches!(error, RunCommandError::CentralConfig(_)),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -3866,6 +4120,116 @@ scheduler:
         let error = resolve_central_config(&root.path().join("config.yaml"), &source)
             .expect_err("tracker credentials without a variable should fail");
         assert!(matches!(error, CentralConfigError::InvalidReference { .. }));
+    }
+
+    #[test]
+    fn central_config_rejects_non_environment_github_review_credentials() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path()).replace(
+            "    credential: github-review",
+            "    credential: github-ssh",
+        );
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("GitHub review credentials must resolve to an environment token");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.credential"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_unsupported_active_review_provider() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "review_profiles:\n  github-standard:\n    provider: github",
+                "review_profiles:\n  github-standard:\n    provider: gitlab",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("unsupported active review provider should fail");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.provider"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_unsupported_project_set_provider_without_policy_flags() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "      provider: github\n      provider_id: repo-42",
+                "      provider: git\n      provider_id: repo-42",
+            )
+            .replace(
+                "review_profiles:\n  github-standard:\n    provider: github",
+                "review_profiles:\n  github-standard:\n    provider: gitlab",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("project-set merge providers must be supported");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.provider"
+        ));
+    }
+
+    #[test]
+    fn central_config_rejects_github_backed_review_for_non_github_repository() {
+        for provider in ["github", "codex"] {
+            let root = tempfile::tempdir().expect("central config root should exist");
+            std::fs::write(root.path().join("integration.md"), "integration\n")
+                .expect("integration instructions should be written");
+            let source = central_fixture(root.path())
+                .replace(
+                    "      provider: github\n      provider_id: repo-42",
+                    "      provider: git\n      provider_id: repo-42",
+                )
+                .replace(
+                    "review_profiles:\n  github-standard:\n    provider: github",
+                    &format!("review_profiles:\n  github-standard:\n    provider: {provider}"),
+                );
+            let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+                .expect_err("GitHub-backed review requires a GitHub repository provider");
+            assert!(matches!(
+                error,
+                CentralConfigError::InvalidReference { field }
+                    if field == "repositories.core-repo.remote.provider"
+            ));
+        }
+    }
+
+    #[test]
+    fn central_config_rejects_non_environment_github_review_credentials_without_policy_flags() {
+        let root = tempfile::tempdir().expect("central config root should exist");
+        std::fs::write(root.path().join("integration.md"), "integration\n")
+            .expect("integration instructions should be written");
+        let source = central_fixture(root.path())
+            .replace(
+                "    credential: github-review",
+                "    credential: github-ssh",
+            )
+            .replace("required_checks: true", "required_checks: false")
+            .replace("required_review: true", "required_review: false");
+        let error = resolve_central_config(&root.path().join("config.yaml"), &source)
+            .expect_err("GitHub merge evidence still needs an API credential");
+        assert!(matches!(
+            error,
+            CentralConfigError::InvalidReference { field }
+                if field == "review_profiles.github-standard.credential"
+        ));
     }
 
     #[test]

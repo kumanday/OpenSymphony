@@ -8,6 +8,10 @@ descriptions, reviews, checks, and source refs. It writes private issue capsules
 under `.opensymphony/memory/`, updates a DuckDB index, evolves
 `.opensymphony/memory/memory.yaml`, and syncs stable topics into public docs.
 
+The operator projection reports memory scope, source freshness, degradation,
+and overlay provenance without exposing memory grants or tokens. Memory
+availability does not grant filesystem access.
+
 Related specifications:
 
 - [OKF Memory System Specification](specs/okf-memory-spec.md) describes how the
@@ -227,8 +231,13 @@ memory:
 `auto_capture` defaults to `true`. `auto_archive` defaults to `false`; when it
 is enabled, OpenSymphony archives only after fresh capture succeeds with no
 blocking warnings. `serve` starts the local memory server during
-`opensymphony run` when memory is initialized. The default bind address uses an
-ephemeral loopback port, and workers receive the resulting MCP endpoint through
+`opensymphony run` when memory is initialized. The default bind address selects
+an available loopback port once, records it in
+`<workspace-root>/.opensymphony-memory-bind.json`, and reuses that exact port on
+later starts. This keeps the endpoint stable for an authenticated parent
+conversation recovered after daemon restart; startup fails if the recorded
+port cannot be rebound rather than rotating the conversation's endpoint.
+Workers receive the resulting MCP endpoint through
 `OPENSYMPHONY_MEMORY_ENDPOINT`. Workers receive only the normal read token;
 admin tools require a separate `OPENSYMPHONY_MEMORY_ADMIN_TOKEN`.
 
@@ -481,7 +490,13 @@ explicitly. Ordinary worker grants have no administrative capability. Persisted
 sibling memory and target-branch code use the registered canonical source;
 AST requests may name that source using the `repository` alias as well as the
 legacy `repo` field; live overlays resolve only the execution repository's
-verified checkout.
+verified checkout. A parent integration grant instead contains the exact
+repository set from its durable runtime envelope. Persisted memory may span
+that set and the parent plus recorded descendants; `all_accessible` cannot add
+another repository or work item. Live overlays resolve only the envelope's
+active integration checkouts, using their opaque handles, contained relative
+paths, run and attempt, and target commits. An unrelated managed checkout stays
+inaccessible even when its repository belongs to the same project.
 The overlay must match the worker's issue, run, attempt, checkout generation,
 and target commit. A worker may advance that checkout during its run; strict
 discovery verifies that the current `HEAD` descends from the target commit
@@ -504,23 +519,58 @@ providers to import memory internals.
 Worker-scoped memory access uses a server-local, non-persisted bearer grant
 bound to the worker's project-set, project, work item, execution repository,
 authorized repository set, visibility, run/attempt, and checkout generation.
-An unchanged claim set may reuse the conversation bearer; a changed run,
-attempt, binding, target commit, or generation rotates the bearer and requires a
-fresh conversation. The startup checkout `HEAD` is retained as capture
-provenance, not as a live-overlay equality requirement. Durable daemon recovery reconstructs
-the claims from the terminal runtime envelope and forces a fresh conversation
-when the in-memory registry was replaced. Terminal, inactive, and
-binding-superseded lifecycles issue the stop/cancel fence before revoking the
-issue grant. Raw bearer tokens are never persisted in manifests or diagnostics.
+An unchanged leaf claim set may reuse the conversation bearer; a changed leaf
+run, attempt, binding, target commit, or generation rotates the bearer and
+requires a fresh leaf conversation. The startup checkout `HEAD` is retained as
+capture provenance, not as a live-overlay equality requirement. Durable daemon
+recovery reconstructs leaf claims from the runtime envelope and forces a fresh
+leaf conversation when the in-memory registry was replaced. A parent controller
+instead restores the bearer already held by its persisted OpenHands
+conversation into the reconstructed registry and verifies the same memory
+endpoint and workspace before reattachment. A missing or different parent
+conversation manifest is rejected before a replacement session can launch.
+Terminal, inactive, and binding-superseded lifecycles issue the stop/cancel
+fence before revoking the issue grant. Raw bearer tokens are never persisted in
+manifests or diagnostics. With automatic capture enabled, terminal issues seen
+at daemon startup remain capture candidates instead of being assumed captured.
+Subtree cleanup revokes a bearer only when its checkout generation matches the
+cleanup target. If a newer generation for the same issue already holds the
+live grant, old-generation cleanup leaves that bearer and its lifecycle state
+unchanged.
 This grant applies to direct `memory.show` capsule reads as well as search,
 context, brief, related, docs, status, and code-intelligence tools. If the
 central service stops, the control-plane status is explicitly degraded and
 scoped worker reads remain blocked; they do not silently fall back to an
 unrelated repository-local store. Leaf capture reads the immutable runtime
 envelope for repository ownership and commits, and documentation sync uses
-that explicit owner. Terminal capture snapshots those durable envelopes before
-the scheduler performs terminal workspace cleanup, so removal or retention
-policy cannot erase the repository/run provenance needed for capture.
+that explicit owner. Terminal capture reads those durable envelopes from leaf
+roots and from the generation-bound `parents/<parent-key>/<generation>` layout.
+Completed parent roots remain retained across reconciliation and restart so a
+transient capture failure cannot erase the repository/run provenance needed for
+the next attempt. Their descendant leases remain active with the root so leaf
+cleanup cannot invalidate registered integration worktrees before OSYM-893
+records capture acknowledgement and performs ordered cleanup. The run loop
+records that acknowledgement only after the capture workflow completes for the
+selected parent. Cleanup first receipts hook execution and detaches the parent
+integration worktrees, then removes unleased descendants bottom-up and the
+parent root last. Failure to persist the acknowledgement leaves the capture
+candidate eligible for retry.
+For a parent, the capture path also reads validated durable controller state
+and requires a matching terminal lifecycle. Successful completion additionally
+requires its final attempt to be passed for the same run and input version, its
+final evidence to be bound to the same conversation, and its exact repository
+commit map to equal the runtime envelope. A terminal run manifest or harness
+success by itself cannot authorize successful parent capture. Failed and
+canceled controllers receive a repository-neutral parent binding with no
+verified commit claims so their diagnostics can be captured before the explicit
+retention policy runs. If restart proves that a parent launch never attached and
+no `run.json` exists, the owned parent manifest plus the matching terminal
+controller supplies only that neutral parent classification; it does not invent
+run, attempt, command, or commit evidence. The durable binding explicitly marks
+a parent even when its commit map is empty, so repository-neutral capture cannot
+inherit a configured default leaf repository. A capture with an actual runtime
+envelope records one repository-neutral parent-runtime source reference with
+the durable run and attempt identifiers.
 Retained legacy run envelopes that lack usable run/attempt provenance are
 skipped as non-bindable entries during the pre-cleanup scan rather than
 preventing unrelated terminal captures from completing.
@@ -783,12 +833,23 @@ are covered by the same archive operation.
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-553: Parent Execution Roots And Child Workspace Reuse
+- COE-554: Restart-Safe Parent Integration Controller
+- COE-555: Parent Repair Review And Merge Lifecycle
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
 - COE-562: Implement artifact validation and digest primitives
 - COE-563: Implement task-packet admission and freeze tooling
 - COE-564: Implement verifier execution and outcome records
 - COE-565: Implement isolated workspace materialization
 - COE-566: Implement configurable run matrices and scheduling
 - COE-567: Implement run lifecycle and process-protocol primitives
+- COE-608: ACP Profiles And Executable Protocol Client
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -944,11 +1005,22 @@ are covered by the same archive operation.
 - COE-549
 - COE-550
 - COE-551
+- COE-553
+- COE-554
+- COE-555
+- COE-556
 - COE-562
 - COE-563
 - COE-564
 - COE-565
 - COE-566
 - COE-567
+- COE-608
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

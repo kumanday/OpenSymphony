@@ -63,7 +63,13 @@ describe("MockGatewayTransport action methods", () => {
     expect(result.status).toBe("accepted");
   });
 
-  it("retryRun returns a receipt with expected events and deterministic idempotency key", async () => {
+  it("replanParent returns a receipt for a hierarchy parent", async () => {
+    const result = await transport.replanParent("parent-1", 7);
+    assertReceiptShape(result);
+    expect(result.correlation_id).toContain("replan-parent-1-");
+  });
+
+  it("retryRun returns a receipt with expected events", async () => {
     const result = await transport.retryRun(runDetail.run_id);
     assertReceiptShape(result);
     expect(result.correlation_id).toContain(`retry-${runDetail.run_id}-`);
@@ -96,10 +102,25 @@ describe("MockGatewayTransport action methods", () => {
   });
 
   it("approvalDecision returns a receipt correlated to the approval", async () => {
+    const dispatch = jest.spyOn(transport, "dispatchAction");
     const result = await transport.approvalDecision("approval-1", "approved", "approved for test");
     assertReceiptShape(result);
     expect(result.correlation_id).toContain("approval-approval-1-");
     expect(result.status).toBe("accepted");
+    expect(dispatch.mock.calls[0][0].target_entity).toEqual({ entity_kind: "approval", entity_id: "approval-1" });
+  });
+
+  it("routes ACP approval decisions by the public issue identifier", async () => {
+    const dispatch = jest.spyOn(transport, "dispatchAction");
+    const interaction = {
+      request_id: "request-1", run_id: "run-1", issue_id: "internal-1",
+      issue_identifier: "COE-612", session_id: "session-1", generation: 1,
+      rpc_id: "7", kind: "permission" as const, title: "Permission",
+      options: [], questions: [], requested_at: "2026-09-23T00:00:00Z",
+      expires_at: "2026-09-24T00:00:00Z",
+    };
+    await transport.approvalDecision("request-1", "approved", undefined, interaction, "allow");
+    expect(dispatch.mock.calls[0][0].target_entity).toEqual({ entity_kind: "run", entity_id: "COE-612" });
   });
 
   it("setActionReceipt overrides generated receipts for a correlation id", async () => {
@@ -134,7 +155,7 @@ describe("HttpGatewayTransport action integration", () => {
   it("cancelRun POSTs a cancel action to the dispatch endpoint", async () => {
     const fetchSpy = mockFetch(receipt);
     const transport = new HttpGatewayTransport({ baseUri });
-    const result = await transport.cancelRun("run-1");
+    const result = await transport.cancelRun("run-1", "attempt-1");
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const requestUrl = fetchSpy.mock.calls[0][0] as string;
@@ -144,19 +165,67 @@ describe("HttpGatewayTransport action integration", () => {
     const body = JSON.parse(requestInit.body as string);
     expect(body.action_kind).toBe("cancel");
     expect(body.target_entity).toEqual({ entity_kind: "run", entity_id: "run-1" });
-    expect(body.idempotency_key).toBe("cancel-run-1");
+    expect(body.idempotency_key).toBe("cancel-run-1-attempt-1");
     expect(result.correlation_id).toBe(receipt.correlation_id);
   });
 
   it("retryRun includes retry action kind and idempotency key", async () => {
     const fetchSpy = mockFetch(receipt);
     const transport = new HttpGatewayTransport({ baseUri });
-    await transport.retryRun("run-2");
+    await transport.retryRun("run-2", "attempt-2");
 
     const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
     const body = JSON.parse(requestInit.body as string);
     expect(body.action_kind).toBe("retry");
-    expect(body.idempotency_key).toBe("retry-run-2");
+    expect(body.idempotency_key).toBe("retry-run-2-attempt-2");
+  });
+
+  it.each(["retryRun", "cancelRun", "resumeRun", "rehydrateRun"] as const)(
+    "%s distinguishes later attempts and preserves request retry identity",
+    async (method) => {
+      const fetchSpy = mockFetch(receipt);
+      const transport = new HttpGatewayTransport({ baseUri });
+      await transport[method]("run-1");
+      await transport[method]("run-1");
+      await transport[method]("run-1", "operation-1");
+      await transport[method]("run-1", "operation-1");
+      const actions = fetchSpy.mock.calls.map((call) =>
+        JSON.parse((call[1] as RequestInit).body as string),
+      );
+      expect(actions[0].idempotency_key).not.toBe(actions[1].idempotency_key);
+      expect(actions[2].idempotency_key).toBe(actions[3].idempotency_key);
+      expect(actions[2].correlation_id).not.toBe(actions[3].correlation_id);
+    },
+  );
+
+  it("replanParent POSTs a replan action for an issue", async () => {
+    const fetchSpy = mockFetch(receipt);
+    const transport = new HttpGatewayTransport({ baseUri });
+    await transport.replanParent("parent-1", 7, "generation-7");
+
+    const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.action_kind).toBe("replan");
+    expect(body.target_entity).toEqual({ entity_kind: "issue", entity_id: "parent-1" });
+    expect(body.payload).toEqual({ hierarchy_generation: 7 });
+    expect(body.idempotency_key).toBe("replan-parent-1-generation-7");
+  });
+
+  it("replanParent gives each new operation a key while allowing request retries", async () => {
+    const fetchSpy = mockFetch(receipt);
+    const transport = new HttpGatewayTransport({ baseUri });
+    await transport.replanParent("parent-1", 7, "generation-7");
+    await transport.replanParent("parent-1", 7, "generation-7");
+    await transport.replanParent("parent-1", 8, "generation-8");
+
+    const keys = fetchSpy.mock.calls.map((call) =>
+      JSON.parse((call[1] as RequestInit).body as string).idempotency_key,
+    );
+    expect(keys).toEqual([
+      "replan-parent-1-generation-7",
+      "replan-parent-1-generation-7",
+      "replan-parent-1-generation-8",
+    ]);
   });
 
   it("approvalDecision POSTs the decision and explanation", async () => {

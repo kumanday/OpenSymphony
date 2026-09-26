@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::atomic::{AtomicU64, Ordering},
@@ -32,16 +33,16 @@ use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_gateway_schema::event_journal::{EventActor, EventKind, EventRecord};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_memory::MemoryVisibility;
-use crate::opensymphony_openhands::{OpenHandsError, TransportConfig};
+use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
-    IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
-    TrackerBackend, WorkerBackend, WorkspaceBackend,
+    IssueStateCategory, OperatorResponseDelivery, OrchestratorSnapshot, Scheduler, SchedulerConfig,
+    SchedulerError, TrackerBackend, WorkerBackend, WorkspaceBackend,
 };
-use crate::opensymphony_workflow::ProcessEnvironment;
 use crate::opensymphony_workspace::{WorkspaceError, checkout_credential_environment_variables};
 use chrono::{DateTime, Utc};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -64,6 +65,87 @@ use self::{
         terminal_state_set,
     },
 };
+
+const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
+
+enum RunWake {
+    Shutdown,
+    Server(Result<io::Result<()>, tokio::task::JoinError>),
+    OperatorCommand(Box<crate::opensymphony_gateway::OperatorCommand>),
+    OperatorUpdate,
+    TrackerTick,
+}
+
+struct OperatorDeliveryCompleted {
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    delivered: Result<bool, String>,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+fn spawn_operator_delivery_completion(
+    delivery: OperatorResponseDelivery,
+    interaction: crate::opensymphony_gateway_schema::approval::OperatorInteraction,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    delivered_tx: tokio::sync::mpsc::Sender<OperatorDeliveryCompleted>,
+    notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let completed = OperatorDeliveryCompleted {
+            interaction,
+            delivered: delivery.wait().await,
+            reply,
+        };
+        if delivered_tx.send(completed).await.is_ok() {
+            notify.notify_one();
+        }
+    })
+}
+
+async fn start_shutdown_listener() -> tokio::task::JoinHandle<io::Result<()>> {
+    use std::future::Future;
+
+    let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let signal = tokio::signal::ctrl_c();
+        tokio::pin!(signal);
+        let mut armed = Some(armed_tx);
+        std::future::poll_fn(|cx| {
+            let result = signal.as_mut().poll(cx);
+            if let Some(armed) = armed.take() {
+                let _ = armed.send(());
+            }
+            result
+        })
+        .await
+    });
+    let _ = armed_rx.await;
+    task
+}
+
+async fn next_run_wake(
+    shutdown_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    server_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    operator_commands_rx: &mut tokio::sync::mpsc::Receiver<
+        crate::opensymphony_gateway::OperatorCommand,
+    >,
+    operator_update_notify: &tokio::sync::Notify,
+    ticker: &mut tokio::time::Interval,
+) -> RunWake {
+    tokio::select! {
+        _ = shutdown_task => RunWake::Shutdown,
+        result = server_task => RunWake::Server(result),
+        Some(command) = operator_commands_rx.recv() => RunWake::OperatorCommand(Box::new(command)),
+        _ = operator_update_notify.notified() => RunWake::OperatorUpdate,
+        _ = ticker.tick() => RunWake::TrackerTick,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MemoryServerBindState {
+    schema_version: u32,
+    configured_ip: String,
+    selected_addr: String,
+}
 
 #[derive(Debug, Args, Clone)]
 pub struct RunArgs {
@@ -127,6 +209,8 @@ pub(crate) enum RunCommandError {
     Tracker(#[from] LinearError),
     #[error("failed to create workspace manager: {0}")]
     WorkspaceManager(#[from] WorkspaceError),
+    #[error("failed to prepare ACP session host: {0}")]
+    AcpHost(#[from] crate::opensymphony_acp::HostError),
     #[error("failed to prepare OpenHands transport: {0}")]
     Transport(#[from] OpenHandsError),
     #[error("failed to prepare OpenHands conversation store: {0}")]
@@ -976,7 +1060,11 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         "starting OpenSymphony orchestrator"
     );
 
-    let mut tracker = build_tracker_backend(&runtime.workflow)?;
+    let mut tracker = build_tracker_backend(
+        &runtime.workflow,
+        runtime.repository_checkouts.clone().unwrap_or_default(),
+        runtime.repository_routing.clone(),
+    )?;
     let legacy_repository = runtime.repository_routing.as_ref().and_then(|routing| {
         routing
             .legacy_repository
@@ -1010,14 +1098,21 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .root
             .join(".opensymphony-retry-state")
     });
+    let acp_host =
+        crate::opensymphony_acp::SessionHost::new(crate::opensymphony_acp::RetentionPolicy {
+            max_sessions: 128,
+            ..crate::opensymphony_acp::RetentionPolicy::default()
+        })?;
     let mut workspace = RuntimeWorkspaceBackend::new_with_retention_and_state_root(
         workspace_manager.clone(),
         &runtime.workflow,
         runtime.retain_failed,
         retry_state_root,
     )
+    .with_acp_host(acp_host.clone())
     .with_openhands_conversation_store(runtime.openhands_conversation_store.clone());
-    let selected_openhands = selected_openhands_harness(&runtime);
+    let selected_openhands = selected_openhands_harness(&runtime)
+        || backends::requires_openhands_recovery(workspace_manager.as_ref()).await?;
     let managed_local_preparation = if selected_openhands {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
             .await?
@@ -1073,6 +1168,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         target_commit: None,
         checkout_head: None,
         execution_repo: execution_repo.unwrap_or_else(|| runtime.target_repo.display().to_string()),
+        parent_scope: false,
         authorized_repositories: BTreeSet::from([runtime.target_repo.display().to_string()]),
         authorized_repositories_by_project: runtime
             .repository_routing
@@ -1096,25 +1192,30 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
     }
 
-    let (transport, mut supervisor) = if selected_openhands {
-        build_runtime_transport(
+    let (client, mut supervisor) = if selected_openhands {
+        let (transport, supervisor) = build_runtime_transport(
             &runtime,
             managed_local_preparation.tooling,
             &linear_worker_env,
         )
-        .await?
-    } else {
-        (
-            TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?,
-            None,
-        )
-    };
-    let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
-    if selected_openhands {
+        .await?;
+        let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
         client.openapi_probe().await?;
-    }
+        (Some(client), supervisor)
+    } else {
+        (None, None)
+    };
+    let agent_server_base_url = client
+        .as_ref()
+        .map(|client| client.base_url())
+        .unwrap_or("");
+    let acp_profiles = crate::opensymphony_acp::profile_capabilities(
+        &runtime.workflow.extensions.acp,
+        &linear_worker_env,
+        &backends::runtime_checkout_credential_envs(&runtime),
+    );
 
-    let worker = RuntimeWorkerBackend::new(
+    let worker = RuntimeWorkerBackend::new_with_client(
         client.clone(),
         Arc::new(runtime.workflow.clone()),
         workspace_manager,
@@ -1122,6 +1223,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         linear_worker_env,
     )
     .with_openhands_conversation_store(runtime.openhands_conversation_store.clone())
+    .with_acp_host(acp_host)
+    .with_integration_instructions(runtime.integration_instructions.clone())
     .with_checkout_credential_envs(
         runtime
             .repository_checkouts
@@ -1129,6 +1232,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             .map(checkout_credential_environment_variables)
             .unwrap_or_default(),
     );
+    let operator_update_notify = worker.operator_update_notify();
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
     scheduler_config.repository_routing = runtime.repository_routing.clone();
@@ -1160,7 +1264,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         &scheduler.snapshot(now_timestamp()),
         runtime.workflow.config.workspace.root.as_path(),
         &terminal_state_set(&runtime.workflow),
-        current_agent_server_status(&mut supervisor, client.base_url()),
+        current_agent_server_status(&mut supervisor, agent_server_base_url),
         current_memory_server_status(memory_server.as_ref()),
         &recent_events,
     );
@@ -1181,10 +1285,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     } else {
         None
     };
+    let (operator_commands_tx, mut operator_commands_rx) = tokio::sync::mpsc::channel(64);
+    let (operator_deliveries_tx, mut operator_deliveries_rx) = tokio::sync::mpsc::channel(64);
     let server =
         GatewayServer::with_journal(store.clone(), gateway_journal.clone(), gateway_broker)
+            .with_operator_commands(operator_commands_tx)
             .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow))
             .with_memory_config(server_memory_config)
+            .with_harness_profiles(acp_profiles)
             .with_active_states(
                 runtime
                     .workflow
@@ -1196,47 +1304,27 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             )
             .with_terminal_states(terminal_state_set(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
+    // Keep SIGINT armed while bootstrap and scheduler mutations await. A
+    // short-lived ctrl_c future inside select can miss a signal during a tick.
+    let mut shutdown_task = start_shutdown_listener().await;
     let mut gateway_action_cursor = 0;
 
-    let bootstrap_snapshot = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("received shutdown signal");
+    let bootstrap_snapshot = match scheduler.bootstrap(now_timestamp()).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
             server_task.abort();
+            shutdown_task.abort();
             shutdown_memory_server(&mut memory_server).await?;
-            if let Some(mut supervisor) = supervisor {
-                let _ = supervisor.stop();
-            }
-            return Ok(());
+            return Err(RunCommandError::SchedulerConfig(error));
         }
-        result = &mut server_task => {
-            match result {
-                Ok(Ok(())) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    if let Some(mut supervisor) = supervisor {
-                        let _ = supervisor.stop();
-                    }
-                    return Ok(());
-                }
-                Ok(Err(error)) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(error));
-                }
-                Err(error) => {
-                    shutdown_memory_server(&mut memory_server).await?;
-                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
-                }
-            }
-        }
-        result = scheduler.bootstrap(now_timestamp()) => match result {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                server_task.abort();
-                shutdown_memory_server(&mut memory_server).await?;
-                return Err(RunCommandError::SchedulerConfig(error));
-            }
-        },
     };
-    let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let startup_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
+    let recovered_completed_parent_captures = scheduler.completed_subtree_cleanup_identifiers();
+    let mut auto_capture_completed_issues = initial_auto_capture_completed_issues(
+        &startup_terminal_issues,
+        &recovered_completed_parent_captures,
+        runtime.memory.auto_capture,
+    );
     push_recent_event(
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
@@ -1253,7 +1341,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             &bootstrap_snapshot,
             runtime.workflow.config.workspace.root.as_path(),
             &terminal_state_set(&runtime.workflow),
-            current_agent_server_status(&mut supervisor, client.base_url()),
+            current_agent_server_status(&mut supervisor, agent_server_base_url),
             current_memory_server_status(memory_server.as_ref()),
             &recent_events,
         ))
@@ -1264,46 +1352,138 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+        // Only wait for the next event inside select. Scheduler mutations can
+        // await after changing state and must run to completion once started.
+        let wake = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut operator_commands_rx,
+            &operator_update_notify,
+            &mut ticker,
+        )
+        .await;
+        match wake {
+            RunWake::Shutdown => {
                 info!("received shutdown signal");
                 break;
             }
-            result = &mut server_task => {
-                match result {
-                    Ok(Ok(())) => break,
-                    Ok(Err(error)) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(error));
+            RunWake::Server(result) => match result {
+                Ok(Ok(())) => break,
+                Ok(Err(error)) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(error));
+                }
+                Err(error) => {
+                    shutdown_memory_server(&mut memory_server).await?;
+                    return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                }
+            },
+            RunWake::OperatorCommand(command) => match *command {
+                crate::opensymphony_gateway::OperatorCommand::Response {
+                    interaction,
+                    answer,
+                    reply,
+                    delivery,
+                } => {
+                    if !delivery.claim() {
+                        let _ = reply.send(Err("operator response delivery timed out".into()));
+                        continue;
                     }
-                    Err(error) => {
-                        shutdown_memory_server(&mut memory_server).await?;
-                        return Err(RunCommandError::Serve(io::Error::other(error.to_string())));
+                    match scheduler
+                        .begin_operator_response(&interaction, answer)
+                        .await
+                    {
+                        Ok(delivery) => {
+                            spawn_operator_delivery_completion(
+                                delivery,
+                                interaction,
+                                reply,
+                                operator_deliveries_tx.clone(),
+                                operator_update_notify.clone(),
+                            );
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
                     }
                 }
-            }
-            result = async {
-                ticker.tick().await;
+                crate::opensymphony_gateway::OperatorCommand::HarnessOperation {
+                    issue_identifier,
+                    run_id,
+                    operation_id,
+                    arguments,
+                    reply,
+                    delivery,
+                } => {
+                    if !delivery.claim() {
+                        let _ = reply.send(Err("harness operation dispatch timed out".into()));
+                        continue;
+                    }
+                    match scheduler
+                        .begin_harness_operation(
+                            &issue_identifier,
+                            &run_id,
+                            &operation_id,
+                            arguments,
+                        )
+                        .await
+                    {
+                        Ok(delivery) => {
+                            tokio::spawn(async move {
+                                let _ = reply.send(delivery.wait().await);
+                            });
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
+            },
+            RunWake::OperatorUpdate => {
+                while let Ok(completed) = operator_deliveries_rx.try_recv() {
+                    let result = scheduler
+                        .complete_operator_response(&completed.interaction, completed.delivered);
+                    let _ = completed.reply.send(result);
+                }
                 let observed_at = now_timestamp();
-                let capture_bindings_before_tick = if runtime.memory.auto_capture {
-                    super::memory::load_all_terminal_capture_bindings(
-                        &runtime.workflow.config.workspace.root,
-                    )
-                } else {
-                    Ok(BTreeMap::new())
+                let snapshot = match scheduler.drain_worker_updates(observed_at).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        warn!(%error, "operator worker update failed");
+                        push_recent_event(
+                            &mut recent_events,
+                            RecentEventKind::Warning,
+                            None,
+                            format!("operator worker update failed: {error}"),
+                            Utc::now(),
+                        );
+                        scheduler.snapshot(observed_at)
+                    }
                 };
+                store
+                    .publish(map_snapshot(
+                        &snapshot,
+                        runtime.workflow.config.workspace.root.as_path(),
+                        &terminal_state_set(&runtime.workflow),
+                        current_agent_server_status(&mut supervisor, agent_server_base_url),
+                        current_memory_server_status(memory_server.as_ref()),
+                        &recent_events,
+                    ))
+                    .await;
+            }
+            RunWake::TrackerTick => {
+                let observed_at = now_timestamp();
                 let result = match apply_gateway_action_events(
                     &mut scheduler,
                     &gateway_journal,
                     &mut gateway_action_cursor,
                     observed_at,
-                ).await {
+                )
+                .await
+                {
                     Ok(()) => scheduler.tick(observed_at).await,
                     Err(error) => Err(error),
                 };
-                (observed_at, capture_bindings_before_tick, result)
-            } => {
-                let (observed_at, capture_bindings_before_tick, result) = result;
                 match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
@@ -1323,16 +1503,26 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             ),
                             Utc::now(),
                         );
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, client.base_url()),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                         if !auto_capture_candidates.is_empty() {
-                            let auto_capture_result = match capture_bindings_before_tick {
+                            // Parent completion and its exact commit evidence
+                            // can become durable in this scheduler tick. Load
+                            // bindings afterward so capture does not use the
+                            // pre-finalization controller snapshot.
+                            let capture_bindings =
+                                super::memory::load_all_terminal_capture_bindings(
+                                    &runtime.workflow.config.workspace.root,
+                                );
+                            let auto_capture_result = match capture_bindings {
                                 Ok(capture_bindings) => {
                                     super::memory::auto_capture_terminal(
                                         &runtime.target_repo,
@@ -1351,11 +1541,35 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 }
                                 Err(error) => Err(error),
                             };
-                            mark_auto_capture_completed(
-                                &mut auto_capture_completed_issues,
-                                &auto_capture_candidates,
-                                &auto_capture_result,
-                            );
+                            let cleanup_acknowledged = match &auto_capture_result {
+                                Ok(report) if report.workflow_completed() => {
+                                    let completed = if report.completed_issue_keys.is_empty()
+                                        && report.warnings.is_empty()
+                                    {
+                                        auto_capture_candidates.clone()
+                                    } else {
+                                        report.completed_issue_keys.clone()
+                                    };
+                                    match scheduler
+                                        .acknowledge_terminal_capture(&completed, observed_at)
+                                        .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            warn!(%error, "failed to persist terminal capture acknowledgement; cleanup will wait for retry");
+                                            false
+                                        }
+                                    }
+                                }
+                                _ => true,
+                            };
+                            if cleanup_acknowledged {
+                                mark_auto_capture_completed(
+                                    &mut auto_capture_completed_issues,
+                                    &auto_capture_candidates,
+                                    &auto_capture_result,
+                                );
+                            }
                             publish_auto_capture_event(
                                 auto_capture_result,
                                 &snapshot,
@@ -1363,13 +1577,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 SnapshotPublishContext {
                                     runtime: &runtime,
                                     supervisor: &mut supervisor,
-                                    agent_server_base_url: client.base_url(),
+                                    agent_server_base_url,
                                     memory_server: memory_server.as_ref(),
                                     memory_config: gateway_memory_config.as_ref(),
                                     recent_events: &mut recent_events,
                                     store: &store,
                                 },
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                     Err(error) => {
@@ -1382,14 +1597,16 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             Utc::now(),
                         );
                         let snapshot = scheduler.snapshot(observed_at);
-                        store.publish(map_snapshot(
-                            &snapshot,
-                            runtime.workflow.config.workspace.root.as_path(),
-                            &terminal_state_set(&runtime.workflow),
-                            current_agent_server_status(&mut supervisor, client.base_url()),
-                            current_memory_server_status(memory_server.as_ref()),
-                            &recent_events,
-                        )).await;
+                        store
+                            .publish(map_snapshot(
+                                &snapshot,
+                                runtime.workflow.config.workspace.root.as_path(),
+                                &terminal_state_set(&runtime.workflow),
+                                current_agent_server_status(&mut supervisor, agent_server_base_url),
+                                current_memory_server_status(memory_server.as_ref()),
+                                &recent_events,
+                            ))
+                            .await;
                     }
                 }
             }
@@ -1397,6 +1614,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     server_task.abort();
+    shutdown_task.abort();
     shutdown_memory_server(&mut memory_server).await?;
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
@@ -1435,13 +1653,31 @@ where
             continue;
         }
         let sequence = event.sequence;
-        let Some(target) = gateway_cancel_target(&event) else {
-            *cursor = sequence;
-            continue;
-        };
-        scheduler
-            .interrupt_operator_cancel(target, observed_at)
-            .await?;
+        if let Some(target) = gateway_cancel_target(&event) {
+            scheduler
+                .interrupt_operator_cancel(target, observed_at)
+                .await?;
+        } else if let Some((target, accepted_generation)) = gateway_replan_request(&event) {
+            let outcome = match scheduler
+                .replan_parent_target(target, accepted_generation, observed_at)
+                .await
+            {
+                Ok(changed) => Ok(changed),
+                Err(SchedulerError::Workspace { detail })
+                    if detail.starts_with("cannot replan hierarchy parent ") =>
+                {
+                    Err(detail)
+                }
+                Err(error) => return Err(error),
+            };
+            let outcome = gateway_replan_outcome_event(&event, outcome);
+            journal
+                .append(outcome)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: format!("failed to record replan outcome: {error:?}"),
+                })?;
+        }
         *cursor = sequence;
     }
     Ok(())
@@ -1457,6 +1693,65 @@ fn gateway_cancel_target(event: &EventRecord) -> Option<&str> {
         return None;
     }
     payload["target_entity"]["id"].as_str()
+}
+
+fn gateway_replan_request(event: &EventRecord) -> Option<(&str, u64)> {
+    match &event.kind {
+        EventKind::GatewayActionDispatched { action } if action == "replan" => {}
+        _ => return None,
+    }
+    let payload = event.payload.as_ref()?;
+    if payload["status"] != "accepted" {
+        return None;
+    }
+    let target = payload["target_entity"]["id"].as_str()?;
+    let accepted_generation = payload["payload"]["hierarchy_generation"].as_u64()?;
+    Some((target, accepted_generation))
+}
+
+fn gateway_replan_outcome_event(
+    dispatch: &EventRecord,
+    outcome: Result<bool, String>,
+) -> EventRecord {
+    let (completed, reason) = match outcome {
+        Ok(true) => (true, None),
+        Ok(false) => (
+            false,
+            Some("target is not blocked by HierarchyChanged".to_owned()),
+        ),
+        Err(reason) => (false, Some(reason)),
+    };
+    let status = if completed { "completed" } else { "rejected" };
+    EventRecord::builder()
+        .actor(EventActor::system("orchestrator"))
+        .correlation_id_opt(dispatch.correlation_id.clone())
+        .entity_refs(dispatch.entity_refs.clone())
+        .kind(if completed {
+            EventKind::GatewayActionCompleted {
+                action: "replan".to_owned(),
+            }
+        } else {
+            EventKind::GatewayActionFailed {
+                action: "replan".to_owned(),
+                reason: reason
+                    .clone()
+                    .expect("a rejected replan must carry a reason"),
+            }
+        })
+        .summary(if completed {
+            "Hierarchy replan completed"
+        } else {
+            "Hierarchy replan rejected"
+        })
+        .payload(json!({
+            "action_id": dispatch.payload.as_ref().and_then(|payload| payload.get("action_id")),
+            "action_kind": "replan",
+            "correlation_id": dispatch.correlation_id,
+            "status": status,
+            "target_entity": dispatch.payload.as_ref().and_then(|payload| payload.get("target_entity")),
+            "reason": reason,
+        }))
+        .build()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1524,6 +1819,7 @@ pub(super) struct RuntimeMemoryEnv {
     pub(super) target_commit: Option<String>,
     pub(super) checkout_head: Option<String>,
     pub(super) execution_repo: String,
+    pub(super) parent_scope: bool,
     pub(super) authorized_repositories: BTreeSet<String>,
     pub(super) authorized_repositories_by_project: BTreeMap<String, BTreeSet<String>>,
     pub(super) scope_grants: Option<super::memory::MemoryScopeGrantRegistry>,
@@ -1536,9 +1832,14 @@ async fn start_runtime_memory_server(
         return Ok(None);
     };
     let config = load_runtime_memory_config(runtime)?;
-    super::memory::start_memory_server_with_resolved_config(
+    let configured_bind = server.bind;
+    let selected_bind = resolve_runtime_memory_server_bind(
+        &runtime.workflow.config.workspace.root,
+        configured_bind,
+    )?;
+    let handle = super::memory::start_memory_server_with_resolved_config(
         config,
-        server.bind,
+        selected_bind,
         server.token.clone(),
         Some(runtime.workflow.config.workspace.root.clone()),
         runtime.config_path.clone(),
@@ -1546,8 +1847,114 @@ async fn start_runtime_memory_server(
         Some(runtime.config_generation.clone()),
     )
     .await
-    .map(Some)
-    .map_err(RunCommandError::MemoryServer)
+    .map_err(RunCommandError::MemoryServer)?;
+    if configured_bind.port() == 0 {
+        persist_runtime_memory_server_bind(
+            &runtime.workflow.config.workspace.root,
+            configured_bind,
+            handle.local_addr(),
+        )?;
+    }
+    Ok(Some(handle))
+}
+
+fn resolve_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+) -> Result<SocketAddr, RunCommandError> {
+    if configured.port() != 0 {
+        return Ok(configured);
+    }
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(configured),
+        Err(error) => {
+            return Err(RunCommandError::MemoryServer(
+                crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                    "failed to read persisted memory server bind {}: {error}",
+                    path.display()
+                )),
+            ));
+        }
+    };
+    let state: MemoryServerBindState = serde_json::from_str(&raw).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to decode persisted memory server bind {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    let selected: SocketAddr = state.selected_addr.parse().map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "persisted memory server bind {} is invalid: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    if state.schema_version != 1
+        || state.configured_ip != configured.ip().to_string()
+        || selected.ip() != configured.ip()
+        || selected.port() == 0
+    {
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "persisted memory server bind {} does not match the configured interface",
+                path.display()
+            )),
+        ));
+    }
+    Ok(selected)
+}
+
+fn persist_runtime_memory_server_bind(
+    workspace_root: &Path,
+    configured: SocketAddr,
+    selected: SocketAddr,
+) -> Result<(), RunCommandError> {
+    fs::create_dir_all(workspace_root).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to create workspace root {} for memory bind persistence: {error}",
+                workspace_root.display()
+            ),
+        ))
+    })?;
+    let path = workspace_root.join(MEMORY_SERVER_BIND_STATE);
+    let state = MemoryServerBindState {
+        schema_version: 1,
+        configured_ip: configured.ip().to_string(),
+        selected_addr: selected.to_string(),
+    };
+    let payload = serde_json::to_vec_pretty(&state).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!("failed to encode persisted memory server bind: {error}"),
+        ))
+    })?;
+    let temporary = workspace_root.join(format!(
+        "{MEMORY_SERVER_BIND_STATE}.{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+    fs::write(&temporary, payload).map_err(|error| {
+        RunCommandError::MemoryServer(crate::opensymphony_memory::MemoryError::InvalidInput(
+            format!(
+                "failed to write persisted memory server bind {}: {error}",
+                temporary.display()
+            ),
+        ))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(RunCommandError::MemoryServer(
+            crate::opensymphony_memory::MemoryError::InvalidInput(format!(
+                "failed to publish persisted memory server bind {}: {error}",
+                path.display()
+            )),
+        ));
+    }
+    Ok(())
 }
 
 fn load_runtime_memory_config(
@@ -1788,6 +2195,18 @@ fn auto_capture_candidates(
         .collect()
 }
 
+fn initial_auto_capture_completed_issues(
+    startup_terminal_issues: &BTreeSet<String>,
+    recovered_completed_parent_captures: &BTreeSet<String>,
+    auto_capture_enabled: bool,
+) -> BTreeSet<String> {
+    if auto_capture_enabled {
+        recovered_completed_parent_captures.clone()
+    } else {
+        startup_terminal_issues.clone()
+    }
+}
+
 fn mark_auto_capture_completed(
     completed_issues: &mut BTreeSet<String>,
     candidates: &[String],
@@ -1821,8 +2240,363 @@ mod tests {
     use super::*;
     use crate::opensymphony_memory::MemoryError;
 
+    #[tokio::test]
+    async fn pending_operator_flush_allows_worker_wake_and_shutdown() {
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::channel(1);
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let now = Utc::now();
+        let interaction = OperatorInteraction {
+            request_id: "delayed-flush".into(),
+            run_id: "run-worker".into(),
+            issue_id: "issue".into(),
+            issue_identifier: "COE-612".into(),
+            session_id: "session".into(),
+            generation: 1,
+            rpc_id: "opaque-token".into(),
+            kind: OperatorInteractionKind::Permission,
+            title: "Permission".into(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            plan: None,
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        let (acknowledge, acknowledgement) = tokio::sync::oneshot::channel();
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let delivery = OperatorResponseDelivery::new(async move {
+            acknowledgement.await.expect("worker flush acknowledgement")
+        });
+        let delivery_task = spawn_operator_delivery_completion(
+            delivery,
+            interaction.clone(),
+            reply,
+            delivered_tx,
+            notify.clone(),
+        );
+        notify.notify_one(); // an unrelated worker update arrives during the flush
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("worker wake remains responsive"),
+            RunWake::OperatorUpdate
+        ));
+        assert!(delivered_rx.try_recv().is_err());
+        shutdown_tx.send(()).expect("signal shutdown");
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                next_run_wake(
+                    &mut shutdown_task,
+                    &mut server_task,
+                    &mut commands_rx,
+                    &notify,
+                    &mut ticker,
+                ),
+            )
+            .await
+            .expect("shutdown remains responsive"),
+            RunWake::Shutdown
+        ));
+        acknowledge.send(Ok(true)).expect("release flush");
+        delivery_task.await.expect("delivery completion task");
+        let completed = delivered_rx.recv().await.expect("actor completion message");
+        assert_eq!(completed.interaction, interaction);
+        assert_eq!(completed.delivered, Ok(true));
+        completed.reply.send(Ok(())).expect("gateway receipt");
+        received
+            .await
+            .expect("authoritative receipt")
+            .expect("accepted");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_tracker_tick_completes_before_queued_operator_wakes() {
+        use crate::opensymphony_gateway::OperatorCommand;
+        use crate::opensymphony_gateway_schema::approval::{
+            OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+        };
+
+        let mut ticker = interval(Duration::from_secs(300));
+        let (commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = Arc::new(tokio::sync::Notify::new());
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let mut shutdown_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        let (tick_entered_tx, tick_entered_rx) = tokio::sync::oneshot::channel();
+        let (tick_release_tx, tick_release_rx) = tokio::sync::oneshot::channel();
+        let signal = operator_notify.clone();
+        let queued_wakes = tokio::spawn(async move {
+            tick_entered_rx.await.expect("tick entered");
+            signal.notify_one();
+            let now = Utc::now();
+            let (reply, _received) = tokio::sync::oneshot::channel();
+            commands_tx
+                .send(OperatorCommand::Response {
+                    interaction: OperatorInteraction {
+                        request_id: "request".into(),
+                        run_id: "run".into(),
+                        issue_id: "issue".into(),
+                        issue_identifier: "COE-612".into(),
+                        session_id: "session".into(),
+                        generation: 1,
+                        rpc_id: "0".into(),
+                        kind: OperatorInteractionKind::Permission,
+                        title: "Permission".into(),
+                        options: Vec::new(),
+                        questions: Vec::new(),
+                        plan: None,
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(1),
+                    },
+                    answer: OperatorAnswer::Cancel,
+                    reply,
+                    delivery: crate::opensymphony_gateway::OperatorCommandFence::default(),
+                })
+                .await
+                .expect("queue operator command");
+            tick_release_tx.send(()).expect("release tick");
+        });
+        let selected_tick = async {
+            tick_entered_tx.send(()).expect("start tick");
+            tick_release_rx.await.expect("tick release");
+        };
+        selected_tick.await;
+        queued_wakes.await.expect("queued wakes");
+
+        let first = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        let second = next_run_wake(
+            &mut shutdown_task,
+            &mut server_task,
+            &mut commands_rx,
+            &operator_notify,
+            &mut ticker,
+        )
+        .await;
+        assert!(matches!(
+            &first,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert!(matches!(
+            &second,
+            RunWake::OperatorCommand(_) | RunWake::OperatorUpdate
+        ));
+        assert_ne!(
+            matches!(&first, RunWake::OperatorCommand(_)),
+            matches!(&second, RunWake::OperatorCommand(_)),
+            "both queued event types remain available after the tick"
+        );
+        server_task.abort();
+        shutdown_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_queued_during_tick_wakes_after_tick_completes() {
+        let mut ticker = interval(Duration::from_secs(300));
+        let (_commands_tx, mut commands_rx) = tokio::sync::mpsc::channel(1);
+        let operator_notify = tokio::sync::Notify::new();
+        let mut server_task = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut shutdown_task = tokio::spawn(async move {
+            shutdown_rx.await.map_err(io::Error::other)?;
+            Ok(())
+        });
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::TrackerTick
+        ));
+
+        // Model a long scheduler mutation: the signal listener must remain
+        // armed while the selected tick is in progress.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let queue_shutdown = tokio::spawn(async move {
+            shutdown_tx.send(()).expect("queue shutdown");
+            release_tx.send(()).expect("release tick");
+        });
+        release_rx.await.expect("tick completed");
+        queue_shutdown.await.expect("queued signal");
+        assert!(matches!(
+            next_run_wake(
+                &mut shutdown_task,
+                &mut server_task,
+                &mut commands_rx,
+                &operator_notify,
+                &mut ticker,
+            )
+            .await,
+            RunWake::Shutdown
+        ));
+        server_task.abort();
+    }
+
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn ephemeral_memory_bind_reuses_its_persisted_port_after_restart() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let configured: SocketAddr = "127.0.0.1:0".parse().expect("configured bind");
+        let selected: SocketAddr = "127.0.0.1:48123".parse().expect("selected bind");
+
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("initial bind"),
+            configured
+        );
+        persist_runtime_memory_server_bind(root.path(), configured, selected)
+            .expect("persist selected bind");
+        assert_eq!(
+            resolve_runtime_memory_server_bind(root.path(), configured).expect("recovered bind"),
+            selected
+        );
+        assert!(
+            resolve_runtime_memory_server_bind(
+                root.path(),
+                "0.0.0.0:0".parse().expect("changed interface")
+            )
+            .is_err(),
+            "a changed interface must not silently rotate a bound parent endpoint"
+        );
+    }
+
+    #[test]
+    fn gateway_replan_outcome_records_completed_or_rejected_result() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "action_id": "replan-action",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+
+        let completed = gateway_replan_outcome_event(&dispatch, Ok(true));
+        assert!(matches!(
+            completed.kind,
+            EventKind::GatewayActionCompleted { ref action } if action == "replan"
+        ));
+        assert_eq!(
+            completed.payload.as_ref().expect("completion payload")["status"],
+            "completed"
+        );
+
+        let rejected = gateway_replan_outcome_event(&dispatch, Ok(false));
+        assert!(matches!(
+            rejected.kind,
+            EventKind::GatewayActionFailed { ref action, .. } if action == "replan"
+        ));
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["status"],
+            "rejected"
+        );
+        assert_eq!(
+            rejected.payload.as_ref().expect("rejection payload")["reason"],
+            "target is not blocked by HierarchyChanged"
+        );
+
+        let fenced = gateway_replan_outcome_event(
+            &dispatch,
+            Err("cannot replan hierarchy parent COE-552 while execution is running".to_owned()),
+        );
+        assert!(matches!(
+            fenced.kind,
+            EventKind::GatewayActionFailed { ref action, ref reason }
+                if action == "replan"
+                    && reason == "cannot replan hierarchy parent COE-552 while execution is running"
+        ));
+        assert_eq!(
+            fenced.payload.as_ref().expect("fenced payload")["reason"],
+            "cannot replan hierarchy parent COE-552 while execution is running"
+        );
+    }
+
+    #[test]
+    fn gateway_replan_request_requires_the_displayed_hierarchy_generation() {
+        let dispatch = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+                "payload": { "hierarchy_generation": 7 },
+            }))
+            .build();
+
+        assert_eq!(gateway_replan_request(&dispatch), Some(("COE-552", 7)));
+
+        let missing_generation = EventRecord::builder()
+            .correlation_id("replan-correlation")
+            .kind(EventKind::GatewayActionDispatched {
+                action: "replan".to_owned(),
+            })
+            .payload(serde_json::json!({
+                "status": "accepted",
+                "target_entity": { "id": "COE-552" },
+            }))
+            .build();
+        assert_eq!(gateway_replan_request(&missing_generation), None);
     }
 
     #[test]
@@ -1879,6 +2653,7 @@ mod tests {
             state_root: Some(state.clone()),
             memory_catalog_root: Some(memory),
             memory_sources: BTreeMap::new(),
+            integration_instructions: None,
             project_set_id: None,
             retain_failed: true,
             preserve_terminal_workspaces: true,
@@ -2185,6 +2960,30 @@ mod tests {
 
         let retry_candidates = auto_capture_candidates(&current, &mut completed, true);
         assert_eq!(retry_candidates, vec!["COE-2".to_string()]);
+    }
+
+    #[test]
+    fn startup_terminal_issues_retry_capture_after_daemon_restart() {
+        let terminal = issue_set(&["COE-1", "COE-2"]);
+        assert!(
+            initial_auto_capture_completed_issues(&terminal, &BTreeSet::new(), true).is_empty()
+        );
+        assert_eq!(
+            initial_auto_capture_completed_issues(&terminal, &BTreeSet::new(), false),
+            terminal
+        );
+    }
+
+    #[test]
+    fn startup_preserves_durable_completed_parent_capture_markers() {
+        let terminal = issue_set(&["COE-PARENT", "COE-LEAF"]);
+        let recovered = issue_set(&["COE-PARENT"]);
+
+        let mut completed = initial_auto_capture_completed_issues(&terminal, &recovered, true);
+        assert_eq!(
+            auto_capture_candidates(&terminal, &mut completed, true),
+            vec!["COE-LEAF".to_owned()]
+        );
     }
 
     #[test]

@@ -243,11 +243,14 @@ describe("run detail fixture", () => {
   });
 
   test("run_detail has expected fields", () => {
-    const data = loadFixture("run_detail.json") as Record<string, unknown>;
+    const data = loadFixture("run_detail.json") as Record<string, any>;
     expect(data.status).toBe("running");
     expect(data.issue_identifier).toBe("COE-390");
     expect(data.turn_count).toBe(3);
     expect(data.max_turns).toBe(8);
+    expect(data.operator.repository.display_alias).toBe("backend");
+    expect(data.operator.containment.effective_containment).toBe("trusted_host");
+    expect(JSON.stringify(data)).not.toContain("remote_url");
   });
 });
 

@@ -1,0 +1,5 @@
+query ProjectByName($name: String!) {
+  projects(filter: { name: { eq: $name } }, first: 2) {
+    nodes { id name slugId }
+  }
+}

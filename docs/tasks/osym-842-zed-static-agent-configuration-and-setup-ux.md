@@ -1,67 +1,64 @@
 ---
 id: OSYM-842
-title: Zed Static Agent Configuration And Setup UX
-milestone: "M13: ACP Debugging And IDE Attach"
+title: Multi-Harness IDE Setup And Capability Guidance
+milestone: 'M13: ACP Debugging And IDE Attach'
 priority: 3
 estimate: 3
-blockedBy: ["OSYM-841"]
-blocks: ["OSYM-843", "OSYM-844"]
+blockedBy:
+- OSYM-841
+blocks:
+- OSYM-843
 areas:
-  - debugging
-  - docs
-  - acp
+- debugging
+- docs
+- acp
 parent: null
 ---
 
 ## Summary
 
-Document and surface the one-time Zed external-agent configuration needed to start OpenSymphony Debug through ACP.
+Provide one static Zed integration and harness-aware setup guidance that works across supported ACP profiles without per-vendor editor configuration.
 
 ## Scope
 
 ### In scope
 
-- Document the static Zed `agent_servers.opensymphony-debug` configuration.
-- Add CLI or app guidance for missing configuration and invalid workspace shape.
-- Provide copyable setup text without writing per-issue Zed configuration.
-- Include troubleshooting for missing manifests, invalid cwd, and existing OpenHands server store mismatch.
+- Document the static opensymphony debug --acp-stdio command and exact issue-workspace selection; verify current Zed agent_servers syntax.
+- Explain the attached harness/profile/session, negotiated capabilities, observe/control state, approval destination and host-bound execution facilities.
+- Provide recovery guidance for missing editor/owner/manifests, invalid cwd/binding, unsupported extensions/restoration, nonpersistent lost sessions and OpenHands store mismatch.
+- Document the ACP client contract for other IDEs while qualifying actual editor support only with evidence.
 
 ### Out of scope
 
-- Automatically starting a Zed agent thread from the CLI.
-- Writing per-conversation Zed `agent_servers` entries.
+- Per-issue agent_servers entries and undocumented editor auto-start APIs.
 
 ## Deliverables
 
-- Zed setup documentation.
-- Operator-facing setup and recovery messages.
-- Tests for guidance text where CLI output is covered.
+- Copyable static Zed setup and multi-harness capability/troubleshooting guide.
 
 ## Acceptance Criteria
 
-- [ ] A single static Zed external-agent config can start `opensymphony debug --acp-stdio`.
-- [ ] Documentation shows how to open an issue workspace and start the OpenSymphony Debug agent.
-- [ ] Error guidance tells users to open the exact issue workspace root.
-- [ ] No per-issue Zed agent configuration is created.
+- [ ] One configuration attaches to issues from two ACP profiles with no provider-specific setup changes.
+- [ ] Guidance accurately distinguishes live attach, restored context and transcript inspection, including required host availability.
+- [ ] Users can identify who owns control and where to answer a pending request; unsupported IDE extensions have a concrete fallback/error.
+- [ ] Examples use the exact issue workspace and expose no secret environment values.
 
 ## Test Plan
 
-- Run docs link checks or markdown lint if available.
-- Run CLI output tests for setup and failure guidance where implemented.
-- Manually verify the documented Zed JSON snippet is syntactically valid.
+- Validate the JSON settings example and perform a real Zed setup smoke check.
+- Run relevant CLI guidance tests and docs link checks.
 
 ## Context
 
-- Builds on OSYM-841.
-- Read `docs/specs/opensymphony-acp-debugging-spec.md` Zed integration and desired UX sections.
-- The expected static command is `opensymphony debug --acp-stdio`.
+- docs/specs/opensymphony-acp-debugging-spec.md: IDE setup; docs/operations.md.
+- OSYM-841 capability/errors contract; current official Zed external-agent documentation.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [ ] Linked specifications and repository contracts have been read.
+- [ ] Required dependencies are merged and their evidence is available.
+- [ ] The implementation can begin using this task and its referenced sources.
 
 ## Notes
 
-At MVP scope, the operator starts the external agent from Zed.
+Zed is the initial qualified editor. The server protocol remains usable by other compliant clients with supported capabilities.
