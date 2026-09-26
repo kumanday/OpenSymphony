@@ -115,6 +115,13 @@ from the stopped worker checkout, and then moves the child to `Done`. This
 leaves the retained checkout clean for parent workspace preparation. Production
 review profiles retain their configured provider policy.
 
+The fixture keeps separate stable seed checkouts as memory sources while the
+execution path uses verified per-issue clones. Before marking a child `Done`,
+the controller advances its seed to the merged `develop` commit so terminal
+memory capture has the current repository source. Parent subtree cleanup waits
+through two terminal refresh windows, then requires no managed workspace or
+parent pin to remain. The active process lock is checked during final teardown.
+
 The active project set in that generated config contains only the disposable
 Linear project and the three disposable repositories. The release evidence must
 record its exact config hash before `opensymphony run` starts. Production project

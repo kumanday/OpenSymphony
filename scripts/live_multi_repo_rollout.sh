@@ -613,6 +613,7 @@ for index in 0 1 2; do
       locator: ${repository}
       clone: https://github.com/${repository}.git
     target_branch: develop
+    checkout_path: "${RESOURCE_DIR}/seeds/${alias[index]}"
     credential: github-clone
     review_profile: github-review
     instructions:
@@ -948,13 +949,18 @@ managed_workspaces_remaining() {
   [[ -d "${root}" ]] || return 0
   find "${root}" -mindepth 1 -maxdepth 1 \
     ! -name '.opensymphony-orchestrator-state.json' \
+    ! -name '.opensymphony-instance.lock' \
     ! \( -name '.opensymphony-staging' -type d \) \
+    ! \( -name '.opensymphony-parent-pins' -type d \) \
     ! \( -name parents -type d \) -print || printf 'scan-error:%s\n' "${root}"
   if [[ -L "${root}/.opensymphony-orchestrator-state.json" ]]; then
     printf '%s\n' "${root}/.opensymphony-orchestrator-state.json"
   fi
   if [[ -d "${root}/.opensymphony-staging" && ! -L "${root}/.opensymphony-staging" ]]; then
     find "${root}/.opensymphony-staging" -mindepth 1 -print || printf 'scan-error:%s\n' "${root}/.opensymphony-staging"
+  fi
+  if [[ -d "${root}/.opensymphony-parent-pins" && ! -L "${root}/.opensymphony-parent-pins" ]]; then
+    find "${root}/.opensymphony-parent-pins" -mindepth 1 -print || printf 'scan-error:%s\n' "${root}/.opensymphony-parent-pins"
   fi
   if [[ -d "${root}/parents" && ! -L "${root}/parents" ]]; then
     find "${root}/parents" -mindepth 1 -maxdepth 1 ! -type d -print || printf 'scan-error:%s\n' "${root}/parents"
@@ -1020,6 +1026,8 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       jq -e '.merged == true' >/dev/null
     gh api -X DELETE "repos/${repository}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
     retire_published_child_edit "${index}" "${repository}"
+    git -C "${RESOURCE_DIR}/seeds/${alias[index]}" fetch origin develop >/dev/null
+    git -C "${RESOURCE_DIR}/seeds/${alias[index]}" reset --hard FETCH_HEAD >/dev/null
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"
     CHILD_MERGED[index]=1
   done
@@ -1051,7 +1059,9 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
   fi
 
   if (( PARENT_MERGED == 1 )); then
-    for _ in $(seq 1 120); do
+    # Subtree cleanup follows the terminal refresh cadence. Allow two full
+    # five-minute windows while retaining the overall scenario deadline.
+    for _ in $(seq 1 600); do
       if (( SECONDS - START_SECONDS >= MAX_SECONDS )); then break; fi
       if [[ -z "$(managed_workspaces_remaining)" ]]; then
         break
