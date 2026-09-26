@@ -79,7 +79,7 @@ OPENSYMPHONY_LIVE_MODEL=<bounded-model> \
 ```
 
 The script creates uniquely named private repositories, a uniquely named Linear
-project and hierarchy, isolated state/workspace/catalog roots, and a unique
+project and hierarchy, isolated state/workspace roots, and a unique
 loopback port. It preflights the team's `Todo`, `Human Review`, `Rework`, and
 `Done` states before provisioning and starts the overall deadline before the
 first remote write. It caps task count, retry count, and model turns. The
@@ -92,9 +92,10 @@ exercise failed-check rework, not an automated PR-review webhook. Review of this
 repository's PR follows the configured OpenHands or Codex integration; the fixture
 does not require a separate reviewer account. Each child calls its checked-in
 completion helper as its last action to verify the edit and move its own issue
-to `Human Review` before a scheduler continuation can replace the completed
-run receipt. The rollout controller then publishes child edits from a fresh
-controller-owned checkout using its GitHub credential;
+to `Human Review`. The rollout controller waits for the orchestrator's
+control-plane snapshot to report a completed outcome in `Human Review`, then
+publishes child edits from a fresh controller-owned checkout using its GitHub
+credential;
 the worker never receives the checkout credential. Resource names are recorded
 before creation and reconciled during teardown if a provider response is lost.
 The script tears down processes,

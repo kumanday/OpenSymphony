@@ -55,7 +55,7 @@ if [[ ! "${MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${CLEANUP_MAX_SECONDS}" =~ ^[1-9
   exit 1
 fi
 
-for command in cargo codex git gh jq lsof python3 shasum; do
+for command in cargo codex curl git gh jq lsof python3 shasum; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "Missing required command: ${command}" >&2
     exit 1
@@ -790,6 +790,16 @@ pr_by_branch() {
          state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}'
 }
 
+child_completed_for_review() {
+  local identifier="$1"
+  deadline_command curl --silent --show-error --fail --max-time 5 \
+    "http://127.0.0.1:${PORT}/api/v1/snapshot" |
+    jq -e --arg identifier "${identifier}" '
+      .snapshot.issues | any(.[];
+        .identifier == $identifier and .tracker_state == "Human Review" and
+        .runtime_state == "completed" and .last_outcome == "completed")' >/dev/null
+}
+
 publish_child_if_ready() {
   local index="$1"
   local alias=(alpha beta gamma)
@@ -803,8 +813,7 @@ publish_child_if_ready() {
     checkout="${candidate}"
   done
   [[ -n "${checkout}" ]] || return 0
-  jq -e --arg id "${CHILD_IDS[index]}" '.issue_id == $id and .status == "succeeded"' \
-    "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
+  child_completed_for_review "${CHILD_IDENTIFIERS[index]}" || return 0
   [[ -f "${checkout}/delivery.txt" && ! -L "${checkout}/delivery.txt" ]] || return 0
   [[ "$(cat "${checkout}/delivery.txt")" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
   if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
