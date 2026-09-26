@@ -4829,6 +4829,8 @@ impl WorkspaceManager {
                 })?;
             self.release_parent_child_checkout_pins(workspace, &request.generation)
                 .await?;
+            self.release_checkout_staging_intent(workspace, &request.generation)
+                .await?;
             if tombstone.deleted_at.is_none() {
                 tombstone.deleted_at = Some(Utc::now());
                 self.write_cleanup_tombstone(workspace, &tombstone).await?;
@@ -4865,6 +4867,8 @@ impl WorkspaceManager {
                 }
             }
             self.release_parent_child_checkout_pins(workspace, &request.generation)
+                .await?;
+            self.release_checkout_staging_intent(workspace, &request.generation)
                 .await?;
             tombstone.deleted_at = Some(Utc::now());
             self.write_cleanup_tombstone(workspace, &tombstone).await?;
@@ -4943,6 +4947,8 @@ impl WorkspaceManager {
             }
         }
         self.release_parent_child_checkout_pins(workspace, &tombstone.generation)
+            .await?;
+        self.release_checkout_staging_intent(workspace, &tombstone.generation)
             .await?;
         tombstone.deleted_at = Some(Utc::now());
         self.write_cleanup_tombstone(workspace, &tombstone).await?;
@@ -6019,6 +6025,65 @@ impl WorkspaceManager {
                 });
             }
         }
+        Ok(())
+    }
+
+    async fn release_checkout_staging_intent(
+        &self,
+        workspace: &WorkspaceHandle,
+        generation: &str,
+    ) -> Result<(), WorkspaceError> {
+        let Some(checkout_generation) = workspace.checkout_generation() else {
+            return Ok(());
+        };
+        if checkout_generation != generation {
+            return Err(WorkspaceError::CleanupGenerationMismatch {
+                path: workspace.workspace_path().to_path_buf(),
+                expected: checkout_generation.to_owned(),
+                actual: generation.to_owned(),
+            });
+        }
+        let root = self.canonicalize_path(&self.config.root).await?;
+        let relative = PathBuf::from(".opensymphony-staging").join(format!(
+            "{}--{generation}.intent.json",
+            workspace.workspace_key()
+        ));
+        let marker_path = resolve_path_within_root(&root, &relative)?;
+        self.reject_symlinked_path_components(&root, &relative)
+            .await?;
+        match fs::symlink_metadata(&marker_path).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManagedFile {
+                    path: marker_path,
+                    source,
+                });
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(checkout_verification(
+                    &marker_path,
+                    "checkout staging intent is not a regular file",
+                ));
+            }
+            Ok(_) => {}
+        }
+        let staging_root = root.join(".opensymphony-staging");
+        let canonical_staging_root = self.canonicalize_path(&staging_root).await?;
+        if !self
+            .staging_intent_is_orphaned(&canonical_staging_root, &marker_path)
+            .await?
+        {
+            return Err(checkout_verification(
+                &marker_path,
+                "checkout staging intent does not match the deleted generation",
+            ));
+        }
+        fs::remove_file(&marker_path)
+            .await
+            .map_err(|source| WorkspaceError::RemoveWorkspace {
+                path: marker_path,
+                source,
+            })?;
         Ok(())
     }
 

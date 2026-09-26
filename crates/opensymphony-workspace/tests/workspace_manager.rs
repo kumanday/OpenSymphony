@@ -2373,6 +2373,43 @@ async fn verified_checkout_is_atomic_repository_local_and_quarantines_drift() {
         std::fs::canonicalize(hooked.handle.workspace_path()).expect("checkout should exist")
     );
 
+    let generation = hooked
+        .handle
+        .checkout_generation()
+        .expect("verified checkout should have a generation")
+        .to_owned();
+    let staging_intent = hook_manager
+        .config()
+        .root
+        .join(".opensymphony-staging")
+        .join(format!(
+            "{}--{generation}.intent.json",
+            hooked.handle.workspace_key()
+        ));
+    assert!(
+        staging_intent.is_file(),
+        "published checkout retains its recovery intent"
+    );
+    let cleanup = CleanupRequest {
+        generation,
+        outcome: CleanupTerminalOutcome::Succeeded,
+        remove: true,
+    };
+    hook_manager
+        .cleanup_with_request(
+            &hooked.handle,
+            IssueLifecycleState::Terminal,
+            cleanup.clone(),
+        )
+        .await
+        .expect("terminal cleanup should release the checkout and its staging intent");
+    assert!(!hooked.handle.workspace_path().exists());
+    assert!(!staging_intent.exists());
+    hook_manager
+        .cleanup_with_request(&hooked.handle, IssueLifecycleState::Terminal, cleanup)
+        .await
+        .expect("terminal cleanup should stay idempotent after staging-intent release");
+
     assert!(!clean_retry.handle.workspace_path().exists());
     assert!(
         temp_dir

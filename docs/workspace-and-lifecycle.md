@@ -74,7 +74,10 @@ an atomic rename. Existing generations are reused only after the same checks;
 remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
 than reset in place. Startup cleanup also requires the matching durable
 staging-intent marker created before a clone; unrelated files and directories
-under `.opensymphony-staging` are preserved.
+under `.opensymphony-staging` are preserved. Terminal deletion releases the
+matching checkout staging intent after removing the published generation and
+before completing its cleanup tombstone. A failed release remains retryable
+through that tombstone, including after the checkout path is gone.
 
 The checkout manifest records the generation, binding, target commit,
 instruction path/hash/source commit, scheduler-policy generation, resolved
