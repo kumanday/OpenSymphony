@@ -627,7 +627,7 @@ review_profiles:
   github-review:
     provider: github
     credential: github-review-token
-    required_checks: true
+    required_checks: false
     required_review: false
     merge_method: merge
 workspace:
@@ -860,7 +860,7 @@ checks_are_green() {
   local sha
   sha="$(gh api "repos/${repository}/pulls/${number}" --jq .head.sha)"
   gh api "repos/${repository}/commits/${sha}/check-runs?per_page=100" | jq -r '
-    (.check_runs | length) > 0 and all(.check_runs[];
+    .total_count == (.check_runs | length) and (.check_runs | length) > 0 and all(.check_runs[];
       .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))'
 }
 
@@ -982,7 +982,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     if [[ "$(checks_are_green "${repository}" "${pr_number}")" != "true" ]]; then
       continue
     fi
-    gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=merge |
+    gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=merge -f sha="${pr_sha}" |
       jq -e '.merged == true' >/dev/null
     gh api -X DELETE "repos/${repository}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"

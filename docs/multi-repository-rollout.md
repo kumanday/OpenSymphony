@@ -105,6 +105,13 @@ down processes, branches, pull requests, issues, project, repositories, port
 ownership, credential copies, and local roots, then writes a teardown inventory.
 A missing cleanup receipt fails the gate.
 
+The disposable private repositories have no branch protection. Their GitHub
+plan returns 403 for the required-status-checks protection endpoint, so the
+generated review profile leaves `required_checks` disabled. The rollout
+controller instead verifies that every check run on each exact child PR head is
+green before merging and moving the child to `Done`. Production review profiles
+retain their configured provider policy.
+
 The active project set in that generated config contains only the disposable
 Linear project and the three disposable repositories. The release evidence must
 record its exact config hash before `opensymphony run` starts. Production project
