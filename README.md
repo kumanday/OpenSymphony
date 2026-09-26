@@ -17,7 +17,7 @@ OpenSymphony automates software development workflows by:
 ### Key Features
 
 - **Hierarchy-aware scheduling**: Parent issues wait for sub-issues to complete
-- **Multi-repository projects**: Each child names one repository; a repository-neutral parent checks the merged result
+- **Multi-repository projects**: Each terminal child names one repository; repository-neutral parents check merged results
 - **Live runtime updates**: OpenHands uses WebSocket with REST reconciliation; Codex and ACP use local stdio
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: The scheduler polls Linear; agent-side writes use checked-in helper/query assets

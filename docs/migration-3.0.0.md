@@ -16,7 +16,7 @@ workflow can continue with `legacy_single` routing and its current harness.
    ```bash
    opensymphony migrate preflight --repo /path/to/target-repo
    opensymphony migrate apply --repo /path/to/target-repo \
-     --config /absolute/path/to/config.yaml
+     --output /absolute/path/to/config.yaml
    ```
 
    The generated central config starts with the compatible single-repository
