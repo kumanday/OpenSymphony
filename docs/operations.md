@@ -1,5 +1,10 @@
 # Operations
 
+For first-time multi-repository setup, use the
+[multi-repository guide](multi-repository.md). For a local ACP agent, use the
+[ACP harness guide](acp.md). This page covers the detailed commands and
+failure handling after the route is configured.
+
 This document covers the current local operator workflow for OpenSymphony.
 
 Run detail and TUI projections expose sanitized repository, target commit,

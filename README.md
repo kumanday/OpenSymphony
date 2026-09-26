@@ -1,6 +1,6 @@
 # OpenSymphony
 
-OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and can run issues through either the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server or the local Codex app-server harness.
+OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and runs issues through the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server, the local Codex app-server, or a local ACP v1 agent.
 
 ![OpenSymphony desktop task graph showing Completed, Current, and Backlog panes with selected-task critical path](docs/images/os-tg-ancestry-critical-path.png)
 
@@ -17,17 +17,23 @@ OpenSymphony automates software development workflows by:
 ### Key Features
 
 - **Hierarchy-aware scheduling**: Parent issues wait for sub-issues to complete
+- **Multi-repository projects**: Each child names one repository; a repository-neutral parent checks the merged result
 - **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
 - **Dependency-aware Task Graph**: Shows dispatchable work, roadmap backlog, and selected-task critical paths
-- **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
+- **Harness selection**: OpenHands, local Codex app-server, or a configured ACP v1 stdio agent
 - **Code Graph**: Tree-sitter-backed symbols, diagnostics, and source-cited structural context for agents
 - **Operational Knowledge Graph**: Builds agent-queriable and human-navigable memory from completed work
 
 OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
 rewrite. See [Migration Guide](docs/migration-1.0.0.md) if you are upgrading an
 older setup.
+
+Version 3.0.0 adds explicit multi-repository project routing and production
+ACP worker profiles. Existing single-repository workflows remain available.
+See the [3.0 upgrade guide](docs/migration-3.0.0.md) before selecting a new
+routing mode or harness.
 
 Packaging note: crates.io exposes a single public package, `opensymphony`.
 Internally, the repo still keeps clear subsystem boundaries under
@@ -216,6 +222,15 @@ cd /path/to/target-repo
 opensymphony run
 ```
 
+For a central configuration in another location, pass
+`--config /absolute/path/to/config.yaml` to `opensymphony run`.
+The default single-repository workflow needs no multi-repository labels.
+For a project spanning several repositories, follow the
+[multi-repository guide](docs/multi-repository.md). To run a local ACP agent,
+follow the [ACP harness guide](docs/acp.md). Repository routing and harness
+selection are independent: an ACP profile can run a child bound to one
+repository in a multi-repository project.
+
 For real-time monitoring while the orchestrator is running, run the TUI in a separate terminal window:
 ```bash
 opensymphony tui
@@ -335,10 +350,11 @@ flowchart TB
         orchestrator["Orchestrator Scheduler"]
         workspace["Workspace Manager"]
         control["Gateway + Control API<br/>GET /healthz, /api/v1/snapshot, /api/v1/capabilities"]
-        runtime["Harness Runtime Client<br/>OpenHands REST/WebSocket or Codex stdio"]
+        runtime["Harness Runtime Client"]
         linear_read["Linear Read Adapter"]
+        routing["Repository binding and parent integration"]
 
-        orchestrator --> workspace
+        orchestrator --> routing --> workspace
         orchestrator --> runtime
         orchestrator --> linear_read
         orchestrator --> control
@@ -357,13 +373,19 @@ flowchart TB
     linear["Linear"]
     openhands["OpenHands Agent-Server"]
     codex["Codex App-Server"]
+    acp["Local ACP v1 agent"]
+    config["Central project set and harness profiles"]
 
     operator --> control
+    config --> routing
+    config --> runtime
     workspace --> issue_ws
     runtime --> openhands
     runtime --> codex
+    runtime --> acp
     openhands --> agent
     codex --> agent
+    acp --> agent
     linear_read -->|read issues| linear
     graphql -->|agent-side writes| linear
 ```
@@ -517,11 +539,14 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 - [Architecture](docs/architecture.md) - High-level design and component interactions
 - [Configuration](docs/configuration.md) - Target repo bootstrap and runtime config
+- [Multi-repository projects](docs/multi-repository.md) - Repository labels, parent integration, and rollout
+- [ACP harness](docs/acp.md) - Local agent profiles, operator requests, and recovery
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
 - [Installer and Distribution Strategy](docs/installer-and-distribution.md) - Future signed installer shape and DuckDB packaging boundaries
 - [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
 - [Testing](docs/testing-and-operations.md) - Test strategy and validation layers
 - [Migration Guide](docs/migration-1.0.0.md) - Breaking changes and upgrade steps for 1.0.0
+- [3.0 upgrade guide](docs/migration-3.0.0.md) - Moving from single-repository workflows and selecting ACP
 - [AGENTS.md](AGENTS.md) - Repository guidelines for coding agents
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development details
 

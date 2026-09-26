@@ -3,6 +3,11 @@
 This document covers target-repo bootstrap, generated files, and the runtime
 configuration that `opensymphony run` expects.
 
+For a first multi-repository setup, read [multi-repository projects](multi-repository.md)
+before the field reference below. For a local ACP agent, start with the
+[ACP harness guide](acp.md). Repository routing and harness selection are
+independent choices in the same selected config.
+
 Operator projections expose project and repository identity through safe
 aliases, canonical IDs, and safe remote fingerprints. Credential-bearing
 remote URLs and raw credential values are excluded.
