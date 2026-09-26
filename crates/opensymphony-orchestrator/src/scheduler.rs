@@ -121,6 +121,13 @@ fn full_detail_refresh_interval_ms(state: &DurableOrchestratorState) -> u64 {
     // Summary discovery cannot admit a parent: it has no complete child-edge
     // set. Once every required child is terminal, obtain that full snapshot on
     // the terminal cadence instead of leaving fan-in behind the hourly scan.
+    // A parent retry also needs a full snapshot to refresh its verified targets.
+    let parent_waiting_for_refresh = state.parent_integrations.values().any(|controller| {
+        matches!(
+            controller.state,
+            super::ParentIntegrationState::RefreshingRepositories
+        )
+    });
     let parent_ready_for_fan_in = state.hierarchy.iter().any(|(parent_id, snapshot)| {
         state
             .parent_integrations
@@ -141,7 +148,7 @@ fn full_detail_refresh_interval_ms(state: &DurableOrchestratorState) -> u64 {
                 .filter(|edge| edge.required)
                 .all(|edge| state.terminal_orchestrator_issues.contains(&edge.child_id))
     });
-    if parent_ready_for_fan_in {
+    if parent_ready_for_fan_in || parent_waiting_for_refresh {
         TERMINAL_REFRESH_INTERVAL_MS
     } else {
         FULL_DETAIL_REFRESH_INTERVAL_MS
@@ -10377,7 +10384,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_child_hierarchy_shortens_full_refresh_only_until_parent_dispatch() {
+    fn parent_fan_in_and_refresh_states_shorten_full_detail_cadence() {
         let mut parent = tracker_issue_from_normalized(&issue_with_project(None, None));
         let parent_id = IssueId::new(parent.id.clone()).expect("parent id");
         let child_ids = [
@@ -10432,6 +10439,17 @@ mod tests {
             full_detail_refresh_interval_ms(&state),
             FULL_DETAIL_REFRESH_INTERVAL_MS,
             "dispatched parents must not keep the fast full-refresh cadence"
+        );
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state =
+            crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories;
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            TERMINAL_REFRESH_INTERVAL_MS,
+            "parent retries need a fresh complete tracker snapshot"
         );
     }
 

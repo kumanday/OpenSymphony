@@ -821,6 +821,9 @@ continuation. A repair request is accepted only when its receipt selects
 a completed command observed by the harness before the attempt deadline. Repair
 implementation retries stop at the configured scheduler limit, and provider
 rate-limit responses defer all repair lookups until their retry delay expires.
+While a parent is refreshing repositories, the scheduler requests complete
+tracker details on the terminal refresh cadence so a failed verification can
+retry without waiting for the hourly background scan.
 After a provider merge, refresh fetches the configured target, proves the
 recorded merge-result commit and every retained child merge result are
 reachable, and refreshes complete instruction provenance before final
