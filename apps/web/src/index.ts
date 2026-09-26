@@ -87,6 +87,10 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.runApprovals(runId);
   }
 
+  runInputs(runId: string): ReturnType<GatewayTransport["runInputs"]> {
+    return this.inner.runInputs(runId);
+  }
+
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
     return this.inner.runValidation(runId);
   }
@@ -111,20 +115,28 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.dispatchAction(action);
   }
 
-  cancelRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.cancelRun(runId);
+  cancelRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.cancelRun(runId, operationId);
   }
 
-  retryRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.retryRun(runId);
+  replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId?: string,
+  ): Promise<ActionReceipt> {
+    return this.inner.replanParent(parentId, hierarchyGeneration, operationId);
   }
 
-  resumeRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.resumeRun(runId);
+  retryRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.retryRun(runId, operationId);
   }
 
-  rehydrateRun(runId: string): Promise<ActionReceipt> {
-    return this.inner.rehydrateRun(runId);
+  resumeRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.resumeRun(runId, operationId);
+  }
+
+  rehydrateRun(runId: string, operationId?: string): Promise<ActionReceipt> {
+    return this.inner.rehydrateRun(runId, operationId);
   }
 
   commentRun(runId: string, text: string): Promise<ActionReceipt> {
@@ -139,8 +151,10 @@ class BrowserTransport implements BrowserTransportAdapter {
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: import("@opensymphony/gateway-schema").OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
-    return this.inner.approvalDecision(approvalId, decision, explanation);
+    return this.inner.approvalDecision(approvalId, decision, explanation, interaction, optionId);
   }
 
   openWorkspace(runId: string): Promise<ActionReceipt> {

@@ -63,7 +63,15 @@ pub(super) fn map_snapshot(
         issues: snapshot
             .issues
             .iter()
-            .map(|issue| map_issue(issue, terminal_states, generated_at))
+            .map(|issue| {
+                map_issue(
+                    issue,
+                    terminal_states,
+                    generated_at,
+                    snapshot.hierarchy.get(issue.issue.id.as_str()),
+                    &snapshot.operator_interactions,
+                )
+            })
             .collect(),
         recent_events: recent_events.iter().cloned().collect(),
     }
@@ -92,6 +100,8 @@ fn map_issue(
     issue: &crate::opensymphony_domain::IssueSnapshot,
     terminal_states: &HashSet<String>,
     generated_at: DateTime<Utc>,
+    hierarchy: Option<&crate::opensymphony_domain::HierarchyStateSnapshot>,
+    operator_interactions: &[crate::opensymphony_gateway_schema::approval::OperatorInteraction],
 ) -> IssueSnapshot {
     let runtime_state = match issue.runtime.state {
         SchedulerStatus::Running | SchedulerStatus::Claimed => IssueRuntimeState::Running,
@@ -110,7 +120,9 @@ fn map_issue(
                     Some(
                         WorkerOutcomeKind::Failed
                         | WorkerOutcomeKind::TimedOut
-                        | WorkerOutcomeKind::Stalled,
+                        | WorkerOutcomeKind::Stalled
+                        | WorkerOutcomeKind::Detached
+                        | WorkerOutcomeKind::CancelFailed,
                     ) => IssueRuntimeState::Failed,
                     _ if issue.runtime.release_reason
                         == Some(crate::opensymphony_domain::ReleaseReason::RetryExhausted) =>
@@ -173,8 +185,75 @@ fn map_issue(
     let repository_binding_blocked = repository_binding
         .as_ref()
         .is_some_and(|binding| binding.resolved_binding().is_none());
+    let hierarchy_blocked = hierarchy.and_then(|state| state.blocked_reason.clone());
+    let operator = Some(crate::opensymphony_domain::ControlPlaneOperatorSnapshot {
+        routing_mode: None,
+        active_project_set: Vec::new(),
+        linear_project: issue
+            .issue
+            .project_slug
+            .clone()
+            .or_else(|| issue.issue.project_id.clone()),
+        binding_status: repository_binding.as_ref().map(|binding| match binding {
+            crate::opensymphony_domain::RepositoryBindingOutcome::Resolved(_) => "resolved",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MissingBinding => "missing_binding",
+            crate::opensymphony_domain::RepositoryBindingOutcome::UnknownAlias(_) => "unknown_alias",
+            crate::opensymphony_domain::RepositoryBindingOutcome::MultipleBindings(_) => "multiple_bindings",
+            crate::opensymphony_domain::RepositoryBindingOutcome::RepositoryNotAllowedForProject(_, _) => "repository_not_allowed_for_project",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ParentBindingNotAllowed => "parent_binding_not_allowed",
+            crate::opensymphony_domain::RepositoryBindingOutcome::ProjectOutsideActiveSet(_) => "project_outside_active_set",
+        }.to_owned()),
+        parent: hierarchy.map(
+            |state| crate::opensymphony_domain::ControlPlaneParentSnapshot {
+                parent_id: issue.issue.identifier.to_string(),
+                state: None,
+                hierarchy_generation: Some(state.generation),
+                blocked_reason: hierarchy_blocked.clone(),
+                descendant_repositories: Vec::new(),
+                checkout_handles: Vec::new(),
+            },
+        ),
+        repository: repository_binding.as_ref().and_then(|binding| {
+            binding.resolved_binding().map(|binding| {
+                crate::opensymphony_domain::ControlPlaneRepositorySnapshot {
+                    canonical_id: binding.repository.id.as_str().to_owned(),
+                    display_alias: binding.alias.clone(),
+                    safe_remote_fingerprint: Some(
+                        binding
+                            .repository
+                            .safe_remote_fingerprint
+                            .as_str()
+                            .to_owned(),
+                    ),
+                    config_generation: Some(binding.config_generation.clone()),
+                    inventory_generation: Some(binding.inventory_generation.clone()),
+                    checkout_generation: None,
+                    target_branch: None,
+                    target_commit: None,
+                    instruction_source: None,
+                    instruction_hash: None,
+                }
+            })
+        }),
+        leases: Vec::new(),
+        repairs: Vec::new(),
+        memory: None,
+        containment: None,
+        provider: None,
+        verification: None,
+        cleanup: None,
+    });
 
     IssueSnapshot {
+        operator_interactions: operator_interactions
+            .iter()
+            .filter(|request| request.issue_id == issue.issue.id.as_str())
+            .cloned()
+            .collect(),
+        harness_capability: issue
+            .conversation
+            .as_ref()
+            .and_then(|c| c.harness_capability.as_deref().cloned()),
         identifier: issue.issue.identifier.to_string(),
         title: issue.issue.title.clone(),
         tracker_state: issue.issue.state.name.clone(),
@@ -253,6 +332,7 @@ fn map_issue(
         max_turns: worker.map(|worker| worker.max_turns).unwrap_or(0),
         runtime_seconds,
         blocked: repository_binding_blocked
+            || hierarchy_blocked.is_some()
             || issue.issue.blocked_by.iter().any(|blocker| {
                 blocker
                     .state
@@ -266,6 +346,8 @@ fn map_issue(
                     .iter()
                     .any(|sub_issue| !is_terminal_state(terminal_states, &sub_issue.state))),
         repository_binding,
+        hierarchy_generation: hierarchy.map(|state| state.generation),
+        hierarchy_blocked_reason: hierarchy_blocked,
         blocked_by: issue
             .issue
             .blocked_by
@@ -351,6 +433,7 @@ fn map_issue(
             Some(HarnessInterruptStatus::TimedOut)
         ),
         cancel_reason: interrupt.map(|interrupt| interrupt.command.reason.as_str().to_string()),
+        operator,
     }
 }
 
@@ -444,10 +527,15 @@ pub(super) fn current_agent_server_status(
     }
 
     AgentServerStatus {
-        reachable: true,
+        reachable: !base_url.is_empty(),
         base_url: base_url.to_string(),
         conversation_count: 0,
-        status_line: "reachable".to_string(),
+        status_line: if base_url.is_empty() {
+            "not_selected"
+        } else {
+            "reachable"
+        }
+        .to_string(),
     }
 }
 
@@ -571,7 +659,7 @@ tracker:
             )
             .collect();
 
-        let snapshot = OrchestratorSnapshot::new(
+        let mut snapshot = OrchestratorSnapshot::new(
             ts(2_000),
             DaemonSnapshot::new(
                 HealthStatus::Healthy,
@@ -595,6 +683,7 @@ tracker:
                     },
                     branch_name: None,
                     pr_url: None,
+                    pr_urls: Vec::new(),
                     url: None,
                     labels: Vec::new(),
                     project_id: Some("proj-open".to_owned()),
@@ -633,6 +722,7 @@ tracker:
                     last_seen_tracker_refresh_at: None,
                 }),
                 conversation: Some(ConversationMetadata {
+                    harness_capability: None,
                     conversation_id: must(ConversationId::new("conv_352")),
                     server_base_url: Some("http://127.0.0.1:3000".to_owned()),
                     transport_target: Some("loopback".to_owned()),
@@ -659,6 +749,13 @@ tracker:
                 last_worker_outcome: None,
                 recent_worker_outcomes: Vec::new(),
             }],
+        );
+        snapshot.hierarchy.insert(
+            "lin_352".to_owned(),
+            crate::opensymphony_domain::HierarchyStateSnapshot {
+                generation: 3,
+                blocked_reason: Some("HierarchyChanged".to_owned()),
+            },
         );
 
         let mapped = map_snapshot(
@@ -703,6 +800,12 @@ tracker:
             Some("OpenSymphony")
         );
         assert_eq!(mapped.issues[0].workspace_label.as_deref(), Some("COE-352"));
+        assert!(mapped.issues[0].blocked);
+        assert_eq!(mapped.issues[0].hierarchy_generation, Some(3));
+        assert_eq!(
+            mapped.issues[0].hierarchy_blocked_reason.as_deref(),
+            Some("HierarchyChanged")
+        );
     }
 
     #[test]
@@ -747,6 +850,7 @@ tracker:
                 },
                 branch_name: None,
                 pr_url: None,
+                pr_urls: Vec::new(),
                 url: None,
                 labels: Vec::new(),
                 project_id: None,
@@ -816,6 +920,7 @@ tracker:
 
     fn codex_conversation(thread_id: &str) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(ConversationId::new(thread_id.to_owned())),
             server_base_url: None,
             transport_target: Some("codex_app_server".to_owned()),
@@ -947,6 +1052,8 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            harness_stopped: false,
+            parent_verification: None,
         });
         let issue = map_single_issue(domain_issue);
         assert_eq!(
@@ -976,6 +1083,8 @@ tracker:
             turn_count: 1,
             summary: None,
             error: None,
+            harness_stopped: false,
+            parent_verification: None,
         });
 
         assert_eq!(map_single_issue(domain_issue).retry_count, 3);
@@ -1000,6 +1109,36 @@ tracker:
     }
 
     #[test]
+    fn detached_active_run_is_failed_while_its_cleanup_remains_fenced() {
+        let mut issue = released_issue_snapshot(
+            "In Progress",
+            IssueStateCategory::Active,
+            crate::opensymphony_domain::ReleaseReason::Completed,
+        );
+        issue.last_worker_outcome = Some(WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-acp-uncertain")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Detached,
+            started_at: ts(1_000),
+            finished_at: ts(1_400),
+            turn_count: 1,
+            summary: Some("ACP prompt outcome is uncertain".into()),
+            error: None,
+            harness_stopped: false,
+            parent_verification: None,
+        });
+        let issue = map_single_issue(issue);
+        assert_eq!(
+            issue.runtime_state,
+            crate::opensymphony_control::IssueRuntimeState::Failed
+        );
+        assert_eq!(
+            issue.last_outcome,
+            crate::opensymphony_control::WorkerOutcome::Failed
+        );
+    }
+
+    #[test]
     fn terminal_tracker_state_overrides_a_failed_worker_outcome() {
         let mut issue = released_issue_snapshot(
             "Done",
@@ -1015,6 +1154,8 @@ tracker:
             turn_count: 1,
             summary: None,
             error: Some("historical failure".to_owned()),
+            harness_stopped: false,
+            parent_verification: None,
         });
 
         assert_eq!(

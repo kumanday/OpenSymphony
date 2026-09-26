@@ -41,6 +41,8 @@ fn fixture() -> SnapshotEnvelope {
                 total_cost_micros: 250_000,
             },
             issues: vec![IssueSnapshot {
+                operator_interactions: Vec::new(),
+                harness_capability: None,
                 identifier: "COE-269".to_owned(),
                 title: "Control-plane API and snapshot store".to_owned(),
                 tracker_state: "In Progress".to_owned(),
@@ -65,6 +67,8 @@ fn fixture() -> SnapshotEnvelope {
                 max_turns: 0,
                 runtime_seconds: 0,
                 blocked: false,
+                hierarchy_generation: None,
+                hierarchy_blocked_reason: None,
                 repository_binding: None,
                 blocked_by: Vec::new(),
                 server_base_url: Some("https://agent.example.com/runtime".to_owned()),
@@ -84,6 +88,7 @@ fn fixture() -> SnapshotEnvelope {
                 cancel_timed_out: false,
                 cancel_reason: None,
                 detached: false,
+                operator: None,
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,
@@ -159,4 +164,48 @@ fn older_issue_snapshots_without_project_metadata_still_decode() {
     assert_eq!(issue.project_name, None);
     assert_eq!(issue.workspace_label, None);
     assert_eq!(issue.blocked_by, Vec::<String>::new());
+}
+
+#[test]
+fn operator_projection_round_trips_without_secret_or_path_fields() {
+    use crate::opensymphony_domain::{
+        ControlPlaneContainmentSnapshot, ControlPlaneOperatorSnapshot,
+        ControlPlaneRepositorySnapshot,
+    };
+
+    let projection = ControlPlaneOperatorSnapshot {
+        routing_mode: Some("project_set".to_owned()),
+        active_project_set: vec!["project-a".to_owned()],
+        linear_project: Some("project-a".to_owned()),
+        binding_status: Some("resolved".to_owned()),
+        parent: None,
+        repository: Some(ControlPlaneRepositorySnapshot {
+            canonical_id: "github:repository:123".to_owned(),
+            display_alias: "backend".to_owned(),
+            safe_remote_fingerprint: Some("sha256:fingerprint".to_owned()),
+            config_generation: Some("config-1".to_owned()),
+            inventory_generation: Some("inventory-1".to_owned()),
+            checkout_generation: None,
+            target_branch: Some("develop".to_owned()),
+            target_commit: Some("abc123".to_owned()),
+            instruction_source: Some("AGENTS.md".to_owned()),
+            instruction_hash: Some("sha256:instructions".to_owned()),
+        }),
+        leases: Vec::new(),
+        repairs: Vec::new(),
+        memory: None,
+        containment: Some(ControlPlaneContainmentSnapshot {
+            requested_scope: Some("trusted_host".to_owned()),
+            effective_containment: "trusted_host".to_owned(),
+        }),
+        provider: None,
+        verification: None,
+        cleanup: None,
+    };
+    let encoded = serde_json::to_value(&projection).expect("serialize operator projection");
+    assert!(encoded.get("workspace_path").is_none());
+    assert!(encoded.get("remote_url").is_none());
+    let decoded: ControlPlaneOperatorSnapshot =
+        serde_json::from_value(encoded).expect("deserialize operator projection");
+    assert_eq!(decoded, projection);
 }

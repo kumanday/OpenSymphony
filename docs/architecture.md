@@ -2,16 +2,38 @@
 
 ## 1. Objective
 
-Implement the Symphony orchestration model in Rust while using OpenHands as the
-execution substrate and FrankenTUI as an optional operator client.
+Implement the Symphony orchestration model in Rust. The scheduler can use the
+OpenHands agent-server, the local Codex app-server, or a configured local ACP
+v1 agent for execution. FrankenTUI is an optional operator client.
 
 The system must preserve these boundaries:
 
 - the orchestrator is the source of truth for scheduling state
 - the tracker is polled and reconciled by the orchestrator
-- each issue executes in its own workspace
+- each repository-bound work issue executes in its own checkout
+- a multi-repository parent uses a separate integration workspace after its
+  children merge
 - `WORKFLOW.md` remains the repo-owned policy and prompt contract
 - UI is optional and must not affect correctness
+
+The control-plane issue snapshot may carry an optional sanitized operator
+projection for repository, parent, lease, repair, memory, containment,
+provider, verification, and cleanup facts. Missing facts remain unknown. No
+client infers completion, permission, or workspace confinement from absence.
+An ACP run may also publish ephemeral, bound operator interactions. The
+orchestrator actor owns pending decisions; gateway clients submit a response
+command, and the active ACP worker returns it to the original RPC responder.
+The actor validates and reserves a decision, then waits for the ACP input-sink
+flush in an owned task. A completion message returns to the actor to settle the
+pending decision and gateway receipt; other issues, callbacks, ticks, and
+shutdown remain responsive during that wait. An in-flight decision excludes a
+duplicate response.
+Worker callback reports wake that actor for immediate application and snapshot
+publication, independently of the tracker polling interval.
+The run loop selects an event before mutating scheduler state, so a newly
+arriving callback or operator command cannot cancel an in-progress tick.
+Pending interactions are discarded on completion, cancellation, expiry, or
+restart and cannot be reconstructed from stored evidence.
 
 ## 2. Layered design
 
@@ -24,7 +46,7 @@ OpenSymphony is split into five layers:
 2. Configuration layer
    - typed workflow/config loader
    - env and path resolution
-   - OpenHands extension config
+   - project sets, repository inventory, and harness profiles
 3. Coordination layer
    - orchestrator actor
    - retry queue
@@ -35,6 +57,7 @@ OpenSymphony is split into five layers:
    - OpenHands REST client
    - OpenHands WebSocket runtime stream
    - local Codex app-server stdio adapter
+   - local ACP v1 stdio session host
    - issue session runner
 5. Observability layer
    - structured logs
@@ -47,6 +70,10 @@ Packaging distinction:
 - packaging is intentionally flat: crates.io publishes only `opensymphony`
 - the `crates/opensymphony-*` directories are internal module trees compiled
   into that one package
+
+Start with the [multi-repository guide](multi-repository.md) for issue binding
+and parent integration, or the [ACP guide](acp.md) for local agent setup and
+operator requests. The two choices are independent.
 
 ## 3. Main decisions
 
@@ -65,7 +92,15 @@ Rust owns:
 
 OpenHands conversation state is informative, not authoritative.
 
-Repository routing is also orchestrator-owned: terminal child metadata carries
+Parent admission derives child terminal status from scheduler-owned durable
+outcomes or released executions. Provider-supplied terminal flags cannot
+approve dispatch. A current execution supersedes any older success receipt;
+unclaimed, claimed, running, and retry-queued children remain ineligible,
+including when a subtree no longer requires merge evidence. Reopening or
+recovering nonterminal work invalidates its durable success receipt before
+batched launch preparation.
+
+Repository routing is also orchestrator-owned: repository-bound child metadata carries
 one alias, the central inventory resolves it to a canonical provider identity,
 and the scheduler persists that identity plus its config and inventory
 generations before claiming work. Project associations are validation scope,
@@ -78,7 +113,149 @@ Repository binding outcomes are carried into the control-plane issue snapshot;
 invalid outcomes mark the issue blocked while preserving the typed diagnostic
 for operator clients.
 
-### 3.2 OpenHands is the execution adapter
+Hierarchy reconciliation is scheduler-owned as a separate generation axis from
+checkout, run, and attempt generations. The scheduler persists required child
+edges and owner-identified leases through the workspace manager's atomic JSON
+artifact path. Parent dispatch consumes provider-backed merge evidence only
+after terminal orchestrator outcomes and retained checkout-generation lease
+resources are present; scope changes after freeze are recorded as
+`HierarchyChanged` and cannot silently widen the parent run.
+
+An eligible parent is materialized as a repository-neutral execution root for
+the frozen hierarchy generation. The workspace backend resolves only active
+ancestor leases, groups their retained generations by canonical repository ID,
+and asks the workspace manager for one contained integration worktree per
+repository. Those worktrees share a selected child's Git object store, refresh
+the configured target through that repository's credential provider, and pin
+the provider merge-result commits used for admission. An orchestrator-owned
+copy of the checkout map remains outside the parent runtime root, and every
+reopen compares the runtime map to that copy before rechecking target and merge
+ancestry. The parent worker starts
+once with this root as `cwd`, a relative checkout-handle map, and a generic
+`parent_multi_checkout` envelope; neither the directory layout nor the prompt
+assigns repository roles.
+
+The scheduler persists one generation-bound parent integration controller with
+the hierarchy state. Its versioned transitions cover admission, lease
+acquisition, workspace preparation, repository refresh, harness integration,
+final verification, and finalization. Each harness turn is one bounded attempt
+on the shared parent conversation and records its input version, root or opaque
+checkout handle, redacted log tail, cleanup receipt, and outcome. Recovery keeps
+a reconciled running attempt attached; an unreconciled attempt becomes
+indeterminate and must pass cleanup and repository refresh before rerun. Final
+verification binds the worker-authored exact command to a trusted SHA-256
+identity before redaction; durable evidence retains that identity and a redacted
+diagnostic, while events older than the current attempt are ignored. Final
+admission identity is stored separately from the compact transition tail so an
+unbounded retry history cannot replay the initial admission transitions. If a
+completed parent reopens, the scheduler creates a new controller lifecycle even
+when its child-edge generation did not change. A bound parent conversation also
+fixes the harness choice for that lifecycle; a configured harness switch fails
+before the replacement session starts.
+An integration defect creates an immutable repair attempt for one canonical
+repository. The controller copies the verified target, instruction provenance,
+and central review policy into that attempt, then records a durable intent and
+receipt for each provider operation. Branch, push, pull-request, review, and
+merge writes are preceded by provider reconciliation, so restart recovery finds
+an existing result before repeating a side effect. Requested changes stay on
+the same attempt and pull request. Provider outages, failed checks, review
+rejection, external closure, force-push, and merge conflicts remain precise,
+resumable states. GitHub is the first provider adapter and remains authoritative
+for PR, review, check, and merge facts. Each scheduler tick checks a fresh full
+tracker snapshot before advancing repair-provider writes, so any parent absent
+from the current active set fences review, push, and merge operations in the
+same observation.
+After merge, the controller records the provider merge-result commit and the
+workspace manager fetches the configured target through the central credential
+path. The refreshed checkout is accepted only when that merge result and every
+retained child merge result are reachable from the new target. Squash and
+rebase results therefore do not depend on the replaced repair commit remaining
+an ancestor. Both copies of the
+generation-bound checkout map and its instruction hash are updated before final
+verification can resume.
+Final evidence is accepted only from the run-bound
+`evidence/final-verification.json` receipt. The runtime reopens every checkout
+at its exact prepared commit and uses the file only to select an actual command
+observed through the Codex or OpenHands event stream. The controller maps the
+observed command working directory to the parent root or an exact checkout
+handle and supplies the deadline, exit result, bounded log,
+foreground-process ownership, and
+teardown from those runtime events before it can pass the attempt. Generic
+harness success or a prompt-authored claim without matching events is
+insufficient. Each accepted command or resource event is persisted with the
+controller before the worker reaches a terminal outcome. The adapter records
+stopped-turn evidence only after a terminal runtime state or acknowledged stop;
+a backward-compatible run-manifest flag carries that fact across restart, and a
+transport-level failed outcome cannot substitute for it. On timeout
+or cancellation, a reconciled harness stopped state
+releases the foreground-process receipt; any other named resource remains an
+explicit cleanup fence. The durable final record maps every canonical repository to the
+exact verified commit so a higher ancestor can consume the completed parent
+without assigning repository roles.
+When admission produces no repository targets, the same observed final command
+can complete with an empty commit map. This represents a repository-neutral
+parent and does not weaken command, deadline, cleanup, or controller gates.
+Recovery treats a persisted launch intent with no attached conversation,
+command, or resource as a metadata-only crash and safely returns through
+cleanup and baseline refresh. A terminal harness manifest whose controller
+outcome was lost becomes indeterminate and reruns after resource cleanup and
+baseline refresh. Recovered parent memory grants restore the bearer
+already held by the bound conversation into the reconstructed registry.
+Legacy in-flight parent runs that predate controller persistence reconstruct
+and persist that controller from the durable hierarchy, workspace envelope,
+run identity, and existing conversation before backend reattachment. Route
+preview conversations never become controller bindings.
+Every recovered parent dispatch carries that expected conversation identity
+into the worker launch boundary. A missing or different conversation manifest
+fails before a replacement harness session can start. Reused turns receive a
+small continuation prompt containing the current run, attempt, generation,
+exact commit map, and receipt contract; the original workflow and repository
+instructions remain in the bound conversation rather than being replayed.
+Terminal success is gated by the durable controller's completed state in both
+live and recovery release paths. Completed parent roots and their descendant
+leases remain durable for capture retry; OSYM-893 consumes that terminal state
+for ordered worktree cleanup and lease release. After automatic capture commits
+all selected parent capsules, the run loop asks the scheduler to persist a
+generation-bound subtree cleanup intent. Cleanup first archives the stopped
+harness conversation and asks the workspace manager to receipt the
+`before_remove` hook and detach every parent integration worktree through Git.
+Only then does the scheduler release that parent's lease owners and remove
+unleased descendant generations from deepest to shallowest, followed by the
+non-Git parent root. A lease owned by another ancestor or by an unexpired
+diagnostic hold continues to block its generation. A claimed, running, or
+retry-queued child bound to the exact retained generation also blocks deletion
+while that execution still owns the workspace.
+Every pending cleanup tick refreshes the full tracker snapshot first. A newly
+active descendant with an unresolved or matching workspace generation fences
+deletion; an already resolved newer generation does not retain the old target.
+
+The scheduler receipts every prepared or deleted target in the durable parent
+controller. Workspace run manifests hold the hook and integration-worktree
+receipts, while root-level generation tombstones bracket recursive deletion.
+Lease releases and final completion transitions roll back in memory when their
+atomic state writes fail, and the workspace manager persists an attempted hook
+fence before `before_remove` can perform side effects. Restart repeats only an
+incomplete step without rerunning an indeterminate hook attempt. Generation
+cleanup revokes only the matching memory bearer, so a newer run for the same
+issue keeps its authorization. A missing path is successful only when
+the tombstone matches its issue, workspace key, path, terminal outcome, and
+generation. Failed and canceled parents use the existing failed-workspace
+cleanup semantics without changing terminal classification: `retain_failed`
+applies to failed parents, while canceled parents continue cleanup. Reopened
+parents and operator replans cannot replace a controller until its acknowledged
+cleanup completes. Capture selects descendant leases owned by that controller's
+generation even if the observed hierarchy has already advanced, and restart
+recovery selects only the parent root matching the controller's durable
+hierarchy generation.
+Generation-bound OpenHands cleanup, including a parent root, also requires its
+conversation store before workspace preparation can proceed. Missing
+conversation evidence fails closed unless the run manifest proves preparation
+failed without ever recording a conversation binding.
+The completed cleanup intent remains in orchestrator state after the parent root
+is removed and seeds automatic-capture completion after daemon restart, so a
+terminal parent is not routed and captured again without first reopening.
+
+### 3.2 OpenHands adapter
 
 OpenHands provides:
 
@@ -91,7 +268,7 @@ OpenHands provides:
 
 OpenSymphony does not reimplement an agent loop.
 
-### 3.3 WebSocket-first, not WebSocket-only
+### 3.3 OpenHands uses WebSocket and REST
 
 REST is still required for:
 
@@ -102,7 +279,7 @@ REST is still required for:
 - reconnect reconciliation
 - restart recovery
 
-### 3.4 One local server, many workspaces
+### 3.4 One local OpenHands server, many workspaces
 
 The local supervised topology runs one OpenHands server for the daemon while
 passing a distinct `working_dir` per issue.
@@ -201,7 +378,7 @@ relations, attachments, project content/status updates, and introspection.
 
 ## 5. Process model
 
-Local MVP process graph:
+Local process graph when an OpenHands route is selected:
 
 ```text
 opensymphony run
@@ -211,16 +388,21 @@ opensymphony run
   ├─ openhands REST client
   ├─ openhands WebSocket client
   ├─ optional Codex app-server stdio worker
+  ├─ optional ACP v1 stdio session host
   ├─ gateway API
   ├─ control-plane compatibility API
   └─ local server supervisor
        └─ python -m openhands.agent_server
 ```
 
+An ACP-only or Codex-only run does not launch the OpenHands server.
+
 The scheduler attaches a `HarnessRouteDecision` to each worker start request.
 The default route remains `openhands_agent_server`. Workflow `routing.harness`
 or the `OPENSYMPHONY_HARNESS` environment override can select the local
-`codex_app_server` route when that harness is available and can start runs.
+`codex_app_server` or `acp` route when configured and available. ACP also
+requires a named `routing.harness_profile`; the scheduler binds the selected
+profile to each prepared run.
 Route decisions are emitted as `routing.decision` runtime audit events so dry-run
 previews and real dispatches show the selected harness, model, and model
 profile.
@@ -321,6 +503,91 @@ Notable removals:
 - workflow-owned `openhands.mcp`
 - the old bridge CLI command
 - provider-specific AI review secret naming
+
+## ACP executable protocol client
+
+The `opensymphony_acp` internal module uses the official Rust ACP SDK for typed
+requests, JSON-RPC correlation and ordered application dispatch. OpenSymphony owns
+the child process and supplies bounded LF framing to the SDK line transport.
+`SessionHost` owns a bounded registry of supervised per-issue sessions. Each
+session actor accepts generation-fenced commands and allows one outstanding
+prompt. Worker handles borrow a process across attempts; dropping a handle or
+subscriber preserves the session. Idle expiry and explicit retirement use the
+same supervised process teardown. The `run_turn` compatibility API creates one
+session for one prompt. Neither API mutates scheduling state. The production
+`opensymphony run` worker selects ACP explicitly, borrows the retained owner, and
+reports normalized updates and outcomes through scheduler-owned worker messages.
+The same launch preparation verifies checkout bindings, instruction provenance,
+hooks, review context and scoped memory before adapter dispatch. ACP-only startup
+requires neither an OpenHands client nor an OpenHands server.
+
+The persisted route retains the ACP profile and model selection across daemon
+recovery. Profile switches retire a quiescent owner before archiving its manifest;
+active prompts, observation leases and uncertain submissions fence switching and
+cleanup. A submitted prompt is never replayed on restart. Tool patches merge by
+call identity with bounded state; replay frames do not contribute usage. Optional
+usage remains absent when the peer does not report it. Raw redacted source frames
+stay on the owner separately from the normalized scheduler event stream.
+For a bound parent continuation, a changed run-scoped grant rotates the process
+while retaining the authoritative session ID. The replacement must negotiate
+load or resume; it cannot create a new parent session after a failed restore.
+
+Durable ACP identity and submission/outcome markers live in the existing
+conversation manifest, with additive ACP identity in its runtime envelope.
+`ControlPlaneServer::with_acp_host` exposes authenticated observation commands
+and ordered source events for a separate debug process. It does not grant IDE
+writer control; scheduler holds and writer transfer belong to OSYM-907.
+
+Handlers are installed before initialization. Permission callbacks receive the
+protocol cancellation outcome; unknown requests receive method-not-found and
+unknown notifications receive no response. Updates are processed before the
+prompt response is returned. Host policy gates filesystem and terminal
+advertisements. The ordered dispatch handler admits callbacks to one bounded
+connection-owned actor. File operations are serialized; terminal waits use
+bounded asynchronous responses so they cannot block RPC dispatch. Terminal
+processes use the existing process-group or Windows Job Object supervisors.
+ACP extension registrations are exact profile/version entries inside the ACP
+module. The pinned Cursor `cursor/create_plan` request uses the scheduler-owned
+plan response path; its ID-bearing `cursor/update_todos` request receives a
+bounded response and contributes todo activity only after its correlated
+accepted response. The response correlator tracks IDs across all inbound
+callback methods, so a plan response cannot accept a concurrent same-ID todo.
+A bounded pending-candidate queue fences the worker with a
+visible diagnostic on saturation. Both bind to the connection-owned
+active session without a peer-supplied session field. Unobserved Cursor question,
+task, and image methods are outside the enabled registration. Outbound operation dispatch enters
+through the gateway's operator action, binds the current run in the scheduler,
+and resolves the registered method and session inside the retained owner. The
+public run capability supplies its attempt binding; the host bounds concurrent
+requests and the gateway journals each accepted operation's outcome. An outbound
+RPC retains its own ID and deadline after prompt completion so a back-to-back
+operation result is not discarded by the prompt callback epoch.
+Negotiated peer support and profile enablement are both required. Timeouts
+report an unknown outcome, while the unresolved SDK waiter retains its permit
+until a peer response or connection closure. This caps pending replies at eight
+even across successive timeout batches. Known-secret redaction runs on the
+validated result before it can enter an operator receipt. Lifecycle state
+remains orchestrator-owned.
+Each retained prompt first retires the prior callback epoch through a bounded,
+cancellable preparation step while the owner continues servicing commands. Only
+then does it persist submission and dispatch the prompt. Session config responses
+and updates are committed in SDK dispatch order before prompt completion. The
+prompt response revokes its callback epoch before an adjacent request is
+dispatched; automatic permission policy also requires that live epoch.
+Callback closures use a bounded channel wait so a burst of open requests cannot
+silently drop the expiry signal. A receiver that stops draining fails the turn;
+worker completion clears its pending interactions. No
+OpenHands server or client participates in this launch path.
+
+## ACP live interoperability
+
+The [ACP live qualification](acp-live-qualification.md) records production
+`opensymphony run` paths for pinned Cursor and Devin stdio CLIs. Both use the
+same scheduler-owned routing and issue workspace; vendor-specific behavior
+stays inside the ACP client/registered extension boundary. Devin may announce
+configuration before the `session/new` response, so the client buffers those
+bounded announcements until it can bind the authoritative session ID. The
+response wins for fields it supplies.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
@@ -480,6 +747,13 @@ Notable removals:
 - COE-549: Verified Checkouts Instructions And Harness Envelopes
 - COE-550: Per-Instance Memory Catalog And Source Migration
 - COE-551: Scoped Cross-Repository Memory And Leaf Overlays
+- COE-556: Bottom-Up Subtree Cleanup And Recovery
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -615,5 +889,12 @@ Notable removals:
 - COE-549
 - COE-550
 - COE-551
+- COE-556
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

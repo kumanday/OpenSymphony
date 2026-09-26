@@ -198,18 +198,37 @@ Tasks:
 
 - Follow-on tasks to be assigned after M10.3 Codex And Subscription Readiness.
 
-## M13: ACP Debugging And IDE Attach
+## M12.99: ACP Harness Runtime Adapter
 
-Goal: Expose OpenSymphony issue debug sessions through Zed ACP while preserving issue workspace, OpenHands conversation, and debug stream ownership in OpenSymphony.
+Goal: Run any configured ACP harness within the supported v1 stdio capability matrix through a fully implemented runtime adapter, with host-owned sessions, production execution routing, operator response delivery and custom extensions.
 
 Tasks:
 
-- OSYM-840 Debug Attachment Core Refactor
-- OSYM-841 ACP Stdio Server Protocol Adapter
-- OSYM-842 Zed Static Agent Configuration And Setup UX
-- OSYM-843 Tauri Debug-In-Zed Launch Action
-- OSYM-844 Default Debug UX Transition And CLI Compatibility
-- OSYM-845 ACP Debug Integration Tests And Failure Guidance
+- OSYM-900 ACP Profiles And Executable Protocol Client
+- OSYM-901 ACP Session Ownership And Durable Recovery
+- OSYM-902 ACP Execution Routing And Worker Integration
+- OSYM-903 ACP Client Callbacks And Session Configuration
+- OSYM-904 ACP Operator Requests And Response Routing
+- OSYM-905 ACP Extensions And Harness Operations
+- OSYM-906 ACP Runtime Conformance And Live Qualification
+
+## M13: ACP Debugging And IDE Attach
+
+Goal: Attach IDEs to the existing sessions of all supported ACP profiles through the shared runtime owner, with exclusive scheduler/IDE control, preserved native debug paths and multi-harness qualification before the default UX transition.
+
+Tasks:
+
+- OSYM-840 Multi-Harness Debug Attachment Core
+- OSYM-907 Debug Control Handoff And Scheduler Fencing
+- OSYM-841 Multi-Harness ACP IDE Bridge
+- OSYM-842 Multi-Harness IDE Setup And Capability Guidance
+- OSYM-843 Multi-Harness Desktop Debug-In-Zed Action
+- OSYM-845 Multi-Harness IDE Attachment Qualification
+- OSYM-844 Default Multi-Harness IDE Debug UX And CLI Compatibility
+
+Planning source: `docs/tasks/acp-runtime-ide-task-package.yaml`. Runtime implementation
+and response wiring are required for M12.99; M13 qualification depends on the
+runtime qualification gate. The default debug UX changes after IDE qualification.
 
 ## M12.6: Tree-sitter Code Intelligence
 

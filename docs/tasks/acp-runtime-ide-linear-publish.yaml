@@ -1,0 +1,81 @@
+planningWave: acp-runtime-and-ide-attachment
+linearProject: e7b957855cb7
+publishedAt: '2026-09-22T05:43:58.212962+00:00'
+milestones:
+  'M12.99: ACP Harness Runtime Adapter':
+    milestoneId: ea0aefa3-3507-455e-a682-b912be95898a
+    name: 'M12.99: ACP Harness Runtime Adapter'
+  'M13: ACP Debugging And IDE Attach':
+    milestoneId: 12eda288-1f93-45db-a31d-43afab515cd8
+    name: 'M13: ACP Debugging And IDE Attach'
+tasks:
+  OSYM-900:
+    issue: COE-608
+    issueId: 586ff6c6-36aa-48df-bc36-9d0ee58a942b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-608/acp-profiles-and-executable-protocol-client
+    file: docs/tasks/osym-900-acp-profiles-and-executable-protocol-client.md
+  OSYM-901:
+    issue: COE-609
+    issueId: 7fe1bf06-9b5d-4e12-ba3b-cbac6267249b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-609/acp-session-ownership-and-durable-recovery
+    file: docs/tasks/osym-901-acp-session-ownership-and-durable-recovery.md
+  OSYM-903:
+    issue: COE-610
+    issueId: f9af7cf3-085e-48cd-ad99-c2762a8dee2f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-610/acp-client-callbacks-and-session-configuration
+    file: docs/tasks/osym-903-acp-client-callbacks-and-session-configuration.md
+  OSYM-902:
+    issue: COE-611
+    issueId: 968d5159-633b-4fa7-8295-0f751faba40a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-611/acp-execution-routing-and-worker-integration
+    file: docs/tasks/osym-902-acp-execution-routing-and-worker-integration.md
+  OSYM-840:
+    issue: COE-455
+    issueId: 1c6b02f5-20d3-4a48-8b02-512b43b10bda
+    url: https://linear.app/trilogy-ai-coe/issue/COE-455/multi-harness-debug-attachment-core
+    file: docs/tasks/osym-840-debug-attachment-core-refactor.md
+  OSYM-904:
+    issue: COE-612
+    issueId: 4d69274a-b427-42b8-8af4-80916ab733b8
+    url: https://linear.app/trilogy-ai-coe/issue/COE-612/acp-operator-requests-and-response-routing
+    file: docs/tasks/osym-904-acp-operator-requests-and-response-routing.md
+  OSYM-905:
+    issue: COE-613
+    issueId: 191f0c79-9679-4533-aee7-b6f43d7b0ee4
+    url: https://linear.app/trilogy-ai-coe/issue/COE-613/acp-extensions-and-harness-operations
+    file: docs/tasks/osym-905-acp-extensions-and-harness-operations.md
+  OSYM-907:
+    issue: COE-614
+    issueId: 3ae6e5e0-652a-46a4-b347-f42935fab168
+    url: https://linear.app/trilogy-ai-coe/issue/COE-614/debug-control-handoff-and-scheduler-fencing
+    file: docs/tasks/osym-907-debug-control-handoff-and-scheduler-fencing.md
+  OSYM-841:
+    issue: COE-457
+    issueId: 6144149c-5daf-439f-ae56-68255d72ab71
+    url: https://linear.app/trilogy-ai-coe/issue/COE-457/multi-harness-acp-ide-bridge
+    file: docs/tasks/osym-841-acp-stdio-server-protocol-adapter.md
+  OSYM-906:
+    issue: COE-615
+    issueId: 91141389-ba7a-4910-b9c3-0b557769b398
+    url: https://linear.app/trilogy-ai-coe/issue/COE-615/acp-runtime-conformance-and-live-qualification
+    file: docs/tasks/osym-906-acp-runtime-conformance-and-live-qualification.md
+  OSYM-842:
+    issue: COE-459
+    issueId: 412da99d-aac9-4113-9ded-862fe989dc71
+    url: https://linear.app/trilogy-ai-coe/issue/COE-459/multi-harness-ide-setup-and-capability-guidance
+    file: docs/tasks/osym-842-zed-static-agent-configuration-and-setup-ux.md
+  OSYM-843:
+    issue: COE-462
+    issueId: e35799ff-8aea-44f2-aac5-69195cc72221
+    url: https://linear.app/trilogy-ai-coe/issue/COE-462/multi-harness-desktop-debug-in-zed-action
+    file: docs/tasks/osym-843-tauri-debug-in-zed-launch-action.md
+  OSYM-845:
+    issue: COE-470
+    issueId: e3ce0e84-3cba-447b-b0b7-2c9380c4a86d
+    url: https://linear.app/trilogy-ai-coe/issue/COE-470/multi-harness-ide-attachment-qualification
+    file: docs/tasks/osym-845-acp-debug-integration-tests-and-failure-guidance.md
+  OSYM-844:
+    issue: COE-466
+    issueId: 5ef5ba64-4a9f-4eb2-be5e-19aa508a63c0
+    url: https://linear.app/trilogy-ai-coe/issue/COE-466/default-multi-harness-ide-debug-ux-and-cli-compatibility
+    file: docs/tasks/osym-844-default-debug-ux-transition-and-cli-compatibility.md

@@ -1869,6 +1869,7 @@ pub struct DevinRunReport {
     pub pull_requests: Vec<SessionPullRequest>,
     pub structured_output: Option<Value>,
     pub attachments: Vec<SessionAttachment>,
+    pub attachment_listing_error: Option<String>,
 }
 
 /// Options for [`DevinSessionRunner::run`].
@@ -2033,10 +2034,20 @@ impl DevinSessionRunner {
         session: SessionResponse,
         outcome: DevinRunOutcome,
     ) -> Result<DevinRunReport, DevinClientError> {
-        let attachments = if self.options.collect_attachments {
-            self.client.list_attachments(&session.session_id).await?
+        let (attachments, attachment_listing_error) = if self.options.collect_attachments {
+            match self.client.list_attachments(&session.session_id).await {
+                Ok(attachments) => (attachments, None),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session.session_id,
+                        %error,
+                        "Devin session settled but attachment listing failed"
+                    );
+                    (Vec::new(), Some(error.to_string()))
+                }
+            }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
 
         Ok(DevinRunReport {
@@ -2049,6 +2060,7 @@ impl DevinSessionRunner {
             pull_requests: session.pull_requests,
             structured_output: session.structured_output,
             attachments,
+            attachment_listing_error,
         })
     }
 }
@@ -2119,6 +2131,8 @@ pub struct DevinEvidenceManifest {
     pub event_count: usize,
     pub attachments: Vec<DevinStoredAttachment>,
     pub skipped_attachments: Vec<DevinSkippedAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_listing_error: Option<String>,
     /// Absolute path of the evidence root inside the local issue workspace.
     pub evidence_root: PathBuf,
     pub containment: String,
@@ -2178,6 +2192,7 @@ impl DevinEvidenceCollector {
             "pull_requests": report.pull_requests,
             "structured_output": report.structured_output,
             "attachments": report.attachments,
+            "attachment_listing_error": report.attachment_listing_error,
             "containment": DEVIN_REMOTE_CONTAINMENT,
         });
         write_file(&self.root.join("session.json"), pretty(&summary).as_bytes()).await?;
@@ -2209,6 +2224,7 @@ impl DevinEvidenceCollector {
             event_count: self.events.len(),
             attachments,
             skipped_attachments: skipped,
+            attachment_listing_error: report.attachment_listing_error.clone(),
             evidence_root: self.root.clone(),
             containment: DEVIN_REMOTE_CONTAINMENT.to_owned(),
         };

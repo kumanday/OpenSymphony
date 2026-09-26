@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
+    path::{Component, Path, PathBuf},
+    pin::Pin,
     time::Duration,
 };
 
@@ -16,19 +18,33 @@ use crate::opensymphony_domain::{
     TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceRecord, managed_repository_aliases,
 };
+use crate::opensymphony_gateway_schema::approval::{
+    OperatorAnswer, OperatorInteraction, OperatorInteractionKind,
+};
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
-use crate::opensymphony_workspace::{checkout_workspace_key, sanitize_workspace_key};
+use crate::opensymphony_workspace::{
+    CleanupTarget, CleanupTerminalOutcome, checkout_workspace_key, redact_runtime_diagnostic,
+    sanitize_workspace_key,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     select,
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, timeout},
 };
 use tracing::{debug, warn};
 
 use super::filter_issues_for_dispatch;
+use super::{
+    DurableOrchestratorState, HierarchyBlockedReason, HierarchySnapshot, LeaseRecord,
+    LeaseResource, ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt,
+    ParentCleanupStatus, ParentEligibilityEvidence, ParentIntegrationController,
+    ParentIntegrationError, ParentProviderOperationKind, ParentRepairAttempt, ParentRepairPolicy,
+    ParentRepairStatus, ParentRepositoryTarget, ParentSubtreeCleanupIntent,
+    ParentSubtreeCleanupStatus, ParentSubtreeCleanupTarget,
+};
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
@@ -38,6 +54,106 @@ const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
 const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 const HUMAN_REVIEW_STATE: &str = "human review";
 const MERGING_STATE: &str = "merging";
+const PARENT_ELIGIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+// A repository-neutral child can fan out into several leaf merge-evidence
+// requests. The runtime provider evaluates those leaves eight at a time, so
+// reserve one base timeout for each provider batch in the descendant subtree.
+const PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY: usize = 8;
+
+fn validate_operator_answer(
+    request: &OperatorInteraction,
+    answer: &OperatorAnswer,
+) -> Result<(), String> {
+    match (request.kind, answer) {
+        (OperatorInteractionKind::Permission, OperatorAnswer::Permission { option_id })
+            if request.options.iter().any(|option| option.id == *option_id) =>
+        {
+            Ok(())
+        }
+        (OperatorInteractionKind::Question, OperatorAnswer::Question { answers }) => {
+            if answers.len() != request.questions.len() {
+                return Err("question answer count mismatch".into());
+            }
+            for question in &request.questions {
+                let selected = answers
+                    .iter()
+                    .filter(|answer| answer.question_id == question.id)
+                    .collect::<Vec<_>>();
+                if selected.len() != 1
+                    || selected[0].selected_option_ids.is_empty()
+                    || (!question.allow_multiple && selected[0].selected_option_ids.len() != 1)
+                    || selected[0]
+                        .selected_option_ids
+                        .iter()
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != selected[0].selected_option_ids.len()
+                    || selected[0]
+                        .selected_option_ids
+                        .iter()
+                        .any(|id| !question.options.iter().any(|option| option.id == *id))
+                {
+                    return Err("invalid structured question answer".into());
+                }
+            }
+            Ok(())
+        }
+        (OperatorInteractionKind::PlanApproval, OperatorAnswer::Plan { .. })
+        | (
+            OperatorInteractionKind::Question | OperatorInteractionKind::PlanApproval,
+            OperatorAnswer::Decline,
+        )
+        | (_, OperatorAnswer::Cancel) => Ok(()),
+        _ => Err("answer kind or option does not match pending request".into()),
+    }
+}
+
+fn parent_eligibility_timeout(provider_work_units: usize) -> Duration {
+    let batches = provider_work_units
+        .max(1)
+        .saturating_add(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY - 1)
+        / PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY;
+    let multiplier = u32::try_from(batches).unwrap_or(u32::MAX);
+    PARENT_ELIGIBILITY_TIMEOUT.saturating_mul(multiplier)
+}
+
+fn full_detail_refresh_interval_ms(state: &DurableOrchestratorState) -> u64 {
+    // Summary discovery cannot admit a parent: it has no complete child-edge
+    // set. Once every required child is terminal, obtain that full snapshot on
+    // the terminal cadence instead of leaving fan-in behind the hourly scan.
+    // A parent retry also needs a full snapshot to refresh its verified targets.
+    let parent_waiting_for_refresh = state.parent_integrations.values().any(|controller| {
+        matches!(
+            controller.state,
+            super::ParentIntegrationState::RefreshingRepositories
+        )
+    });
+    let parent_ready_for_fan_in = state.hierarchy.iter().any(|(parent_id, snapshot)| {
+        state
+            .parent_integrations
+            .get(parent_id)
+            .is_some_and(|controller| {
+                matches!(
+                    controller.state,
+                    super::ParentIntegrationState::WaitingForChildren
+                )
+            })
+            && snapshot
+                .required_child_edges
+                .iter()
+                .any(|edge| edge.required)
+            && snapshot
+                .required_child_edges
+                .iter()
+                .filter(|edge| edge.required)
+                .all(|edge| state.terminal_orchestrator_issues.contains(&edge.child_id))
+    });
+    if parent_ready_for_fan_in || parent_waiting_for_refresh {
+        TERMINAL_REFRESH_INTERVAL_MS
+    } else {
+        FULL_DETAIL_REFRESH_INTERVAL_MS
+    }
+}
 
 fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
     let Some(workspace) = execution.workspace() else {
@@ -212,16 +328,22 @@ pub struct WorkerStartRequest {
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
     pub route: HarnessRouteDecision,
-    /// The issue was restored from durable process-recovery state. A scoped
-    /// memory grant is process-local, so a reused conversation must be
-    /// replaced once before the next worker prompt installs the new bearer.
+    /// The issue was restored from durable process-recovery state.
     pub memory_grant_registry_recovered: bool,
+    /// A parent retry must attach this durable controller-owned conversation.
+    /// The backend rejects a missing or different manifest before session launch.
+    pub expected_parent_conversation_id: Option<String>,
+    /// Active requested-change repair resumed in the existing parent
+    /// conversation. Provider receipts remain scheduler-owned.
+    pub parent_repair: Option<ParentRepairAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessRouteDecision {
     pub task_type: String,
     pub harness_kind: String,
+    #[serde(default)]
+    pub harness_profile: Option<String>,
     pub model: Option<String>,
     pub model_profile: Option<String>,
     pub reason: String,
@@ -237,8 +359,13 @@ impl HarnessRouteDecision {
             .unwrap_or("<default model profile>");
         let model = self.model.as_deref().unwrap_or("<harness default model>");
         let mode = if self.dry_run { "dry-run " } else { "" };
+        let harness_profile = self
+            .harness_profile
+            .as_deref()
+            .map(|profile| format!(" profile `{profile}`"))
+            .unwrap_or_default();
         format!(
-            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
+            "{mode}selected harness `{}`{harness_profile} with model `{model}` and profile `{profile}`: {}",
             self.harness_kind, self.reason
         )
     }
@@ -247,11 +374,22 @@ impl HarnessRouteDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLaunch {
     pub conversation: ConversationMetadata,
+    /// Timestamp persisted by the worker path when the run actually began.
+    /// This is the boundary used to fence provider evidence for this run.
+    pub started_at: Option<TimestampMs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum WorkerUpdate {
+    OperatorRequest {
+        worker_id: WorkerId,
+        interaction: OperatorInteraction,
+    },
+    OperatorClosed {
+        worker_id: WorkerId,
+        request_id: String,
+    },
     RuntimeEvent {
         worker_id: WorkerId,
         observed_at: TimestampMs,
@@ -263,6 +401,10 @@ pub enum WorkerUpdate {
     ConversationMetadataUpdate {
         worker_id: WorkerId,
         conversation: ConversationMetadata,
+    },
+    HarnessCapabilityUpdate {
+        worker_id: WorkerId,
+        capability: crate::opensymphony_gateway_schema::capability::HarnessRunCapability,
     },
     TokenUsageUpdate {
         worker_id: WorkerId,
@@ -296,6 +438,7 @@ pub struct WorkerInterruptAcknowledgement {
 struct WorkerMetadata {
     issue_id: IssueId,
     harness_kind: Option<String>,
+    dry_run: bool,
 }
 
 impl WorkerMetadata {
@@ -303,7 +446,13 @@ impl WorkerMetadata {
         Self {
             issue_id,
             harness_kind,
+            dry_run: false,
         }
+    }
+
+    fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
     }
 }
 
@@ -336,10 +485,53 @@ pub trait TrackerBackend {
             .filter(|issue| requested.contains(&issue.identifier.to_ascii_uppercase()))
             .collect())
     }
+    async fn issue_by_id(&mut self, issue_id: &str) -> Result<Option<TrackerIssue>, Self::Error> {
+        Ok(self
+            .issues_by_identifiers(&[issue_id.to_owned()])
+            .await?
+            .into_iter()
+            .next())
+    }
     async fn issue_states_by_ids(
         &mut self,
         issue_ids: &[String],
     ) -> Result<Vec<TrackerIssueStateSnapshot>, Self::Error>;
+    async fn parent_eligibility(
+        &mut self,
+        _parent: &TrackerIssue,
+        hierarchy: &HierarchySnapshot,
+    ) -> Result<ParentEligibilityEvidence, Self::Error> {
+        Ok(ParentEligibilityEvidence::tracker_only_for_snapshot(
+            hierarchy,
+        ))
+    }
+    async fn parent_repair_snapshot(
+        &mut self,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<super::ParentRepairProviderSnapshot>, Self::Error> {
+        Ok(None)
+    }
+    async fn ensure_parent_repair_pull_request(
+        &mut self,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<(String, String)>, Self::Error> {
+        Ok(None)
+    }
+    async fn merge_parent_repair(
+        &mut self,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<super::ParentRepairProviderSnapshot>, Self::Error> {
+        Ok(None)
+    }
+    async fn request_parent_repair_review(
+        &mut self,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<super::ParentRepairProviderSnapshot>, Self::Error> {
+        Ok(None)
+    }
+    fn parent_repair_review_budget_exhausted(&self, _repair: &ParentRepairAttempt) -> bool {
+        false
+    }
     fn error_category(_error: &Self::Error) -> Option<TrackerErrorCategory> {
         None
     }
@@ -372,6 +564,104 @@ pub trait WorkspaceBackend {
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
+    async fn recovered_run_started_at(
+        &mut self,
+    ) -> Result<BTreeMap<IssueId, TimestampMs>, Self::Error> {
+        Ok(BTreeMap::new())
+    }
+
+    async fn load_orchestrator_state(&mut self) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn persist_orchestrator_state(
+        &mut self,
+        _state: &serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn workspace_lease_resource(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Option<LeaseResource>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn cleanup_target_for_resource(
+        &mut self,
+        _resource: &LeaseResource,
+        _outcome: CleanupTerminalOutcome,
+    ) -> Result<Option<CleanupTarget>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn parent_workspace_targets(
+        &mut self,
+        _issue: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Vec<ParentRepositoryTarget>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    async fn reconcile_parent_repair_branch(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<(Option<String>, String)>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn prepare_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn reconcile_parent_repair_push(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<(String, Option<String>, bool)>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn publish_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn refresh_parent_repair(
+        &mut self,
+        _parent: &NormalizedIssue,
+        _workspace: &WorkspaceRecord,
+        _target: &ParentRepositoryTarget,
+        _repair: &ParentRepairAttempt,
+    ) -> Result<Option<(String, PathBuf, String)>, Self::Error> {
+        Ok(None)
+    }
+
     async fn recover_retry_exhaustion(
         &mut self,
     ) -> Result<Vec<RetryExhaustionRecord>, Self::Error> {
@@ -397,6 +687,17 @@ pub trait WorkspaceBackend {
 
     async fn remove_workspace(&mut self, workspace: &WorkspaceRecord) -> Result<(), Self::Error> {
         self.cleanup_workspace(workspace, true).await
+    }
+
+    async fn cleanup_generation(&mut self, target: &CleanupTarget) -> Result<(), Self::Error> {
+        self.cleanup_workspace(&target.workspace, true).await
+    }
+
+    async fn prepare_cleanup_generation(
+        &mut self,
+        _target: &CleanupTarget,
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     async fn persist_retry_count(
@@ -483,6 +784,42 @@ pub trait WorkerBackend {
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error>;
 
+    async fn respond_operator_request(
+        &mut self,
+        _worker_id: &WorkerId,
+        _request_id: &str,
+        _answer: OperatorAnswer,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Enqueue the answer without waiting for a potentially slow harness
+    /// transport. The scheduler actor completes the decision after the owned
+    /// delivery receipt resolves.
+    async fn begin_operator_response(
+        &mut self,
+        worker_id: &WorkerId,
+        request_id: &str,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, Self::Error> {
+        let delivered = self
+            .respond_operator_request(worker_id, request_id, answer)
+            .await?;
+        Ok(OperatorResponseDelivery::new(async move { Ok(delivered) }))
+    }
+
+    async fn begin_harness_operation(
+        &mut self,
+        _worker_id: &WorkerId,
+        _run_id: &str,
+        _operation_id: &str,
+        _arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, Self::Error> {
+        Ok(HarnessOperationDelivery::new(async {
+            Err("harness operations are unavailable".into())
+        }))
+    }
+
     async fn abort_worker(
         &mut self,
         worker_id: &WorkerId,
@@ -504,6 +841,36 @@ pub trait WorkerBackend {
     }
 }
 
+pub struct OperatorResponseDelivery(
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'static>>,
+);
+
+impl OperatorResponseDelivery {
+    pub fn new(wait: impl Future<Output = Result<bool, String>> + Send + 'static) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<bool, String> {
+        self.0.await
+    }
+}
+
+pub struct HarnessOperationDelivery(
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'static>>,
+);
+
+impl HarnessOperationDelivery {
+    pub fn new(
+        wait: impl Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    ) -> Self {
+        Self(Box::pin(wait))
+    }
+
+    pub async fn wait(self) -> Result<serde_json::Value, String> {
+        self.0.await
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SchedulerError {
     #[error("invalid scheduler configuration: {detail}")]
@@ -520,6 +887,10 @@ pub enum SchedulerError {
     RetryCalculation(#[from] RetryCalculationError),
     #[error(transparent)]
     Identifier(#[from] IdentifierError),
+    #[error(transparent)]
+    ParentIntegration(#[from] ParentIntegrationError),
+    #[error("parent repair operation is unavailable: {detail}")]
+    ParentRepairUnavailable { detail: String },
 }
 
 pub struct Scheduler<T, W, M> {
@@ -530,9 +901,18 @@ pub struct Scheduler<T, W, M> {
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
     worker_metadata: HashMap<WorkerId, WorkerMetadata>,
+    pending_operator: HashMap<String, (WorkerId, OperatorInteraction)>,
+    responding_operator: HashSet<String>,
     parent_issue_ids: HashSet<IssueId>,
+    terminal_undispatched_parent_ids: HashSet<IssueId>,
+    terminal_child_failure_ids: HashSet<IssueId>,
+    parent_eligibility_checked_at: BTreeMap<IssueId, TimestampMs>,
+    hierarchy_state: DurableOrchestratorState,
+    hierarchy_state_dirty: bool,
+    durable_state_loaded: bool,
     pending_retry_persistence: BTreeMap<IssueId, RetryEntry>,
     pending_retry_exhaustion_persistence: BTreeMap<IssueId, RetryExhaustionRecord>,
+    pending_finished_updates: BTreeMap<IssueId, (IssueExecution, WorkerOutcomeRecord)>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     pending_retry_exhaustion: Option<Vec<RetryExhaustionRecord>>,
     pending_retry_recovery: Option<Vec<RetryPendingRecord>>,
@@ -549,7 +929,10 @@ pub struct Scheduler<T, W, M> {
 }
 
 enum DispatchCandidates {
-    Full(Vec<TrackerIssue>),
+    Full {
+        issues: Vec<TrackerIssue>,
+        reachable_child_edges: BTreeSet<(IssueId, IssueId)>,
+    },
     Summary(Vec<TrackerIssueSummary>),
 }
 
@@ -568,9 +951,18 @@ where
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
             worker_metadata: HashMap::new(),
+            pending_operator: HashMap::new(),
+            responding_operator: HashSet::new(),
             parent_issue_ids: HashSet::new(),
+            terminal_undispatched_parent_ids: HashSet::new(),
+            terminal_child_failure_ids: HashSet::new(),
+            parent_eligibility_checked_at: BTreeMap::new(),
+            hierarchy_state: DurableOrchestratorState::default(),
+            hierarchy_state_dirty: false,
+            durable_state_loaded: false,
             pending_retry_persistence: BTreeMap::new(),
             pending_retry_exhaustion_persistence: BTreeMap::new(),
+            pending_finished_updates: BTreeMap::new(),
             pending_recovery: None,
             pending_retry_exhaustion: None,
             pending_retry_recovery: None,
@@ -615,12 +1007,1260 @@ where
         &mut self.worker
     }
 
+    pub async fn begin_parent_repair(
+        &mut self,
+        parent_id: &IssueId,
+        repository_id: &crate::opensymphony_domain::CanonicalRepositoryId,
+        defect_key: &str,
+        observed_at: TimestampMs,
+    ) -> Result<String, SchedulerError> {
+        self.load_recovery_state().await?;
+        let (parent, workspace) = self
+            .executions
+            .get(parent_id)
+            .and_then(|execution| {
+                execution
+                    .workspace()
+                    .cloned()
+                    .map(|workspace| (execution.issue().clone(), workspace))
+            })
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no active workspace"),
+            })?;
+        let legacy_target = self
+            .hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .and_then(|controller| controller.targets.get(repository_id))
+            .is_some_and(|target| {
+                target.target_branch.is_empty()
+                    && target.repair_policy == ParentRepairPolicy::default()
+            });
+        if legacy_target {
+            let current_target = self
+                .workspace
+                .parent_workspace_targets(&parent, &workspace)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+                .into_iter()
+                .find(|target| target.repository_id == *repository_id)
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: format!("parent {parent_id} has no migrated target {repository_id}"),
+                })?;
+            let previous = self.hierarchy_state.clone();
+            self.hierarchy_state
+                .parent_integrations
+                .get_mut(parent_id)
+                .expect("controller was checked")
+                .migrate_legacy_repair_target(current_target)?;
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous;
+                return Err(error);
+            }
+        }
+        let (target, input_version) = {
+            let controller = self
+                .hierarchy_state
+                .parent_integrations
+                .get(parent_id)
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: format!("parent {parent_id} has no integration controller"),
+                })?;
+            (
+                controller
+                    .targets
+                    .get(repository_id)
+                    .cloned()
+                    .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                        detail: format!("parent {parent_id} has no target {repository_id}"),
+                    })?,
+                parent_controller_input_version(controller),
+            )
+        };
+        let previous = self.hierarchy_state.clone();
+        let resource = self
+            .hierarchy_state
+            .descendant_resources_for(parent_id)
+            .into_iter()
+            .find(|resource| resource.repository_id == *repository_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no leased resource for {repository_id}"),
+            })?;
+        let repair_id = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .expect("controller was checked")
+            .begin_repair(
+                defect_key,
+                repository_id.clone(),
+                &target.checkout_handle,
+                &target.target_commit,
+                &input_version,
+                observed_at,
+            )?;
+        if let Err(error) = self.hierarchy_state.acquire_leases(vec![LeaseRecord {
+            kind: super::LeaseKind::Repair,
+            resource,
+            owner: super::LeaseOwner::repair(parent_id),
+            hierarchy_generation: self
+                .hierarchy_state
+                .parent_integrations
+                .get(parent_id)
+                .expect("controller was checked")
+                .hierarchy_generation,
+            acquired_at: observed_at.as_u64(),
+            expires_at: None,
+            released_at: None,
+        }]) {
+            self.hierarchy_state = previous;
+            return Err(SchedulerError::Workspace {
+                detail: error.to_string(),
+            });
+        }
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+
+        let repair = self.repair(parent_id, &repair_id)?.clone();
+        if repair.status != ParentRepairStatus::PreparingBranch {
+            return Ok(repair_id);
+        }
+        if !repair.operations.iter().any(|operation| {
+            operation.kind == ParentProviderOperationKind::ReconcileBranch
+                && operation.receipt.is_none()
+        }) {
+            self.persist_repair_intent(
+                parent_id,
+                &repair_id,
+                ParentProviderOperationKind::ReconcileBranch,
+                &input_version,
+                observed_at,
+            )
+            .await?;
+        }
+        let (branch_head, instruction_hash) = self
+            .workspace
+            .reconcile_parent_repair_branch(&parent, &workspace, &target, &repair)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: "workspace backend does not support parent repairs".to_owned(),
+            })?;
+        if instruction_hash != repair.instruction_hash {
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: format!(
+                    "repository instructions changed before repair: expected {}, got {}",
+                    repair.instruction_hash, instruction_hash
+                ),
+            });
+        }
+        self.complete_repair_operation(
+            parent_id,
+            &repair_id,
+            ParentProviderOperationKind::ReconcileBranch,
+            if branch_head.is_some() {
+                "found"
+            } else {
+                "missing"
+            },
+            observed_at,
+        )
+        .await?;
+        if let Some(branch_head) = branch_head {
+            if branch_head != repair.target_commit
+                && repair.pushed_commit.as_deref() != Some(&branch_head)
+            {
+                return Err(SchedulerError::ParentRepairUnavailable {
+                    detail: format!(
+                        "repair branch {} points at an unrecorded commit",
+                        repair.branch
+                    ),
+                });
+            }
+            if repair.operations.iter().any(|operation| {
+                operation.kind == ParentProviderOperationKind::CreateBranch
+                    && operation.receipt.is_none()
+            }) {
+                self.complete_repair_operation(
+                    parent_id,
+                    &repair_id,
+                    ParentProviderOperationKind::CreateBranch,
+                    "reconciled",
+                    observed_at,
+                )
+                .await?;
+            }
+        } else {
+            self.persist_repair_intent(
+                parent_id,
+                &repair_id,
+                ParentProviderOperationKind::CreateBranch,
+                &input_version,
+                observed_at,
+            )
+            .await?;
+            let created_instruction_hash = self
+                .workspace
+                .prepare_parent_repair(&parent, &workspace, &target, &repair)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: "workspace backend does not support branch creation".to_owned(),
+                })?;
+            if created_instruction_hash != repair.instruction_hash {
+                return Err(SchedulerError::ParentRepairUnavailable {
+                    detail: "repository instructions changed during branch creation".to_owned(),
+                });
+            }
+            self.complete_repair_operation(
+                parent_id,
+                &repair_id,
+                ParentProviderOperationKind::CreateBranch,
+                "created",
+                observed_at,
+            )
+            .await?;
+        }
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .expect("controller was checked");
+        controller.record_repair_branch_ready(&repair_id)?;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(repair_id)
+    }
+
+    pub async fn publish_parent_repair(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        observed_at: TimestampMs,
+    ) -> Result<String, SchedulerError> {
+        let (parent, workspace) = self.parent_context(parent_id)?;
+        let (target, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        let publication_input_version = format!(
+            "{input_version};repair-cycle:{}",
+            repair.requested_change_count
+        );
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcilePush,
+            &publication_input_version,
+            observed_at,
+        )
+        .await?;
+        let (local_commit, remote_commit, has_uncommitted_changes) = self
+            .workspace
+            .reconcile_parent_repair_push(&parent, &workspace, &target, &repair)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: "workspace backend does not support repair push reconciliation".to_owned(),
+            })?;
+        self.complete_repair_operation(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcilePush,
+            if remote_commit.is_some() {
+                "found"
+            } else {
+                "missing"
+            },
+            observed_at,
+        )
+        .await?;
+        if let Some(remote_commit) = remote_commit.as_deref()
+            && remote_commit != local_commit
+            && repair.pushed_commit.as_deref() != Some(remote_commit)
+        {
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: "remote repair branch was force-pushed".to_owned(),
+            });
+        }
+        if !has_uncommitted_changes && local_commit == repair.target_commit {
+            self.mark_parent_repair_implementation_required(parent_id, repair_id)
+                .await?;
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: "repair branch has no commit beyond its recorded target".to_owned(),
+            });
+        }
+        let publish_required =
+            has_uncommitted_changes || remote_commit.as_deref() != Some(local_commit.as_str());
+        let commit = if !publish_required {
+            if repair.operations.iter().any(|operation| {
+                operation.kind == ParentProviderOperationKind::Push
+                    && operation.input_version == publication_input_version
+                    && operation.receipt.is_none()
+            }) {
+                self.complete_repair_operation(
+                    parent_id,
+                    repair_id,
+                    ParentProviderOperationKind::Push,
+                    "reconciled",
+                    observed_at,
+                )
+                .await?;
+            }
+            local_commit
+        } else {
+            self.persist_repair_intent(
+                parent_id,
+                repair_id,
+                ParentProviderOperationKind::Push,
+                &publication_input_version,
+                observed_at,
+            )
+            .await?;
+            let commit = self
+                .workspace
+                .publish_parent_repair(&parent, &workspace, &target, &repair)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: "workspace backend does not support repair publication".to_owned(),
+                })?;
+            if commit == repair.target_commit {
+                self.mark_parent_repair_implementation_required(parent_id, repair_id)
+                    .await?;
+                return Err(SchedulerError::ParentRepairUnavailable {
+                    detail: "repair branch has no commit beyond its recorded target".to_owned(),
+                });
+            }
+            self.complete_repair_operation(
+                parent_id,
+                repair_id,
+                ParentProviderOperationKind::Push,
+                "pushed",
+                observed_at,
+            )
+            .await?;
+            commit
+        };
+        {
+            let previous = self.hierarchy_state.clone();
+            self.hierarchy_state
+                .parent_integrations
+                .get_mut(parent_id)
+                .expect("controller was checked")
+                .record_repair_push(repair_id, &commit, &publication_input_version, observed_at)?;
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous;
+                return Err(error);
+            }
+        }
+
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcilePullRequest,
+            &publication_input_version,
+            observed_at,
+        )
+        .await?;
+        let repair = self.repair(parent_id, repair_id)?.clone();
+        let snapshot = match self.tracker.parent_repair_snapshot(&repair).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+                self.apply_parent_repair_snapshot(
+                    parent_id,
+                    repair_id,
+                    unavailable_provider_snapshot(&repair),
+                    &input_version,
+                    observed_at,
+                )
+                .await?;
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
+            }
+        };
+        let pull_request = match snapshot
+            .and_then(|snapshot| snapshot.pull_request_id.zip(snapshot.pull_request_url))
+        {
+            Some(pull_request) => {
+                self.complete_repair_operation(
+                    parent_id,
+                    repair_id,
+                    ParentProviderOperationKind::ReconcilePullRequest,
+                    "found",
+                    observed_at,
+                )
+                .await?;
+                pull_request
+            }
+            None => {
+                self.complete_repair_operation(
+                    parent_id,
+                    repair_id,
+                    ParentProviderOperationKind::ReconcilePullRequest,
+                    "missing",
+                    observed_at,
+                )
+                .await?;
+                self.persist_repair_intent(
+                    parent_id,
+                    repair_id,
+                    ParentProviderOperationKind::CreatePullRequest,
+                    &publication_input_version,
+                    observed_at,
+                )
+                .await?;
+                self.tracker
+                    .ensure_parent_repair_pull_request(&repair)
+                    .await
+                    .map_err(|error| self.tracker_operation_error(error, observed_at))?
+                    .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                        detail: "provider backend does not support repair pull requests".to_owned(),
+                    })?
+            }
+        };
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .expect("controller was checked");
+        controller.record_repair_pull_request(
+            repair_id,
+            &pull_request.0,
+            &pull_request.1,
+            &publication_input_version,
+            observed_at,
+        )?;
+        if controller
+            .repair(repair_id)?
+            .operations
+            .iter()
+            .any(|operation| {
+                operation.kind == ParentProviderOperationKind::CreatePullRequest
+                    && operation.receipt.is_none()
+            })
+        {
+            let key = controller
+                .repair(repair_id)?
+                .operations
+                .iter()
+                .find(|operation| {
+                    operation.kind == ParentProviderOperationKind::CreatePullRequest
+                        && operation.receipt.is_none()
+                })
+                .expect("checked pending create operation")
+                .idempotency_key
+                .clone();
+            controller.record_provider_operation(
+                repair_id,
+                &key,
+                "created",
+                Some(pull_request.0.clone()),
+                observed_at,
+            )?;
+        }
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(pull_request.1)
+    }
+
+    pub async fn request_parent_repair_review(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        observed_at: TimestampMs,
+    ) -> Result<ParentRepairStatus, SchedulerError> {
+        let (_, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        let review_input_version = format!(
+            "{input_version};repair-head:{}",
+            repair.pushed_commit.as_deref().unwrap_or("missing")
+        );
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcileReview,
+            &review_input_version,
+            observed_at,
+        )
+        .await?;
+        let snapshot = self
+            .tracker
+            .parent_repair_snapshot(&repair)
+            .await
+            .map_err(|error| self.tracker_operation_error(error, observed_at))?
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: "provider backend does not support repair review reconciliation".to_owned(),
+            })?;
+        let already_reviewed = snapshot.review_head_commit.as_deref()
+            == repair.pushed_commit.as_deref()
+            && (snapshot.review_approved || snapshot.review_rejected || snapshot.changes_requested);
+        self.complete_repair_operation_with_detail(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcileReview,
+            if already_reviewed { "found" } else { "pending" },
+            snapshot.review_request_cursor.clone(),
+            observed_at,
+        )
+        .await?;
+        let snapshot = if already_reviewed {
+            snapshot
+        } else {
+            if self.tracker.parent_repair_review_budget_exhausted(&repair) {
+                let previous = self.hierarchy_state.clone();
+                let controller = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(parent_id)
+                    .expect("controller was checked");
+                controller.record_repair_review_budget_exhausted(
+                    repair_id,
+                    &review_input_version,
+                    observed_at,
+                )?;
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous;
+                    return Err(error);
+                }
+                return Ok(ParentRepairStatus::ReviewBudgetExhausted);
+            }
+            self.persist_repair_intent(
+                parent_id,
+                repair_id,
+                ParentProviderOperationKind::RequestReview,
+                &review_input_version,
+                observed_at,
+            )
+            .await?;
+            let repair = self.repair(parent_id, repair_id)?.clone();
+            let snapshot = self
+                .tracker
+                .request_parent_repair_review(&repair)
+                .await
+                .map_err(|error| self.tracker_operation_error(error, observed_at))?
+                .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                    detail: "provider backend does not support repair review requests".to_owned(),
+                })?;
+            self.complete_repair_operation(
+                parent_id,
+                repair_id,
+                ParentProviderOperationKind::RequestReview,
+                "requested",
+                observed_at,
+            )
+            .await?;
+            snapshot
+        };
+        self.apply_parent_repair_snapshot(
+            parent_id,
+            repair_id,
+            snapshot,
+            &input_version,
+            observed_at,
+        )
+        .await
+    }
+
+    async fn advance_parent_repairs(
+        &mut self,
+        observed_at: TimestampMs,
+        freshly_inactive_issue_ids: &HashSet<IssueId>,
+    ) -> Result<(), SchedulerError> {
+        let repairs = self
+            .hierarchy_state
+            .parent_integrations
+            .iter()
+            .flat_map(|(parent_id, controller)| {
+                controller
+                    .repair_attempts
+                    .iter()
+                    .filter(|repair| repair.status != ParentRepairStatus::Completed)
+                    .map(move |repair| {
+                        (
+                            parent_id.clone(),
+                            repair.id.clone(),
+                            repair.repository_id.clone(),
+                            repair.status,
+                            repair
+                                .operations
+                                .first()
+                                .map(|operation| operation.idempotency_key.clone())
+                                .unwrap_or_default(),
+                            repair.pushed_commit.clone(),
+                            repair.operations.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (parent_id, repair_id, repository_id, status, defect_key, pushed, operations) in repairs
+        {
+            if self.linear_cooldown_active(observed_at) {
+                break;
+            }
+            if !self.parent_repair_advancement_allowed(&parent_id) {
+                continue;
+            }
+            if freshly_inactive_issue_ids.contains(&parent_id) {
+                continue;
+            }
+            let advancement = async {
+                match status {
+                    ParentRepairStatus::PreparingBranch => {
+                        self.begin_parent_repair(
+                            &parent_id,
+                            &repository_id,
+                            &defect_key,
+                            observed_at,
+                        )
+                        .await?;
+                    }
+                    ParentRepairStatus::Implementing => {
+                        let implementation_completed = self
+                            .repair(&parent_id, &repair_id)?
+                            .implementation_completed;
+                        let execution_released =
+                            self.executions.get(&parent_id).is_some_and(|execution| {
+                                execution.status() == SchedulerStatus::Released
+                            });
+                        if implementation_completed && execution_released {
+                            self.publish_parent_repair(&parent_id, &repair_id, observed_at)
+                                .await?;
+                        } else if !implementation_completed {
+                            self.queue_parent_repair_retry(&parent_id, observed_at)
+                                .await?;
+                        }
+                    }
+                    ParentRepairStatus::AwaitingPullRequest => {
+                        self.publish_parent_repair(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    }
+                    ParentRepairStatus::AwaitingReview => {
+                        let (_, _, input_version) = self.repair_context(&parent_id, &repair_id)?;
+                        let review_input_version = format!(
+                            "{input_version};repair-head:{}",
+                            pushed.as_deref().unwrap_or("missing")
+                        );
+                        let requested = operations.iter().any(|operation| {
+                            operation.kind == ParentProviderOperationKind::RequestReview
+                                && operation.input_version == review_input_version
+                                && operation.receipt.is_some()
+                        });
+                        if requested {
+                            self.reconcile_parent_repair(&parent_id, &repair_id, observed_at)
+                                .await?;
+                        } else {
+                            self.request_parent_repair_review(&parent_id, &repair_id, observed_at)
+                                .await?;
+                        }
+                    }
+                    ParentRepairStatus::AwaitingMerge => {
+                        self.merge_parent_repair(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    }
+                    ParentRepairStatus::Refreshing => {
+                        self.refresh_parent_repair(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    }
+                    ParentRepairStatus::ChangesRequested => {
+                        self.queue_parent_repair_retry(&parent_id, observed_at)
+                            .await?;
+                    }
+                    ParentRepairStatus::FailedChecks
+                    | ParentRepairStatus::ReviewRejected
+                    | ParentRepairStatus::ReviewBudgetExhausted
+                    | ParentRepairStatus::ProviderUnavailable
+                    | ParentRepairStatus::ExternallyClosed
+                    | ParentRepairStatus::ForcePushed
+                    | ParentRepairStatus::MergeConflict => {
+                        self.reconcile_parent_repair(&parent_id, &repair_id, observed_at)
+                            .await?;
+                    }
+                    ParentRepairStatus::Completed => {}
+                }
+                Ok::<(), SchedulerError>(())
+            }
+            .await;
+            if let Err(error) = advancement {
+                let detail = redact_runtime_diagnostic(&error.to_string());
+                warn!(
+                    parent_id = %parent_id,
+                    repair_id,
+                    error = %detail,
+                    "parent repair advancement failed; preserving the repair stage for retry"
+                );
+                let previous = self.hierarchy_state.clone();
+                if let Some(controller) =
+                    self.hierarchy_state.parent_integrations.get_mut(&parent_id)
+                {
+                    if let Err(record_error) = controller.record_repair_advancement_failure(
+                        &repair_id,
+                        &detail,
+                        observed_at,
+                    ) {
+                        warn!(
+                            parent_id = %parent_id,
+                            repair_id,
+                            error = %record_error,
+                            "failed to record parent repair advancement failure"
+                        );
+                        continue;
+                    }
+                    if let Err(persist_error) = self.persist_orchestrator_state().await {
+                        self.hierarchy_state = previous;
+                        self.hierarchy_state_dirty = true;
+                        warn!(
+                            parent_id = %parent_id,
+                            repair_id,
+                            error = %persist_error,
+                            "failed to persist parent repair advancement failure"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parent_repair_advancement_allowed(&self, parent_id: &IssueId) -> bool {
+        let Some(execution) = self.executions.get(parent_id) else {
+            return false;
+        };
+        if execution.workspace().is_none()
+            || execution.issue().state.category != IssueStateCategory::Active
+            || matches!(
+                execution.state(),
+                crate::opensymphony_domain::SchedulerState::Released {
+                    reason: ReleaseReason::TrackerInactive
+                        | ReleaseReason::TrackerTerminal
+                        | ReleaseReason::Cancelled
+                        | ReleaseReason::RetryExhausted,
+                    ..
+                }
+            )
+        {
+            return false;
+        }
+        let Some(controller) = self.hierarchy_state.parent_integrations.get(parent_id) else {
+            return false;
+        };
+        !controller.state.terminal()
+            && self
+                .hierarchy_state
+                .hierarchy
+                .get(parent_id)
+                .is_some_and(|snapshot| snapshot.accepts_event(controller.hierarchy_generation))
+    }
+
+    async fn queue_parent_repair_retry(
+        &mut self,
+        parent_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(execution) = self.remove_execution(parent_id) else {
+            return Ok(());
+        };
+        if execution.status() == SchedulerStatus::RetryQueued {
+            self.insert_execution(parent_id.clone(), execution);
+            return Ok(());
+        }
+        if execution.status() != SchedulerStatus::Released {
+            self.insert_execution(parent_id.clone(), execution);
+            return Ok(());
+        }
+        let previous_attempt = execution
+            .last_worker_outcome()
+            .and_then(|outcome| outcome.attempt);
+        let normal_retry_count = previous_attempt.map_or(0, RetryAttempt::get);
+        if self.retry_limit_reached(normal_retry_count) {
+            if let Err(error) = self
+                .persist_retry_exhaustion(execution.issue(), normal_retry_count)
+                .await
+            {
+                self.insert_execution(parent_id.clone(), execution);
+                return Err(error);
+            }
+            let exhausted = execution.clone().reopen(observed_at).and_then(|execution| {
+                execution.release(observed_at, ReleaseReason::RetryExhausted, None)
+            });
+            let mut exhausted = match exhausted {
+                Ok(exhausted) => exhausted,
+                Err(error) => {
+                    self.insert_execution(parent_id.clone(), execution);
+                    return Err(error.into());
+                }
+            };
+            exhausted.set_retry_count_override(normal_retry_count);
+            self.insert_execution(parent_id.clone(), exhausted);
+            return Ok(());
+        }
+        let next_execution = (|| -> Result<IssueExecution, SchedulerError> {
+            let retry = RetryEntry::continuation(
+                execution.issue(),
+                previous_attempt,
+                normal_retry_count,
+                observed_at,
+                self.config.retry_policy,
+            )?;
+            Ok(execution
+                .clone()
+                .reopen(observed_at)?
+                .restore_retry(retry)?)
+        })();
+        let next_execution = match next_execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.insert_execution(parent_id.clone(), execution);
+                return Err(error);
+            }
+        };
+        self.insert_execution(parent_id.clone(), next_execution);
+        self.persist_retry_if_queued(parent_id).await
+    }
+
+    pub async fn reconcile_parent_repair(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        observed_at: TimestampMs,
+    ) -> Result<ParentRepairStatus, SchedulerError> {
+        let (_, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        let snapshot = match self.tracker.parent_repair_snapshot(&repair).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+                return self
+                    .apply_parent_repair_snapshot(
+                        parent_id,
+                        repair_id,
+                        unavailable_provider_snapshot(&repair),
+                        &input_version,
+                        observed_at,
+                    )
+                    .await;
+            }
+        }
+        .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+            detail: "provider backend does not support repair reconciliation".to_owned(),
+        })?;
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .expect("controller was checked");
+        controller.reconcile_repair_provider(repair_id, snapshot, &input_version, observed_at)?;
+        let status = controller.repair(repair_id)?.status;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(status)
+    }
+
+    pub async fn merge_parent_repair(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        observed_at: TimestampMs,
+    ) -> Result<ParentRepairStatus, SchedulerError> {
+        let (_, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        if repair.status != ParentRepairStatus::AwaitingMerge {
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: format!("repair {repair_id} has not satisfied central review policy"),
+            });
+        }
+        let merge_input_version = format!(
+            "{input_version};repair-head:{}",
+            repair.pushed_commit.as_deref().unwrap_or("missing")
+        );
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcileMerge,
+            &merge_input_version,
+            observed_at,
+        )
+        .await?;
+        let snapshot = match self.tracker.parent_repair_snapshot(&repair).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+                return self
+                    .apply_parent_repair_snapshot(
+                        parent_id,
+                        repair_id,
+                        unavailable_provider_snapshot(&repair),
+                        &input_version,
+                        observed_at,
+                    )
+                    .await
+                    .and(Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    }));
+            }
+        }
+        .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+            detail: "provider backend does not support repair merge reconciliation".to_owned(),
+        })?;
+        if snapshot.merged {
+            self.complete_repair_operation(
+                parent_id,
+                repair_id,
+                ParentProviderOperationKind::ReconcileMerge,
+                "already_merged",
+                observed_at,
+            )
+            .await?;
+            return self
+                .apply_parent_repair_snapshot(
+                    parent_id,
+                    repair_id,
+                    snapshot,
+                    &input_version,
+                    observed_at,
+                )
+                .await;
+        }
+        self.complete_repair_operation(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::ReconcileMerge,
+            "open",
+            observed_at,
+        )
+        .await?;
+        let current_status = self
+            .apply_parent_repair_snapshot(
+                parent_id,
+                repair_id,
+                snapshot,
+                &input_version,
+                observed_at,
+            )
+            .await?;
+        if current_status != ParentRepairStatus::AwaitingMerge {
+            return Ok(current_status);
+        }
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::Merge,
+            &merge_input_version,
+            observed_at,
+        )
+        .await?;
+        let snapshot = self
+            .tracker
+            .merge_parent_repair(&repair)
+            .await
+            .map_err(|error| self.tracker_operation_error(error, observed_at))?
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: "provider backend does not support repair merge".to_owned(),
+            })?;
+        self.apply_parent_repair_snapshot(
+            parent_id,
+            repair_id,
+            snapshot,
+            &input_version,
+            observed_at,
+        )
+        .await
+    }
+
+    async fn mark_parent_repair_implementation_required(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+    ) -> Result<(), SchedulerError> {
+        let previous = self.hierarchy_state.clone();
+        self.hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?
+            .record_repair_implementation_required(repair_id)?;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub async fn refresh_parent_repair(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        observed_at: TimestampMs,
+    ) -> Result<String, SchedulerError> {
+        let (parent, workspace) = self.parent_context(parent_id)?;
+        let (target, repair, input_version) = self.repair_context(parent_id, repair_id)?;
+        if repair.status != ParentRepairStatus::Refreshing {
+            return Err(SchedulerError::ParentRepairUnavailable {
+                detail: format!("repair {repair_id} has no merged target to refresh"),
+            });
+        }
+        self.persist_repair_intent(
+            parent_id,
+            repair_id,
+            ParentProviderOperationKind::RefreshTarget,
+            &input_version,
+            observed_at,
+        )
+        .await?;
+        let (refreshed, refreshed_instruction_path, refreshed_instruction_hash) = self
+            .workspace
+            .refresh_parent_repair(&parent, &workspace, &target, &repair)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: "workspace backend does not support post-repair refresh".to_owned(),
+            })?;
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .expect("controller was checked");
+        let key = controller
+            .repair(repair_id)?
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.kind == ParentProviderOperationKind::RefreshTarget
+                    && operation.receipt.is_none()
+            })
+            .expect("refresh intent was persisted")
+            .idempotency_key
+            .clone();
+        controller.record_provider_operation(
+            repair_id,
+            &key,
+            "refreshed",
+            Some(refreshed.clone()),
+            observed_at,
+        )?;
+        controller.record_repair_refresh(
+            repair_id,
+            &refreshed,
+            &refreshed_instruction_path,
+            &refreshed_instruction_hash,
+            &input_version,
+            observed_at,
+        )?;
+        if let Some(attempt_id) = controller
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.status != ParentAttemptStatus::Running)
+            .map(|attempt| attempt.id.clone())
+        {
+            controller.prepare_retry(
+                &attempt_id,
+                "merged parent repair refreshed; run final verification on the new target",
+                observed_at,
+            )?;
+        }
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        self.queue_parent_repair_retry(parent_id, observed_at)
+            .await?;
+        Ok(refreshed)
+    }
+
+    fn parent_context(
+        &self,
+        parent_id: &IssueId,
+    ) -> Result<(NormalizedIssue, WorkspaceRecord), SchedulerError> {
+        let execution = self.executions.get(parent_id).ok_or_else(|| {
+            SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no active execution"),
+            }
+        })?;
+        let workspace = execution.workspace().cloned().ok_or_else(|| {
+            SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no active workspace"),
+            }
+        })?;
+        Ok((execution.issue().clone(), workspace))
+    }
+
+    fn repair(
+        &self,
+        parent_id: &IssueId,
+        repair_id: &str,
+    ) -> Result<&ParentRepairAttempt, SchedulerError> {
+        self.hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?
+            .repair(repair_id)
+            .map_err(Into::into)
+    }
+
+    fn repair_context(
+        &self,
+        parent_id: &IssueId,
+        repair_id: &str,
+    ) -> Result<(ParentRepositoryTarget, ParentRepairAttempt, String), SchedulerError> {
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?;
+        let repair = controller.repair(repair_id)?.clone();
+        let target = controller
+            .targets
+            .get(&repair.repository_id)
+            .cloned()
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("repair {repair_id} target is unavailable"),
+            })?;
+        Ok((target, repair, parent_controller_input_version(controller)))
+    }
+
+    async fn persist_repair_intent(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        kind: ParentProviderOperationKind,
+        input_version: &str,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let previous = self.hierarchy_state.clone();
+        self.hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?
+            .begin_provider_operation(repair_id, kind, input_version, observed_at)?;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn complete_repair_operation(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        kind: ParentProviderOperationKind,
+        status: &str,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        self.complete_repair_operation_with_detail(
+            parent_id,
+            repair_id,
+            kind,
+            status,
+            None,
+            observed_at,
+        )
+        .await
+    }
+
+    async fn complete_repair_operation_with_detail(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        kind: ParentProviderOperationKind,
+        status: &str,
+        detail: Option<String>,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?;
+        let key = controller
+            .repair(repair_id)?
+            .operations
+            .iter()
+            .find(|operation| operation.kind == kind && operation.receipt.is_none())
+            .map(|operation| operation.idempotency_key.clone())
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("repair {repair_id} has no pending {kind:?} intent"),
+            })?;
+        controller.record_provider_operation(repair_id, &key, status, detail, observed_at)?;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn apply_parent_repair_snapshot(
+        &mut self,
+        parent_id: &IssueId,
+        repair_id: &str,
+        snapshot: super::ParentRepairProviderSnapshot,
+        input_version: &str,
+        observed_at: TimestampMs,
+    ) -> Result<ParentRepairStatus, SchedulerError> {
+        let previous = self.hierarchy_state.clone();
+        let controller = self
+            .hierarchy_state
+            .parent_integrations
+            .get_mut(parent_id)
+            .ok_or_else(|| SchedulerError::ParentRepairUnavailable {
+                detail: format!("parent {parent_id} has no integration controller"),
+            })?;
+        controller.reconcile_repair_provider(repair_id, snapshot, input_version, observed_at)?;
+        let status = controller.repair(repair_id)?.status;
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous;
+            return Err(error);
+        }
+        Ok(status)
+    }
+
     pub fn executions(&self) -> &BTreeMap<IssueId, IssueExecution> {
         &self.executions
     }
 
     pub fn execution(&self, issue_id: &IssueId) -> Option<&IssueExecution> {
         self.executions.get(issue_id)
+    }
+
+    pub fn completed_subtree_cleanup_identifiers(&self) -> BTreeSet<String> {
+        self.hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .filter(|cleanup| cleanup.status == ParentSubtreeCleanupStatus::Completed)
+            .map(|cleanup| cleanup.parent_root.cleanup.identifier.clone())
+            .collect()
     }
 
     pub fn snapshot(&self, generated_at: TimestampMs) -> OrchestratorSnapshot {
@@ -669,7 +2309,180 @@ where
             },
         );
 
-        OrchestratorSnapshot::new(generated_at, daemon, issues)
+        let mut snapshot = OrchestratorSnapshot::new(generated_at, daemon, issues);
+        snapshot.operator_interactions = self
+            .pending_operator
+            .values()
+            .filter(|(_, interaction)| interaction.expires_at > Utc::now())
+            .map(|(_, interaction)| interaction.clone())
+            .collect();
+        snapshot
+            .operator_interactions
+            .sort_by(|a, b| a.request_id.cmp(&b.request_id));
+        snapshot.hierarchy = self
+            .hierarchy_state
+            .hierarchy
+            .iter()
+            .map(|(issue_id, hierarchy)| {
+                (
+                    issue_id.as_str().to_owned(),
+                    crate::opensymphony_domain::HierarchyStateSnapshot {
+                        generation: hierarchy.generation,
+                        blocked_reason: hierarchy
+                            .blocked_reason
+                            .as_ref()
+                            .or(hierarchy.eligibility_blocked_reason.as_ref())
+                            .map(|reason| format!("{reason:?}")),
+                    },
+                )
+            })
+            .collect();
+        snapshot
+    }
+
+    /// The scheduler owns the decision fence; the worker only delivers the
+    /// validated answer to its live ACP responder.
+    pub async fn respond_operator_request(
+        &mut self,
+        binding: &OperatorInteraction,
+        answer: OperatorAnswer,
+    ) -> Result<(), String> {
+        let delivery = self.begin_operator_response(binding, answer).await?;
+        self.complete_operator_response(binding, delivery.wait().await)
+    }
+
+    /// Bind an operator action to the scheduler's current ACP worker. The
+    /// backend and retained owner perform the profile and peer checks.
+    pub async fn begin_harness_operation(
+        &mut self,
+        issue_identifier: &str,
+        run_id: &str,
+        operation_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<HarnessOperationDelivery, String> {
+        let mut matching = self
+            .executions
+            .values()
+            .filter_map(IssueExecution::current_run)
+            .filter(|run| run.issue_identifier.as_str() == issue_identifier);
+        let run = matching.next().ok_or("operator run is not active")?;
+        if matching.next().is_some()
+            || run_id != format!("run-{}", run.worker_id)
+            || self
+                .worker_metadata
+                .get(&run.worker_id)
+                .is_none_or(|metadata| {
+                    metadata.issue_id != run.issue_id
+                        || metadata.harness_kind.as_deref() != Some("acp")
+                })
+        {
+            return Err("operator run binding is stale or ambiguous".into());
+        }
+        let worker_id = run.worker_id.clone();
+        self.worker
+            .begin_harness_operation(&worker_id, run_id, operation_id, arguments)
+            .await
+            .map_err(|error| format!("ACP operation dispatch failed: {error}"))
+    }
+
+    /// Reserve the live decision in actor-owned state and enqueue it. Waiting
+    /// for the harness flush happens outside the scheduler actor.
+    pub async fn begin_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        answer: OperatorAnswer,
+    ) -> Result<OperatorResponseDelivery, String> {
+        let (worker_id, current) = self
+            .pending_operator
+            .get(&binding.request_id)
+            .ok_or("operator request is stale or already answered")?;
+        if current != binding
+            || self.responding_operator.contains(&binding.request_id)
+            || current.expires_at <= Utc::now()
+            || self
+                .worker_metadata
+                .get(worker_id)
+                .is_none_or(|meta| meta.issue_id.as_str() != current.issue_id)
+            || self
+                .executions
+                .get(&IssueId::new(current.issue_id.clone()).map_err(|e| e.to_string())?)
+                .and_then(IssueExecution::current_run)
+                .is_none_or(|run| run.worker_id != *worker_id)
+        {
+            return Err("operator request binding is stale or expired".into());
+        }
+        validate_operator_answer(current, &answer)?;
+        let worker_id = worker_id.clone();
+        self.responding_operator.insert(binding.request_id.clone());
+        match self
+            .worker
+            .begin_operator_response(&worker_id, &binding.request_id, answer)
+            .await
+        {
+            Ok(delivery) => Ok(delivery),
+            Err(error) => {
+                self.responding_operator.remove(&binding.request_id);
+                Err(format!("ACP response delivery failed: {error}"))
+            }
+        }
+    }
+
+    /// Apply a completed delivery only on the orchestrator actor. A retryable
+    /// failure leaves the still-live interaction pending for another answer.
+    pub fn complete_operator_response(
+        &mut self,
+        binding: &OperatorInteraction,
+        delivered: Result<bool, String>,
+    ) -> Result<(), String> {
+        if !self.responding_operator.remove(&binding.request_id) {
+            return Err("operator response attempt is stale".into());
+        }
+        let current = self.pending_operator.get(&binding.request_id).cloned();
+        match delivered {
+            Ok(true) => {
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
+                Ok(())
+            }
+            Ok(false) => {
+                if let Some((worker_id, interaction)) = current
+                    && interaction == *binding
+                {
+                    self.pending_operator.remove(&binding.request_id);
+                    self.observe_operator_resolution(&worker_id, binding);
+                }
+                Err("ACP responder is no longer live".into())
+            }
+            Err(error) => Err(format!("ACP response delivery failed: {error}")),
+        }
+    }
+
+    fn observe_operator_resolution(
+        &mut self,
+        worker_id: &WorkerId,
+        interaction: &OperatorInteraction,
+    ) {
+        let Ok(issue_id) = IssueId::new(interaction.issue_id.clone()) else {
+            return;
+        };
+        if self
+            .worker_metadata
+            .get(worker_id)
+            .is_none_or(|metadata| metadata.issue_id != issue_id)
+        {
+            return;
+        }
+        if let Some(execution) = self.executions.get_mut(&issue_id)
+            && execution
+                .current_run()
+                .is_some_and(|run| run.worker_id == *worker_id)
+        {
+            execution.observe_operator_resolution(datetime_to_timestamp(Utc::now()));
+        }
     }
 
     pub async fn bootstrap(
@@ -691,14 +2504,11 @@ where
         Ok(self.snapshot(observed_at))
     }
 
-    pub async fn tick(
+    /// Apply queued worker reports without waiting for a tracker polling cycle.
+    pub async fn drain_worker_updates(
         &mut self,
         observed_at: TimestampMs,
     ) -> Result<OrchestratorSnapshot, SchedulerError> {
-        self.load_recovery_state().await?;
-        self.flush_pending_retry_persistence().await?;
-        self.flush_pending_retry_exhaustion_persistence().await?;
-
         let updates = self
             .worker
             .poll_updates()
@@ -707,22 +2517,151 @@ where
                 detail: error.to_string(),
             })?;
         self.apply_worker_updates(updates).await?;
+        Ok(self.snapshot(observed_at))
+    }
+
+    pub async fn tick(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<OrchestratorSnapshot, SchedulerError> {
+        self.load_recovery_state().await?;
+        self.flush_pending_retry_persistence().await?;
+        self.flush_pending_retry_exhaustion_persistence().await?;
+        let retain_failed = self.workspace.retain_failed_workspaces();
+        let subtree_cleanup_pending = self
+            .hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .any(|cleanup| {
+                matches!(
+                    cleanup.status,
+                    ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                ) || (cleanup.status == ParentSubtreeCleanupStatus::Retained
+                    && (cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed))
+            });
 
         self.expire_linear_cooldown(observed_at);
-        let mut dispatch_candidates = None;
-        if !self.linear_cooldown_active(observed_at) {
-            if due(
-                self.last_full_detail_refresh_at,
-                FULL_DETAIL_REFRESH_INTERVAL_MS,
+        let full_detail_refresh_interval_ms =
+            full_detail_refresh_interval_ms(&self.hierarchy_state);
+        let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
+            && (subtree_cleanup_pending
+                || due(
+                    self.last_full_detail_refresh_at,
+                    full_detail_refresh_interval_ms,
+                    observed_at,
+                )) {
+            if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
+                self.record_full_detail_refresh(observed_at);
+                let hierarchy_changed = self.reconcile_hierarchy_snapshots(&tracker_snapshot)?;
+                let terminal_hierarchy_changed =
+                    self.reconcile_terminal_hierarchy_snapshots(&tracker_snapshot)?;
+                if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
+                    self.persist_orchestrator_state().await?;
+                }
+                self.fence_hierarchy_changed_runs(observed_at).await?;
+                Some(tracker_snapshot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if !self.linear_cooldown_active(observed_at)
+            && pre_update_full_snapshot.is_none()
+            && !self.pending_finished_updates.is_empty()
+            && let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await?
+        {
+            self.record_full_detail_refresh(observed_at);
+            let hierarchy_changed = self.reconcile_hierarchy_snapshots(&tracker_snapshot)?;
+            let terminal_hierarchy_changed =
+                self.reconcile_terminal_hierarchy_snapshots(&tracker_snapshot)?;
+            if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
+                self.persist_orchestrator_state().await?;
+            }
+            self.fence_hierarchy_changed_runs(observed_at).await?;
+            pre_update_full_snapshot = Some(tracker_snapshot);
+        }
+
+        if !self.linear_cooldown_active(observed_at)
+            && pre_update_full_snapshot.is_none()
+            && due(
+                self.last_running_state_refresh_at,
+                RUNNING_STATE_REFRESH_INTERVAL_MS,
                 observed_at,
-            ) {
+            )
+            && self.has_reconcilable_executions()
+        {
+            self.refresh_running_issue_states(observed_at).await?;
+        }
+
+        if pre_update_full_snapshot.is_some() {
+            self.flush_pending_finished_updates().await?;
+        }
+
+        self.drain_worker_updates(observed_at).await?;
+        if !self.linear_cooldown_active(observed_at) {
+            let freshly_inactive_issue_ids = pre_update_full_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    self.hierarchy_state
+                        .parent_integrations
+                        .keys()
+                        .filter(|parent_id| !snapshot.contains_active(parent_id.as_str()))
+                        .cloned()
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            self.advance_parent_repairs(observed_at, &freshly_inactive_issue_ids)
+                .await?;
+        }
+
+        let mut dispatch_candidates = None;
+        if let Some(tracker_snapshot) = pre_update_full_snapshot.as_ref() {
+            self.bootstrap_recovery(tracker_snapshot, observed_at)
+                .await?;
+            self.reconcile_tracker_state(tracker_snapshot, observed_at)
+                .await?;
+            let active_issue_ids = tracker_snapshot
+                .active
+                .iter()
+                .map(|issue| issue.id.clone())
+                .collect::<HashSet<_>>();
+            self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
+                .await?;
+            dispatch_candidates = Some(DispatchCandidates::Full {
+                issues: tracker_snapshot.active.clone(),
+                reachable_child_edges: self
+                    .required_child_edges_in_tracker_snapshot(tracker_snapshot),
+            });
+        }
+        if !self.linear_cooldown_active(observed_at) {
+            if pre_update_full_snapshot.is_none()
+                && due(
+                    self.last_full_detail_refresh_at,
+                    full_detail_refresh_interval_ms,
+                    observed_at,
+                )
+            {
                 if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
                     self.record_full_detail_refresh(observed_at);
                     self.bootstrap_recovery(&tracker_snapshot, observed_at)
                         .await?;
                     self.reconcile_tracker_state(&tracker_snapshot, observed_at)
                         .await?;
-                    dispatch_candidates = Some(DispatchCandidates::Full(tracker_snapshot.active));
+                    let active_issue_ids = tracker_snapshot
+                        .active
+                        .iter()
+                        .map(|issue| issue.id.clone())
+                        .collect::<HashSet<_>>();
+                    self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
+                        .await?;
+                    dispatch_candidates = Some(DispatchCandidates::Full {
+                        reachable_child_edges: self
+                            .required_child_edges_in_tracker_snapshot(&tracker_snapshot),
+                        issues: tracker_snapshot.active,
+                    });
                 }
             } else if due(
                 self.last_terminal_refresh_at,
@@ -730,14 +2669,6 @@ where
                 observed_at,
             ) {
                 self.refresh_terminal_issues(observed_at).await?;
-            }
-            if due(
-                self.last_running_state_refresh_at,
-                RUNNING_STATE_REFRESH_INTERVAL_MS,
-                observed_at,
-            ) && self.has_reconcilable_executions()
-            {
-                self.refresh_running_issue_states(observed_at).await?;
             }
             if due(
                 self.last_dispatch_discovery_at,
@@ -753,8 +2684,12 @@ where
 
         if let Some(candidates) = dispatch_candidates {
             match candidates {
-                DispatchCandidates::Full(candidates) => {
-                    self.dispatch_ready_issues(&candidates, observed_at).await?;
+                DispatchCandidates::Full {
+                    issues,
+                    reachable_child_edges,
+                } => {
+                    self.dispatch_ready_issues(&issues, observed_at, Some(&reachable_child_edges))
+                        .await?;
                 }
                 DispatchCandidates::Summary(candidates) => {
                     self.dispatch_summary_candidates(&candidates, observed_at)
@@ -767,13 +2702,453 @@ where
 
         let known_candidates = self.known_dispatch_candidates(observed_at);
         if !known_candidates.is_empty() {
-            self.dispatch_ready_issues(&known_candidates, observed_at)
+            self.dispatch_ready_issues(&known_candidates, observed_at, None)
                 .await?;
         }
 
         self.last_poll_at = Some(observed_at);
         self.refresh_health_from_linear_cooldown(observed_at);
         Ok(self.snapshot(observed_at))
+    }
+
+    pub async fn acknowledge_terminal_capture(
+        &mut self,
+        issue_identifiers: &[String],
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let captured = issue_identifiers.iter().collect::<BTreeSet<_>>();
+        let parent_ids = self
+            .executions
+            .iter()
+            .filter(|(_, execution)| {
+                captured.contains(&execution.issue().identifier.to_string())
+                    && self
+                        .hierarchy_state
+                        .parent_integrations
+                        .contains_key(&execution.issue().id)
+            })
+            .map(|(issue_id, _)| issue_id.clone())
+            .collect::<Vec<_>>();
+        let mut intents = Vec::new();
+        for parent_id in parent_ids {
+            let Some(execution) = self.executions.get(&parent_id).cloned() else {
+                continue;
+            };
+            let Some(parent_workspace) = execution.workspace().cloned() else {
+                continue;
+            };
+            let Some(controller) = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if controller.subtree_cleanup.is_some() {
+                continue;
+            }
+            if controller.has_unreconciled_harness() {
+                return Err(SchedulerError::Workspace {
+                    detail: format!(
+                        "captured parent {parent_id} still has an unreconciled harness cleanup fence"
+                    ),
+                });
+            }
+            if controller.has_unreconciled_provider_operation() {
+                return Err(SchedulerError::Workspace {
+                    detail: format!(
+                        "captured parent {parent_id} still has an unreconciled provider operation cleanup fence"
+                    ),
+                });
+            }
+            let outcome = match controller.state {
+                super::ParentIntegrationState::Completed => {
+                    if controller.final_evidence.is_none()
+                        || controller.repair_attempts.iter().any(|repair| {
+                            repair.status != ParentRepairStatus::Completed
+                                || repair.operations.iter().any(|operation| {
+                                    operation.receipt.is_none() || operation.completed_at.is_none()
+                                })
+                        })
+                    {
+                        return Err(SchedulerError::Workspace {
+                            detail: format!(
+                                "captured parent {parent_id} is missing final evidence or repair receipts"
+                            ),
+                        });
+                    }
+                    CleanupTerminalOutcome::Succeeded
+                }
+                super::ParentIntegrationState::Failed { .. } => CleanupTerminalOutcome::Failed,
+                super::ParentIntegrationState::Canceled { .. } => CleanupTerminalOutcome::Canceled,
+                _ => {
+                    return Err(SchedulerError::Workspace {
+                        detail: format!(
+                            "captured parent {parent_id} has not reached a terminal controller state"
+                        ),
+                    });
+                }
+            };
+            let retained = outcome == CleanupTerminalOutcome::Failed
+                && self.workspace.retain_failed_workspaces();
+            let resources = self
+                .hierarchy_state
+                .descendant_resources_for_generation(&parent_id, controller.hierarchy_generation);
+            let mut descendants = Vec::with_capacity(resources.len());
+            for resource in resources {
+                let cleanup = self
+                    .workspace
+                    .cleanup_target_for_resource(&resource, CleanupTerminalOutcome::Succeeded)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    })?
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: format!(
+                            "captured parent {} is missing retained workspace generation {}",
+                            parent_id, resource.checkout_generation
+                        ),
+                    })?;
+                descendants.push(ParentSubtreeCleanupTarget {
+                    resource: Some(resource.clone()),
+                    cleanup,
+                    prepared_at: None,
+                    cleaned_at: None,
+                });
+            }
+            descendants.sort_by(|left, right| {
+                let left_resource = left.resource.as_ref().expect("descendant resource");
+                let right_resource = right.resource.as_ref().expect("descendant resource");
+                hierarchy_depth(&self.hierarchy_state, &parent_id, &right_resource.issue_id)
+                    .cmp(&hierarchy_depth(
+                        &self.hierarchy_state,
+                        &parent_id,
+                        &left_resource.issue_id,
+                    ))
+                    .then_with(|| left_resource.cmp(right_resource))
+            });
+            let intent = ParentSubtreeCleanupIntent {
+                hierarchy_generation: controller.hierarchy_generation,
+                capture_acknowledged_at: observed_at,
+                requested_at: observed_at,
+                outcome,
+                status: if retained {
+                    ParentSubtreeCleanupStatus::Retained
+                } else {
+                    ParentSubtreeCleanupStatus::Pending
+                },
+                parent_root: ParentSubtreeCleanupTarget {
+                    resource: None,
+                    cleanup: CleanupTarget {
+                        issue_id: parent_id.to_string(),
+                        identifier: execution.issue().identifier.to_string(),
+                        workspace: parent_workspace,
+                        generation: format!("parent:{}", controller.hierarchy_generation),
+                        outcome,
+                    },
+                    prepared_at: None,
+                    cleaned_at: None,
+                },
+                descendants,
+                retry_count: 0,
+                last_error: None,
+            };
+            intents.push((parent_id, intent));
+        }
+        if !intents.is_empty() {
+            let previous_state = self.hierarchy_state.clone();
+            for (parent_id, intent) in intents {
+                self.hierarchy_state
+                    .parent_integrations
+                    .get_mut(&parent_id)
+                    .expect("parent controller was cloned")
+                    .subtree_cleanup = Some(intent);
+            }
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                return Err(error);
+            }
+        }
+        let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? else {
+            return Ok(());
+        };
+        let active_issue_ids = tracker_snapshot
+            .active
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect::<HashSet<_>>();
+        self.reconcile_parent_subtree_cleanup(observed_at, &active_issue_ids)
+            .await
+    }
+
+    async fn reconcile_parent_subtree_cleanup(
+        &mut self,
+        observed_at: TimestampMs,
+        freshly_active_issue_ids: &HashSet<String>,
+    ) -> Result<(), SchedulerError> {
+        let retain_failed = self.workspace.retain_failed_workspaces();
+        let mut retention_changed = false;
+        for (parent_id, controller) in &mut self.hierarchy_state.parent_integrations {
+            let tracker_reopened = self.executions.get(parent_id).is_some_and(|execution| {
+                execution.issue().state.category == IssueStateCategory::Active
+            });
+            if let Some(cleanup) = controller.subtree_cleanup.as_mut() {
+                let next_status = match cleanup.status {
+                    ParentSubtreeCleanupStatus::Retained
+                        if cleanup.outcome != CleanupTerminalOutcome::Failed || !retain_failed =>
+                    {
+                        Some(ParentSubtreeCleanupStatus::Pending)
+                    }
+                    ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                        if cleanup.outcome == CleanupTerminalOutcome::Failed
+                            && retain_failed
+                            && !tracker_reopened
+                            && cleanup.parent_root.cleaned_at.is_none() =>
+                    {
+                        Some(ParentSubtreeCleanupStatus::Retained)
+                    }
+                    _ => None,
+                };
+                if let Some(next_status) = next_status {
+                    cleanup.status = next_status;
+                    cleanup.last_error = None;
+                    retention_changed = true;
+                }
+            }
+        }
+        if retention_changed {
+            self.persist_orchestrator_state().await?;
+        }
+        let parent_ids = self
+            .hierarchy_state
+            .parent_integrations
+            .iter()
+            .filter(|(_, controller)| {
+                controller.subtree_cleanup.as_ref().is_some_and(|cleanup| {
+                    matches!(
+                        cleanup.status,
+                        ParentSubtreeCleanupStatus::Pending | ParentSubtreeCleanupStatus::Removing
+                    )
+                })
+            })
+            .map(|(parent_id, _)| parent_id.clone())
+            .collect::<Vec<_>>();
+        for parent_id in parent_ids {
+            let parent_root = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .map(|cleanup| cleanup.parent_root.clone())
+                .expect("cleanup intent exists");
+            if parent_root.prepared_at.is_none() {
+                match self
+                    .workspace
+                    .prepare_cleanup_generation(&parent_root.cleanup)
+                    .await
+                {
+                    Ok(()) => {
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists")
+                            .parent_root
+                            .prepared_at = Some(observed_at);
+                        self.persist_orchestrator_state().await?;
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                        continue;
+                    }
+                }
+            }
+            let descendants = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .map(|cleanup| cleanup.descendants.clone())
+                .unwrap_or_default();
+            let previous_state = self.hierarchy_state.clone();
+            let mut leases_released = false;
+            for target in &descendants {
+                let resource = target.resource.as_ref().expect("descendant resource");
+                if self.hierarchy_state.release_parent_resource_leases(
+                    &parent_id,
+                    resource,
+                    observed_at.as_u64(),
+                ) {
+                    leases_released = true;
+                }
+            }
+            if leases_released && let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                return Err(error);
+            }
+            if let Some(cleanup) = self
+                .hierarchy_state
+                .parent_integrations
+                .get_mut(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_mut())
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Removing;
+                cleanup.last_error = None;
+            }
+            self.persist_orchestrator_state().await?;
+
+            let mut failed = false;
+            for (index, target) in descendants.iter().enumerate() {
+                if target.cleaned_at.is_some() {
+                    continue;
+                }
+                let resource = target.resource.as_ref().expect("descendant resource");
+                let fresh_tracker_fence = freshly_active_issue_ids
+                    .contains(resource.issue_id.as_str())
+                    && !self
+                        .executions
+                        .get(&resource.issue_id)
+                        .and_then(IssueExecution::workspace)
+                        .is_some_and(|workspace| workspace.path != target.cleanup.workspace.path);
+                if self
+                    .hierarchy_state
+                    .active_for_at(resource, observed_at.as_u64())
+                    || fresh_tracker_fence
+                    || self
+                        .executions
+                        .get(&resource.issue_id)
+                        .is_some_and(|execution| {
+                            matches!(
+                                execution.status(),
+                                SchedulerStatus::Claimed
+                                    | SchedulerStatus::Running
+                                    | SchedulerStatus::RetryQueued
+                            ) && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == target.cleanup.workspace.path
+                            })
+                        })
+                {
+                    continue;
+                }
+                match self.workspace.cleanup_generation(&target.cleanup).await {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&resource.issue_id)
+                            && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == target.cleanup.workspace.path
+                            })
+                        {
+                            execution.clear_workspace();
+                        }
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists")
+                            .descendants[index]
+                            .cleaned_at = Some(observed_at);
+                        self.persist_orchestrator_state().await?;
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                continue;
+            }
+            let cleanup = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&parent_id)
+                .and_then(|controller| controller.subtree_cleanup.as_ref())
+                .expect("cleanup intent exists")
+                .clone();
+            if cleanup
+                .descendants
+                .iter()
+                .any(|target| target.cleaned_at.is_none())
+            {
+                if let Some(cleanup) = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&parent_id)
+                    .and_then(|controller| controller.subtree_cleanup.as_mut())
+                {
+                    cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                }
+                self.persist_orchestrator_state().await?;
+                continue;
+            }
+            if cleanup.parent_root.cleaned_at.is_none() {
+                let previous_state = self.hierarchy_state.clone();
+                let previous_execution = self.executions.get(&parent_id).cloned();
+                match self
+                    .workspace
+                    .cleanup_generation(&cleanup.parent_root.cleanup)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Some(execution) = self.executions.get_mut(&parent_id)
+                            && execution.workspace().is_some_and(|workspace| {
+                                workspace.path == cleanup.parent_root.cleanup.workspace.path
+                            })
+                        {
+                            execution.clear_workspace();
+                        }
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.parent_root.cleaned_at = Some(observed_at);
+                        cleanup.status = ParentSubtreeCleanupStatus::Completed;
+                        cleanup.last_error = None;
+                        if let Err(error) = self.persist_orchestrator_state().await {
+                            self.hierarchy_state = previous_state;
+                            if let Some(execution) = previous_execution {
+                                self.executions.insert(parent_id.clone(), execution);
+                            }
+                            return Err(error);
+                        }
+                    }
+                    Err(error) => {
+                        let cleanup = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get_mut(&parent_id)
+                            .and_then(|controller| controller.subtree_cleanup.as_mut())
+                            .expect("cleanup intent exists");
+                        cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                        cleanup.retry_count = cleanup.retry_count.saturating_add(1);
+                        cleanup.last_error = Some(redact_runtime_diagnostic(&error.to_string()));
+                        self.persist_orchestrator_state().await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn interrupt_operator_cancel(
@@ -823,6 +3198,192 @@ where
 
         self.insert_execution(issue_id, execution);
         Ok(true)
+    }
+
+    /// Clear a durable `HierarchyChanged` block after an operator or parent
+    /// controller has deliberately accepted the current child-edge snapshot.
+    /// The transition keeps retained evidence and leases intact; the next
+    /// eligibility pass must reacquire the current generation's leases.
+    pub async fn replan_parent(
+        &mut self,
+        parent_id: &IssueId,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        self.load_recovery_state().await?;
+        let Some(snapshot) = self.hierarchy_state.hierarchy.get(parent_id) else {
+            return Ok(false);
+        };
+        if snapshot.blocked_reason != Some(HierarchyBlockedReason::HierarchyChanged) {
+            return Ok(false);
+        }
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(parent_id)
+            .and_then(|controller| controller.subtree_cleanup.as_ref())
+            .is_some_and(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed)
+        {
+            return Err(SchedulerError::Workspace {
+                detail: format!(
+                    "cannot replan hierarchy parent {parent_id} while subtree cleanup is incomplete"
+                ),
+            });
+        }
+        if self.executions.get(parent_id).is_some_and(|execution| {
+            matches!(
+                execution.status(),
+                SchedulerStatus::Claimed | SchedulerStatus::Running
+            )
+        }) {
+            return Err(SchedulerError::Workspace {
+                detail: format!(
+                    "cannot replan hierarchy parent {parent_id} while its fenced execution is still running"
+                ),
+            });
+        }
+
+        let previous_state = self.hierarchy_state.clone();
+        let generation = if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
+            snapshot.replan();
+            Some(snapshot.generation)
+        } else {
+            None
+        };
+        if let Some(generation) = generation {
+            self.hierarchy_state
+                .rebind_ancestor_leases(parent_id, generation);
+        }
+        let controller_replaced = generation.is_some_and(|generation| {
+            self.hierarchy_state
+                .parent_integrations
+                .get(parent_id)
+                .is_some_and(|controller| controller.hierarchy_generation != generation)
+        });
+        if controller_replaced {
+            self.hierarchy_state.parent_integrations.insert(
+                parent_id.clone(),
+                ParentIntegrationController::new(
+                    parent_id.clone(),
+                    generation.expect("controller replacement requires a generation"),
+                )?,
+            );
+        }
+        self.parent_eligibility_checked_at.remove(parent_id);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        if controller_replaced
+            && let Some(issue) = self
+                .executions
+                .get(parent_id)
+                .map(|execution| execution.issue().clone())
+        {
+            self.reopen_completed_parent_for_new_controller(&issue, observed_at)?;
+        }
+        Ok(true)
+    }
+
+    /// Replan a hierarchy parent addressed by the tracker identifier exposed
+    /// by the gateway action envelope. The scheduler resolves the identifier
+    /// through the tracker before mutating its durable hierarchy state.
+    pub async fn replan_parent_target(
+        &mut self,
+        target: &str,
+        accepted_generation: u64,
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        self.load_recovery_state().await?;
+        let lookup_target = self
+            .executions
+            .values()
+            .find(|execution| {
+                execution.conversation().is_some_and(|conversation| {
+                    let conversation_id = conversation.conversation_id.as_str();
+                    conversation_id.eq_ignore_ascii_case(target)
+                        || conversation_id_suffix(conversation_id).eq_ignore_ascii_case(target)
+                })
+            })
+            .map(|execution| execution.issue().identifier.as_str().to_owned())
+            .unwrap_or_else(|| target.to_owned());
+        let issues = match self
+            .tracker
+            .issues_by_identifiers(std::slice::from_ref(&lookup_target))
+            .await
+        {
+            Ok(issues) => issues,
+            Err(error) => {
+                if T::error_category(&error) == Some(TrackerErrorCategory::NotFound) {
+                    warn!(target = %lookup_target, "replan target disappeared before execution");
+                    return Ok(false);
+                }
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
+            }
+        };
+        let Some(issue) = issues.into_iter().find(|issue| {
+            issue.identifier.eq_ignore_ascii_case(&lookup_target) || issue.id == lookup_target
+        }) else {
+            return Ok(false);
+        };
+        let issue_id = IssueId::new(issue.id.clone())?;
+        let Some(expected_generation) = self
+            .hierarchy_state
+            .hierarchy
+            .get(&issue_id)
+            .filter(|snapshot| {
+                snapshot.blocked_reason == Some(HierarchyBlockedReason::HierarchyChanged)
+            })
+            .map(|snapshot| snapshot.generation)
+        else {
+            return Ok(false);
+        };
+        if expected_generation != accepted_generation {
+            warn!(
+                parent = %lookup_target,
+                accepted_generation,
+                current_generation = expected_generation,
+                "rejecting replan for a stale accepted hierarchy generation"
+            );
+            return Ok(false);
+        }
+
+        // Refresh the child edges before clearing the durable block. If the
+        // accepted snapshot changed while the action was in flight, preserve
+        // the new HierarchyChanged fence instead of silently accepting scope
+        // the operator did not explicitly replan.
+        let tracker_snapshot = self
+            .load_tracker_snapshot(observed_at)
+            .await?
+            .ok_or_else(|| SchedulerError::Tracker {
+                detail: "replan reachability refresh deferred by tracker rate limit".to_owned(),
+            })?;
+        let reachable_child_edges =
+            self.required_child_edges_in_tracker_snapshot(&tracker_snapshot);
+        let previous_state = self.hierarchy_state.clone();
+        self.reconcile_hierarchy_issue(&issue, Some(&reachable_child_edges))?;
+        let current_generation = self
+            .hierarchy_state
+            .hierarchy
+            .get(&issue_id)
+            .map(|snapshot| snapshot.generation);
+        if self.hierarchy_state != previous_state
+            && let Err(error) = self.persist_orchestrator_state().await
+        {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        if current_generation != Some(expected_generation) {
+            warn!(
+                parent = %lookup_target,
+                expected_generation,
+                current_generation = ?current_generation,
+                "rejecting replan for a hierarchy generation that changed before execution"
+            );
+            return Ok(false);
+        }
+        self.replan_parent(&issue_id, observed_at).await
     }
 
     pub async fn run_until_shutdown<F>(&mut self, shutdown: F) -> Result<(), SchedulerError>
@@ -913,8 +3474,8 @@ where
             .map(|(index, issue)| (issue.id.clone(), index))
             .collect();
         let terminal_state_by_id = terminal
-            .into_iter()
-            .map(|issue| (issue.id, issue.state))
+            .iter()
+            .map(|issue| (issue.id.clone(), issue.state.clone()))
             .collect();
 
         let state_by_id = if lookup_ids.is_empty() {
@@ -945,6 +3506,7 @@ where
             terminal_state_by_id,
             state_by_id,
             active,
+            terminal,
         }))
     }
 
@@ -970,26 +3532,63 @@ where
             return Ok(());
         }
 
-        let snapshots = match self.tracker.issue_states_by_ids(&issue_ids).await {
-            Ok(snapshots) => snapshots,
-            Err(error) => {
-                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
-                    return Ok(());
+        let has_running_parent = issue_ids.iter().any(|issue_id| {
+            IssueId::new(issue_id.clone())
+                .ok()
+                .is_some_and(|issue_id| self.parent_issue_ids.contains(&issue_id))
+        });
+        let active = if has_running_parent {
+            match self.tracker.candidate_issues().await {
+                Ok(active) => active,
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(());
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
                 }
-                return Err(SchedulerError::Tracker {
-                    detail: error.to_string(),
-                });
+            }
+        } else {
+            Vec::new()
+        };
+        let active_ids = active
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect::<HashSet<_>>();
+        let state_issue_ids = issue_ids
+            .into_iter()
+            .filter(|issue_id| !active_ids.contains(issue_id.as_str()))
+            .collect::<Vec<_>>();
+        let snapshots = if state_issue_ids.is_empty() {
+            Vec::new()
+        } else {
+            match self.tracker.issue_states_by_ids(&state_issue_ids).await {
+                Ok(snapshots) => snapshots,
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(());
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
+                }
             }
         };
         self.last_running_state_refresh_at = Some(observed_at);
         let tracker_snapshot = TrackerSnapshot {
-            active: Vec::new(),
-            active_index: HashMap::new(),
+            active_index: active
+                .iter()
+                .enumerate()
+                .map(|(index, issue)| (issue.id.clone(), index))
+                .collect(),
             terminal_state_by_id: HashMap::new(),
             state_by_id: snapshots
                 .into_iter()
                 .map(|snapshot| (snapshot.id.clone(), snapshot))
                 .collect(),
+            active,
+            terminal: Vec::new(),
         };
         self.reconcile_tracker_state(&tracker_snapshot, observed_at)
             .await
@@ -1015,10 +3614,11 @@ where
             active: Vec::new(),
             active_index: HashMap::new(),
             terminal_state_by_id: terminal
-                .into_iter()
-                .map(|issue| (issue.id, issue.state))
+                .iter()
+                .map(|issue| (issue.id.clone(), issue.state.clone()))
                 .collect(),
             state_by_id: HashMap::new(),
+            terminal,
         };
         self.reconcile_tracker_state(&tracker_snapshot, observed_at)
             .await
@@ -1076,6 +3676,455 @@ where
         };
     }
 
+    fn reconcile_hierarchy_snapshots(
+        &mut self,
+        tracker_snapshot: &TrackerSnapshot,
+    ) -> Result<bool, SchedulerError> {
+        let reachable_child_edges = self.required_child_edges_in_tracker_snapshot(tracker_snapshot);
+        let mut durable_state_changed = false;
+        for tracker_issue in &tracker_snapshot.active {
+            durable_state_changed |=
+                self.reconcile_hierarchy_issue(tracker_issue, Some(&reachable_child_edges))?;
+        }
+        self.hierarchy_state_dirty |= durable_state_changed;
+        Ok(durable_state_changed)
+    }
+
+    fn reconcile_terminal_hierarchy_snapshots(
+        &mut self,
+        tracker_snapshot: &TrackerSnapshot,
+    ) -> Result<bool, SchedulerError> {
+        for issue in &tracker_snapshot.terminal {
+            let Ok(issue_id) = IssueId::new(issue.id.clone()) else {
+                continue;
+            };
+            if self
+                .hierarchy_state
+                .hierarchy
+                .get(&issue_id)
+                .is_none_or(|snapshot| !snapshot.has_dispatched_execution_fence())
+            {
+                self.terminal_undispatched_parent_ids.insert(issue_id);
+            } else {
+                self.terminal_undispatched_parent_ids.remove(&issue_id);
+            }
+        }
+        let issues = tracker_snapshot
+            .terminal
+            .iter()
+            .filter(|issue| {
+                IssueId::new(issue.id.clone())
+                    .is_ok_and(|issue_id| self.hierarchy_state.hierarchy.contains_key(&issue_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if issues.is_empty() {
+            return Ok(false);
+        }
+        let reachable_child_edges = self.required_child_edges_in_tracker_snapshot(tracker_snapshot);
+        let mut changed = false;
+        for issue in issues {
+            changed |= self.reconcile_hierarchy_issue(&issue, Some(&reachable_child_edges))?;
+        }
+        Ok(changed)
+    }
+
+    fn required_child_edges_in_tracker_snapshot(
+        &self,
+        tracker_snapshot: &TrackerSnapshot,
+    ) -> BTreeSet<(IssueId, IssueId)> {
+        let mut edges = BTreeSet::new();
+        for issue in tracker_snapshot
+            .active
+            .iter()
+            .chain(tracker_snapshot.terminal.iter())
+        {
+            let Ok(issue_id) = IssueId::new(issue.id.clone()) else {
+                continue;
+            };
+            let snapshot =
+                HierarchySnapshot::new_with_canceled_states(issue, &self.config.terminal_states);
+            edges.extend(
+                snapshot
+                    .required_child_edges
+                    .into_iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| (issue_id.clone(), edge.child_id)),
+            );
+            if !is_canceled_tracker_issue(issue, &self.config.terminal_states)
+                && let Some(parent_id) = issue
+                    .parent_id
+                    .as_deref()
+                    .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())
+            {
+                edges.insert((parent_id, issue_id));
+            }
+        }
+        edges
+    }
+
+    async fn fence_hierarchy_changed_runs(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let mut cleared_in_flight_fence = false;
+        let issue_ids = self
+            .hierarchy_state
+            .hierarchy
+            .iter()
+            .filter(|(_, snapshot)| {
+                snapshot.blocked_reason == Some(HierarchyBlockedReason::HierarchyChanged)
+            })
+            .filter_map(|(issue_id, _)| {
+                self.executions.get(issue_id).and_then(|execution| {
+                    matches!(
+                        execution.status(),
+                        SchedulerStatus::Claimed | SchedulerStatus::Running
+                    )
+                    .then(|| issue_id.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        for issue_id in issue_ids {
+            let Some(issue) = self
+                .executions
+                .get(&issue_id)
+                .map(|execution| execution.issue().clone())
+            else {
+                continue;
+            };
+            self.release_issue(
+                issue_id.clone(),
+                issue,
+                observed_at,
+                ReleaseReason::TrackerInactive,
+                false,
+                Some(WorkerAbortReason::TrackerInactive),
+            )
+            .await?;
+            if self
+                .executions
+                .get(&issue_id)
+                .is_some_and(|execution| execution.status() == SchedulerStatus::Released)
+                && let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id)
+            {
+                cleared_in_flight_fence |= snapshot.clear_in_flight_dispatch();
+            }
+        }
+        if cleared_in_flight_fence {
+            self.hierarchy_state_dirty = true;
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_hierarchy_issue(
+        &mut self,
+        tracker_issue: &TrackerIssue,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
+    ) -> Result<bool, SchedulerError> {
+        let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+        let terminal_failure_resolved =
+            self.executions
+                .get(&normalized.id)
+                .is_some_and(|execution| {
+                    execution.retry().is_none()
+                        && execution.last_worker_outcome().is_some_and(|outcome| {
+                            matches!(outcome.outcome, WorkerOutcomeKind::Succeeded)
+                        })
+                });
+        if self.terminal_child_failure_ids.contains(&normalized.id) && terminal_failure_resolved {
+            self.terminal_child_failure_ids.remove(&normalized.id);
+        }
+        let existing_snapshot = self.hierarchy_state.hierarchy.get(&normalized.id).cloned();
+        if reachable_child_edges.is_none()
+            && existing_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.required_child_edges
+                    != HierarchySnapshot::new_with_canceled_states(
+                        tracker_issue,
+                        &self.config.terminal_states,
+                    )
+                    .required_child_edges
+            })
+        {
+            // Keep the old scope and its leases until the full observation can
+            // distinguish removed children from children moved to another parent.
+            self.last_full_detail_refresh_at = None;
+            return Ok(false);
+        }
+        let should_retain_parent_identity = !tracker_issue.sub_issues.is_empty()
+            || existing_snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot.required_child_edges.is_empty()
+                    || snapshot.frozen
+                    || snapshot.blocked_reason.is_some()
+            });
+        let cleanup_blocks_reconciliation = self
+            .hierarchy_state
+            .parent_integrations
+            .get(&normalized.id)
+            .and_then(|controller| controller.subtree_cleanup.as_ref())
+            .is_some_and(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed);
+        if cleanup_blocks_reconciliation {
+            let mut changed = false;
+            if normalized.state.category == IssueStateCategory::Active
+                && let Some(cleanup) = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&normalized.id)
+                    .and_then(|controller| controller.subtree_cleanup.as_mut())
+                && cleanup.status == ParentSubtreeCleanupStatus::Retained
+            {
+                cleanup.status = ParentSubtreeCleanupStatus::Pending;
+                cleanup.last_error = None;
+                changed = true;
+            }
+            return Ok(changed);
+        }
+        if !should_retain_parent_identity {
+            self.parent_issue_ids.remove(&normalized.id);
+            self.terminal_undispatched_parent_ids.remove(&normalized.id);
+            self.terminal_child_failure_ids.remove(&normalized.id);
+            self.hierarchy_state
+                .run_hierarchy_generations
+                .remove(&normalized.id);
+            self.hierarchy_state
+                .parent_integrations
+                .remove(&normalized.id);
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.remove(&normalized.id) {
+                let removed_child_ids = snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<Vec<_>>();
+                self.hierarchy_state.release_removed_subtree_leases(
+                    &normalized.id,
+                    &removed_child_ids,
+                    reachable_child_edges,
+                    current_epoch_millis(),
+                );
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        self.parent_issue_ids.insert(normalized.id.clone());
+        if !self.hierarchy_state.hierarchy.contains_key(&normalized.id) {
+            let snapshot = HierarchySnapshot::new_with_canceled_states(
+                tracker_issue,
+                &self.config.terminal_states,
+            );
+            let terminal_undispatched = normalized.state.category == IssueStateCategory::Terminal
+                && !snapshot.has_dispatched_execution_fence();
+            if terminal_undispatched {
+                self.terminal_undispatched_parent_ids
+                    .insert(normalized.id.clone());
+            }
+            self.hierarchy_state
+                .hierarchy
+                .insert(normalized.id.clone(), snapshot);
+            self.hierarchy_state.parent_integrations.insert(
+                normalized.id.clone(),
+                ParentIntegrationController::new(normalized.id.clone(), 1)?,
+            );
+            if terminal_undispatched {
+                self.hierarchy_state
+                    .release_subtree_evidence_for_undispatched_parent_with_reachability(
+                        &normalized.id,
+                        reachable_child_edges,
+                        current_epoch_millis(),
+                    );
+            }
+            return Ok(true);
+        }
+        let terminal_undispatched = normalized.state.category == IssueStateCategory::Terminal
+            && self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
+        if terminal_undispatched {
+            self.terminal_undispatched_parent_ids
+                .insert(normalized.id.clone());
+        } else {
+            self.terminal_undispatched_parent_ids.remove(&normalized.id);
+        }
+        let released_terminal_parent_evidence = terminal_undispatched
+            && self
+                .hierarchy_state
+                .release_subtree_evidence_for_undispatched_parent_with_reachability(
+                    &normalized.id,
+                    reachable_child_edges,
+                    current_epoch_millis(),
+                );
+        let parent_waiting_for_tracker_confirmation =
+            self.parent_waiting_for_tracker_confirmation(&normalized.id);
+        let reactivated_parent = !parent_waiting_for_tracker_confirmation
+            && self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| {
+                    snapshot.dispatch_claimed()
+                        && !snapshot.has_in_flight_dispatch()
+                        && normalized.state.category == IssueStateCategory::Active
+                        && !self
+                            .executions
+                            .get(&normalized.id)
+                            .is_some_and(|execution| {
+                                matches!(
+                                    execution.status(),
+                                    SchedulerStatus::Claimed | SchedulerStatus::Running
+                                )
+                            })
+                        && !self.hierarchy_state.leases.iter().any(|lease| {
+                            lease.active()
+                                && normalized.parent_id.is_none()
+                                && (lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                                    || (lease.kind == super::LeaseKind::Review
+                                        && lease.owner.id.starts_with(&format!(
+                                            "review:{normalized_id}:",
+                                            normalized_id = normalized.id
+                                        ))))
+                        })
+                });
+        let reconciliation =
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&normalized.id) {
+                if reactivated_parent {
+                    // Reconcile the detailed child edges before making a
+                    // previously terminal parent dispatchable again. A
+                    // changed scope must advance the generation that the new
+                    // run will use.
+                    snapshot.replan();
+                }
+                let previous_child_ids = snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<BTreeSet<_>>();
+                let reconciliation = snapshot.reconcile_with_canceled_states(
+                    &tracker_issue.sub_issues,
+                    &self.config.terminal_states,
+                );
+                if !matches!(&reconciliation, super::HierarchyReconciliation::Unchanged) {
+                    let current_child_ids = snapshot
+                        .required_child_edges
+                        .iter()
+                        .filter(|edge| edge.required)
+                        .map(|edge| edge.child_id.clone())
+                        .collect::<BTreeSet<_>>();
+                    let removed_child_ids = previous_child_ids
+                        .difference(&current_child_ids)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    Some((snapshot.generation, current_child_ids, removed_child_ids))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some((generation, current_child_ids, removed_child_ids)) = reconciliation {
+            self.parent_eligibility_checked_at.remove(&normalized.id);
+            self.hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(&normalized.id);
+            let retained_child_ids = current_child_ids
+                .iter()
+                .filter(|child_id| {
+                    !self.executions.get(*child_id).is_some_and(|execution| {
+                        matches!(
+                            execution.status(),
+                            SchedulerStatus::Claimed | SchedulerStatus::Running
+                        )
+                    })
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            self.hierarchy_state
+                .rebind_leaf_leases(&retained_child_ids, generation);
+            self.hierarchy_state.release_removed_subtree_leases(
+                &normalized.id,
+                &removed_child_ids,
+                reachable_child_edges,
+                current_epoch_millis(),
+            );
+            for child_id in &retained_child_ids {
+                self.hierarchy_state
+                    .run_hierarchy_generations
+                    .insert(child_id.clone(), generation);
+            }
+            if self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .is_some_and(|snapshot| snapshot.blocked_reason.is_none())
+            {
+                self.hierarchy_state.parent_integrations.insert(
+                    normalized.id.clone(),
+                    ParentIntegrationController::new(normalized.id.clone(), generation)?,
+                );
+                self.reopen_completed_parent_for_new_controller(
+                    &normalized,
+                    TimestampMs::new(current_epoch_millis()),
+                )?;
+            }
+            return Ok(true);
+        }
+        if reactivated_parent {
+            let generation = self
+                .hierarchy_state
+                .hierarchy
+                .get(&normalized.id)
+                .map(|snapshot| snapshot.generation);
+            if let Some(generation) = generation
+                && self
+                    .hierarchy_state
+                    .hierarchy
+                    .get(&normalized.id)
+                    .is_some_and(|snapshot| snapshot.blocked_reason.is_none())
+            {
+                self.parent_eligibility_checked_at.remove(&normalized.id);
+                self.hierarchy_state.parent_integrations.insert(
+                    normalized.id.clone(),
+                    ParentIntegrationController::new(normalized.id.clone(), generation)?,
+                );
+                self.reopen_completed_parent_for_new_controller(
+                    &normalized,
+                    TimestampMs::new(current_epoch_millis()),
+                )?;
+            }
+        }
+        Ok(released_terminal_parent_evidence || reactivated_parent)
+    }
+
+    fn reopen_completed_parent_for_new_controller(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        if issue.state.category != IssueStateCategory::Active
+            || !self.executions.get(&issue.id).is_some_and(|execution| {
+                matches!(
+                    execution.state(),
+                    crate::opensymphony_orchestrator::SchedulerState::Released {
+                        reason: ReleaseReason::Completed,
+                        ..
+                    }
+                )
+            })
+        {
+            return Ok(());
+        }
+        let mut execution = self
+            .remove_execution(&issue.id)
+            .expect("completed parent execution was checked above");
+        execution = execution.reopen(observed_at)?;
+        execution.refresh_issue(issue.clone())?;
+        self.insert_execution(issue.id.clone(), execution);
+        Ok(())
+    }
+
     fn set_linear_cooldown_from_tracker_error(
         &mut self,
         error: &T::Error,
@@ -1103,11 +4152,41 @@ where
         true
     }
 
+    fn tracker_operation_error(
+        &mut self,
+        error: T::Error,
+        observed_at: TimestampMs,
+    ) -> SchedulerError {
+        self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+        SchedulerError::Tracker {
+            detail: error.to_string(),
+        }
+    }
+
     async fn bootstrap_recovery(
         &mut self,
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let recovered_in_flight_parent_ids = self
+            .pending_recovery
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|record| record.had_in_flight_run && record.recovered_run.is_some())
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        for parent_id in &recovered_in_flight_parent_ids {
+            if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(parent_id) {
+                self.hierarchy_state_dirty |= snapshot.restore_recovered_dispatch_fence();
+            }
+        }
+        let hierarchy_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?;
+        let terminal_hierarchy_changed =
+            self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
+        if hierarchy_changed || terminal_hierarchy_changed || self.hierarchy_state_dirty {
+            self.persist_orchestrator_state().await?;
+        }
         if self.recovered {
             return Ok(());
         }
@@ -1125,6 +4204,157 @@ where
             .map(|pending| (pending.issue.id.clone(), pending))
             .collect::<HashMap<_, _>>();
         let mut records = records;
+        records.retain(|record| {
+            let Some(generation) = recovered_parent_hierarchy_generation(&record.workspace.path)
+            else {
+                return true;
+            };
+            let expected_generation = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&record.issue.id)
+                .map(|controller| controller.hierarchy_generation)
+                .or_else(|| {
+                    self.hierarchy_state
+                        .hierarchy
+                        .get(&record.issue.id)
+                        .map(|snapshot| snapshot.generation)
+                });
+            let current = expected_generation.is_none_or(|expected| generation == expected);
+            if !current {
+                tracing::warn!(
+                    issue = %record.issue.id,
+                    recovered_generation = generation,
+                    controller_generation = expected_generation,
+                    path = %record.workspace.path.display(),
+                    "skipping superseded parent execution root during scheduler recovery"
+                );
+            }
+            current
+        });
+        if self
+            .migrate_legacy_in_flight_parent_controllers(&records, observed_at)
+            .await?
+        {
+            self.persist_orchestrator_state().await?;
+        }
+        for record in &records {
+            if let Some(controller) = self
+                .hierarchy_state
+                .parent_integrations
+                .get_mut(&record.issue.id)
+            {
+                if record.recovered_run.is_some() {
+                    controller.reconcile_restart(true, observed_at)?;
+                } else if record.successful_run || record.completed_run || record.cancelled_run {
+                    controller.reconcile_terminal_run_after_restart(observed_at)?;
+                } else {
+                    controller.reconcile_restart(false, observed_at)?;
+                }
+                self.hierarchy_state_dirty = true;
+            }
+        }
+        for controller in self.hierarchy_state.parent_integrations.values_mut() {
+            let has_unlaunched_attempt = controller.attempts.iter().any(|attempt| {
+                attempt.status == ParentAttemptStatus::Running
+                    && attempt.conversation_id.is_none()
+                    && attempt.commands.is_empty()
+                    && attempt.resources.is_empty()
+            });
+            if has_unlaunched_attempt {
+                controller.reconcile_restart(false, observed_at)?;
+                self.hierarchy_state_dirty = true;
+            }
+        }
+        if self.hierarchy_state_dirty {
+            self.persist_orchestrator_state().await?;
+        }
+        // Recovery manifests intentionally do not persist a second hierarchy
+        // identity. Hydrate the parent edge from the provider's full issue
+        // detail so retained intermediate-parent leases preserve the higher
+        // ancestor owner, which may be outside the active project scan while
+        // the intermediate issue is terminal.
+        let recovered_parent_ids = tracker_snapshot
+            .active
+            .iter()
+            .chain(tracker_snapshot.terminal.iter())
+            .filter_map(|issue| {
+                let issue_id = IssueId::new(issue.id.clone()).ok()?;
+                let parent_id = issue
+                    .parent_id
+                    .as_deref()
+                    .and_then(|parent_id| IssueId::new(parent_id.to_owned()).ok())?;
+                Some((issue_id, parent_id))
+            })
+            .collect::<HashMap<_, _>>();
+        for record in &mut records {
+            if record.issue.parent_id.is_none()
+                && let Some(parent_id) = recovered_parent_ids.get(&record.issue.id)
+            {
+                record.issue.parent_id = Some(parent_id.clone());
+            }
+        }
+        let mut dispatch_transition_changed = false;
+        let in_flight_issue_ids = records
+            .iter()
+            .filter(|record| record.had_in_flight_run)
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        let terminal_recovered_in_flight_parent_ids = records
+            .iter()
+            .filter(|record| {
+                record.had_in_flight_run
+                    && record.recovered_run.is_some()
+                    && tracker_snapshot.contains_terminal(record.issue.id.as_str())
+            })
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        let intended_parent_ids = self
+            .hierarchy_state
+            .hierarchy
+            .iter()
+            .filter(|(_, snapshot)| snapshot.dispatch_intended())
+            .map(|(parent_id, _)| parent_id.clone())
+            .collect::<Vec<_>>();
+        for parent_id in intended_parent_ids {
+            if in_flight_issue_ids.contains(&parent_id) {
+                let nested_child_ids = self
+                    .hierarchy_state
+                    .hierarchy
+                    .get(&parent_id)
+                    .map(|snapshot| {
+                        snapshot
+                            .required_child_edges
+                            .iter()
+                            .filter(|edge| {
+                                edge.required
+                                    && self.hierarchy_state.hierarchy.contains_key(&edge.child_id)
+                            })
+                            .map(|edge| edge.child_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
+                    snapshot.mark_dispatched();
+                }
+                if !terminal_recovered_in_flight_parent_ids.contains(&parent_id) {
+                    self.hierarchy_state
+                        .release_leaf_leases_for_parent(&parent_id, observed_at.as_u64());
+                    self.hierarchy_state.release_ancestor_leases_for_children(
+                        &nested_child_ids,
+                        observed_at.as_u64(),
+                    );
+                }
+            } else {
+                if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&parent_id) {
+                    snapshot.clear_dispatch_intent();
+                }
+            }
+            dispatch_transition_changed = true;
+        }
+        if dispatch_transition_changed {
+            self.persist_orchestrator_state().await?;
+        }
         self.recovered_memory_issue_ids
             .extend(records.iter().map(|record| record.issue.id.clone()));
         for record in &mut records {
@@ -1248,7 +4478,7 @@ where
         }
 
         let mut retry_records = Vec::new();
-        for record in records {
+        for (record_index, record) in records.iter().cloned().enumerate() {
             let mut recovered_run = record.recovered_run.clone();
             let mut recovered_workspace = Some(record.workspace.clone());
             if let Some(recovered_run) = recovered_run.as_ref() {
@@ -1315,14 +4545,21 @@ where
                 // the live tracker binding, discard the old workspace before
                 // restoring the retry so the replacement is materialized by
                 // the normal dispatch path.
-                // A persisted non-retrying outcome means something outside this
-                // process is still bound to this workspace, so its manifests
-                // and evidence must survive even when the binding moved.
+                // Preserve evidence for a remote session whose persisted
+                // outcome forbids a replacement run.
                 if recovered_run.is_none()
                     && recovered_workspace.is_some()
                     && binding_changed
                     && record.terminal_worker_outcome.is_none()
                 {
+                    self.release_stale_binding_leases(
+                        &record.issue,
+                        recovered_workspace
+                            .as_ref()
+                            .expect("metadata-only recovery workspace should be present"),
+                        observed_at,
+                    )
+                    .await?;
                     self.workspace
                         .remove_workspace(&record.workspace)
                         .await
@@ -1359,6 +4596,8 @@ where
                                 .to_owned(),
                         ),
                         error: None,
+                        harness_stopped: false,
+                        parent_verification: None,
                     });
                     self.insert_execution(
                         issue_id.clone(),
@@ -1496,7 +4735,12 @@ where
                         .remove_execution(&issue_id)
                         .expect("active recovery execution should be present");
                     let already_exhausted = retry_exhausted_release(&execution);
-                    if self.retry_limit_reached(record.normal_retry_count) {
+                    if self.parent_waiting_for_tracker_confirmation(&issue_id) {
+                        self.insert_execution(
+                            issue_id.clone(),
+                            execution.release(observed_at, ReleaseReason::Completed, None)?,
+                        );
+                    } else if self.retry_limit_reached(record.normal_retry_count) {
                         let mut execution = if already_exhausted {
                             execution
                         } else {
@@ -1589,11 +4833,98 @@ where
             }
 
             if tracker_snapshot.contains_terminal(issue_id.as_str()) {
+                let issue_has_children = tracker_snapshot
+                    .terminal_issue(&issue_id)
+                    .map(|issue| !issue.sub_issues.is_empty())
+                    .unwrap_or(!record.issue.sub_issues.is_empty());
+                let parent_finalized = self.parent_finalized_success(&issue_id, issue_has_children);
+                if record.successful_run && !record.had_in_flight_run && parent_finalized {
+                    self.record_terminal_orchestrator_success(&issue_id).await?;
+                }
+                if let Some(recovered_run) = record.recovered_run.as_ref() {
+                    // A tracker terminal state does not prove that a run which
+                    // was in flight at restart has stopped. Fence and stop the
+                    // recovered worker before exposing a terminal outcome to
+                    // parent eligibility.
+                    if !self
+                        .stop_recovered_run_before_workspace_removal(
+                            &record,
+                            recovered_run,
+                            record.harness_kind.as_deref(),
+                            observed_at,
+                        )
+                        .await?
+                    {
+                        retry_records.push(record);
+                        continue;
+                    }
+                }
+                if !parent_finalized {
+                    let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
+                    execution.attach_workspace(record.workspace.clone())?;
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerTerminal, None)?,
+                    );
+                    self.terminal_child_failure_ids.insert(issue_id.clone());
+                    continue;
+                }
+                let owned_by_subtree_cleanup = match self
+                    .workspace_is_owned_by_subtree_cleanup(&record.issue, &record.workspace)
+                    .await
+                {
+                    Ok(owned) => owned,
+                    Err(error) => {
+                        retry_records.push(record);
+                        retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                        self.pending_recovery = Some(retry_records);
+                        return Err(error);
+                    }
+                };
+                if owned_by_subtree_cleanup {
+                    continue;
+                }
+                if let Err(error) = self
+                    .retain_terminal_child_lease_for_workspace(&record.issue, &record.workspace)
+                    .await
+                {
+                    retry_records.push(record);
+                    retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                    self.pending_recovery = Some(retry_records);
+                    return Err(error);
+                }
+                let workspace_has_active_lease =
+                    match self.workspace_has_active_lease(&record.workspace).await {
+                        Ok(has_active_lease) => has_active_lease,
+                        Err(error) => {
+                            retry_records.push(record);
+                            retry_records.extend(records.iter().skip(record_index + 1).cloned());
+                            self.pending_recovery = Some(retry_records);
+                            return Err(error);
+                        }
+                    };
+                if workspace_has_active_lease {
+                    let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
+                    execution.attach_workspace(record.workspace.clone())?;
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerTerminal, None)?,
+                    );
+                    if record.had_in_flight_run
+                        || (record.completed_run && !record.successful_run && !record.cancelled_run)
+                    {
+                        self.terminal_child_failure_ids.insert(issue_id.clone());
+                    }
+                    retry_records.push(record);
+                    continue;
+                }
                 let retain_failed = !record.successful_run
                     && !record.cancelled_run
                     && self.retry_limit_reached(record.normal_retry_count)
                     && self.workspace.retain_failed_workspaces();
-                let cleanup_result = if retain_failed {
+                let parent_workspace =
+                    self.is_parent_integration_workspace(&issue_id, issue_has_children);
+                let cleanup_result = if parent_workspace || retain_failed {
                     Ok(())
                 } else if !record.successful_run
                     && !record.cancelled_run
@@ -1615,6 +4946,19 @@ where
                             .map_err(|error| SchedulerError::Workspace {
                                 detail: error.to_string(),
                             })?;
+                        if parent_workspace {
+                            let mut execution =
+                                IssueExecution::new(record.issue.clone(), observed_at);
+                            execution.attach_workspace(record.workspace.clone())?;
+                            self.insert_execution(
+                                issue_id.clone(),
+                                execution.release(
+                                    observed_at,
+                                    ReleaseReason::TrackerTerminal,
+                                    None,
+                                )?,
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(issue = %issue_id, %error, "deferring terminal workspace cleanup retry");
@@ -1653,7 +4997,38 @@ where
         } else {
             self.pending_recovery = Some(retry_records);
         }
+        if self.prune_recovered_memory_issue_ids() {
+            self.hierarchy_state_dirty = true;
+            self.persist_orchestrator_state().await?;
+        }
         Ok(())
+    }
+
+    fn prune_recovered_memory_issue_ids(&mut self) -> bool {
+        let mut retained = self
+            .pending_recovery
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .map(|record| record.issue.id.clone())
+            .collect::<HashSet<_>>();
+        retained.extend(
+            self.pending_retry_recovery
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|record| record.issue.id.clone()),
+        );
+        retained.extend(
+            self.executions
+                .iter()
+                .filter(|(_, execution)| !matches!(execution.status(), SchedulerStatus::Released))
+                .map(|(issue_id, _)| issue_id.clone()),
+        );
+        let before = self.recovered_memory_issue_ids.len();
+        self.recovered_memory_issue_ids
+            .retain(|issue_id| retained.contains(issue_id));
+        self.recovered_memory_issue_ids.len() != before
     }
 
     async fn reconcile_tracker_state(
@@ -1661,13 +5036,11 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
+        let durable_state_changed = self.reconcile_hierarchy_snapshots(tracker_snapshot)?
+            || self.reconcile_terminal_hierarchy_snapshots(tracker_snapshot)?;
+        self.fence_hierarchy_changed_runs(observed_at).await?;
         for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
-            if normalized.sub_issues.is_empty() {
-                self.parent_issue_ids.remove(&normalized.id);
-            } else {
-                self.parent_issue_ids.insert(normalized.id.clone());
-            }
             let retry_cleanup_workspace = self
                 .executions
                 .get(&normalized.id)
@@ -1675,6 +5048,7 @@ where
                 .and_then(|execution| execution.workspace().cloned());
             if let Some(workspace) = retry_cleanup_workspace
                 && !self.workspace.retain_failed_workspaces()
+                && !self.workspace_has_active_lease(&workspace).await?
             {
                 match self.workspace.cleanup_failed_workspace(&workspace).await {
                     Ok(()) => {
@@ -1872,6 +5246,9 @@ where
             }
         }
 
+        if durable_state_changed || self.hierarchy_state_dirty {
+            self.persist_orchestrator_state().await?;
+        }
         Ok(())
     }
 
@@ -1882,7 +5259,9 @@ where
                 if execution.issue().state.category != IssueStateCategory::Active {
                     return false;
                 }
-                if self.parent_issue_ids.contains(&execution.issue().id) {
+                if execution.issue().sub_issues.is_empty()
+                    && self.parent_issue_ids.contains(&execution.issue().id)
+                {
                     return false;
                 }
                 match execution.status() {
@@ -2322,6 +5701,78 @@ where
         Ok(())
     }
 
+    /// Migrate runs written before parent controllers were persisted. The
+    /// recovered run manifest and parent workspace envelope are the durable
+    /// proof that launch already happened, so recreate the missing controller
+    /// and bind it to that exact conversation before backend reattachment.
+    async fn migrate_legacy_in_flight_parent_controllers(
+        &mut self,
+        records: &[RecoveryRecord],
+        observed_at: TimestampMs,
+    ) -> Result<bool, SchedulerError> {
+        let mut changed = false;
+        for record in records {
+            if !record.had_in_flight_run {
+                continue;
+            }
+            let Some(recovered_run) = record.recovered_run.as_ref() else {
+                continue;
+            };
+            if self
+                .hierarchy_state
+                .parent_integrations
+                .contains_key(&record.issue.id)
+            {
+                continue;
+            }
+            let Some(snapshot) = self
+                .hierarchy_state
+                .hierarchy
+                .get(&record.issue.id)
+                .cloned()
+            else {
+                continue;
+            };
+            if snapshot.required_child_edges.is_empty() && record.issue.sub_issues.is_empty() {
+                continue;
+            }
+
+            let targets = self
+                .workspace
+                .parent_workspace_targets(&record.issue, &record.workspace)
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
+            let started_at = self
+                .hierarchy_state
+                .run_started_at_by_issue
+                .get(&record.issue.id)
+                .copied()
+                .unwrap_or(observed_at);
+            let admission_input_version = parent_input_version(&snapshot);
+            let targets_input_version = parent_targets_input_version(snapshot.generation, &targets);
+            let mut controller =
+                ParentIntegrationController::new(record.issue.id.clone(), snapshot.generation)?;
+            controller.admit(&admission_input_version, started_at)?;
+            controller.record_workspace_prepared(targets, &targets_input_version, started_at)?;
+            controller.start_attempt(
+                "parent integration harness run",
+                format!("parent-run:{}", recovered_run.worker_id),
+                ParentAttemptRoot::ParentRoot,
+                recovered_run.conversation.conversation_id.as_str(),
+                effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
+                targets_input_version,
+                started_at,
+            )?;
+            self.hierarchy_state
+                .parent_integrations
+                .insert(record.issue.id.clone(), controller);
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     async fn restore_recovered_run(
         &mut self,
         issue_id: &IssueId,
@@ -2403,12 +5854,37 @@ where
             harness_kind.as_deref(),
         )?;
         execution = execution.claim(run.clone())?;
+        let expected_parent_conversation_id = (!recovery_issue.sub_issues.is_empty())
+            .then(|| {
+                self.hierarchy_state
+                    .parent_integrations
+                    .get(issue_id)
+                    .and_then(|controller| controller.conversation_id.clone())
+            })
+            .flatten();
         let start_request = WorkerStartRequest {
             issue: recovery_issue,
             workspace: workspace.clone(),
             run: run.clone(),
             route: route.clone(),
             memory_grant_registry_recovered: self.recovered_memory_issue_ids.contains(issue_id),
+            expected_parent_conversation_id,
+            parent_repair: self
+                .hierarchy_state
+                .parent_integrations
+                .get(issue_id)
+                .and_then(|controller| {
+                    controller
+                        .repair_attempts
+                        .iter()
+                        .rev()
+                        .find(|repair| {
+                            repair.status == ParentRepairStatus::ChangesRequested
+                                || (repair.status == ParentRepairStatus::Implementing
+                                    && !repair.implementation_completed)
+                        })
+                        .cloned()
+                }),
         };
         self.remove_execution(issue_id);
         let launch = match self.worker.recover_worker(start_request).await {
@@ -2439,7 +5915,7 @@ where
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
-            Some(launch.conversation),
+            Some(launch.conversation.clone()),
         )?;
         execution.record_turn_started(observed_at)?;
         if let Some(reason) = interrupt_reason {
@@ -2467,11 +5943,108 @@ where
                 issue_id.clone(),
                 harness_kind
                     .filter(|kind| !kind.trim().is_empty())
-                    .or(Some(route.harness_kind)),
-            ),
+                    .or(Some(route.harness_kind.clone())),
+            )
+            .with_dry_run(route.dry_run),
         );
+        if !execution.issue().sub_issues.is_empty() && !route.dry_run {
+            let conversation_id = launch.conversation.conversation_id.to_string();
+            let previous_state = self.hierarchy_state.clone();
+            let attachment_result = self
+                .hierarchy_state
+                .parent_integrations
+                .get(issue_id)
+                .and_then(|controller| controller.current_attempt_id())
+                .map(str::to_owned)
+                .ok_or_else(|| SchedulerError::Workspace {
+                    detail: "recovered parent launch has no durable attempt intent".to_owned(),
+                })
+                .and_then(|attempt_id| {
+                    self.hierarchy_state
+                        .parent_integrations
+                        .get_mut(issue_id)
+                        .ok_or_else(|| SchedulerError::Workspace {
+                            detail: "recovered parent launch has no durable integration controller"
+                                .to_owned(),
+                        })?
+                        .attach_attempt_conversation(&attempt_id, &conversation_id)
+                        .map_err(SchedulerError::from)
+                });
+            if let Err(error) = attachment_result {
+                self.hierarchy_state = previous_state;
+                execution = self
+                    .retain_recovered_execution_after_attachment_failure(
+                        issue_id,
+                        execution,
+                        &run,
+                        observed_at,
+                        &error.to_string(),
+                    )
+                    .await?;
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error);
+            }
+            if let Err(error) = self.persist_orchestrator_state().await {
+                self.hierarchy_state = previous_state;
+                execution = self
+                    .retain_recovered_execution_after_attachment_failure(
+                        issue_id,
+                        execution,
+                        &run,
+                        observed_at,
+                        &error.to_string(),
+                    )
+                    .await?;
+                self.insert_execution(issue_id.clone(), execution);
+                return Err(error);
+            }
+        }
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
+    }
+
+    async fn retain_recovered_execution_after_attachment_failure(
+        &mut self,
+        issue_id: &IssueId,
+        mut execution: IssueExecution,
+        run: &RunAttempt,
+        observed_at: TimestampMs,
+        detail: &str,
+    ) -> Result<IssueExecution, SchedulerError> {
+        match self
+            .abort_worker(
+                &mut execution,
+                run,
+                WorkerAbortReason::TrackerInactive,
+                observed_at,
+            )
+            .await
+        {
+            Ok(true) => {
+                let outcome = WorkerOutcomeRecord::from_run(
+                    run,
+                    WorkerOutcomeKind::Failed,
+                    observed_at,
+                    Some("recovered parent attachment was not durable".to_owned()),
+                    Some(detail.to_owned()),
+                );
+                execution = execution.release(
+                    observed_at,
+                    ReleaseReason::TrackerInactive,
+                    Some(outcome),
+                )?;
+            }
+            Ok(false) => warn!(
+                issue_id = %issue_id,
+                "retaining recovered parent worker after durable attachment failure until its stop is acknowledged"
+            ),
+            Err(abort_error) => warn!(
+                issue_id = %issue_id,
+                error = %abort_error,
+                "retaining recovered parent worker after durable attachment failure because abort failed"
+            ),
+        }
+        Ok(execution)
     }
 
     async fn retry_recovered_interrupt(
@@ -2665,7 +6238,8 @@ where
                 detailed.push(detailed_issue);
             }
 
-            self.dispatch_ready_issues(&detailed, observed_at).await?;
+            self.dispatch_ready_issues(&detailed, observed_at, None)
+                .await?;
             if self.worker_metadata.len()
                 >= usize::try_from(self.config.max_concurrent_agents).unwrap_or(usize::MAX)
             {
@@ -2680,6 +6254,7 @@ where
         &mut self,
         active_issues: &[TrackerIssue],
         observed_at: TimestampMs,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
     ) -> Result<(), SchedulerError> {
         let ready =
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
@@ -2691,6 +6266,7 @@ where
         }
 
         let mut pending_launches = Vec::new();
+        let mut first_error = None;
         let mut planned_running_by_state: HashMap<String, usize> = HashMap::new();
 
         for tracker_issue in ready {
@@ -2699,9 +6275,6 @@ where
             }
 
             let normalized = normalize_tracker_issue(&tracker_issue, &self.config)?;
-            if !normalized.sub_issues.is_empty() || self.parent_issue_ids.contains(&normalized.id) {
-                continue;
-            }
             let issue_id = normalized.id.clone();
             let should_dispatch = match self.executions.get(&issue_id) {
                 Some(execution) => match execution.status() {
@@ -2749,11 +6322,104 @@ where
                 }
             }
 
-            // Route first: an unavailable harness must fail before a workspace
-            // is materialized and workspace creation hooks run.
-            let route = decide_issue_route(&normalized, &self.config)?;
+            if self.reconcile_hierarchy_issue(&tracker_issue, None)? || self.hierarchy_state_dirty {
+                self.hierarchy_state_dirty = true;
+                self.persist_orchestrator_state().await?;
+            }
+            // Keep the known execution hydrated with the same detailed issue
+            // that just drove hierarchy reconciliation. The later known-
+            // candidate pass must not reintroduce an older child-edge list.
+            self.refresh_execution_issue(&issue_id, normalized.clone())?;
 
-            let workspace = if harness_executes_remotely(&route.harness_kind) {
+            if normalized.sub_issues.is_empty() && self.parent_issue_ids.contains(&normalized.id) {
+                continue;
+            }
+
+            // Check the ancestor fence before parent eligibility can persist a
+            // dispatch intent and acquire leases. A nested parent may be
+            // reactivated while a higher parent is integrating retained
+            // evidence; leaving the intent behind would make the nested
+            // parent permanently undispatchable after the higher lease ends.
+            if self
+                .hierarchy_state
+                .has_active_dispatched_ancestor(&issue_id)
+            {
+                continue;
+            }
+
+            let parent_repair_retry = self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(|controller| {
+                    matches!(
+                        controller.state,
+                        super::ParentIntegrationState::Fixing { .. }
+                    )
+                });
+            if !normalized.sub_issues.is_empty() && !parent_repair_retry {
+                let parent_retry = self
+                    .executions
+                    .get(&issue_id)
+                    .is_some_and(|execution| execution.status() == SchedulerStatus::RetryQueued);
+                if !self
+                    .parent_dispatch_is_eligible(
+                        &tracker_issue,
+                        &normalized,
+                        observed_at,
+                        parent_retry,
+                        reachable_child_edges,
+                    )
+                    .await?
+                {
+                    continue;
+                }
+            }
+
+            if let Some(hierarchy_generation) = self
+                .hierarchy_state
+                .hierarchy
+                .values()
+                .filter(|snapshot| {
+                    snapshot
+                        .required_child_edges
+                        .iter()
+                        .any(|edge| edge.required && edge.child_id == issue_id)
+                })
+                .map(|snapshot| snapshot.generation)
+                .next()
+            {
+                let previous_state = self.hierarchy_state.clone();
+                self.hierarchy_state
+                    .run_hierarchy_generations
+                    .insert(issue_id.clone(), hierarchy_generation);
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            }
+
+            // Validate the route before materializing a workspace. A remote-only
+            // harness keeps evidence here but executes in its own environment.
+            let route = match decide_issue_route(&normalized, &self.config) {
+                Ok(route) => route,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
+            let workspace_result = if harness_executes_remotely(&route.harness_kind) {
                 self.workspace
                     .ensure_evidence_workspace(&normalized, observed_at)
                     .await
@@ -2761,10 +6427,87 @@ where
                 self.workspace
                     .ensure_workspace(&normalized, observed_at)
                     .await
+            };
+            let workspace = match workspace_result {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
+
+            if !normalized.sub_issues.is_empty() && !parent_repair_retry {
+                let targets = match self
+                    .workspace
+                    .parent_workspace_targets(&normalized, &workspace)
+                    .await
+                {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        let error = self
+                            .clear_parent_dispatch_intent_after_preparation_failure(
+                                &issue_id,
+                                SchedulerError::Workspace {
+                                    detail: error.to_string(),
+                                },
+                            )
+                            .await;
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
+                };
+                let input_version = parent_targets_input_version(
+                    self.hierarchy_state
+                        .hierarchy
+                        .get(&issue_id)
+                        .map_or(0, |snapshot| snapshot.generation),
+                    &targets,
+                );
+                let previous_state = self.hierarchy_state.clone();
+                let result = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&issue_id)
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: "parent workspace has no durable integration controller".to_owned(),
+                    })?
+                    .record_workspace_prepared(targets, &input_version, observed_at);
+                if let Err(error) = result {
+                    self.hierarchy_state = previous_state;
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
             }
-            .map_err(|error| SchedulerError::Workspace {
-                detail: error.to_string(),
-            })?;
 
             if let Some(normal_retry_count) = self
                 .executions
@@ -2776,15 +6519,38 @@ where
                 // worker's start_run preparation writes the replacement run
                 // manifest. A crash before start_workers must recover the
                 // queued retry rather than an advanced, unqueued count.
-                self.workspace
+                if let Err(error) = self
+                    .workspace
                     .persist_retry_count(&workspace, normal_retry_count)
                     .await
-                    .map_err(|error| SchedulerError::Workspace {
-                        detail: error.to_string(),
-                    })?;
+                {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            SchedulerError::Workspace {
+                                detail: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
             }
 
-            let worker_id = self.next_worker_id()?;
+            let worker_id = match self.next_worker_id() {
+                Ok(worker_id) => worker_id,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
             let previous_retry = self
                 .executions
                 .get(&issue_id)
@@ -2810,9 +6576,44 @@ where
             let mut execution = self
                 .remove_execution(&issue_id)
                 .unwrap_or_else(|| IssueExecution::new(normalized.clone(), observed_at));
-            execution.refresh_issue(normalized.clone())?;
-            execution.attach_workspace(workspace.clone())?;
-            execution = execution.claim(run.clone())?;
+            if let Err(error) = execution.refresh_issue(normalized.clone()) {
+                self.insert_execution(issue_id.clone(), execution);
+                let error = self
+                    .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error.into())
+                    .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+            if let Err(error) = execution.attach_workspace(workspace.clone()) {
+                self.insert_execution(issue_id.clone(), execution);
+                let error = self
+                    .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error.into())
+                    .await;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+            let execution_before_claim = execution.clone();
+            let unclaimed_execution = execution_before_claim.clone();
+            execution = match execution.claim(run.clone()) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    self.insert_execution(issue_id.clone(), execution_before_claim);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
             let claimed_run = execution
                 .current_run()
                 .cloned()
@@ -2826,7 +6627,81 @@ where
                 memory_grant_registry_recovered: self
                     .recovered_memory_issue_ids
                     .contains(&issue_id),
+                expected_parent_conversation_id: (!normalized.sub_issues.is_empty())
+                    .then(|| {
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get(&issue_id)
+                            .and_then(|controller| controller.conversation_id.clone())
+                    })
+                    .flatten(),
+                parent_repair: self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .and_then(|controller| {
+                        controller
+                            .repair_attempts
+                            .iter()
+                            .rev()
+                            .find(|repair| {
+                                repair.status == ParentRepairStatus::ChangesRequested
+                                    || (repair.status == ParentRepairStatus::Implementing
+                                        && !repair.implementation_completed)
+                            })
+                            .cloned()
+                    }),
             };
+
+            if !normalized.sub_issues.is_empty() && !start_request.route.dry_run {
+                let previous_state = self.hierarchy_state.clone();
+                let input_version = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .map(parent_controller_input_version)
+                    .unwrap_or_default();
+                let result = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get_mut(&issue_id)
+                    .ok_or_else(|| SchedulerError::Workspace {
+                        detail: "parent launch has no durable integration controller".to_owned(),
+                    })?
+                    .start_attempt_intent(
+                        "parent integration harness run",
+                        format!("parent-run:{}", claimed_run.worker_id),
+                        ParentAttemptRoot::ParentRoot,
+                        effective_stall_timeout(self.config.stall_timeout_ms).as_u64(),
+                        input_version,
+                        observed_at,
+                    );
+                if let Err(error) = result {
+                    self.hierarchy_state = previous_state;
+                    self.insert_execution(issue_id.clone(), unclaimed_execution);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(
+                            &issue_id,
+                            error.into(),
+                        )
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.persist_orchestrator_state().await {
+                    self.hierarchy_state = previous_state;
+                    self.insert_execution(issue_id.clone(), unclaimed_execution);
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            }
 
             *planned_running_by_state.entry(state_key).or_default() += 1;
             pending_launches.push((issue_id, execution, claimed_run, start_request));
@@ -2842,13 +6717,33 @@ where
             )
             .await;
 
-        let mut first_error = None;
         for ((issue_id, mut execution, claimed_run, start_request), result) in
             pending_launches.into_iter().zip(start_results)
         {
             match result {
                 Ok(launch) => {
                     self.recovered_memory_issue_ids.remove(&issue_id);
+                    let started_at = launch.started_at.unwrap_or(observed_at);
+                    if !execution.issue().sub_issues.is_empty() && !start_request.route.dry_run {
+                        let conversation_id = launch.conversation.conversation_id.to_string();
+                        let attempt_id = self
+                            .hierarchy_state
+                            .parent_integrations
+                            .get(&issue_id)
+                            .and_then(|controller| controller.current_attempt_id())
+                            .map(str::to_owned)
+                            .ok_or_else(|| SchedulerError::Workspace {
+                                detail: "parent launch has no durable attempt intent".to_owned(),
+                            })?;
+                        self.hierarchy_state
+                            .parent_integrations
+                            .get_mut(&issue_id)
+                            .ok_or_else(|| SchedulerError::Workspace {
+                                detail: "parent launch has no durable integration controller"
+                                    .to_owned(),
+                            })?
+                            .attach_attempt_conversation(&attempt_id, &conversation_id)?;
+                    }
                     execution = execution.start_running(
                         observed_at,
                         effective_stall_timeout(self.config.stall_timeout_ms),
@@ -2860,8 +6755,64 @@ where
                         WorkerMetadata::new(
                             issue_id.clone(),
                             Some(start_request.route.harness_kind),
-                        ),
+                        )
+                        .with_dry_run(start_request.route.dry_run),
                     );
+                    let run_start_changed = self
+                        .hierarchy_state
+                        .run_started_at_by_issue
+                        .insert(issue_id.clone(), started_at)
+                        .is_none_or(|previous| previous != started_at);
+                    self.hierarchy_state
+                        .terminal_orchestrator_issues
+                        .remove(&issue_id);
+                    if !execution.issue().sub_issues.is_empty()
+                        && self.hierarchy_state.hierarchy.contains_key(&issue_id)
+                    {
+                        let nested_child_ids = self
+                            .hierarchy_state
+                            .hierarchy
+                            .get(&issue_id)
+                            .map(|snapshot| {
+                                snapshot
+                                    .required_child_edges
+                                    .iter()
+                                    .filter(|edge| {
+                                        edge.required
+                                            && self
+                                                .hierarchy_state
+                                                .hierarchy
+                                                .contains_key(&edge.child_id)
+                                    })
+                                    .map(|edge| edge.child_id.clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id) {
+                            snapshot.mark_dispatched();
+                        }
+                        self.hierarchy_state
+                            .release_leaf_leases_for_parent(&issue_id, observed_at.as_u64());
+                        self.hierarchy_state.release_ancestor_leases_for_children(
+                            &nested_child_ids,
+                            observed_at.as_u64(),
+                        );
+                        if let Err(error) = self.persist_orchestrator_state().await
+                            && first_error.is_none()
+                        {
+                            self.hierarchy_state_dirty = true;
+                            first_error = Some(error);
+                        }
+                    }
+                    if run_start_changed
+                        && (execution.issue().sub_issues.is_empty()
+                            || !self.hierarchy_state.hierarchy.contains_key(&issue_id))
+                        && let Err(error) = self.persist_orchestrator_state().await
+                        && first_error.is_none()
+                    {
+                        self.hierarchy_state_dirty = true;
+                        first_error = Some(error);
+                    }
                     if let Err(error) = self.workspace.clear_retry_pending(&issue_id).await {
                         if first_error.is_none() {
                             first_error = Some(SchedulerError::Workspace {
@@ -2875,6 +6826,16 @@ where
                 Err(error) => {
                     let detail = error.to_string();
                     warn!(issue_id = %issue_id, error = %detail, "failed to launch scheduler worker");
+                    if !execution.issue().sub_issues.is_empty()
+                        && let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(&issue_id)
+                    {
+                        snapshot.clear_dispatch_intent();
+                        if let Err(persist_error) = self.persist_orchestrator_state().await
+                            && first_error.is_none()
+                        {
+                            first_error = Some(persist_error);
+                        }
+                    }
                     let outcome = WorkerOutcomeRecord::from_run(
                         &claimed_run,
                         WorkerOutcomeKind::Failed,
@@ -2899,6 +6860,250 @@ where
         first_error.map_or(Ok(()), Err)
     }
 
+    async fn record_parent_worker_outcome(
+        &mut self,
+        issue_id: &IssueId,
+        execution: &IssueExecution,
+        outcome: &mut WorkerOutcomeRecord,
+    ) -> Result<bool, SchedulerError> {
+        let previous_state = self.hierarchy_state.clone();
+        let merging_continuation = tracker_merging_interrupt_cancelled(execution, outcome);
+        let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(issue_id) else {
+            return Ok(false);
+        };
+        let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+            return Ok(false);
+        };
+        let launch_never_attached = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .is_some_and(|attempt| attempt.conversation_id.is_none());
+        let deadline_reached = controller
+            .current_attempt_deadline()
+            .is_some_and(|deadline| outcome.finished_at.as_u64() >= deadline.as_u64());
+        if execution
+            .interrupt()
+            .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
+        {
+            controller.observe_harness_stopped(
+                &attempt_id,
+                "harness interrupt reconciled a stopped state",
+                outcome.finished_at,
+            )?;
+        }
+        let mut verification_evidence_accepted = false;
+        let verification_passed = if deadline_reached {
+            controller.append_log(
+                &attempt_id,
+                "worker outcome arrived at or after the absolute parent attempt deadline",
+            )?;
+            false
+        } else {
+            match outcome.parent_verification.as_ref() {
+                Some(evidence) => {
+                    match controller.record_verification_evidence(&attempt_id, evidence) {
+                        Ok(passed) => {
+                            verification_evidence_accepted = true;
+                            passed
+                        }
+                        Err(error) => {
+                            controller.append_log(
+                                &attempt_id,
+                                &format!("verification receipt rejected: {error}"),
+                            )?;
+                            false
+                        }
+                    }
+                }
+                None => false,
+            }
+        };
+        enforce_parent_outcome_trust(outcome, deadline_reached, verification_passed);
+        if outcome.harness_stopped {
+            controller.observe_harness_stopped(
+                &attempt_id,
+                "harness adapter observed a terminal runtime state",
+                outcome.finished_at,
+            )?;
+        }
+        let observed_cleanup = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.cleanup.clone());
+        let harness_stopped = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .is_some_and(|attempt| attempt.harness_stopped_at.is_some());
+        let status = if !launch_never_attached && !harness_stopped {
+            ParentAttemptStatus::Indeterminate
+        } else {
+            match outcome.outcome {
+                WorkerOutcomeKind::Succeeded if verification_passed => ParentAttemptStatus::Passed,
+                WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Failed => {
+                    ParentAttemptStatus::Failed
+                }
+                WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => {
+                    ParentAttemptStatus::TimedOut
+                }
+                WorkerOutcomeKind::Cancelled => ParentAttemptStatus::Canceled,
+                WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => {
+                    ParentAttemptStatus::Indeterminate
+                }
+            }
+        };
+        let cleanup = observed_cleanup.unwrap_or_else(|| ParentCleanupReceipt {
+            status: if launch_never_attached {
+                ParentCleanupStatus::Succeeded
+            } else {
+                ParentCleanupStatus::Pending
+            },
+            occurred_at: outcome.finished_at,
+            detail: Some(if launch_never_attached {
+                "worker launch failed before a parent command could start".to_owned()
+            } else {
+                "parent command teardown receipt was not available".to_owned()
+            }),
+        });
+        let exit_code = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.exit_code);
+        controller.finish_attempt(&attempt_id, status, exit_code, cleanup, outcome.finished_at)?;
+        let repair_implementation_turn = matches!(
+            controller.state,
+            super::ParentIntegrationState::Fixing { .. }
+        ) && controller.repair_attempts.iter().any(|repair| {
+            repair.status == ParentRepairStatus::ChangesRequested
+                || (repair.status == ParentRepairStatus::Implementing
+                    && !repair.implementation_completed)
+        });
+        let inactive_repair_implementation = repair_implementation_turn
+            && execution.issue().state.category != IssueStateCategory::Active;
+        if status == ParentAttemptStatus::Passed
+            && !inactive_repair_implementation
+            && matches!(
+                controller.state,
+                super::ParentIntegrationState::Fixing { .. }
+            )
+            && let Some(repair_id) = controller
+                .repair_attempts
+                .iter()
+                .rev()
+                .find(|repair| {
+                    repair.status == ParentRepairStatus::ChangesRequested
+                        || (repair.status == ParentRepairStatus::Implementing
+                            && !repair.implementation_completed)
+                })
+                .map(|repair| repair.id.clone())
+        {
+            controller.record_repair_implementation_completed(&repair_id)?;
+        }
+        let input_version = parent_controller_input_version(controller);
+        let repair_requested = verification_evidence_accepted
+            && status == ParentAttemptStatus::Failed
+            && outcome
+                .parent_verification
+                .as_ref()
+                .and_then(|evidence| evidence.repair_repository_id.as_ref())
+                .is_some();
+        if inactive_repair_implementation {
+            controller.cancel_without_harness(
+                "tracker became inactive before the repair implementation turn could be published",
+                &input_version,
+                outcome.finished_at,
+            )?;
+        } else if status == ParentAttemptStatus::Passed
+            && execution.issue().state.category == IssueStateCategory::Terminal
+        {
+            controller.complete(&attempt_id, &input_version, outcome.finished_at)?;
+        } else if status == ParentAttemptStatus::Passed {
+            // The harness evidence is final, but only the tracker can prove
+            // that the parent reached its terminal workflow state. Preserve
+            // this passed attempt so a later successful tracker refresh can
+            // finalize it without rerunning or losing its exact receipts.
+        } else if merging_continuation {
+            controller.prepare_retry(
+                &attempt_id,
+                "tracker merging superseded human-review polling; refresh before continuing",
+                outcome.finished_at,
+            )?;
+        } else if status == ParentAttemptStatus::Indeterminate {
+            controller.prepare_retry(
+                &attempt_id,
+                "parent harness outcome is indeterminate; retain ownership until terminal state is reconciled",
+                outcome.finished_at,
+            )?;
+        } else if status == ParentAttemptStatus::Canceled
+            && (execution.issue().state.category != IssueStateCategory::Active
+                || acknowledged_operator_cancel_terminal(execution, outcome))
+        {
+            controller.cancel(
+                outcome
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| "parent integration harness was canceled".to_owned()),
+                &input_version,
+                status == ParentAttemptStatus::Canceled,
+                outcome.finished_at,
+            )?;
+        } else if repair_requested {
+            // The failed, harness-observed check selected a verified repository
+            // for repair. Keep the controller in Integrating so the
+            // orchestrator can atomically create the repair attempt below.
+        } else if repair_implementation_turn {
+            // Keep the durable repair in Fixing. The execution retry policy
+            // controls another implementation turn without publishing an
+            // incomplete branch.
+        } else {
+            controller.prepare_retry(
+                &attempt_id,
+                outcome
+                    .error
+                    .as_deref()
+                    .or(outcome.summary.as_deref())
+                    .unwrap_or("parent integration turn finished before terminal tracker state"),
+                outcome.finished_at,
+            )?;
+        }
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            self.hierarchy_state_dirty = true;
+            return Err(error);
+        }
+        Ok(repair_requested)
+    }
+
+    async fn clear_parent_dispatch_intent_after_preparation_failure(
+        &mut self,
+        issue_id: &IssueId,
+        error: SchedulerError,
+    ) -> SchedulerError {
+        let should_clear = self
+            .hierarchy_state
+            .hierarchy
+            .get(issue_id)
+            .is_some_and(HierarchySnapshot::dispatch_intended);
+        if !should_clear {
+            return error;
+        }
+        if let Some(snapshot) = self.hierarchy_state.hierarchy.get_mut(issue_id) {
+            snapshot.clear_dispatch_intent();
+        }
+        if let Err(persist_error) = self.persist_orchestrator_state().await {
+            warn!(
+                issue = %issue_id,
+                error = %persist_error,
+                "failed to clear parent dispatch intent after launch preparation failure"
+            );
+            return persist_error;
+        }
+        error
+    }
+
     async fn apply_worker_updates(
         &mut self,
         updates: Vec<WorkerUpdate>,
@@ -2906,6 +7111,66 @@ where
         let mut first_error = None;
         for update in updates {
             match update {
+                WorkerUpdate::OperatorRequest {
+                    worker_id,
+                    interaction,
+                } => {
+                    if let Some(meta) = self.worker_metadata.get(&worker_id)
+                        && meta.harness_kind.as_deref() == Some("acp")
+                        && interaction.issue_id == meta.issue_id.as_str()
+                        && interaction.run_id == format!("run-{worker_id}")
+                        && interaction.generation > 0
+                        && interaction.expires_at > Utc::now()
+                        && !self.pending_operator.contains_key(&interaction.request_id)
+                        && self
+                            .executions
+                            .get(&meta.issue_id)
+                            .is_some_and(|execution| {
+                                execution.status() == SchedulerStatus::Running
+                                    && execution
+                                        .current_run()
+                                        .is_some_and(|run| run.worker_id == worker_id)
+                            })
+                    {
+                        let (reason, summary) = match interaction.kind {
+                            OperatorInteractionKind::Permission => {
+                                ("permission_request", "ACP agent requested permission")
+                            }
+                            OperatorInteractionKind::Question => {
+                                ("form_request", "ACP agent requested form input")
+                            }
+                            OperatorInteractionKind::PlanApproval => {
+                                ("plan_request", "ACP agent requested plan approval")
+                            }
+                        };
+                        if let Some(execution) = self.executions.get_mut(&meta.issue_id) {
+                            execution.observe_runtime_event(
+                                datetime_to_timestamp(Utc::now()),
+                                Some(format!("acp-operator-{}", interaction.request_id)),
+                                Some("acp.waiting_for_input".into()),
+                                Some(summary.into()),
+                                Some(serde_json::json!({
+                                    "reason": reason,
+                                    "operator_responses": true,
+                                })),
+                            )?;
+                        }
+                        self.pending_operator
+                            .insert(interaction.request_id.clone(), (worker_id, interaction));
+                    }
+                }
+                WorkerUpdate::OperatorClosed {
+                    worker_id,
+                    request_id,
+                } => {
+                    if let Some((owner, interaction)) = self.pending_operator.get(&request_id)
+                        && *owner == worker_id
+                    {
+                        let interaction = interaction.clone();
+                        self.pending_operator.remove(&request_id);
+                        self.observe_operator_resolution(&worker_id, &interaction);
+                    }
+                }
                 WorkerUpdate::RuntimeEvent {
                     worker_id,
                     observed_at,
@@ -2921,6 +7186,42 @@ where
                     else {
                         continue;
                     };
+                    let parent_log = format!(
+                        "{}: {}{}",
+                        event_kind.as_deref().unwrap_or("runtime_event"),
+                        summary.as_deref().unwrap_or_default(),
+                        payload
+                            .as_ref()
+                            .map(|payload| format!(" {payload}"))
+                            .unwrap_or_default()
+                    );
+                    let parent_workspace_path = self
+                        .executions
+                        .get(&issue_id)
+                        .and_then(IssueExecution::workspace)
+                        .map(|workspace| workspace.path.clone());
+                    if let Some(controller) =
+                        self.hierarchy_state.parent_integrations.get_mut(&issue_id)
+                        && let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned)
+                    {
+                        if let Err(error) = observe_parent_command_event(
+                            controller,
+                            &attempt_id,
+                            parent_workspace_path.as_deref(),
+                            observed_at,
+                            event_id.as_deref(),
+                            event_kind.as_deref(),
+                            payload.as_ref(),
+                        ) {
+                            controller.append_log(
+                                &attempt_id,
+                                &format!("runtime command evidence rejected: {error}"),
+                            )?;
+                        }
+                        controller
+                            .append_log(&attempt_id, &redact_runtime_diagnostic(&parent_log))?;
+                        self.hierarchy_state_dirty = true;
+                    }
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
                         execution.observe_runtime_event(
                             observed_at,
@@ -2932,6 +7233,8 @@ where
                     }
                 }
                 WorkerUpdate::Finished { worker_id, outcome } => {
+                    self.pending_operator
+                        .retain(|_, (owner, _)| *owner != worker_id);
                     let Some(metadata) = self.worker_metadata.remove(&worker_id) else {
                         continue;
                     };
@@ -2939,21 +7242,52 @@ where
                     let Some(execution) = self.remove_execution(&issue_id) else {
                         continue;
                     };
+                    if metadata.dry_run {
+                        let execution = execution.release(
+                            outcome.finished_at,
+                            ReleaseReason::Completed,
+                            Some(outcome),
+                        )?;
+                        self.insert_execution(issue_id, execution);
+                        continue;
+                    }
                     let finished_at = outcome.finished_at;
                     let original_execution = execution.clone();
+                    let finished_outcome = outcome.clone();
                     let execution = match self
                         .resolve_finished_execution(execution, outcome, finished_at)
                         .await
                     {
                         Ok(execution) => execution,
                         Err(error) => {
-                            self.insert_execution(issue_id.clone(), original_execution);
+                            let mut retained_execution = original_execution;
+                            retained_execution.retain_worker_outcome(finished_outcome.clone());
+                            self.insert_execution(issue_id.clone(), retained_execution.clone());
+                            self.pending_finished_updates
+                                .insert(issue_id.clone(), (retained_execution, finished_outcome));
                             if first_error.is_none() {
                                 first_error = Some(error);
                             }
                             continue;
                         }
                     };
+                    if let Err(error) = self
+                        .rebind_finished_child_hierarchy_generation(&issue_id)
+                        .await
+                    {
+                        // The outcome has already been applied by
+                        // resolve_finished_execution. If rebinding its
+                        // hierarchy generation cannot be durably persisted,
+                        // retry the original running execution so the next
+                        // flush applies the outcome exactly once.
+                        self.insert_execution(issue_id.clone(), original_execution.clone());
+                        self.pending_finished_updates
+                            .insert(issue_id.clone(), (original_execution, finished_outcome));
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
                     self.insert_execution(issue_id.clone(), execution);
                     if let Err(error) = self.persist_retry_if_queued(&issue_id).await
                         && first_error.is_none()
@@ -2973,6 +7307,24 @@ where
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
+                        execution.update_conversation(conversation);
+                    }
+                }
+                WorkerUpdate::HarnessCapabilityUpdate {
+                    worker_id,
+                    capability,
+                } => {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id)
+                        && let Some(mut conversation) = execution.conversation().cloned()
+                    {
+                        conversation.harness_capability = Some(Box::new(capability));
                         execution.update_conversation(conversation);
                     }
                 }
@@ -3002,7 +7354,55 @@ where
             }
         }
 
+        if self.hierarchy_state_dirty
+            && let Err(error) = self.persist_orchestrator_state().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+
         first_error.map_or(Ok(()), Err)
+    }
+
+    async fn rebind_finished_child_hierarchy_generation(
+        &mut self,
+        issue_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        let Some(generation) = self
+            .hierarchy_state
+            .hierarchy
+            .values()
+            .filter(|snapshot| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .any(|edge| edge.required && edge.child_id == *issue_id)
+            })
+            .map(|snapshot| snapshot.generation)
+            .next()
+        else {
+            return Ok(());
+        };
+        if self
+            .hierarchy_state
+            .run_hierarchy_generations
+            .get(issue_id)
+            .is_none_or(|current| *current == generation)
+        {
+            return Ok(());
+        }
+
+        let previous_state = self.hierarchy_state.clone();
+        self.hierarchy_state
+            .run_hierarchy_generations
+            .insert(issue_id.clone(), generation);
+        self.hierarchy_state
+            .rebind_leaf_leases(&BTreeSet::from([issue_id.clone()]), generation);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn handle_stalls(&mut self, observed_at: TimestampMs) -> Result<(), SchedulerError> {
@@ -3013,17 +7413,31 @@ where
         let stalled = self
             .executions
             .iter()
-            .filter_map(|(issue_id, execution)| match execution.state() {
-                crate::opensymphony_domain::SchedulerState::Running { stall, .. }
-                    if stall.stalled_at <= observed_at =>
-                {
-                    Some(issue_id.clone())
+            .filter_map(|(issue_id, execution)| {
+                let absolute_timeout = self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(issue_id)
+                    .and_then(ParentIntegrationController::current_attempt_deadline)
+                    .is_some_and(|deadline| deadline <= observed_at);
+                let awaiting_input = self.pending_operator.values().any(|(worker, request)| {
+                    request.issue_id == issue_id.as_str()
+                        && request.expires_at > Utc::now()
+                        && self.worker_metadata.contains_key(worker)
+                });
+                match execution.state() {
+                    crate::opensymphony_domain::SchedulerState::Running { stall, .. }
+                        if (stall.stalled_at <= observed_at && !awaiting_input)
+                            || absolute_timeout =>
+                    {
+                        Some((issue_id.clone(), absolute_timeout))
+                    }
+                    _ => None,
                 }
-                _ => None,
             })
             .collect::<Vec<_>>();
 
-        for issue_id in stalled {
+        for (issue_id, absolute_timeout) in stalled {
             let Some(mut execution) = self.remove_execution(&issue_id) else {
                 continue;
             };
@@ -3049,14 +7463,24 @@ where
             }
             let outcome = WorkerOutcomeRecord::from_run(
                 &run,
-                if remote_stopped {
+                if absolute_timeout {
+                    WorkerOutcomeKind::TimedOut
+                } else if remote_stopped {
                     WorkerOutcomeKind::Stalled
                 } else {
                     WorkerOutcomeKind::Detached
                 },
                 observed_at,
-                Some("worker exceeded the configured stall timeout".to_string()),
-                Some("scheduler stall timeout reached".to_string()),
+                Some(if absolute_timeout {
+                    "parent integration attempt exceeded its absolute timeout".to_owned()
+                } else {
+                    "worker exceeded the configured stall timeout".to_owned()
+                }),
+                Some(if absolute_timeout {
+                    "parent integration command deadline reached".to_owned()
+                } else {
+                    "scheduler stall timeout reached".to_owned()
+                }),
             );
             execution = self
                 .resolve_finished_execution(execution, outcome, observed_at)
@@ -3136,7 +7560,10 @@ where
             return Ok(());
         };
 
-        execution.refresh_issue(issue)?;
+        if let Err(error) = execution.refresh_issue(issue) {
+            self.insert_execution(issue_id, execution);
+            return Err(error.into());
+        }
         let abort_requested = abort_reason.is_some();
         let mut remote_stopped = true;
         if let Some(run) = execution.current_run().cloned()
@@ -3160,6 +7587,113 @@ where
             );
             self.insert_execution(issue_id, execution);
             return Ok(());
+        }
+        let previous_parent_state = self.hierarchy_state.clone();
+        let parent_update = (|| -> Result<bool, SchedulerError> {
+            let Some(controller) = self.hierarchy_state.parent_integrations.get_mut(&issue_id)
+            else {
+                return Ok(false);
+            };
+            if execution.issue().state.category == IssueStateCategory::Terminal
+                && !controller.state.terminal()
+                && matches!(controller.state, super::ParentIntegrationState::Integrating)
+                && controller.current_attempt_id().is_none()
+                && let Some(attempt_id) = controller
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.status == ParentAttemptStatus::Passed)
+                    .map(|attempt| attempt.id.clone())
+            {
+                let input_version = parent_controller_input_version(controller);
+                match controller.complete(&attempt_id, &input_version, observed_at) {
+                    Ok(()) => return Ok(true),
+                    Err(ParentIntegrationError::FinalVerificationIncomplete) => {
+                        // A legacy or malformed Passed marker is insufficient
+                        // to release the parent. Keep its controller and
+                        // leases intact for operator-visible recovery.
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if controller.state.terminal() {
+                return Ok(false);
+            }
+            let Some(attempt_id) = controller.current_attempt_id().map(str::to_owned) else {
+                if !controller.can_cancel_without_harness() {
+                    // An indeterminate attempt or incomplete teardown can still
+                    // own a live harness. Retain the controller and its leases
+                    // for stop reconciliation or operator recovery.
+                    return Ok(false);
+                }
+                // Provider-side repair stages deliberately have no live
+                // harness turn. A terminal tracker transition still owns the
+                // controller lifecycle, so finish it durably without issuing
+                // a fictitious worker interrupt.
+                let input_version = parent_controller_input_version(controller);
+                controller.cancel_without_harness(
+                    format!("scheduler released parent integration: {reason:?}"),
+                    &input_version,
+                    observed_at,
+                )?;
+                return Ok(true);
+            };
+            if execution
+                .interrupt()
+                .is_some_and(|interrupt| interrupt.status == HarnessInterruptStatus::Acknowledged)
+            {
+                controller.observe_harness_stopped(
+                    &attempt_id,
+                    "harness interrupt reconciled a stopped state",
+                    observed_at,
+                )?;
+            }
+            let observed_cleanup = controller
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| attempt.cleanup.clone());
+            let observed_exit_code = controller
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| attempt.exit_code);
+            controller.finish_attempt(
+                &attempt_id,
+                ParentAttemptStatus::Canceled,
+                observed_exit_code,
+                observed_cleanup.unwrap_or_else(|| ParentCleanupReceipt {
+                    status: ParentCleanupStatus::Pending,
+                    occurred_at: observed_at,
+                    detail: Some(format!(
+                        "scheduler release acknowledged harness stop but has no command teardown receipt: {reason:?}"
+                    )),
+                }),
+                observed_at,
+            )?;
+            let input_version = parent_controller_input_version(controller);
+            controller.cancel(
+                format!("scheduler released parent integration: {reason:?}"),
+                &input_version,
+                true,
+                observed_at,
+            )?;
+            Ok(true)
+        })();
+        let parent_changed = match parent_update {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.hierarchy_state = previous_parent_state;
+                self.insert_execution(issue_id, execution);
+                return Err(error);
+            }
+        };
+        if parent_changed && let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_parent_state;
+            self.hierarchy_state_dirty = true;
+            self.insert_execution(issue_id, execution);
+            return Err(error);
         }
         self.workspace
             .revoke_issue_resources(execution.issue().identifier.as_str());
@@ -3189,11 +7723,33 @@ where
         } else {
             reason
         };
-        let mut retry_cleanup_succeeded = retain_failed;
+        let successful_terminal_outcome = reason == ReleaseReason::Completed
+            || (reason == ReleaseReason::TrackerTerminal
+                && execution
+                    .last_worker_outcome()
+                    .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
+        let parent_finalized =
+            self.parent_finalized_success(&issue_id, !execution.issue().sub_issues.is_empty());
+        if successful_terminal_outcome && parent_finalized {
+            self.record_terminal_orchestrator_success(&issue_id).await?;
+        }
         if cleanup_terminal
+            && parent_finalized
+            && let Err(error) = self.retain_terminal_child_lease(&execution).await
+        {
+            self.insert_execution(issue_id, execution);
+            return Err(error);
+        }
+        let parent_workspace = self
+            .is_parent_integration_workspace(&issue_id, !execution.issue().sub_issues.is_empty());
+        let mut retry_cleanup_succeeded = retain_failed;
+        if !parent_workspace
+            && cleanup_terminal
+            && parent_finalized
             && remote_stopped
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
+            && !self.workspace_has_active_lease(&workspace).await?
         {
             match if cleanup_reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
@@ -3306,10 +7862,23 @@ where
     async fn resolve_finished_execution(
         &mut self,
         mut execution: IssueExecution,
-        outcome: WorkerOutcomeRecord,
+        mut outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
     ) -> Result<IssueExecution, SchedulerError> {
+        let issue_id = execution.issue().id.clone();
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+                .await?;
+            if self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+            {
+                return self
+                    .queue_retry_for_outcome(execution, outcome, observed_at)
+                    .await;
+            }
             return self
                 .release_finished_execution(execution, observed_at, reason, Some(outcome))
                 .await;
@@ -3323,6 +7892,18 @@ where
             outcome.outcome,
             WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
         ) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+                .await?;
+            if self
+                .hierarchy_state
+                .parent_integrations
+                .get(&issue_id)
+                .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+            {
+                return self
+                    .queue_retry_for_outcome(execution, outcome, observed_at)
+                    .await;
+            }
             return self
                 .release_finished_execution(
                     execution,
@@ -3333,6 +7914,8 @@ where
                 .await;
         }
         if acknowledged_operator_cancel_terminal(&execution, &outcome) {
+            self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+                .await?;
             return self
                 .release_finished_execution(
                     execution,
@@ -3343,7 +7926,6 @@ where
                 .await;
         }
 
-        let issue_id = execution.issue().id.clone();
         if let Some(state) = self
             .refresh_finished_issue_state(&issue_id, observed_at)
             .await
@@ -3354,10 +7936,104 @@ where
             if let Some(reason) =
                 non_active_release_reason(execution.issue().state.category.clone())
             {
+                self.record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+                    .await?;
+                if self
+                    .hierarchy_state
+                    .parent_integrations
+                    .get(&issue_id)
+                    .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+                {
+                    return self
+                        .queue_retry_for_outcome(execution, outcome, observed_at)
+                        .await;
+                }
                 return self
                     .release_finished_execution(execution, observed_at, reason, Some(outcome))
                     .await;
             }
+        }
+
+        let repair_request_accepted = self
+            .record_parent_worker_outcome(&issue_id, &execution, &mut outcome)
+            .await?;
+        let repair_implementation_ready = self
+            .hierarchy_state
+            .parent_integrations
+            .get(&issue_id)
+            .is_some_and(|controller| {
+                matches!(
+                    controller.state,
+                    super::ParentIntegrationState::Fixing { .. }
+                ) && controller.repair_attempts.iter().any(|repair| {
+                    repair.status == ParentRepairStatus::Implementing
+                        && repair.implementation_completed
+                })
+            });
+        if repair_implementation_ready {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
+        let repair_repository_id = repair_request_accepted
+            .then(|| {
+                outcome
+                    .parent_verification
+                    .as_ref()
+                    .and_then(|evidence| evidence.repair_repository_id.clone())
+            })
+            .flatten();
+        if let Some(repository_id) = repair_repository_id {
+            let evidence = outcome
+                .parent_verification
+                .as_ref()
+                .expect("repair repository was selected from verification evidence");
+            let defect_key = format!(
+                "parent-repair:{}:{}:{}:{}",
+                issue_id, evidence.run_id, evidence.attempt, repository_id
+            );
+            self.insert_execution(issue_id.clone(), execution.clone());
+            let repair_result = self
+                .begin_parent_repair(&issue_id, &repository_id, &defect_key, outcome.finished_at)
+                .await;
+            let execution = self
+                .remove_execution(&issue_id)
+                .expect("parent execution was temporarily restored");
+            repair_result?;
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
+        if self.parent_waiting_for_tracker_confirmation(&issue_id) {
+            return self
+                .release_finished_execution(
+                    execution,
+                    observed_at,
+                    ReleaseReason::Completed,
+                    Some(outcome),
+                )
+                .await;
+        }
+
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(&issue_id)
+            .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+        {
+            return self
+                .queue_retry_for_outcome(execution, outcome, observed_at)
+                .await;
         }
 
         let retry_count = execution
@@ -3421,6 +8097,26 @@ where
             reason,
             ReleaseReason::TrackerTerminal | ReleaseReason::RetryExhausted
         );
+        let parent_finalized = self.parent_finalized_success(
+            &execution.issue().id,
+            !execution.issue().sub_issues.is_empty(),
+        );
+        let parent_workspace = self.is_parent_integration_workspace(
+            &execution.issue().id,
+            !execution.issue().sub_issues.is_empty(),
+        );
+        if cleanup_terminal && parent_finalized {
+            self.retain_terminal_child_lease(&execution).await?;
+        }
+        let successful_terminal_outcome = reason == ReleaseReason::Completed
+            || (reason == ReleaseReason::TrackerTerminal
+                && outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.outcome == WorkerOutcomeKind::Succeeded));
+        if successful_terminal_outcome && parent_finalized {
+            self.record_terminal_orchestrator_success(&execution.issue().id)
+                .await?;
+        }
         if reason == ReleaseReason::RetryExhausted {
             let normal_retry_count = execution
                 .current_run()
@@ -3437,8 +8133,11 @@ where
             execution.set_retry_count_override(normal_retry_count);
             let retain_failed = self.workspace.retain_failed_workspaces() || !persisted;
             if cleanup_terminal
+                && parent_finalized
+                && !parent_workspace
                 && !retain_failed
                 && let Some(workspace) = execution.workspace().cloned()
+                && !self.workspace_has_active_lease(&workspace).await?
             {
                 let cleanup = self.workspace.cleanup_failed_workspace(&workspace).await;
                 match cleanup {
@@ -3458,8 +8157,11 @@ where
         let retain_failed =
             reason == ReleaseReason::RetryExhausted && self.workspace.retain_failed_workspaces();
         if cleanup_terminal
+            && parent_finalized
+            && !parent_workspace
             && !retain_failed
             && let Some(workspace) = execution.workspace().cloned()
+            && !self.workspace_has_active_lease(&workspace).await?
         {
             let cleanup = if reason == ReleaseReason::RetryExhausted {
                 self.workspace.cleanup_failed_workspace(&workspace).await
@@ -3478,6 +8180,68 @@ where
             }
         }
         Ok(execution)
+    }
+
+    async fn record_terminal_orchestrator_success(
+        &mut self,
+        issue_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        if self
+            .hierarchy_state
+            .terminal_orchestrator_issues
+            .insert(issue_id.clone())
+            && let Err(error) = self.persist_orchestrator_state().await
+        {
+            self.hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(issue_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn parent_finalized_success(&self, issue_id: &IssueId, issue_has_children: bool) -> bool {
+        match self.hierarchy_state.parent_integrations.get(issue_id) {
+            Some(controller) => {
+                controller.state == super::ParentIntegrationState::Completed
+                    && self
+                        .hierarchy_state
+                        .hierarchy
+                        .get(issue_id)
+                        .is_some_and(|snapshot| {
+                            snapshot.accepts_event(controller.hierarchy_generation)
+                        })
+            }
+            None => !issue_has_children,
+        }
+    }
+
+    // Parent capture retries after daemon restart from the durable runtime
+    // envelope, so cleanup remains deferred to the capture-aware lifecycle.
+    fn is_parent_integration_workspace(
+        &self,
+        issue_id: &IssueId,
+        issue_has_children: bool,
+    ) -> bool {
+        issue_has_children
+            || self
+                .hierarchy_state
+                .parent_integrations
+                .contains_key(issue_id)
+    }
+
+    fn parent_waiting_for_tracker_confirmation(&self, issue_id: &IssueId) -> bool {
+        self.hierarchy_state
+            .parent_integrations
+            .get(issue_id)
+            .is_some_and(|controller| {
+                !controller.state.terminal()
+                    && controller.current_attempt_id().is_none()
+                    && controller
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| attempt.status == ParentAttemptStatus::Passed)
+            })
     }
 
     async fn persist_retry_exhaustion(
@@ -3571,6 +8335,535 @@ where
         first_error.map_or(Ok(()), |detail| Err(SchedulerError::Workspace { detail }))
     }
 
+    async fn flush_pending_finished_updates(&mut self) -> Result<(), SchedulerError> {
+        let pending = std::mem::take(&mut self.pending_finished_updates);
+        let mut first_error = None;
+        for (issue_id, (execution, outcome)) in pending {
+            let finished_at = outcome.finished_at;
+            let retry_execution = execution.clone();
+            match self
+                .resolve_finished_execution(execution, outcome.clone(), finished_at)
+                .await
+            {
+                Ok(execution) => {
+                    if let Err(error) = self
+                        .rebind_finished_child_hierarchy_generation(&issue_id)
+                        .await
+                    {
+                        self.insert_execution(issue_id.clone(), retry_execution.clone());
+                        self.pending_finished_updates
+                            .insert(issue_id.clone(), (retry_execution, outcome));
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
+                    self.insert_execution(issue_id.clone(), execution);
+                    if let Err(error) = self.persist_retry_if_queued(&issue_id).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                Err(error) => {
+                    self.insert_execution(issue_id.clone(), retry_execution.clone());
+                    self.pending_finished_updates
+                        .insert(issue_id.clone(), (retry_execution, outcome));
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    async fn parent_dispatch_is_eligible(
+        &mut self,
+        tracker_issue: &TrackerIssue,
+        normalized: &NormalizedIssue,
+        observed_at: TimestampMs,
+        allow_retry: bool,
+        reachable_child_edges: Option<&BTreeSet<(IssueId, IssueId)>>,
+    ) -> Result<bool, SchedulerError> {
+        if self
+            .hierarchy_state
+            .parent_integrations
+            .get(&normalized.id)
+            .is_some_and(ParentIntegrationController::has_unreconciled_harness)
+        {
+            return Ok(false);
+        }
+        if allow_retry
+            && self
+                .hierarchy_state
+                .parent_integrations
+                .get(&normalized.id)
+                .is_some_and(|controller| {
+                    matches!(
+                        controller.state,
+                        super::ParentIntegrationState::Fixing { .. }
+                    ) && controller
+                        .repair_attempts
+                        .iter()
+                        .any(|repair| repair.status == ParentRepairStatus::ChangesRequested)
+                })
+        {
+            return Ok(true);
+        }
+        if self.linear_cooldown_active(observed_at) {
+            return Ok(false);
+        }
+        let Some(snapshot) = self.hierarchy_state.hierarchy.get(&normalized.id).cloned() else {
+            return Ok(false);
+        };
+        if snapshot.blocked_reason.is_some() {
+            return Ok(false);
+        }
+        // Summary discovery and known-candidate reconciliation do not carry
+        // the complete tracker edge set. Keep parents deferred until a full
+        // observation can release canceled-subtree evidence safely.
+        if reachable_child_edges.is_none() {
+            return Ok(false);
+        }
+        if snapshot.dispatch_claimed() && !allow_retry {
+            return Ok(allow_retry);
+        }
+        if snapshot.dispatch_intended() && !allow_retry {
+            return Ok(false);
+        }
+        if !allow_retry
+            && self
+                .parent_eligibility_checked_at
+                .get(&normalized.id)
+                .is_some_and(|checked_at| {
+                    checked_at
+                        .as_u64()
+                        .saturating_add(DISPATCH_DISCOVERY_INTERVAL_MS)
+                        > observed_at.as_u64()
+                })
+        {
+            return Ok(false);
+        }
+        self.parent_eligibility_checked_at
+            .insert(normalized.id.clone(), observed_at);
+        let eligibility_timeout =
+            parent_eligibility_timeout(self.parent_eligibility_work_units(&normalized.id));
+        let mut evidence = match timeout(
+            eligibility_timeout,
+            self.tracker.parent_eligibility(tracker_issue, &snapshot),
+        )
+        .await
+        {
+            Err(_) => {
+                warn!(
+                    parent = %normalized.identifier,
+                    timeout = ?eligibility_timeout,
+                    "parent eligibility provider lookup timed out; keeping parent blocked"
+                );
+                self.record_parent_eligibility_block(
+                    &normalized.id,
+                    HierarchyBlockedReason::UnresolvedFailure(
+                        "parent eligibility provider lookup timed out".to_owned(),
+                    ),
+                )
+                .await?;
+                return Ok(false);
+            }
+            Ok(Ok(evidence)) => evidence,
+            Ok(Err(error)) => {
+                self.set_linear_cooldown_from_tracker_error(&error, observed_at);
+                warn!(
+                    parent = %normalized.identifier,
+                    error = %error,
+                    "parent eligibility provider lookup failed; keeping parent blocked"
+                );
+                self.record_parent_eligibility_block(
+                    &normalized.id,
+                    HierarchyBlockedReason::UnresolvedFailure(error.to_string()),
+                )
+                .await?;
+                return Ok(false);
+            }
+        };
+        let mut released_canceled_subtree_holds = false;
+        for child in &mut evidence.children {
+            // A current execution supersedes an older durable success receipt.
+            // Provider terminal flags never authorize parent admission.
+            child.orchestrator_terminal = self.executions.get(&child.child_id).map_or_else(
+                || {
+                    self.hierarchy_state
+                        .terminal_orchestrator_issues
+                        .contains(&child.child_id)
+                },
+                |execution| {
+                    matches!(
+                        execution.state(),
+                        crate::opensymphony_orchestrator::SchedulerState::Released {
+                            reason: ReleaseReason::TrackerTerminal | ReleaseReason::Completed,
+                            ..
+                        }
+                    ) && self.parent_finalized_success(
+                        &child.child_id,
+                        !execution.issue().sub_issues.is_empty(),
+                    )
+                },
+            );
+            if !child.merge_required {
+                if !child.orchestrator_terminal {
+                    child.unresolved_failure =
+                        Some("child orchestrator outcome is not durably terminal".to_owned());
+                    continue;
+                }
+                if let Some(reachable_child_edges) = reachable_child_edges {
+                    released_canceled_subtree_holds |= self
+                        .hierarchy_state
+                        .release_subtree_evidence_for_undispatched_parent_with_reachability(
+                            &child.child_id,
+                            Some(reachable_child_edges),
+                            observed_at.as_u64(),
+                        );
+                }
+                child.resource = None;
+                child.resources.clear();
+                continue;
+            }
+            if self.terminal_child_failure_ids.contains(&child.child_id)
+                || self
+                    .executions
+                    .get(&child.child_id)
+                    .is_some_and(|execution| {
+                        execution.retry().is_some()
+                            || execution.last_worker_outcome().is_some_and(|outcome| {
+                                matches!(
+                                    outcome.outcome,
+                                    WorkerOutcomeKind::Failed
+                                        | WorkerOutcomeKind::TimedOut
+                                        | WorkerOutcomeKind::Stalled
+                                        | WorkerOutcomeKind::Detached
+                                        | WorkerOutcomeKind::CancelFailed
+                                )
+                            })
+                    })
+            {
+                child.orchestrator_terminal = false;
+                child.unresolved_failure =
+                    Some("child has an unresolved worker failure or retry".to_owned());
+                continue;
+            }
+            let direct_provider_evidence_is_stale =
+                child.provider_evidence_at.is_some_and(|evidence_at| {
+                    !self.hierarchy_state.hierarchy.contains_key(&child.child_id)
+                        && self.child_run_started_after(&child.child_id, evidence_at)
+                });
+            let descendant_provider_evidence_is_stale =
+                child.provider_evidence_by_issue.iter().any(|boundary| {
+                    self.child_run_started_after(&boundary.issue_id, boundary.evidence_at)
+                });
+            if child.provider_merge_confirmed
+                && (direct_provider_evidence_is_stale || descendant_provider_evidence_is_stale)
+            {
+                child.orchestrator_terminal = false;
+                child.unresolved_failure =
+                    Some("provider merge evidence predates the current child run".to_owned());
+                continue;
+            }
+            if child.resource.is_none() {
+                let descendant_resources = self
+                    .hierarchy_state
+                    .descendant_resources_for(&child.child_id);
+                if !descendant_resources.is_empty() {
+                    child.resource = descendant_resources.first().cloned();
+                    child.resources = descendant_resources;
+                } else {
+                    let retry_resources = self
+                        .hierarchy_state
+                        .ancestor_resources_for_child(&normalized.id, &child.child_id);
+                    let expected_owner = super::LeaseOwner::leaf_worker(&child.child_id);
+                    let leaf_resource = self
+                        .hierarchy_state
+                        .leases
+                        .iter()
+                        .find(|lease| {
+                            lease.active()
+                                && lease.kind == super::LeaseKind::LeafWorker
+                                && lease.hierarchy_generation == snapshot.generation
+                                && lease.owner == expected_owner
+                                && lease.resource.issue_id == child.child_id
+                        })
+                        .map(|lease| lease.resource.clone());
+                    if retry_resources.is_empty() {
+                        child.resource = leaf_resource;
+                    } else {
+                        let mut resources = retry_resources;
+                        if let Some(leaf_resource) = leaf_resource
+                            && !resources.contains(&leaf_resource)
+                        {
+                            resources.push(leaf_resource);
+                        }
+                        child.resource = resources.first().cloned();
+                        child.resources = resources;
+                    }
+                }
+            }
+            if child.resources.is_empty() {
+                child.resources = child.resource.clone().into_iter().collect();
+            }
+        }
+        if released_canceled_subtree_holds {
+            self.persist_orchestrator_state().await?;
+        }
+        if let Err(reason) = evidence.eligible_for(&snapshot) {
+            self.record_parent_eligibility_block(&normalized.id, reason)
+                .await?;
+            return Ok(false);
+        }
+        if evidence.children.iter().any(|child| {
+            child.resources().into_iter().any(|resource| {
+                if self.hierarchy_state.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == super::LeaseKind::AncestorIntegration
+                        && lease.owner == super::LeaseOwner::ancestor(&normalized.id)
+                        && lease.hierarchy_generation == snapshot.generation
+                        && lease.resource == *resource
+                }) {
+                    return false;
+                }
+                if self.hierarchy_state.hierarchy.contains_key(&child.child_id) {
+                    return !self.hierarchy_state.leases.iter().any(|lease| {
+                        lease.active()
+                            && lease.kind == super::LeaseKind::AncestorIntegration
+                            && lease.owner == super::LeaseOwner::ancestor(&child.child_id)
+                            && lease.resource == *resource
+                    });
+                }
+                let expected_owner = super::LeaseOwner::leaf_worker(&resource.issue_id);
+                !self.hierarchy_state.leases.iter().any(|lease| {
+                    lease.active()
+                        && lease.kind == super::LeaseKind::LeafWorker
+                        && lease.hierarchy_generation == snapshot.generation
+                        && lease.owner == expected_owner
+                        && lease.resource == *resource
+                })
+            })
+        }) {
+            self.record_parent_eligibility_block(
+                &normalized.id,
+                HierarchyBlockedReason::MissingCheckoutEvidence,
+            )
+            .await?;
+            return Ok(false);
+        }
+
+        self.clear_parent_eligibility_block(&normalized.id).await?;
+
+        let mut next_state = self.hierarchy_state.clone();
+        let Some(next_snapshot) = next_state.hierarchy.get_mut(&normalized.id) else {
+            return Ok(false);
+        };
+        let mut required_merge_commits = BTreeSet::new();
+        for commit in evidence.children.iter().flat_map(|child| {
+            if child.merge_result_commits_by_repository.is_empty() {
+                child
+                    .merge_result_commit
+                    .iter()
+                    .chain(child.merge_result_commits.iter())
+                    .map(|commit| super::RequiredMergeCommit {
+                        repository_id: child.merge_repository_id.clone(),
+                        commit: commit.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                child.merge_result_commits_by_repository.clone()
+            }
+        }) {
+            if !commit.commit.trim().is_empty() {
+                required_merge_commits.insert(commit);
+            }
+        }
+        next_snapshot.dispatch_required_merge_commits =
+            required_merge_commits.into_iter().collect();
+        if next_snapshot.freeze().is_err() {
+            return Ok(false);
+        }
+        next_snapshot.mark_dispatch_intent();
+        let input_version = parent_input_version(next_snapshot);
+        let mut required_leases = evidence.integration_leases(&normalized.id, observed_at.as_u64());
+        required_leases.extend(evidence.children.iter().flat_map(|child| {
+            child
+                .resources()
+                .into_iter()
+                .cloned()
+                .map(|resource| LeaseRecord {
+                    kind: super::LeaseKind::Review,
+                    resource,
+                    owner: super::LeaseOwner::review_for_parent(&normalized.id, &child.child_id),
+                    hierarchy_generation: evidence.hierarchy_generation,
+                    acquired_at: observed_at.as_u64(),
+                    expires_at: None,
+                    released_at: None,
+                })
+        }));
+        next_state
+            .acquire_leases(required_leases)
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
+        let controller = next_state
+            .parent_integrations
+            .entry(normalized.id.clone())
+            .or_insert(ParentIntegrationController::new(
+                normalized.id.clone(),
+                snapshot.generation,
+            )?);
+        let controller_replaced = controller.hierarchy_generation != snapshot.generation;
+        if controller_replaced {
+            *controller =
+                ParentIntegrationController::new(normalized.id.clone(), snapshot.generation)?;
+        }
+        controller.admit(&input_version, observed_at)?;
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        if controller_replaced {
+            self.reopen_completed_parent_for_new_controller(normalized, observed_at)?;
+        }
+        Ok(true)
+    }
+
+    fn child_run_started_after(&self, issue_id: &IssueId, evidence_at: TimestampMs) -> bool {
+        self.hierarchy_state
+            .run_started_at_by_issue
+            .get(issue_id)
+            .copied()
+            .or_else(|| {
+                self.executions
+                    .get(issue_id)
+                    .and_then(|execution| execution.last_worker_outcome())
+                    .map(|outcome| outcome.started_at)
+            })
+            .is_some_and(|started_at| evidence_at < started_at)
+    }
+
+    async fn record_parent_eligibility_block(
+        &mut self,
+        parent_id: &IssueId,
+        reason: HierarchyBlockedReason,
+    ) -> Result<(), SchedulerError> {
+        let changed = self
+            .hierarchy_state
+            .hierarchy
+            .get_mut(parent_id)
+            .is_some_and(|snapshot| {
+                if snapshot.blocked_reason.is_some()
+                    || snapshot.eligibility_blocked_reason.as_ref() == Some(&reason)
+                {
+                    false
+                } else {
+                    snapshot.eligibility_blocked_reason = Some(reason);
+                    true
+                }
+            });
+        if changed {
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_parent_eligibility_block(
+        &mut self,
+        parent_id: &IssueId,
+    ) -> Result<(), SchedulerError> {
+        let changed = self
+            .hierarchy_state
+            .hierarchy
+            .get_mut(parent_id)
+            .is_some_and(|snapshot| snapshot.eligibility_blocked_reason.take().is_some());
+        if changed {
+            self.persist_orchestrator_state().await?;
+        }
+        Ok(())
+    }
+
+    async fn hydrate_parent_hierarchy_for_terminal_child(
+        &mut self,
+        issue: &NormalizedIssue,
+    ) -> Result<(), SchedulerError> {
+        let Some(parent_id) = issue.parent_id.as_ref() else {
+            return Ok(());
+        };
+        if self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            return Ok(());
+        }
+        let parent = self
+            .tracker
+            .issue_by_id(parent_id.as_str())
+            .await
+            .map_err(|error| SchedulerError::Tracker {
+                detail: format!("failed to hydrate terminal child parent {parent_id}: {error}"),
+            })?
+            .ok_or_else(|| SchedulerError::Tracker {
+                detail: format!("terminal child parent {parent_id} was not found"),
+            })?;
+        if self.reconcile_hierarchy_issue(&parent, None)? {
+            self.hierarchy_state_dirty = true;
+            self.persist_orchestrator_state().await?;
+        }
+        if self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            Ok(())
+        } else {
+            Err(SchedulerError::Tracker {
+                detail: format!(
+                    "terminal child {issue_id} parent {parent_id} did not contain the child edge",
+                    issue_id = issue.id
+                ),
+            })
+        }
+    }
+
+    fn parent_eligibility_work_units(&self, parent_id: &IssueId) -> usize {
+        self.hierarchy_provider_work_units(parent_id, &mut HashSet::new())
+    }
+
+    fn hierarchy_provider_work_units(
+        &self,
+        issue_id: &IssueId,
+        visiting: &mut HashSet<IssueId>,
+    ) -> usize {
+        if !visiting.insert(issue_id.clone()) {
+            return 1;
+        }
+        let child_ids = self
+            .hierarchy_state
+            .hierarchy
+            .get(issue_id)
+            .map(|snapshot| {
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| edge.child_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let work_units = if child_ids.is_empty() {
+            1
+        } else {
+            let descendant_work_units = child_ids
+                .iter()
+                .map(|child_id| self.hierarchy_provider_work_units(child_id, visiting))
+                .sum::<usize>();
+            let has_nested_parent = child_ids
+                .iter()
+                .any(|child_id| self.hierarchy_state.hierarchy.contains_key(child_id));
+            descendant_work_units + usize::from(has_nested_parent)
+        };
+        visiting.remove(issue_id);
+        work_units.max(1)
+    }
+
     async fn persist_retry_if_queued(&mut self, issue_id: &IssueId) -> Result<(), SchedulerError> {
         let Some((retry, workspace)) = self.executions.get(issue_id).and_then(|execution| {
             execution
@@ -3608,11 +8901,38 @@ where
             return Ok(());
         }
 
+        if !self.durable_state_loaded {
+            if let Some(raw) = self
+                .workspace
+                .load_orchestrator_state()
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?
+            {
+                self.hierarchy_state =
+                    serde_json::from_value(raw).map_err(|error| SchedulerError::Workspace {
+                        detail: format!("invalid durable hierarchy state: {error}"),
+                    })?;
+                self.hierarchy_state
+                    .validate()
+                    .map_err(|detail| SchedulerError::Workspace { detail })?;
+            }
+            self.durable_state_loaded = true;
+        }
+
         let recoveries = self.workspace.recover_workspaces().await.map_err(|error| {
             SchedulerError::Workspace {
                 detail: error.to_string(),
             }
         })?;
+        let recovered_run_started_at =
+            self.workspace
+                .recovered_run_started_at()
+                .await
+                .map_err(|error| SchedulerError::Workspace {
+                    detail: error.to_string(),
+                })?;
         let retry_exhaustion =
             self.workspace
                 .recover_retry_exhaustion()
@@ -3631,9 +8951,264 @@ where
             .extend(recoveries.iter().map(|record| record.issue.id.clone()));
         self.recovered_memory_issue_ids
             .extend(retry_pending.iter().map(|record| record.issue.id.clone()));
+        self.recovered_memory_issue_ids
+            .extend(recovered_run_started_at.keys().cloned());
+        if !recovered_run_started_at.is_empty() {
+            self.hierarchy_state
+                .run_started_at_by_issue
+                .extend(recovered_run_started_at);
+            self.persist_orchestrator_state().await?;
+        }
         self.pending_recovery = Some(recoveries);
         self.pending_retry_exhaustion = Some(retry_exhaustion);
         self.pending_retry_recovery = Some(retry_pending);
+        Ok(())
+    }
+
+    async fn persist_orchestrator_state(&mut self) -> Result<(), SchedulerError> {
+        let mut retained_issue_ids = self
+            .executions
+            .iter()
+            .filter(|(_, execution)| {
+                execution.workspace().is_some()
+                    || matches!(
+                        execution.status(),
+                        SchedulerStatus::Claimed
+                            | SchedulerStatus::Running
+                            | SchedulerStatus::RetryQueued
+                    )
+            })
+            .map(|(issue_id, _)| issue_id.clone())
+            .collect::<BTreeSet<_>>();
+        retained_issue_ids.extend(self.recovered_memory_issue_ids.iter().cloned());
+        self.hierarchy_state
+            .prune_obsolete_run_boundaries(&retained_issue_ids);
+        let state = serde_json::to_value(&self.hierarchy_state).map_err(|error| {
+            SchedulerError::Workspace {
+                detail: format!("failed to encode durable hierarchy state: {error}"),
+            }
+        })?;
+        self.workspace
+            .persist_orchestrator_state(&state)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
+        self.hierarchy_state_dirty = false;
+        Ok(())
+    }
+
+    async fn retain_terminal_child_lease(
+        &mut self,
+        execution: &IssueExecution,
+    ) -> Result<bool, SchedulerError> {
+        let Some(workspace) = execution.workspace() else {
+            return Ok(false);
+        };
+        self.retain_terminal_child_lease_for_workspace(execution.issue(), workspace)
+            .await
+    }
+
+    async fn parent_is_terminal_and_undispatched(&mut self, parent_id: &IssueId) -> bool {
+        let parent_identifier = parent_id.as_str().to_owned();
+        let Ok(states) = self
+            .tracker
+            .issue_states_by_ids(std::slice::from_ref(&parent_identifier))
+            .await
+        else {
+            // A failed refresh must retain evidence. Cleanup can retry after
+            // the provider confirms whether the parent is still terminal.
+            return false;
+        };
+        let parent_terminal = states.iter().any(|snapshot| {
+            snapshot.id == parent_identifier
+                && state_category_from_name(&snapshot.state.name, &self.config)
+                    == IssueStateCategory::Terminal
+        });
+        let undispatched = parent_terminal
+            && self
+                .hierarchy_state
+                .hierarchy
+                .get(parent_id)
+                .is_some_and(|snapshot| !snapshot.has_dispatched_execution_fence());
+        if !undispatched {
+            self.terminal_undispatched_parent_ids.remove(parent_id);
+        }
+        undispatched
+    }
+
+    async fn retain_terminal_child_lease_for_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        self.hydrate_parent_hierarchy_for_terminal_child(issue)
+            .await?;
+        if !self.hierarchy_state.has_ancestor_edge(&issue.id) {
+            return Ok(false);
+        }
+        if self
+            .hierarchy_state
+            .has_active_dispatched_ancestor(&issue.id)
+        {
+            return Ok(false);
+        }
+        if let Some(parent_id) = issue.parent_id.as_ref()
+            && self.parent_is_terminal_and_undispatched(parent_id).await
+        {
+            if self
+                .hierarchy_state
+                .release_subtree_evidence_for_undispatched_parent(parent_id, current_epoch_millis())
+            {
+                self.persist_orchestrator_state().await?;
+            }
+            return Ok(false);
+        }
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(false);
+        };
+        if self.hierarchy_state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.resource == resource
+                && lease.kind != super::LeaseKind::LeafWorker
+        }) {
+            return Ok(false);
+        }
+        let issue_id = issue.id.clone();
+        let leaf_owner = super::LeaseOwner::leaf_worker(&issue_id);
+        let hierarchy_generation = self
+            .hierarchy_state
+            .run_hierarchy_generations
+            .get(&issue_id)
+            .copied()
+            .or_else(|| {
+                self.hierarchy_state
+                    .hierarchy
+                    .values()
+                    .filter(|snapshot| {
+                        snapshot
+                            .required_child_edges
+                            .iter()
+                            .any(|edge| edge.required && edge.child_id == issue_id)
+                    })
+                    .map(|snapshot| snapshot.generation)
+                    .next()
+            })
+            // A terminal child can finish before its parent enters the
+            // scheduler's configured scan. Seed the first snapshot generation
+            // so retained evidence can be consumed when that parent arrives.
+            .unwrap_or(1);
+        if self.hierarchy_state.leases.iter().any(|lease| {
+            lease.active()
+                && lease.kind == super::LeaseKind::LeafWorker
+                && lease.owner == leaf_owner
+                && lease.resource == resource
+                && lease.hierarchy_generation == hierarchy_generation
+        }) {
+            return Ok(true);
+        }
+        let acquired_at = current_epoch_millis();
+        let mut next_state = self.hierarchy_state.clone();
+        for lease in &mut next_state.leases {
+            if lease.active()
+                && lease.kind == super::LeaseKind::LeafWorker
+                && lease.owner == leaf_owner
+            {
+                lease.released_at = Some(acquired_at);
+            }
+        }
+        next_state
+            .acquire_leases(vec![LeaseRecord {
+                kind: super::LeaseKind::LeafWorker,
+                resource: resource.clone(),
+                owner: leaf_owner,
+                hierarchy_generation,
+                acquired_at,
+                expires_at: None,
+                released_at: None,
+            }])
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?;
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    async fn workspace_is_owned_by_subtree_cleanup(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .hierarchy_state
+            .parent_integrations
+            .values()
+            .filter_map(|controller| controller.subtree_cleanup.as_ref())
+            .filter(|cleanup| cleanup.status != ParentSubtreeCleanupStatus::Completed)
+            .flat_map(|cleanup| cleanup.descendants.iter())
+            .any(|target| {
+                target.cleaned_at.is_none() && target.resource.as_ref() == Some(&resource)
+            }))
+    }
+
+    async fn workspace_has_active_lease(
+        &mut self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<bool, SchedulerError> {
+        self.workspace
+            .workspace_has_active_lease(workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })
+    }
+
+    async fn release_stale_binding_leases(
+        &mut self,
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+        released_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let Some(resource) = self
+            .workspace
+            .workspace_lease_resource(issue, workspace)
+            .await
+            .map_err(|error| SchedulerError::Workspace {
+                detail: error.to_string(),
+            })?
+        else {
+            return Ok(());
+        };
+        let mut next_state = self.hierarchy_state.clone();
+        if !next_state.release_resource_leases(&resource, released_at.as_u64()) {
+            return Ok(());
+        }
+        let previous_state = std::mem::replace(&mut self.hierarchy_state, next_state);
+        if let Err(error) = self.persist_orchestrator_state().await {
+            self.hierarchy_state = previous_state;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -3671,6 +9246,18 @@ where
         else {
             return;
         };
+        match self.workspace_has_active_lease(&workspace).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    issue = %issue_id,
+                    %error,
+                    "unable to check durable lease before retry-exhausted cleanup"
+                );
+                return;
+            }
+        }
         match self.workspace.cleanup_failed_workspace(&workspace).await {
             Ok(()) => {
                 if let Some(execution) = self.executions.get_mut(issue_id) {
@@ -3707,6 +9294,14 @@ where
     }
 
     fn insert_execution(&mut self, issue_id: IssueId, execution: IssueExecution) {
+        // Reopened/recovered work invalidates old success before launch
+        // preparation can temporarily remove the execution from this map.
+        if execution.status() != SchedulerStatus::Released {
+            self.hierarchy_state_dirty |= self
+                .hierarchy_state
+                .terminal_orchestrator_issues
+                .remove(&issue_id);
+        }
         let current_key = running_state_key_for_execution(&execution);
         if let Some(previous) = self.executions.insert(issue_id, execution) {
             self.decrement_running_count(&previous);
@@ -3756,6 +9351,7 @@ struct TrackerSnapshot {
     active: Vec<TrackerIssue>,
     active_index: HashMap<String, usize>,
     terminal_state_by_id: HashMap<String, String>,
+    terminal: Vec<TrackerIssue>,
     state_by_id: HashMap<String, TrackerIssueStateSnapshot>,
 }
 
@@ -3772,6 +9368,12 @@ impl TrackerSnapshot {
 
     fn contains_terminal(&self, issue_id: &str) -> bool {
         self.terminal_state_by_id.contains_key(issue_id)
+    }
+
+    fn terminal_issue(&self, issue_id: &IssueId) -> Option<&TrackerIssue> {
+        self.terminal
+            .iter()
+            .find(|issue| issue.id == issue_id.as_str())
     }
 
     fn terminal_state_name(&self, issue_id: &str) -> Option<&str> {
@@ -3796,6 +9398,7 @@ pub fn decide_issue_route(
     Ok(HarnessRouteDecision {
         task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
         harness_kind: config.routing.harness.clone(),
+        harness_profile: config.routing.harness_profile.clone(),
         model: config.routing.model.clone(),
         model_profile: config.routing.model_profile.clone(),
         reason: routing_reason(&config.routing),
@@ -3988,6 +9591,7 @@ fn normalize_tracker_issue(
         state: issue_state_from_name(&issue.state, config),
         branch_name: issue.branch_name.clone(),
         pr_url: issue.pr_url.clone(),
+        pr_urls: issue.pr_urls.clone(),
         url: Some(issue.url.clone()),
         labels: issue.labels.clone(),
         project_id: issue.project_id.clone(),
@@ -4040,6 +9644,7 @@ fn minimal_issue_from_state_snapshot(
         state: issue_state_from_name(&snapshot.state.name, config),
         branch_name: None,
         pr_url: None,
+        pr_urls: Vec::new(),
         url: None,
         labels: snapshot.labels.clone(),
         project_id: snapshot.project_id.clone(),
@@ -4198,6 +9803,16 @@ fn matches_state_name(name: &str, states: &[String]) -> bool {
         .any(|state| normalized_state_name(state) == normalized)
 }
 
+fn is_canceled_tracker_issue(issue: &TrackerIssue, canceled_states: &[String]) -> bool {
+    matches!(issue.state_kind, TrackerIssueStateKind::Canceled)
+        || canceled_states.iter().any(|configured_state| {
+            configured_state.to_ascii_lowercase().contains("cancel")
+                && configured_state
+                    .trim()
+                    .eq_ignore_ascii_case(issue.state.trim())
+        })
+}
+
 fn running_state_key_for_execution(execution: &IssueExecution) -> Option<String> {
     (execution.status() == SchedulerStatus::Running)
         .then(|| normalized_state_name(&execution.issue().state.name))
@@ -4240,6 +9855,7 @@ fn tracker_issue_from_normalized(issue: &NormalizedIssue) -> TrackerIssue {
         state_kind: tracker_state_kind_from_issue_state(&issue.state),
         branch_name: issue.branch_name.clone(),
         pr_url: issue.pr_url.clone(),
+        pr_urls: issue.pr_urls.clone(),
         labels: issue.labels.clone(),
         project_id: issue.project_id.clone(),
         project_slug: issue.project_slug.clone(),
@@ -4271,6 +9887,7 @@ fn tracker_issue_from_normalized(issue: &NormalizedIssue) -> TrackerIssue {
                 title: None,
                 url: None,
                 state: child.state.clone(),
+                state_kind: tracker_state_kind_from_name(&child.state),
             })
             .collect(),
         created_at: timestamp_to_datetime(issue.created_at),
@@ -4397,9 +10014,404 @@ fn current_epoch_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn hierarchy_depth(
+    state: &DurableOrchestratorState,
+    parent_id: &IssueId,
+    target_id: &IssueId,
+) -> usize {
+    let mut pending = vec![(parent_id.clone(), 0usize)];
+    let mut visited = BTreeSet::new();
+    while let Some((issue_id, depth)) = pending.pop() {
+        if !visited.insert(issue_id.clone()) {
+            continue;
+        }
+        if &issue_id == target_id {
+            return depth;
+        }
+        if let Some(snapshot) = state.hierarchy.get(&issue_id) {
+            pending.extend(
+                snapshot
+                    .required_child_edges
+                    .iter()
+                    .filter(|edge| edge.required)
+                    .map(|edge| (edge.child_id.clone(), depth.saturating_add(1))),
+            );
+        }
+    }
+    0
+}
+
+fn recovered_parent_hierarchy_generation(path: &Path) -> Option<u64> {
+    let generation = path.file_name()?.to_str()?.parse::<u64>().ok()?;
+    (path.parent()?.parent()?.file_name()?.to_str()? == "parents").then_some(generation)
+}
+
+fn conversation_id_suffix(value: &str) -> &str {
+    value.get(value.len().saturating_sub(8)..).unwrap_or(value)
+}
+
+fn parent_input_version(snapshot: &HierarchySnapshot) -> String {
+    let merges = snapshot
+        .dispatch_required_merge_commits
+        .iter()
+        .map(|commit| {
+            format!(
+                "{}@{}",
+                commit
+                    .repository_id
+                    .as_ref()
+                    .map_or("<legacy>", |repository| repository.as_str()),
+                commit.commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("hierarchy:{};merges:{merges}", snapshot.generation)
+}
+
+fn parent_targets_input_version(
+    hierarchy_generation: u64,
+    targets: &[ParentRepositoryTarget],
+) -> String {
+    let targets = targets
+        .iter()
+        .map(|target| {
+            format!(
+                "{}:{}:{}@{}",
+                target.repository_id,
+                target.checkout_handle,
+                target.relative_path.display(),
+                target.target_commit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("hierarchy:{hierarchy_generation};targets:{targets}")
+}
+
+fn parent_controller_input_version(controller: &ParentIntegrationController) -> String {
+    parent_targets_input_version(
+        controller.hierarchy_generation,
+        &controller.targets.values().cloned().collect::<Vec<_>>(),
+    )
+}
+
+fn unavailable_provider_snapshot(
+    repair: &ParentRepairAttempt,
+) -> super::ParentRepairProviderSnapshot {
+    super::ParentRepairProviderSnapshot {
+        pull_request_id: repair.pull_request_id.clone(),
+        pull_request_url: repair.pull_request_url.clone(),
+        head_commit: repair.pushed_commit.clone(),
+        review_head_commit: None,
+        review_request_cursor: None,
+        open: false,
+        checks_passed: false,
+        checks_failed: false,
+        review_approved: false,
+        review_rejected: false,
+        changes_requested: false,
+        review_feedback: Vec::new(),
+        mergeable: false,
+        merge_conflict: false,
+        merged: false,
+        merge_result_commit: None,
+        target_contains_merge_result: false,
+        provider_available: false,
+    }
+}
+
+fn observe_parent_command_event(
+    controller: &mut ParentIntegrationController,
+    attempt_id: &str,
+    parent_workspace_path: Option<&Path>,
+    observed_at: TimestampMs,
+    event_id: Option<&str>,
+    event_kind: Option<&str>,
+    payload: Option<&serde_json::Value>,
+) -> Result<(), ParentIntegrationError> {
+    let Some(kind) = event_kind else {
+        return Ok(());
+    };
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    if kind == "acp.command_started" {
+        if let (Some(command_id), Some(command)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload.get("command").and_then(serde_json::Value::as_str),
+        ) {
+            let cwd = payload.get("cwd").and_then(serde_json::Value::as_str);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                command,
+                root,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind == "acp.command_finished" {
+        if let (Some(command_id), Some(exit_code)) = (
+            payload
+                .get("command_id")
+                .and_then(serde_json::Value::as_str),
+            payload
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                None,
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind == "codex.item/started" || kind == "codex.item/completed" {
+        let params = payload.get("params").unwrap_or(payload);
+        let item = params.get("item").unwrap_or(params);
+        let item_type = item
+            .get("type")
+            .or_else(|| params.get("type"))
+            .and_then(serde_json::Value::as_str);
+        if item_type != Some("commandExecution") {
+            return Ok(());
+        }
+        let command_id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or(event_id);
+        let command = item.get("command").and_then(serde_json::Value::as_str);
+        if kind == "codex.item/started" {
+            if let (Some(command_id), Some(command)) = (command_id, command) {
+                let cwd = item
+                    .get("cwd")
+                    .or_else(|| item.get("workingDirectory"))
+                    .or_else(|| params.get("cwd"))
+                    .or_else(|| params.get("workingDirectory"))
+                    .and_then(serde_json::Value::as_str);
+                let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+                controller.observe_command_started(
+                    attempt_id,
+                    command_id,
+                    command,
+                    root,
+                    observed_at,
+                )?;
+            }
+            return Ok(());
+        }
+        if let (Some(command_id), Some(exit_code)) = (
+            command_id,
+            item.get("exitCode")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        ) {
+            let output = item
+                .get("aggregatedOutput")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_runtime_diagnostic);
+            controller.observe_command_finished(
+                attempt_id,
+                command_id,
+                exit_code,
+                output.as_deref(),
+                observed_at,
+            )?;
+        }
+        return Ok(());
+    }
+    if kind.ends_with("ActionEvent") {
+        let command = nested_runtime_string(payload, &["command"]);
+        let command_id = payload
+            .get("action_id")
+            .and_then(serde_json::Value::as_str)
+            .or(event_id);
+        if let (Some(command_id), Some(command)) = (command_id, command) {
+            let cwd = nested_runtime_string(payload, &["cwd", "working_dir"]);
+            let root = observed_parent_command_root(controller, parent_workspace_path, cwd)?;
+            controller.observe_command_started(
+                attempt_id,
+                command_id,
+                command,
+                root,
+                observed_at,
+            )?;
+        }
+    } else if kind.ends_with("ObservationEvent")
+        && let Some(exit_code) = payload
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+        && let Some(command_id) = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| {
+                attempt
+                    .commands
+                    .iter()
+                    .rev()
+                    .find(|command| command.finished_at.is_none())
+                    .map(|command| command.command_id.clone())
+            })
+    {
+        let output = payload
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .map(redact_runtime_diagnostic);
+        controller.observe_command_finished(
+            attempt_id,
+            &command_id,
+            exit_code,
+            output.as_deref(),
+            observed_at,
+        )?;
+    }
+    Ok(())
+}
+
+fn nested_runtime_string<'a>(payload: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    [Some(payload), payload.get("arguments"), payload.get("args")]
+        .into_iter()
+        .flatten()
+        .find_map(|object| {
+            keys.iter()
+                .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        })
+}
+
+fn observed_parent_command_root(
+    controller: &ParentIntegrationController,
+    parent_workspace_path: Option<&Path>,
+    cwd: Option<&str>,
+) -> Result<ParentAttemptRoot, ParentIntegrationError> {
+    let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) else {
+        return Ok(ParentAttemptRoot::ParentRoot);
+    };
+    let cwd = PathBuf::from(cwd);
+    let relative = if cwd.is_absolute() {
+        let parent = parent_workspace_path.ok_or_else(|| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command reported an absolute cwd without a parent workspace binding"
+                    .to_owned(),
+            )
+        })?;
+        cwd.strip_prefix(parent).map_err(|_| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command cwd is outside the parent integration workspace".to_owned(),
+            )
+        })?
+    } else {
+        cwd.as_path()
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(ParentIntegrationError::InvalidVerificationEvidence(
+            "runtime command cwd is not a contained parent workspace path".to_owned(),
+        ));
+    }
+    if relative.as_os_str().is_empty() || relative == Path::new(".") {
+        return Ok(ParentAttemptRoot::ParentRoot);
+    }
+    controller
+        .targets
+        .values()
+        .find(|target| target.relative_path == relative)
+        .map(|target| ParentAttemptRoot::CheckoutHandle(target.checkout_handle.clone()))
+        .ok_or_else(|| {
+            ParentIntegrationError::InvalidVerificationEvidence(
+                "runtime command cwd does not match a verified parent checkout".to_owned(),
+            )
+        })
+}
+
+fn enforce_parent_outcome_trust(
+    outcome: &mut WorkerOutcomeRecord,
+    deadline_reached: bool,
+    verification_passed: bool,
+) {
+    if deadline_reached && outcome.outcome == WorkerOutcomeKind::Succeeded {
+        outcome.outcome = WorkerOutcomeKind::TimedOut;
+        outcome.summary = Some("parent attempt exceeded its absolute deadline".to_owned());
+        outcome.error = Some("parent worker outcome arrived after the attempt deadline".to_owned());
+    } else if outcome.outcome == WorkerOutcomeKind::Succeeded && !verification_passed {
+        outcome.outcome = WorkerOutcomeKind::Failed;
+        outcome.summary = Some("parent final verification did not pass".to_owned());
+        outcome.error = Some(match outcome.error.take() {
+            Some(existing) => format!(
+                "{existing}; parent success lacked matching orchestrator-owned command evidence"
+            ),
+            None => "parent success lacked matching orchestrator-owned command evidence".to_owned(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opensymphony_orchestrator::ParentRepairPolicy;
+
+    #[test]
+    fn conversation_suffix_matches_gateway_alias_shape() {
+        assert_eq!(conversation_id_suffix("conv-123456789"), "23456789");
+        assert_eq!(conversation_id_suffix("short"), "short");
+    }
+
+    #[test]
+    fn parent_outcome_trust_enforces_deadline_and_runtime_verification() {
+        let outcome = || WorkerOutcomeRecord {
+            worker_id: WorkerId::new("parent-worker").expect("worker id"),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Succeeded,
+            started_at: TimestampMs::new(3),
+            finished_at: TimestampMs::new(103),
+            turn_count: 1,
+            summary: Some("claimed success".to_owned()),
+            error: None,
+            harness_stopped: false,
+            parent_verification: None,
+        };
+        let mut late = outcome();
+        enforce_parent_outcome_trust(&mut late, true, true);
+        assert_eq!(late.outcome, WorkerOutcomeKind::TimedOut);
+        assert!(
+            late.error
+                .as_deref()
+                .is_some_and(|error| error.contains("deadline"))
+        );
+
+        let mut unverified = outcome();
+        enforce_parent_outcome_trust(&mut unverified, false, false);
+        assert_eq!(unverified.outcome, WorkerOutcomeKind::Failed);
+        assert!(
+            unverified
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("orchestrator-owned command evidence"))
+        );
+    }
+
+    #[test]
+    fn canceled_tracker_children_are_not_reachable_for_lease_release() {
+        let mut issue = tracker_issue_from_normalized(&issue_with_project(None, None));
+        issue.state = "Canceled".to_owned();
+        issue.state_kind = TrackerIssueStateKind::Canceled;
+
+        assert!(is_canceled_tracker_issue(&issue, &["Canceled".to_owned()]));
+    }
 
     fn issue_with_project(project_id: Option<&str>, project_slug: Option<&str>) -> NormalizedIssue {
         NormalizedIssue {
@@ -4415,6 +10427,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: Vec::new(),
             project_id: project_id.map(str::to_owned),
@@ -4430,12 +10443,362 @@ mod tests {
     }
 
     #[test]
+    fn parent_eligibility_timeout_scales_by_provider_batches() {
+        assert_eq!(parent_eligibility_timeout(1), Duration::from_secs(30));
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY + 1),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY * 2 + 1),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn parent_fan_in_and_refresh_states_shorten_full_detail_cadence() {
+        let mut parent = tracker_issue_from_normalized(&issue_with_project(None, None));
+        let parent_id = IssueId::new(parent.id.clone()).expect("parent id");
+        let child_ids = [
+            IssueId::new("fan-in-child-a").expect("child id"),
+            IssueId::new("fan-in-child-b").expect("child id"),
+        ];
+        parent.sub_issues = child_ids
+            .iter()
+            .map(|child_id| TrackerIssueRef {
+                id: child_id.to_string(),
+                identifier: child_id.to_string(),
+                title: None,
+                url: None,
+                state: "Done".to_owned(),
+                state_kind: TrackerIssueStateKind::Completed,
+            })
+            .collect();
+        let snapshot = HierarchySnapshot::new(&parent);
+        let mut state = DurableOrchestratorState::default();
+        state.parent_integrations.insert(
+            parent_id.clone(),
+            ParentIntegrationController::new(parent_id.clone(), snapshot.generation)
+                .expect("parent controller"),
+        );
+        state.hierarchy.insert(parent_id.clone(), snapshot);
+
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS
+        );
+        state
+            .terminal_orchestrator_issues
+            .insert(child_ids[0].clone());
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS,
+            "one completed child must not accelerate incomplete fan-in"
+        );
+        state
+            .terminal_orchestrator_issues
+            .insert(child_ids[1].clone());
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            TERMINAL_REFRESH_INTERVAL_MS
+        );
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state = crate::opensymphony_orchestrator::ParentIntegrationState::Integrating;
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS,
+            "dispatched parents must not keep the fast full-refresh cadence"
+        );
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state =
+            crate::opensymphony_orchestrator::ParentIntegrationState::RefreshingRepositories;
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            TERMINAL_REFRESH_INTERVAL_MS,
+            "parent retries need a fresh complete tracker snapshot"
+        );
+    }
+
+    #[test]
     fn recovered_scheduler_worker_ids_expose_their_allocator_ordinal() {
         let recovered = WorkerId::new("scheduler-worker-7").expect("worker id should be valid");
         let custom = WorkerId::new("worker-from-legacy").expect("worker id should be valid");
 
         assert_eq!(recovered_worker_ordinal(&recovered), Some(7));
         assert_eq!(recovered_worker_ordinal(&custom), None);
+    }
+
+    #[test]
+    fn runtime_command_events_supply_parent_verification_receipts() {
+        let mut controller = ParentIntegrationController::new(
+            IssueId::new("parent-command-events").expect("parent id"),
+            1,
+        )
+        .expect("controller");
+        controller
+            .admit("hierarchy:1", TimestampMs::new(1))
+            .expect("admit");
+        controller
+            .record_workspace_prepared(
+                [ParentRepositoryTarget {
+                    repository_id: crate::opensymphony_domain::CanonicalRepositoryId::new(
+                        "github:repository:one",
+                    )
+                    .expect("repository id"),
+                    checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                    instruction_path: PathBuf::from("AGENTS.md"),
+                    instruction_hash: "instructions-1".to_owned(),
+                    repair_policy: ParentRepairPolicy {
+                        review_profile: "required".to_owned(),
+                        review_provider: "github".to_owned(),
+                        review_policy_generation: "policy-1".to_owned(),
+                        required_checks: true,
+                        required_review: true,
+                        merge_method: "squash".to_owned(),
+                    },
+                }],
+                "targets:1",
+                TimestampMs::new(2),
+            )
+            .expect("workspace");
+        let attempt_id = controller
+            .start_attempt(
+                "parent harness",
+                "attempt:1",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(10),
+            Some("action-1"),
+            Some("ActionEvent"),
+            Some(&serde_json::json!({
+                "action_id": "action-1",
+                "tool_name": "terminal",
+                "arguments": {
+                    "command": "cargo test",
+                    "cwd": "/parent/repositories/one"
+                }
+            })),
+        )
+        .expect("command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            None,
+            TimestampMs::new(20),
+            Some("observation-1"),
+            Some("ObservationEvent"),
+            Some(&serde_json::json!({
+                "observation_id": "observation-1",
+                "tool_name": "terminal",
+                "exit_code": 0,
+                "preview": "passed token=secret"
+            })),
+        )
+        .expect("command completion");
+
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt receipt");
+        assert_eq!(
+            attempt
+                .commands
+                .last()
+                .map(|command| command.command.as_str()),
+            Some("cargo test")
+        );
+        assert_eq!(attempt.exit_code, Some(0));
+        assert_eq!(
+            attempt.commands.last().map(|command| &command.root),
+            Some(&ParentAttemptRoot::CheckoutHandle(
+                "checkout-one".to_owned()
+            ))
+        );
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Succeeded)
+        );
+        assert!(attempt.bounded_log.contains("token=[redacted]"));
+        assert!(attempt.resources.iter().any(|resource| {
+            resource.kind == "foreground_process"
+                && resource.identifier == "action-1"
+                && resource.status
+                    == crate::opensymphony_orchestrator::ParentResourceStatus::Released
+        }));
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(30),
+            Some("acp-1-2"),
+            Some("acp.command_started"),
+            Some(&serde_json::json!({"command_id":"terminal-1","command":"cargo test","cwd":"/parent/repositories/one"})),
+        )
+        .expect("ACP command start");
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            Some(Path::new("/parent")),
+            TimestampMs::new(40),
+            Some("acp-1-4"),
+            Some("acp.command_finished"),
+            Some(&serde_json::json!({"command_id":"terminal-1","exit_code":0})),
+        )
+        .expect("ACP command finish");
+        let evidence = crate::opensymphony_domain::ParentVerificationEvidence {
+            schema_version: 1,
+            run_id: "run-parent".into(),
+            attempt: 1,
+            hierarchy_generation: controller.hierarchy_generation,
+            repository_commits: controller
+                .targets
+                .iter()
+                .map(|(repository_id, target)| {
+                    (repository_id.clone(), target.target_commit.clone())
+                })
+                .collect(),
+            command: "cargo test".into(),
+            command_hash: crate::opensymphony_orchestrator::parent_command_identity("cargo test"),
+            root: "checkout-one".into(),
+            repair_repository_id: None,
+        };
+        assert!(
+            controller
+                .record_verification_evidence(&attempt_id, &evidence)
+                .expect("ACP verification evidence")
+        );
+    }
+
+    #[test]
+    fn codex_command_events_cannot_backdate_completion_past_orchestrator_deadline() {
+        let mut controller = ParentIntegrationController::new(
+            IssueId::new("parent-command-deadline").expect("parent id"),
+            1,
+        )
+        .expect("controller");
+        controller
+            .admit("hierarchy:1", TimestampMs::new(1))
+            .expect("admit");
+        controller
+            .record_workspace_prepared(
+                [ParentRepositoryTarget {
+                    repository_id: crate::opensymphony_domain::CanonicalRepositoryId::new(
+                        "github:repository:one",
+                    )
+                    .expect("repository id"),
+                    checkout_handle: "checkout-one".to_owned(),
+                    relative_path: PathBuf::from("repositories/one"),
+                    target_branch: "develop".to_owned(),
+                    target_commit: "abc123".to_owned(),
+                    instruction_path: PathBuf::from("AGENTS.md"),
+                    instruction_hash: "instructions-1".to_owned(),
+                    repair_policy: ParentRepairPolicy {
+                        review_profile: "required".to_owned(),
+                        review_provider: "github".to_owned(),
+                        review_policy_generation: "policy-1".to_owned(),
+                        required_checks: true,
+                        required_review: true,
+                        merge_method: "squash".to_owned(),
+                    },
+                }],
+                "targets:1",
+                TimestampMs::new(2),
+            )
+            .expect("workspace");
+        let attempt_id = controller
+            .start_attempt(
+                "parent harness",
+                "attempt:1",
+                ParentAttemptRoot::ParentRoot,
+                "conversation-1",
+                100,
+                "targets:1",
+                TimestampMs::new(3),
+            )
+            .expect("attempt");
+
+        observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            None,
+            TimestampMs::new(10),
+            Some("command-1"),
+            Some("codex.item/started"),
+            Some(&serde_json::json!({
+                "params": {
+                    "startedAtMs": 1,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "cargo test"
+                    }
+                }
+            })),
+        )
+        .expect("command start");
+        let error = observe_parent_command_event(
+            &mut controller,
+            &attempt_id,
+            None,
+            TimestampMs::new(103),
+            Some("command-1"),
+            Some("codex.item/completed"),
+            Some(&serde_json::json!({
+                "params": {
+                    "completedAtMs": 20,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "exitCode": 0,
+                        "aggregatedOutput": "passed"
+                    }
+                }
+            })),
+        )
+        .expect_err("scheduler observation time enforces the absolute deadline");
+        assert!(error.to_string().contains("after the attempt deadline"));
+
+        let attempt = controller
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt receipt");
+        assert_eq!(attempt.exit_code, None);
+        assert_eq!(
+            attempt.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ParentCleanupStatus::Pending)
+        );
+        assert!(attempt.resources.iter().any(|resource| {
+            resource.kind == "foreground_process"
+                && resource.identifier == "command-1"
+                && resource.status
+                    == crate::opensymphony_orchestrator::ParentResourceStatus::Allocated
+        }));
     }
 
     #[test]
@@ -4474,6 +10837,7 @@ mod tests {
             tracker_project_id_slug_fallbacks: Vec::new(),
             tracker_project_slugs: Vec::new(),
             routing: RoutingConfig {
+                harness_profile: None,
                 harness: "rust_native".to_owned(),
                 model: None,
                 model_profile: None,

@@ -1061,6 +1061,7 @@ pub fn codex_approval_request_from_event(
     .join(":");
 
     Some(ApprovalRequest {
+        operator_interaction: None,
         schema_version: SchemaVersion::v1(),
         approval_id,
         run_id: run_id.clone(),

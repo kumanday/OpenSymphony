@@ -1,3 +1,5 @@
+mod hierarchy;
+mod parent_integration;
 mod scheduler;
 mod selection;
 
@@ -14,9 +16,25 @@ pub use crate::opensymphony_domain::{
     TrackerIssueSummary, TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId,
     WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
 };
+pub use hierarchy::{
+    ChildEligibilityEvidence, DurableOrchestratorState, HierarchyBlockedReason, HierarchyChildEdge,
+    HierarchyReconciliation, HierarchySnapshot, LeaseError, LeaseKind, LeaseOwner, LeaseRecord,
+    LeaseResource, ParentEligibilityEvidence, ProviderEvidenceBoundary, RequiredMergeCommit,
+};
+pub use parent_integration::{
+    ParentAttemptRoot, ParentAttemptStatus, ParentCleanupReceipt, ParentCleanupStatus,
+    ParentCommandReceipt, ParentFinalEvidence, ParentIntegrationController, ParentIntegrationError,
+    ParentIntegrationState, ParentProviderOperation, ParentProviderOperationKind,
+    ParentRepairAttempt, ParentRepairPolicy, ParentRepairProviderSnapshot, ParentRepairStatus,
+    ParentRepositoryTarget, ParentResourceReceipt, ParentResourceStatus, ParentRetryClassification,
+    ParentReviewFeedback, ParentSideEffectIntent, ParentSideEffectReceipt,
+    ParentSubtreeCleanupIntent, ParentSubtreeCleanupStatus, ParentSubtreeCleanupTarget,
+    ParentTransition, ParentVerificationAttempt, parent_command_identity,
+};
 pub use scheduler::{
-    HarnessRouteDecision, RecoveredRun, RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord,
-    Scheduler, SchedulerConfig, SchedulerError, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    HarnessOperationDelivery, HarnessRouteDecision, OperatorResponseDelivery, RecoveredRun,
+    RecoveryRecord, RetryExhaustionRecord, RetryPendingRecord, Scheduler, SchedulerConfig,
+    SchedulerError, TrackerBackend, WorkerAbortReason, WorkerBackend,
     WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
     WorkspaceBackend, decide_issue_route,
 };
@@ -62,6 +80,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: Vec::new(),
             project_id: None,
@@ -105,6 +124,7 @@ mod tests {
             TimestampMs::new(11),
             DurationMs::new(300_000),
             Some(ConversationMetadata {
+                harness_capability: None,
                 conversation_id: must(ConversationId::new("conv_260")),
                 server_base_url: Some("http://127.0.0.1:3000".to_owned()),
                 transport_target: Some("loopback".to_owned()),

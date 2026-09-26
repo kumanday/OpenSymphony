@@ -1,67 +1,65 @@
 ---
 id: OSYM-843
-title: Tauri Debug-In-Zed Launch Action
-milestone: "M13: ACP Debugging And IDE Attach"
+title: Multi-Harness Desktop Debug-In-Zed Action
+milestone: 'M13: ACP Debugging And IDE Attach'
 priority: 3
 estimate: 5
-blockedBy: ["OSYM-840", "OSYM-842"]
-blocks: ["OSYM-844", "OSYM-845"]
+blockedBy:
+- OSYM-840
+- OSYM-842
+blocks:
+- OSYM-845
 areas:
-  - debugging
-  - desktop
-  - tauri
+- debugging
+- desktop
+- tauri
 parent: null
 ---
 
 ## Summary
 
-Wire the desktop app debug action to resolve an issue key to the exact issue workspace path and open Zed on that workspace.
+Launch the selected issue workspace in Zed from the desktop app with accurate harness and attachment readiness, using the shared debug resolver.
 
 ## Scope
 
 ### In scope
 
-- Add a Tauri or gateway command that resolves an issue key to its exact OpenSymphony issue workspace path.
-- Launch `zed -n <workspace-path>` where available.
-- Show concise instruction text telling the operator to start the OpenSymphony Debug external agent in Zed.
-- Handle missing Zed, missing workspace, and missing manifests with recoverable UI feedback.
+- Use existing gateway/control APIs to resolve verified workspace, harness/profile, restoration availability and control state.
+- Launch zed -n with an argv path and present the instruction to start the configured OpenSymphony Debug agent.
+- Handle missing Zed, invalid workspace, lost owner/context, busy control and unsupported attachment capability with actionable UI states.
+- Keep native Codex resume/--app routes available where advertised; UI consumes capabilities instead of a hard-coded OpenHands eligibility check.
 
 ### Out of scope
 
-- Auto-starting Zed agent threads.
-- Creating additional workspace debug manifests.
+- Auto-starting editor threads without a documented API, embedding runtime clients in Tauri, and new debug manifests.
 
 ## Deliverables
 
-- Desktop debug action plumbing.
-- Workspace path resolution API or command.
-- UI states for launch success, missing editor, and invalid workspace.
+- Capability-driven debug action, safe workspace launch plumbing and recovery UI.
 
 ## Acceptance Criteria
 
-- [ ] Tauri can open Zed on the exact issue workspace root for a selected issue.
-- [ ] The app does not open target repo roots or OpenHands conversation store directories for ACP debug.
-- [ ] The UI leaves rich orchestration and visualization in OpenSymphony while Zed owns code inspection and manual edits.
-- [ ] Missing editor or invalid workspace states include actionable recovery text.
+- [ ] Issues from two ACP profiles can launch the same IDE flow, displaying the correct bound harness/profile and control readiness.
+- [ ] The launched path is the exact verified issue workspace, never a repository root, parent directory or runtime store.
+- [ ] Native debug alternatives remain explicit and available; unavailable features are not presented as working actions.
+- [ ] Failure states provide recovery steps without starting a second harness or changing scheduler state directly.
 
 ## Test Plan
 
-- Add unit tests for workspace resolution and command payloads.
-- Add desktop integration tests or manual verification for the launch command where CI permits.
-- Run frontend tests for debug action UI states.
+- Test shared resolver payloads, path quoting/argv handling and UI capability states.
+- Perform desktop-to-Zed launch smoke tests for two profiles; use shared fixtures for frontend tests.
 
 ## Context
 
-- Builds on OSYM-840 and OSYM-842.
-- Read `docs/specs/opensymphony-acp-debugging-spec.md` Tauri integration and workspace selection sections.
-- Existing desktop action surfaces live near the shared client and Tauri shell code.
+- docs/specs/opensymphony-acp-debugging-spec.md: desktop and command surface.
+- Shared API client/debug action surfaces and Tauri shell; OSYM-840 resolver and OSYM-842 guidance.
 
 ## Definition of Ready
 
-- [ ] Hidden assumptions from prior discussion are written down.
-- [ ] Required files, docs, and dependencies are explicitly referenced.
-- [ ] A coding agent could begin execution without additional planning context.
+- [ ] Linked specifications and repository contracts have been read.
+- [ ] Required dependencies are merged and their evidence is available.
+- [ ] The implementation can begin using this task and its referenced sources.
 
 ## Notes
 
-OpenSymphony owns workspace resolution; Zed owns code and agent thread UI.
+The app opens the workspace; the user starts the static external agent. Acquiring runtime control belongs to the orchestrator handoff.

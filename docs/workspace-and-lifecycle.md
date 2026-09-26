@@ -4,6 +4,10 @@
 
 Preserve the Symphony workspace contract while adapting it to OpenHands conversation persistence and local MVP safety constraints.
 
+Remote operator views receive repository aliases, canonical IDs, and checkout
+generations when authoritative state provides them. Exact local paths remain
+limited to trusted local diagnostics.
+
 ## 2. Workspace mapping
 
 Each issue maps to exactly one workspace path:
@@ -70,7 +74,10 @@ an atomic rename. Existing generations are reused only after the same checks;
 remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
 than reset in place. Startup cleanup also requires the matching durable
 staging-intent marker created before a clone; unrelated files and directories
-under `.opensymphony-staging` are preserved.
+under `.opensymphony-staging` are preserved. Terminal deletion releases the
+matching checkout staging intent after removing the published generation and
+before completing its cleanup tombstone. A failed release remains retryable
+through that tombstone, including after the checkout path is gone.
 
 The checkout manifest records the generation, binding, target commit,
 instruction path/hash/source commit, scheduler-policy generation, resolved
@@ -98,6 +105,327 @@ the failure as an empty instruction result. Instruction contents are hashed as
 streams and fail closed above 1 MiB per file or 4 MiB across the selected and
 natively discovered instruction set; prompt loading applies the same per-file
 limit before retaining content in memory.
+
+### Hierarchy leases and terminal retention
+
+The scheduler stores hierarchy snapshots and durable leases in the workspace
+root's `.opensymphony-orchestrator-state.json` through
+`WorkspaceManager::write_json_artifact_atomically`. A lease resource is the
+existing issue ID, canonical repository ID, and checkout generation; hierarchy
+state never stores an alternate checkout path. Terminal cleanup, including
+failed, forced, and restart-recovery cleanup, checks the active owner-identified
+leases before removal. A leased checkout and its conversation evidence remain
+present until all applicable review and ancestor leases are released.
+
+When a nested issue moves to another parent, release checks preserve leases
+through its required descendant edges, including when the new parent exists
+only in the current tracker observation. Removing or canceling the old root
+must not release a still-required descendant's leaf, review, or ancestor leases.
+The old parent's review ownership can be released independently; a later
+leaf-only cleanup pass must not override the reachability decision.
+
+A partial issue refresh that changes an existing hierarchy keeps the prior
+scope and leases and requests a full tracker observation on the next tick.
+Generation-checked replans also fetch full reachability before reconciling
+changed edges, so rejecting a stale replan cannot discard reparented evidence.
+
+### Parent execution roots
+
+A frozen parent hierarchy uses a separate non-Git root:
+
+```text
+<workspace.root>/parents/parent-<sanitized-identifier>-<identity-digest>/<hierarchy-generation>/
+  parent-manifest.json
+  child-checkouts.json
+  integration-plan.md
+  evidence/
+  repositories/<opaque-checkout-handle>/
+
+<workspace.root>/.opensymphony-parent-pins/
+  parent-<sanitized-identifier>/<hierarchy-generation>.json
+```
+
+`child-checkouts.json` is the durable handle boundary. It groups every leased
+child generation by canonical repository, records the safe remote fingerprint,
+target and provider merge-result commits, instruction provenance, and the
+selected shared-storage generation. Reopening an existing root verifies that
+the incoming generation, lease owners, children, and merge results still match
+that map, then revalidates every retained child generation before use. A parent
+whose children are all canceled still gets a valid root with an empty checkout
+map. Arbitrary paths and handles that are absent from the map are rejected.
+The workspace manager publishes an exact orchestrator-owned copy outside the
+parent runtime root and requires the runtime-visible map to match it on every
+reopen. A parent turn therefore cannot authorize an older integration target by
+rewriting its local map. Reopen also repeats provider merge-result reachability
+checks against the pinned target.
+Terminal parent cleanup removes the generation's external checkout pin and any
+pending refresh copy after the parent root is deleted. Pin removal participates
+in the durable cleanup retry, so a leftover pin cannot receive a completed
+cleanup acknowledgement.
+After the first dispatch consumes its intent, a parent retry opens that same
+generation-bound root through the retry verifier. It requires a current durable
+dispatch claim and an active parent integration state; it cannot prepare a new
+root from a retry or revive a terminal parent.
+
+Parent roots follow the same `after_create` contract as leaf workspaces. A new
+empty root runs the configured hook before metadata bootstrap, writes the
+root-scoped completion receipt, and publishes repository artifacts only after
+the hook succeeds. The manager rechecks that the hook did not initialize a
+root-level Git repository before publication. Hook failure or invariant drift
+removes the incomplete generation. Reuse requires the matching receipt and does
+not rerun the hook. Parent workspace keys include an issue-identity digest so
+identifiers that sanitize to the same display value remain distinct.
+
+Parent preparation verifies retained child identity and cleanliness without
+moving a child branch or HEAD. It can accept a recorded shallow generation,
+then fetch and deepen the configured target through the repository credential
+provider before adding a detached integration worktree. A shallow-to-complete
+storage transition remains valid against the immutable child manifest on later
+parent generations and ordinary child retry/reuse. Preparation gives every
+retained child generation an independent verification deadline. It also applies
+one deadline to integration worktree creation, instruction loading, and every
+final Git verification probe. Timed-out Git process groups are terminated and
+incomplete roots are rolled back so the same hierarchy generation can retry.
+Credentialed fetches use the configured repository remote directly, reject
+checkout-local and worktree HTTP, credential, transport, SSH-command, protocol,
+and URL-rewrite settings before exposing the configured secret, disable
+repository-local credential helpers, and route Git hooks to a fresh empty
+directory. Git receives credentials only through the orchestrator-owned askpass
+process. Timed-out authenticated Git process trees are terminated and awaited
+before askpass state is removed on every supported platform. Integration
+worktree creation uses an empty hooks directory and isolated system/global Git
+configuration, and rejects retained-checkout process-filter, fsmonitor, custom
+hooks-path, and conditional-include configuration before any parent verification
+probe. Every workspace-manager Git probe also supplies a version-compatible
+empty `core.fsmonitor` value and a fresh empty `core.hooksPath` on the command
+itself so mutable included configuration and default repository hooks cannot
+activate an executable between validation and use. The new worktree must
+remain below `repositories/`, share the selected child's Git common directory,
+match both the provider identity and locator fingerprints for fetch and push
+remotes, be clean, and point at the recorded target commit. Several children in
+one repository share one handle;
+the target must contain every provider merge-result commit, while replaced
+feature commits from squash or rebase are not required.
+
+Parent integration attempts execute only in the parent root or in a checkout
+named by `child-checkouts.json`. The durable controller records an intent before
+each state-changing operation and stores its receipt before advancing. Attempt
+timeouts, interrupt uncertainty, resource collisions, and cleanup failures are
+retained with bounded diagnostics. After restart, an attempt without a
+reconciled harness is marked indeterminate; repository refresh cannot proceed
+until its recorded resources are released and cleanup succeeds. An empty
+resource list does not prove teardown after an uncertain restart. The attempt
+intent is persisted before the worker starts, and the conversation identity is
+attached as a later launch receipt, so a crash cannot leave an unowned parent
+harness. Cleanup and workspace deletion policy remain owned by the workspace
+manager.
+Once that conversation is bound, a parent harness change is rejected before a
+replacement session starts. A runtime-terminal successful, failed, or canceled
+turn supplies stopped-turn evidence and releases its foreground-process receipt;
+an outcome created by transport loss or local persistence failure does not. A
+timeout, stall, detach, or failed-cancel path still requires explicit stopped
+state reconciliation. The run manifest persists this adapter observation as a
+separate backward-compatible flag; a legacy or current `failed` status alone is
+not terminal harness evidence during restart recovery. An ordinary cancellation while the tracker parent remains
+active returns through cleanup and baseline refresh. Operator and tracker
+terminal cancellation remains terminal. When a tracker terminal state arrives
+between repair worker turns, cancellation records no harness-interrupt intent or
+acknowledgement only after every attempt has conclusive stopped and cleanup
+evidence and every provider operation has a terminal receipt. A
+conversation-bound indeterminate attempt or provider intent without a receipt
+remains retained for reconciliation or operator recovery.
+
+### Capture-acknowledged subtree cleanup
+
+A completed parent stays materialized until automatic terminal capture reports
+that its workflow completed. The scheduler then persists the parent root and
+every leased descendant as one hierarchy-generation cleanup intent. Failed and
+canceled parents record the same acknowledgement. Failed parents remain
+retained when the existing failed-workspace policy requests diagnostics
+retention; canceled parents follow the existing cancellation cleanup policy.
+Changing failed-workspace retention from enabled to disabled resumes a durable
+retained cleanup intent on the next reconciliation tick. Enabling retention
+while a failed cleanup is incomplete moves it back to retained before the
+parent root is deleted.
+
+Removal has two ordered phases. First, the runtime backend applies its normal
+conversation archival fence and the workspace manager receipts the parent
+`before_remove` hook and removes each registered integration worktree with
+`git worktree remove`. The parent root remains present during this phase.
+Second, the scheduler releases only lease owners belonging to that parent and
+removes descendants deepest first when no other active owner remains. The
+parent root is removed last. Higher ancestors and bounded diagnostic holds
+therefore preserve their checkout generations.
+If a descendant is reactivated after its parent-owned leases are released, a
+claimed, running, or retry-queued execution in that exact workspace generation
+also fences deletion until the execution releases the workspace.
+Before each pending cleanup retry, the scheduler refreshes the full tracker
+snapshot. A newly active descendant fences deletion while its workspace
+generation is unresolved or still matches the cleanup target; a resolved newer
+generation does not keep the old target.
+Lease-owner release and cleanup completion are persisted transactionally; a
+failed state write restores the in-memory leases or incomplete cleanup state so
+the next tick retries the durable receipt.
+
+Run-manifest receipts make the hook and each worktree removal idempotent. The
+manager writes an attempted `before_remove` fence before launching the command;
+if cleanup is interrupted before the result receipt, recovery preserves that
+indeterminate record and does not repeat the best-effort side effect. A failed
+`before_remove` receipt remains visible but does not block deletion.
+Generation tombstones outside the deleted workspace are written before root
+deletion and completed afterward; they also copy the successful hook receipt so
+a partially removed metadata directory cannot cause the hook to run twice. The
+external copy applies the same diagnostic redaction as the run manifest. On
+restart, an incomplete tombstone proves that archival and cleanup preparation
+already completed and resumes deletion even when part of the root remains or
+its run manifest is gone. An already missing path is accepted only for an exact
+issue, key, path, outcome, and generation match. Live checkout deletion reads
+the generation and ownership from its on-disk manifests instead of trusting a
+requested handle. Recovery enumerates both checkout roots and nested
+`parents/<key>/<generation>` roots, so completed parent executions return as
+capture candidates and their conversations pass through the archival fence.
+The scheduler accepts only the root matching the durable controller generation;
+superseded roots remain owned by their generation-specific cleanup state rather
+than overwriting the current execution during restart. A tracker reopen waits
+for pending prior-generation cleanup to complete before replacing the
+controller and preparing a new parent root. Capture selects descendants from
+the completed controller generation's active lease owner records rather than
+the newer observed subtree, and an operator replan is rejected until that
+cleanup finishes. Bootstrap recognizes surviving generations already named by
+an incomplete cleanup intent and leaves them to that ordered phase instead of
+reacquiring a leaf lease or applying generic terminal deletion.
+Malformed conversation manifests fail closed for both checkout and parent
+generation cleanup targets, and OpenHands generation cleanup requires the
+conversation store for parent roots as well as checkouts, so the archival fence
+cannot be bypassed. A missing generation-bound conversation manifest also
+fails closed unless a preparation-failed run manifest proves that no harness
+conversation binding was ever recorded. Hook, Git, manifest, tombstone,
+permission, and filesystem failures remain visible on the durable cleanup
+intent and retry on later scheduler ticks.
+
+The final-verification receipt selects an exact harness-observed foreground
+command. The trusted loader computes its SHA-256 identity from the transient
+exact text, then persists only the identity and a bounded redacted diagnostic.
+Command start and completion events preceding the current attempt's start time
+cannot contribute to its result.
+
+The initial launch requires the integration worktrees to match their prepared
+targets exactly. A continuation or failure retry may reattach when the recorded
+target remains an ancestor of the current integration HEAD, preserving
+parent-owned committed and uncommitted work. Repository instruction bytes share
+one aggregate size budget across the entire parent prompt. Every launch reloads
+the pinned repository instructions so any path that creates a fresh conversation
+has a complete prompt; reused conversations consume continuation guidance. The
+runtime revalidates the parent root, envelope, and instructions after the
+`before_run` hook and before harness attachment. `WORKFLOW.md` instruction hashes
+and prompt content both exclude its front matter. Project-set integration
+instructions are also re-read and hash-checked after `before_run`; the parent
+prompt is composed only from those final verified bytes.
+
+Before a fresh parent turn, the runtime removes any stale
+`evidence/final-verification.json`. The parent writes a new bounded selector for
+the command whose result should count as final verification. At completion the
+runtime requires a regular file no larger than 64 KiB, checks its run, attempt,
+hierarchy generation, command root, and exact repository commit map, and
+reopens the checkouts at those commits. The selected command must match start
+and completion events observed from the Codex, OpenHands, or ACP runtime. Those
+events, rather than fields supplied by the parent, provide the orchestrator's
+deadline, working directory, exit result, foreground-process ownership, and
+teardown receipt. Codex and OpenHands command events also supply bounded output;
+ACP terminal callbacks supply the observed command and exit code. A reported
+working directory maps only to the parent root or an exact verified checkout path,
+and the selector must name that observed root. Missing, stale, unobserved, late,
+or still-active evidence
+converts a generic successful harness turn into a failed parent attempt.
+An acknowledged interrupt counts as foreground-process teardown only after the
+harness has reconciled a stopped state. It does not release separately named
+ports or resources, which continue to fence refresh and retry until their own
+cleanup receipts succeed.
+After a daemon restart, a parent memory grant restores the bearer already held
+by the bound OpenHands conversation into the reconstructed registry, preserving
+the one-conversation controller binding. An attempt
+intent persisted before worker launch has no process to tear down; recovery
+records that fact and refreshes the verified baseline before retrying. A
+terminal harness manifest with no durable controller outcome proves foreground
+teardown but never proves verification success; the attempt becomes
+indeterminate and reruns after named-resource cleanup and baseline refresh. Terminal
+tracker state cannot publish orchestrator success, release descendant leases,
+or remove the parent workspace until the durable controller reaches
+`completed` through accepted final verification.
+A verified passed attempt remains parked while the tracker still reports the
+parent active or its refresh is unavailable. Restart recovery preserves that
+tracker-confirmation wait and does not launch a second attempt. A completed
+controller authorizes terminal success only while its hierarchy generation
+still matches the current unblocked snapshot. COE-554 retains the completed
+parent root and its evidence-protecting leases across later reconciliation and
+daemon restart so automatic capture can retry without losing its runtime
+envelope or source checkouts. The capture acknowledgement starts durable
+bottom-up cleanup as described above; capture failure leaves the parent root
+and leases unchanged for retry.
+A recovered parent worker must find the exact conversation manifest recorded by
+the controller. Its expected identity crosses the scheduler-to-worker request,
+and a missing or different manifest fails before any harness session is
+created. The reused conversation receives current run-bound receipt guidance
+without replaying the full workflow prompt. When terminal cleanup removes a
+parent root, the manager first unregisters each contained integration worktree
+from its retained source repository with isolated Git configuration. Cleanup is
+idempotent after partial progress, and the same hierarchy generation can be
+materialized again without stale Git worktree registrations.
+A reopened completed parent starts a new controller lifecycle even when the
+child-edge generation is unchanged. Admission idempotency is retained outside
+the compact transition history, so retry history pruning cannot replay initial
+admission. Parents with no recorded checkout targets still require an observed
+successful final command and successful cleanup; their final repository commit
+map is empty by definition.
+
+A parent repair uses the affected repository's existing contained integration
+worktree. The workspace manager resolves it through the opaque checkout handle,
+reloads the pinned instruction provenance, and creates a fresh
+`fix/<parent>-g<hierarchy-generation>-repair-<attempt>` branch at the recorded
+target. The hierarchy generation keeps a reactivated or replanned parent from
+colliding with a retained branch from an earlier controller lifecycle. Managed
+Git operations isolate hooks and reject checkout-controlled transport settings.
+If crash recovery finds the deterministic branch after its create call, the
+workspace reconciliation completes the original branch intent before the repair
+advances. A successful repair turn that leaves the branch at its target commit
+returns to implementation instead of retrying publication forever.
+Pushes use the configured credential path and reconcile the exact remote branch
+and local intended head before mutation. Requested-change commits reuse that
+branch and pull request, while old-head review results cannot advance the new
+head. The provider adapter reads unresolved review threads, persists a bounded
+copy of current-head feedback, and includes that copy in the repair continuation
+so a private-repository worker does not need provider credentials. Resolved
+threads, including accepted same-thread pushback, stop counting as findings on
+the unchanged head. One repair does not open or modify another repository's
+checkout.
+
+The repair lease and completed parent root remain durable after refresh. Final
+verification resumes only after every affected checkout and both copies of its
+generation-bound map contain a reachable post-merge target and refreshed
+instruction path and hash. A failed harness-observed parent check may request
+one canonical repository repair; the scheduler verifies the repository and
+owns branch, pull-request, review, merge, and refresh receipts before it queues
+the next final-verification turn. The failed verification turn only selects the
+repository. The scheduler creates its repair branch and resumes the same parent
+conversation with that authorized checkout; publication waits for a successful,
+harness-observed repair turn. Ordinary final verification still requires exact
+clean targets, while the repair turn may verify descendant or dirty work on its
+recorded repair branch before the workspace owner commits and pushes it. Its
+successful receipt requires that exact branch, and every non-target checkout
+must remain pinned and clean. Restart recovery canonicalizes historical
+case-variant merge methods in both the runtime checkout map and its generation
+pin before comparing them with current central policy. An
+externally observed merge advances only with current pushed-head policy evidence
+and a pending scheduler-owned merge intent bound to that head. Publishing a
+replacement head supersedes any older pending merge intent. Capture
+acknowledgement and ordered release of evidence-protecting roots and leases
+remain part of the later cleanup lifecycle.
+
+The parent runtime artifact records the complete relative checkout map,
+requested `parent_multi_checkout` scope, harness/model selection, and truthful
+`trusted_host` or `workspace_confined` containment. Parent memory grants remain
+owned by the later parent-controller lifecycle and are not synthesized from a
+leaf checkout grant.
 
 ## 4. Workspace directory layout
 
@@ -214,6 +542,11 @@ Use for:
 ## 6.4 `before_remove`
 
 Runs before workspace deletion for terminal issues.
+
+Remote-only harnesses use evidence-only workspaces. Their issue manifest records
+`evidence_only: true`, and cleanup skips `before_remove` for those workspaces,
+including after restart or during generation-bound cleanup. No repository
+checkout is present for the hook to operate on.
 
 Use for:
 
@@ -601,6 +934,160 @@ trait WorkspaceManager {
 - issue and run metadata file write and reload
 - conversation reset path preserves workspace safety
 
+## ACP client process ownership
+
+The executable ACP client takes a host-supplied workspace root, sanitized checkout
+key, and canonical issue workspace. Both process cwd and session cwd use that
+verified directory; root execution, missing directories and symlink escapes are
+rejected before spawn. Profiles cannot supply a cwd. The host supplies an explicit
+environment with scoped memory grants and checkout credential exclusions. The
+client clears ambient inheritance and rejects profile references that would
+reintroduce excluded credentials.
+Production routing removes ambient and workflow `OPENSYMPHONY_MEMORY_*` values
+before adding the current run's managed grant. Profile environment mappings
+cannot read from or write into this reserved namespace; terminal callbacks inherit the same
+scoped environment as the ACP child.
+
+`SessionHost` retains one supervised process/connection per issue. A stable
+`.opensymphony/acp-owner.lock` prevents competing owners without creating another
+session database. The profile fingerprint also hashes host callback policy,
+client resource limits and resolved MCP attachments, so changed limits, facilities
+or grants reject session reuse
+without persisting credential values. The conversation manifest records that fingerprint,
+credential/grant revision, exact workspace/repository/checkout binding, opaque
+session ID, run/attempt, connection generation, negotiated capabilities and
+submission/outcome state. Native manifests remain readable and cannot be silently
+replaced by ACP. Every command checks the owning connection generation.
+The negotiated ACP record also stores enabled outbound operation descriptors.
+Recovery projects those descriptors for inspection, while a new invocation
+still requires the live owner, current run, exact profile registration, and
+peer capability check; a durable descriptor alone grants no execution right.
+
+The manifest is atomically replaced and synced, including its parent directory,
+before a prompt can reach the transport. Cancellation after the synced
+`submitted` marker is rechecked before transport submission; when no prompt was
+sent, a `cancelled_before_prompt` outcome closes that marker. `submitted`
+without a known terminal outcome becomes `uncertain` and prevents automatic
+recovery or prompt replay.
+Local EOF, process reaping and protocol cancellation acknowledgement are separate
+evidence. Workspace cleanup remains fenced after an uncertain remote outcome.
+
+Recovery prefers advertised resume, then advertised load. Load source events are
+tagged as replay through the load response; subsequent live frames keep their
+own sequence and run binding. A finished nonpersistent session resets to a fresh
+agent with an explicit full-context requirement. Its old transcript remains
+inspection evidence. Unsupported required persistence rejects setup.
+When a configured harness changes after a crash, startup checks the same
+run/envelope-bound pending OpenHands ownership artifact used by workspace
+recovery before deciding whether the OpenHands client and local server are
+needed. Incompatible pending ownership is not promoted.
+
+On Unix, owner takeover also requires the prior process group to be absent.
+A crash between the durable launch reservation and process-ID checkpoint leaves
+a conservative launch-uncertain fence. Windows uses the existing kill-on-close
+Job Object. Retirement waits for active work and leases to clear, then terminates
+and reaps owned process resources before acknowledging cleanup. Trusted local
+host execution provides filesystem/process access; it is not a sandbox.
+
+The production worker binds the selected ACP profile and effective model,
+including a profile default when there is no routing override, to `run.json`
+when preparing the run. It also persists `harness-route.json` before ACP owner
+reservation as the latest workspace route snapshot. Recovery takes its route
+from the matching run record; an older run record can use the workspace snapshot
+only when the durable ACP identity names that same run and attempt. A claim
+for a different run clears the prior turn's terminal status and stop reason
+in the synced claim checkpoint. Durable workflow-prompt seeding is tracked
+separately from that transient status, including for legacy manifests migrated
+before the claim clears their terminal state. The worker keeps the current run's
+verified terminal or parent runtime envelope and binds its ACP session without
+copying an older retained owner's hierarchy or checkout snapshot. A profile
+switch, a change to effective profile configuration or credential scope, or a
+harness switch retires the old owner
+before archiving its manifest. Interrupted or failed launches execute
+`after_run` only when the harness is known stopped. Uncertain work retains its
+workspace, memory grant and cleanup fence. A known-finished session whose host
+is gone can retire through the same exclusive lock and process-absence check
+without launching another peer.
+For an authoritative parent continuation, a process or grant revision archives
+the retired owner while preserving the bound manifest and session ID. The
+replacement claims the new fingerprint under the exclusive owner lock and
+restores that ID through negotiated load or resume. Unsupported or missing
+restoration fails before prompt submission; a scope change requiring a fresh
+conversation is rejected before retirement.
+An ACP session that has not seeded its workflow prompt receives the full
+workflow prompt on the next attempt, even when `session/load` restores the peer
+session ID. A seeded session receives continuation guidance after a new run
+resets its transient status to `ready`. Production ACP turns use configured
+scheduler stall detection and cancellation rather than a fixed client prompt
+deadline; direct client callers can set a bound or use zero to disable it.
+When cancellation closes the owner before prompt submission, scheduler stop
+observation checks the durable record for the exact owner, generation, run and
+workspace. Only a stopped process with `ready` or `finished` state counts as
+stopped; submitted or uncertain state keeps cleanup fenced.
+
+
+Filesystem callbacks require absolute paths in the bound workspace and reject
+parent traversal, escaping or dangling symlinks and non-regular file targets.
+On Unix, the service actor pins the verified workspace directory before the
+agent starts, and the agent child enters that same directory inode with
+`fchdir`. Descriptor-relative callback opens stay anchored to that root even
+if its original pathname is replaced, reject every symlink component,
+including in-workspace links, and use no-follow opens for new files. Terminal
+launch traverses from the same pinned root; its child enters the selected
+directory using `fchdir` before executing the command. On macOS, terminal
+teardown retries a transient process-group permission error after natural exit;
+cleanup succeeds only when group signaling succeeds or the group is confirmed
+absent. An inaccessible live group remains a teardown failure. Windows pins every
+ancestor without write/delete sharing, rejects reparse points through opened
+handles, and holds those guards through file I/O or terminal spawn. Writes create missing
+parent directories only after containment validation. File writes stage in the
+same directory and atomically replace the destination after a complete flush;
+cancellation or I/O failure removes the stage and preserves the original file.
+Unix replacement remains relative to the pinned parent descriptor. Windows uses
+a same-directory NT rename on the owned stage handle, with parent and stage
+handles denying write/delete sharing through promotion. Cancellation marks the
+stage for deletion by handle, including when a blocking write still owns a
+clone. Terminal cwd defaults to
+the same workspace; alternate directories must remain inside it. Terminal env
+entries may only repeat existing host-owned values, protecting executable lookup
+and scoped grants from callback overrides.
+
+Each terminal belongs to one connection/session and receives an unguessable ID.
+Release invalidates the ID immediately, kills outstanding work and waits for
+reaping. Kill preserves the handle and its final output. Cancellation stops all
+owned terminal trees and interrupts in-flight callback waits; connection teardown expires callbacks and waits for process
+cleanup. SDK dispatch continues while terminal wait requests are pending.
+A retained owner calls `begin_turn` before the next prompt to retire the prior
+callback epoch, reap its processes, invalidate old handles and install a fresh
+cancellation token before the durable submission marker. Initial idle readiness
+has no active callback epoch; callbacks after session binding remain denied until
+`begin_turn` installs the first epoch. Both one-turn and retained prompt responses close their callback epochs
+inside ordered dispatch, before adjacent callbacks can run; terminal and callback cleanup
+finishes before the owner publishes `Finished` or returns the turn report. The
+owner keeps handling
+observation and shutdown commands while preparation waits; cancellation, timeout
+or cleanup failure ends the connection before the new prompt. The same bounded,
+cancellable preparation reapplies explicit model, mode and option choices after
+agent configuration updates, before recording durable submission. Preparation
+frames carry the accepted run identity, including when preparation fails before
+submission. Missing-context
+restoration clears the callback binding inside ordered response dispatch and
+retires accepted restoration work before creating a fresh session.
+`HostServices` is captured at connection creation and has no attachment mutation
+path, so editor-like extension requests cannot replace cwd, environment, callbacks
+or MCP grants.
+
+## ACP live restoration boundary
+
+The [pinned live qualification](acp-live-qualification.md) restored
+known-finished Cursor and Devin sessions through `session/load` after retiring
+the first process. The second process kept the same bound session ID and did
+not resend the first prompt. For a peer without advertised persistence,
+restoration starts a fresh session and uses the full prompt when the old
+workflow context has not been preserved. A submitted prompt with unknown
+outcome remains fenced; a stopped owner alone is insufficient evidence for
+automatic prompt replay or workspace removal.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
@@ -644,6 +1131,12 @@ trait WorkspaceManager {
 - COE-407: Browser Transport And Remote Stream Protocols
 - COE-419: Hosted Auth Placeholders And Web Parity
 - COE-473: Desktop task graph dependency and run detail parity
+- COE-609: ACP Session Ownership And Durable Recovery
+- COE-610: ACP Client Callbacks And Session Configuration
+- COE-611: ACP Execution Routing And Worker Integration
+- COE-612: ACP Operator Requests And Response Routing
+- COE-613: ACP Extensions And Harness Operations
+- COE-615: ACP Runtime Conformance And Live Qualification
 
 ## Source refs
 
@@ -664,5 +1157,11 @@ trait WorkspaceManager {
 - COE-407
 - COE-419
 - COE-473
+- COE-609
+- COE-610
+- COE-611
+- COE-612
+- COE-613
+- COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

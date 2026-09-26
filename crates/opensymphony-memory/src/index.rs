@@ -187,6 +187,37 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 registration_source_id: None,
             });
         }
+        if issue_plan.issue.parent_integration
+            && let Some(run_id) = issue_plan.issue.execution_run_id.as_deref()
+        {
+            if issue_plan.issue.verified_repository_commits.is_empty() {
+                live_source_refs.push(MemorySourceRef {
+                    kind: "parent_terminal_runtime_envelope".to_owned(),
+                    id: format!(
+                        "run={run_id};attempt={};repo=;target_commit=",
+                        issue_plan.issue.execution_attempt.unwrap_or_default()
+                    ),
+                    url: None,
+                    repo_id: None,
+                    symbol_key: None,
+                    registration_source_id: None,
+                });
+            } else {
+                live_source_refs.extend(issue_plan.issue.verified_repository_commits.iter().map(
+                    |(repository_id, commit)| MemorySourceRef {
+                        kind: "parent_terminal_runtime_envelope".to_owned(),
+                        id: format!(
+                            "run={run_id};attempt={};repo={repository_id};target_commit={commit}",
+                            issue_plan.issue.execution_attempt.unwrap_or_default()
+                        ),
+                        url: None,
+                        repo_id: Some(repository_id.clone()),
+                        symbol_key: None,
+                        registration_source_id: None,
+                    },
+                ));
+            }
+        }
         for source_ref in live_source_refs {
             if !source_refs.contains(&source_ref) {
                 source_refs.push(source_ref);
@@ -558,29 +589,36 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
         .into_iter()
         .flatten()
         .collect::<BTreeSet<_>>();
-    let routed_repository_id = plan.issue.repository_id.clone().or_else(|| {
-        let candidates = config
-            .repository_sources
-            .values()
-            .filter(|source| {
-                !issue_projects.is_empty()
-                    && source
-                        .project_scope_ids
-                        .iter()
-                        .any(|project| issue_projects.contains(project))
+    let routed_repository_id = if plan.issue.parent_integration {
+        None
+    } else {
+        plan.issue
+            .repository_id
+            .clone()
+            .or_else(|| {
+                let candidates = config
+                    .repository_sources
+                    .values()
+                    .filter(|source| {
+                        !issue_projects.is_empty()
+                            && source
+                                .project_scope_ids
+                                .iter()
+                                .any(|project| issue_projects.contains(project))
+                    })
+                    .map(|source| source.repository_id.clone())
+                    .collect::<BTreeSet<_>>();
+                (candidates.len() == 1)
+                    .then(|| candidates.into_iter().next())
+                    .flatten()
+                    .or_else(|| config.default_repository_id.clone())
             })
-            .map(|source| source.repository_id.clone())
-            .collect::<BTreeSet<_>>();
-        (candidates.len() == 1)
-            .then(|| candidates.into_iter().next())
-            .flatten()
-            .or_else(|| config.default_repository_id.clone())
-    })
-        .or_else(|| {
-            (config.repository_sources.len() == 1)
-                .then(|| config.repository_sources.keys().next().cloned())
-                .flatten()
-        });
+            .or_else(|| {
+                (config.repository_sources.len() == 1)
+                    .then(|| config.repository_sources.keys().next().cloned())
+                    .flatten()
+            })
+    };
     if let Some(repository_id) = routed_repository_id.as_deref()
         && !refs
             .iter()
@@ -601,6 +639,20 @@ fn capture_scope_refs(config: &MemoryConfig, plan: &CaptureIssuePlan) -> Vec<Kno
             id: format!("{repository_id}@{run_id}"),
             label: Some("immutable terminal runtime envelope".to_owned()),
         });
+    }
+    if let Some(run_id) = plan.issue.execution_run_id.as_deref() {
+        for repository_id in plan.issue.verified_repository_commits.keys() {
+            refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: repository_id.clone(),
+                label: Some("verified parent integration repository".to_owned()),
+            });
+            refs.push(KnowledgeScope {
+                kind: KnowledgeScopeKind::Repository,
+                id: format!("{repository_id}@{run_id}"),
+                label: Some("immutable parent terminal runtime envelope".to_owned()),
+            });
+        }
     }
     refs
 }

@@ -1,0 +1,92 @@
+{
+  "profile": {
+    "harness": "acp",
+    "profile_id": "local",
+    "preflight_ready": false,
+    "unavailable_reason": "credential_reference_unavailable",
+    "operations": [
+      {
+        "operation_id": "fixture.echo",
+        "namespace": "opensymphony.test",
+        "version": "1",
+        "capability_predicate": "agentCapabilities._meta['opensymphony.dev/fixtureEcho'] == 1",
+        "parameters_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "result_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "deadline_ms": 5000,
+        "effect": "read_only_idempotent"
+      }
+    ]
+  },
+  "run": {
+    "harness": "acp",
+    "profile_id": "local",
+    "run_binding_id": "run-worker-613",
+    "protocol": "acp",
+    "protocol_version": 1,
+    "rpc": "json_rpc_2_0",
+    "encoding": "utf-8",
+    "framing": "lf",
+    "carrier": "stdio",
+    "session_restore": true,
+    "history_replay": false,
+    "model_selection": false,
+    "cancellation": true,
+    "operator_responses": false,
+    "operations": [
+      {
+        "operation_id": "fixture.echo",
+        "namespace": "opensymphony.test",
+        "version": "1",
+        "capability_predicate": "agentCapabilities._meta['opensymphony.dev/fixtureEcho'] == 1",
+        "parameters_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "result_schema": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        },
+        "deadline_ms": 5000,
+        "effect": "read_only_idempotent"
+      }
+    ]
+  }
+}

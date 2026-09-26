@@ -253,6 +253,14 @@ impl IssueExecution {
         &self.recent_worker_outcomes
     }
 
+    /// Retain a worker outcome while the scheduler retries a fallible
+    /// terminal transition. This does not change the scheduler state; it
+    /// preserves the completed evidence so a persistence failure cannot make
+    /// a finished worker look as though it never reported an outcome.
+    pub fn retain_worker_outcome(&mut self, outcome: WorkerOutcomeRecord) {
+        self.record_outcome(outcome);
+    }
+
     pub fn retry_count_override(&self) -> Option<u32> {
         self.retry_count_override
     }
@@ -592,6 +600,15 @@ impl IssueExecution {
         }
     }
 
+    /// A delivered or closed operator request resumes the worker's idle clock.
+    /// This records liveness without fabricating an agent runtime event or
+    /// changing the absolute runtime cap anchored to the run's start.
+    pub fn observe_operator_resolution(&mut self, observed_at: TimestampMs) {
+        if let SchedulerState::Running { stall, .. } = &mut self.state {
+            stall.observe_activity(observed_at);
+        }
+    }
+
     pub fn queue_retry(
         mut self,
         retry: RetryEntry,
@@ -817,17 +834,34 @@ fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
                 .to_str()
                 .and_then(|name| name.strip_prefix(&format!("{}--", key.as_str())))
                 .is_some_and(|generation| !generation.is_empty())
+            || (name
+                .to_str()
+                .and_then(|generation| generation.parse::<u64>().ok())
+                .is_some_and(|generation| generation > 0)
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new(key.as_str()))
+                && path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == OsStr::new("parents")))
     })
 }
 
 fn workspace_key_matches_issue(actual: &WorkspaceKey, expected: &WorkspaceKey) -> bool {
     actual == expected
-        || actual
-            .as_str()
-            .strip_prefix(&format!("{}-", expected.as_str()))
-            .is_some_and(|digest| {
+        || [
+            format!("{}-", expected.as_str()),
+            format!("parent-{}-", expected.as_str()),
+        ]
+        .iter()
+        .any(|prefix| {
+            actual.as_str().strip_prefix(prefix).is_some_and(|digest| {
                 digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
+        })
 }
 
 fn comparable_workspace_path(path: &Path) -> PathBuf {

@@ -103,6 +103,20 @@ pub enum WorkspaceError {
     },
     #[error("failed to remove workspace {path}: {source}")]
     RemoveWorkspace { path: PathBuf, source: io::Error },
+    #[error("workspace cleanup generation mismatch at {path}: expected {expected}, found {actual}")]
+    CleanupGenerationMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    #[error("workspace cleanup outcome mismatch at {path}: expected {expected}, found {actual}")]
+    CleanupOutcomeMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    #[error("missing matching cleanup tombstone for generation {generation} at {path}")]
+    MissingCleanupTombstone { path: PathBuf, generation: String },
     #[error("checkout generation {generation} at {path} is not attachable: {reason}")]
     CheckoutVerification {
         path: PathBuf,

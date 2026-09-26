@@ -23,8 +23,8 @@ use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
 use crate::opensymphony_workspace::{
-    RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle,
-    WorkspaceManager, compose_terminal_prompt,
+    ParentRuntimeEnvelope, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
+    WorkspaceHandle, WorkspaceManager, compose_terminal_prompt,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -89,6 +89,7 @@ pub struct IssueSessionRunnerConfig {
     pub memory: Option<MemoryWorkerAccess>,
     pub repository_instructions: Option<String>,
     pub terminal_prompt: Option<String>,
+    pub continuation_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,10 +102,9 @@ pub struct MemoryWorkerAccess {
     pub authorized_repositories: Vec<String>,
     pub run_id: Option<String>,
     pub attempt: Option<u32>,
-    /// The token is issued by this process's memory server. A recovered
-    /// supervised server may require a replacement conversation because its
-    /// reconstructed grant registry cannot update the bearer stored by the
-    /// existing server-side MCP configuration.
+    /// The token is issued by this process's memory server. A recovered leaf
+    /// run may require a replacement conversation when its bearer rotated;
+    /// parent recovery restores the persisted bearer and keeps this false.
     pub requires_fresh_conversation: bool,
 }
 
@@ -155,6 +155,14 @@ pub trait WorkpadCommentSource: Send + Sync {
 
 pub trait IssueSessionObserver {
     fn on_launch(&mut self, _conversation: &ConversationMetadata) {}
+
+    fn on_launch_with_started_at(
+        &mut self,
+        conversation: &ConversationMetadata,
+        _started_at: Option<TimestampMs>,
+    ) {
+        self.on_launch(conversation);
+    }
 
     fn on_runtime_event(
         &mut self,
@@ -351,6 +359,7 @@ impl Default for IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 }
@@ -377,6 +386,7 @@ impl IssueSessionRunnerConfig {
             memory: None,
             repository_instructions: None,
             terminal_prompt: None,
+            continuation_prompt: None,
         }
     }
 
@@ -794,6 +804,8 @@ pub struct IssueConversationManifest {
     pub runtime_contract_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_envelope: Option<TerminalRuntimeEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_runtime_envelope: Option<ParentRuntimeEnvelope>,
     /// Codex-only archive state. Missing values from older manifests mean active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_archive_state: Option<String>,
@@ -877,6 +889,7 @@ impl IssueConversationManifest {
             reset_reason,
             runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,
@@ -979,6 +992,7 @@ impl IssueConversationManifest {
 
     fn to_domain_metadata(&self, stream_state: RuntimeStreamState) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: self.conversation_id.clone(),
             server_base_url: self.server_base_url.clone(),
             transport_target: self.transport_target.clone(),
@@ -1001,6 +1015,22 @@ impl IssueConversationManifest {
             next_activity_sequence: 0,
         }
     }
+}
+
+fn bind_runtime_envelopes(
+    manifest: &mut IssueConversationManifest,
+    run_manifest: &mut RunManifest,
+) {
+    manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
+    if let Some(envelope) = manifest.runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+    manifest.parent_runtime_envelope = run_manifest.parent_runtime_envelope.clone();
+    if let Some(envelope) = manifest.parent_runtime_envelope.as_mut() {
+        envelope.conversation_binding = Some(manifest.conversation_id.to_string());
+    }
+    run_manifest.parent_runtime_envelope = manifest.parent_runtime_envelope.clone();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1287,6 +1317,11 @@ impl IssueSessionRunner {
         self
     }
 
+    pub fn with_continuation_prompt(mut self, prompt: Option<String>) -> Self {
+        self.config.continuation_prompt = prompt;
+        self
+    }
+
     pub fn client(&self) -> &OpenHandsClient {
         &self.client
     }
@@ -1513,7 +1548,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return Err(IssueSessionError::RehydrationFailed(format!(
@@ -1552,6 +1587,7 @@ impl IssueSessionRunner {
                 )
                 .await?;
             run_manifest.status = RunStatus::Running;
+            run_manifest.started_at.get_or_insert_with(Utc::now);
             run_manifest.status_detail = Some(format!(
                 "recovered {} prompt trigger for conversation {}",
                 active_session.prompt_kind.as_str(),
@@ -1561,10 +1597,11 @@ impl IssueSessionRunner {
                 .write_run_manifest(workspace, run_manifest)
                 .await?;
         }
-        observer.on_launch(
+        observer.on_launch_with_started_at(
             &active_session
                 .manifest
                 .to_domain_metadata(RuntimeStreamState::Ready),
+            run_manifest.started_at.map(timestamp_ms_from_datetime),
         );
         let baseline_event_ids = pre_trigger_baseline_event_ids.unwrap_or_else(|| {
             recovery_baseline_event_ids(
@@ -1603,16 +1640,15 @@ impl IssueSessionRunner {
         const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 1;
 
         let observed_run = observed_run_for_turn(run);
-        let active_session = match self
-            .initialize_session(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                &observed_run,
-                issue,
-                workflow,
-            )
-            .await?
+        let active_session = match Box::pin(self.initialize_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            issue,
+            workflow,
+        ))
+        .await?
         {
             Step::Continue(session) => session,
             Step::EarlyResult(result) => return Ok(*result),
@@ -1626,10 +1662,11 @@ impl IssueSessionRunner {
                 .execution_status()
                 .is_some_and(turn_is_in_progress)
         {
-            observer.on_launch(
+            observer.on_launch_with_started_at(
                 &active_session
                     .manifest
                     .to_domain_metadata(RuntimeStreamState::Ready),
+                run_manifest.started_at.map(timestamp_ms_from_datetime),
             );
             launch_reported = true;
         }
@@ -1637,8 +1674,8 @@ impl IssueSessionRunner {
         let mut retry_count = 0;
         let mut current_session = active_session;
         let (final_session, outcome) = loop {
-            let (mut active_session, outcome, turn_launch_reported) = match self
-                .execute_turn(
+            let (mut active_session, outcome, turn_launch_reported) =
+                match Box::pin(self.execute_turn(
                     workspace_manager,
                     workspace,
                     run_manifest,
@@ -1649,12 +1686,12 @@ impl IssueSessionRunner {
                     current_session,
                     launch_reported,
                     observer,
-                )
+                ))
                 .await?
-            {
-                Step::Continue(result) => result,
-                Step::EarlyResult(result) => return Ok(*result),
-            };
+                {
+                    Step::Continue(result) => result,
+                    Step::EarlyResult(result) => return Ok(*result),
+                };
             launch_reported = turn_launch_reported;
 
             if is_context_overflow_outcome(&outcome) && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES {
@@ -1829,48 +1866,45 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
-        let (mut active_session, mut prepared_turn) = match self
-            .prepare_turn(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                observed_run,
-                workflow,
-                issue,
-                run,
-                active_session,
-                launch_reported,
-                observer,
-            )
-            .await?
+        let (mut active_session, mut prepared_turn) = match Box::pin(self.prepare_turn(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            workflow,
+            issue,
+            run,
+            active_session,
+            launch_reported,
+            observer,
+        ))
+        .await?
         {
             Step::Continue(state) => state,
             Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
-        active_session = match self
-            .start_turn(
-                workspace_manager,
-                workspace,
-                run_manifest,
-                observed_run,
-                active_session,
-                &mut prepared_turn,
-                observer,
-            )
-            .await?
+        active_session = match Box::pin(self.start_turn(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            observed_run,
+            active_session,
+            &mut prepared_turn,
+            observer,
+        ))
+        .await?
         {
             Step::Continue(session) => session,
             Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
-        let outcome = self
-            .await_terminal_outcome(
-                &mut active_session,
-                &prepared_turn.baseline_event_ids,
-                observer,
-            )
-            .await;
+        let outcome = Box::pin(self.await_terminal_outcome(
+            &mut active_session,
+            &prepared_turn.baseline_event_ids,
+            observer,
+        ))
+        .await;
 
         Ok(Step::Continue((
             active_session,
@@ -2122,7 +2156,7 @@ impl IssueSessionRunner {
         run: &RunAttempt,
         mut active_session: ActiveSession,
         launch_reported: bool,
-        observer: &mut O,
+        _observer: &mut O,
     ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError>
     where
         O: IssueSessionObserver,
@@ -2132,7 +2166,7 @@ impl IssueSessionRunner {
             && turn_is_in_progress(status)
         {
             if let Err(error) = self
-                .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                .wait_for_active_turn_to_finish(&mut active_session.stream)
                 .await
             {
                 return self
@@ -2336,10 +2370,11 @@ impl IssueSessionRunner {
                 }) => {
                     had_run_conflict = true;
                     if !prepared_turn.launch_reported {
-                        observer.on_launch(
+                        observer.on_launch_with_started_at(
                             &active_session
                                 .manifest
                                 .to_domain_metadata(RuntimeStreamState::Ready),
+                            run_manifest.started_at.map(timestamp_ms_from_datetime),
                         );
                         prepared_turn.launch_reported = true;
                     }
@@ -2351,7 +2386,7 @@ impl IssueSessionRunner {
                         );
                     }
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
                         .await
                     {
                         return self
@@ -2420,6 +2455,7 @@ impl IssueSessionRunner {
         }
 
         run_manifest.status = RunStatus::Running;
+        run_manifest.started_at.get_or_insert_with(Utc::now);
         run_manifest.status_detail = Some(format!(
             "{} prompt sent to conversation {}",
             active_session.prompt_kind.as_str(),
@@ -2447,10 +2483,11 @@ impl IssueSessionRunner {
         active_session.accumulate_tokens();
 
         if !prepared_turn.launch_reported {
-            observer.on_launch(
+            observer.on_launch_with_started_at(
                 &active_session
                     .manifest
                     .to_domain_metadata(RuntimeStreamState::Ready),
+                run_manifest.started_at.map(timestamp_ms_from_datetime),
             );
             prepared_turn.launch_reported = true;
         }
@@ -2937,11 +2974,7 @@ impl IssueSessionRunner {
         );
         manifest.llm_config_fingerprint =
             Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
-        manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
-        if let Some(envelope) = manifest.runtime_envelope.as_mut() {
-            envelope.conversation_binding = Some(manifest.conversation_id.to_string());
-        }
-        run_manifest.runtime_envelope = manifest.runtime_envelope.clone();
+        bind_runtime_envelopes(&mut manifest, run_manifest);
         let pending_manifest_path = pending_conversation_manifest_path(workspace);
         if let Err(error) = workspace_manager
             .write_json_artifact_atomically(workspace, &pending_manifest_path, &Some(&manifest))
@@ -2961,13 +2994,11 @@ impl IssueSessionRunner {
             .write_run_manifest(workspace, run_manifest)
             .await?;
 
-        let stream = match self
-            .client
-            .attach_runtime_stream(
-                conversation.conversation_id,
-                self.config.runtime_stream.clone(),
-            )
-            .await
+        let stream = match Box::pin(self.client.attach_runtime_stream(
+            conversation.conversation_id,
+            self.config.runtime_stream.clone(),
+        ))
+        .await
         {
             Ok(stream) => stream,
             Err(error) => {
@@ -3117,6 +3148,10 @@ impl IssueSessionRunner {
         );
         failed_manifest.runtime_envelope = run_manifest.runtime_envelope.clone();
         if let Some(envelope) = failed_manifest.runtime_envelope.as_mut() {
+            envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
+        }
+        failed_manifest.parent_runtime_envelope = run_manifest.parent_runtime_envelope.clone();
+        if let Some(envelope) = failed_manifest.parent_runtime_envelope.as_mut() {
             envelope.conversation_binding = Some(failed_manifest.conversation_id.to_string());
         }
         failed_manifest.apply_transport_diagnostics(
@@ -3426,21 +3461,23 @@ impl IssueSessionRunner {
                     })
                     .map_err(|error| error.to_string())
             }
-            IssueSessionPromptKind::Continuation => Ok(append_memory_scope_guidance(
-                build_continuation_guidance(issue, run),
-                self.config.memory.as_ref(),
-            )),
+            IssueSessionPromptKind::Continuation => {
+                let prompt = append_memory_scope_guidance(
+                    build_continuation_guidance(issue, run),
+                    self.config.memory.as_ref(),
+                );
+                Ok(append_attempt_continuation(
+                    prompt,
+                    self.config.continuation_prompt.as_deref(),
+                ))
+            }
         }
     }
 
-    async fn wait_for_active_turn_to_finish<O>(
+    async fn wait_for_active_turn_to_finish(
         &self,
         stream: &mut RuntimeEventStream,
-        observer: &mut O,
-    ) -> Result<(), OpenHandsError>
-    where
-        O: IssueSessionObserver,
-    {
+    ) -> Result<(), OpenHandsError> {
         if stream
             .state_mirror()
             .execution_status()
@@ -3473,7 +3510,10 @@ impl IssueSessionRunner {
                         ),
                     });
                 }
-                Ok(Ok(Some(event))) => observe_event(observer, &event),
+                // This is a prior turn. The stream mirror and event cache
+                // still consume its events, but the current worker observer
+                // must not attribute its commands to the new parent attempt.
+                Ok(Ok(Some(_event))) => {}
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     if stream
@@ -3525,9 +3565,12 @@ impl IssueSessionRunner {
                 next_token_accumulation = Instant::now() + Duration::from_secs(15);
             }
 
-            match self
-                .terminal_outcome_from_state(&mut session.stream, baseline_event_ids, observer)
-                .await
+            match Box::pin(self.terminal_outcome_from_state(
+                &mut session.stream,
+                baseline_event_ids,
+                observer,
+            ))
+            .await
             {
                 StateCheckResult::Terminal(outcome) => {
                     session.accumulate_tokens();
@@ -3552,7 +3595,8 @@ impl IssueSessionRunner {
             let event_timeout =
                 compute_timeout_duration(&tracker, next_token_accumulation, now, now_ts);
 
-            let next_event = timeout_at(now + event_timeout, session.stream.next_event()).await;
+            let next_event =
+                timeout_at(now + event_timeout, Box::pin(session.stream.next_event())).await;
 
             match next_event {
                 Err(_) => {
@@ -3693,10 +3737,21 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        let previously_observed = session
+            .stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
         if let Ok(inserted) = session.stream.reconcile_events().await
             && inserted > 0
         {
-            observe_latest_event(observer, &session.stream);
+            observe_reconciled_events(
+                observer,
+                session.stream.event_cache().items(),
+                &previously_observed,
+            );
             if let Some(tracker) = tracker {
                 tracker.record_reconciled_events(
                     inserted as u64,
@@ -3856,17 +3911,20 @@ impl IssueSessionRunner {
                 .clone()
                 .unwrap_or_else(|| outcome.summary.clone()),
         );
+        let harness_stopped = session.stream.state_mirror().terminal_status().is_some();
+        run_manifest.harness_stopped = harness_stopped;
         workspace_manager
             .finish_run(workspace, run_manifest, run_status)
             .await?;
 
-        let worker_outcome = WorkerOutcomeRecord::from_run(
+        let mut worker_outcome = WorkerOutcomeRecord::from_run(
             observed_run,
             outcome.kind,
             timestamp_ms_from_datetime(Utc::now()),
             Some(outcome.summary.clone()),
             outcome.error.clone(),
         );
+        worker_outcome.harness_stopped = harness_stopped;
 
         workspace_manager
             .write_json_artifact(
@@ -4280,6 +4338,7 @@ fn build_summary_metadata(
     server_base_url: &str,
 ) -> ConversationMetadata {
     ConversationMetadata {
+        harness_capability: None,
         conversation_id: ConversationId::new(conversation.conversation_id.to_string())
             .expect("UUID-backed conversation ID should not be empty"),
         server_base_url: Some(server_base_url.to_string()),
@@ -4321,13 +4380,27 @@ where
     );
 }
 
-fn observe_latest_event<O>(observer: &mut O, stream: &RuntimeEventStream)
-where
+fn observe_reconciled_events<O>(
+    observer: &mut O,
+    events: &[EventEnvelope],
+    previously_observed: &HashSet<String>,
+) where
     O: IssueSessionObserver,
 {
-    if let Some(event) = stream.event_cache().items().last() {
+    for event in events
+        .iter()
+        .filter(|event| !previously_observed.contains(&event.id))
+    {
         observe_event(observer, event);
     }
+}
+
+fn append_attempt_continuation(mut prompt: String, continuation: Option<&str>) -> String {
+    if let Some(continuation) = continuation {
+        prompt.push_str("\n\n");
+        prompt.push_str(continuation);
+    }
+    prompt
 }
 
 fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> NormalizedOutcome {
@@ -4712,7 +4785,7 @@ mod tests {
 
     use crate::opensymphony_domain::{
         BlockerRef, ConversationId, HarnessInterruptExpectedNextState, HarnessInterruptReason,
-        IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
+        IssueIdentifier, IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
     };
     use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
     use axum::{Json, Router, extract::State, routing::post};
@@ -4726,6 +4799,223 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[derive(Default)]
+    struct ReconciledEventObserver {
+        event_ids: Vec<String>,
+    }
+
+    impl IssueSessionObserver for ReconciledEventObserver {
+        fn on_runtime_event(
+            &mut self,
+            _observed_at: TimestampMs,
+            event_id: Option<String>,
+            _event_kind: Option<String>,
+            _summary: Option<String>,
+            _payload: Option<Value>,
+        ) {
+            if let Some(event_id) = event_id {
+                self.event_ids.push(event_id);
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_forwards_every_new_event_in_cache_order() {
+        let timestamp = Utc::now();
+        let events = vec![
+            EventEnvelope::new("prior", timestamp, "runtime", "MessageEvent", json!({})),
+            EventEnvelope::new(
+                "command-start",
+                timestamp + chrono::Duration::milliseconds(1),
+                "agent",
+                "ActionEvent",
+                json!({"command":"cargo test"}),
+            ),
+            EventEnvelope::new(
+                "command-finish",
+                timestamp + chrono::Duration::milliseconds(2),
+                "tool",
+                "ObservationEvent",
+                json!({"exit_code":0}),
+            ),
+        ];
+        let mut observer = ReconciledEventObserver::default();
+        observe_reconciled_events(&mut observer, &events, &HashSet::from(["prior".to_owned()]));
+
+        assert_eq!(
+            observer.event_ids,
+            vec!["command-start".to_owned(), "command-finish".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn prior_turn_wait_keeps_its_commands_out_of_the_current_attempt() {
+        let server = FakeOpenHandsServer::start()
+            .await
+            .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-prior-turn",
+                "/tmp/opensymphony-prior-turn/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let mut stream = client
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_secs(2),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+            )
+            .await
+            .expect("runtime stream should attach");
+        server
+            .emit_state_update(conversation.conversation_id, "running")
+            .await
+            .expect("prior turn should run");
+        stream
+            .next_event()
+            .await
+            .expect("running event")
+            .expect("running event payload");
+        let prior_command = EventEnvelope::new(
+            "prior-command",
+            Utc::now(),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test prior"}),
+        );
+        server
+            .insert_event(conversation.conversation_id, prior_command)
+            .await
+            .expect("prior command should be delivered");
+        server
+            .emit_state_update(conversation.conversation_id, "finished")
+            .await
+            .expect("prior turn should finish");
+
+        let config = IssueSessionRunnerConfig {
+            terminal_wait_timeout: Duration::from_secs(2),
+            ..IssueSessionRunnerConfig::default()
+        };
+        let runner = IssueSessionRunner::new(client, config);
+        runner
+            .wait_for_active_turn_to_finish(&mut stream)
+            .await
+            .expect("prior turn should drain");
+
+        let baseline_event_ids = stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+        assert!(baseline_event_ids.contains("prior-command"));
+        let current_command = EventEnvelope::new(
+            "current-command",
+            Utc::now() + chrono::Duration::milliseconds(1),
+            "agent",
+            "ActionEvent",
+            json!({"command": "cargo test --test current"}),
+        );
+        let mut observer = ReconciledEventObserver::default();
+        let mut events = stream.event_cache().items().to_vec();
+        events.push(current_command);
+        observe_reconciled_events(&mut observer, &events, &baseline_event_ids);
+        assert_eq!(observer.event_ids, vec!["current-command".to_owned()]);
+    }
+
+    #[test]
+    fn reused_conversation_receives_current_attempt_guidance() {
+        let prompt = append_attempt_continuation(
+            "Continue work on the existing issue conversation.".to_owned(),
+            Some("run_id=run-parent-2 attempt=2 receipt=evidence/final-verification.json"),
+        );
+
+        assert!(prompt.contains("Continue work on the existing issue conversation."));
+        assert!(prompt.contains("run_id=run-parent-2"));
+        assert!(prompt.contains("attempt=2"));
+        assert!(prompt.contains("evidence/final-verification.json"));
+    }
+
+    #[test]
+    fn openhands_binds_parent_scope_without_creating_a_leaf_envelope() {
+        let root = tempfile::tempdir().expect("temporary workspace root");
+        let path = root.path().join("parent-root");
+        std::fs::create_dir_all(&path).expect("parent root should exist");
+        let workspace =
+            WorkspaceHandle::new("parent-id", "COE-PARENT", "parent-COE-PARENT", path.clone());
+        let parent_envelope: ParentRuntimeEnvelope = serde_json::from_value(json!({
+            "parent_issue_id": "parent-id",
+            "parent_identifier": "COE-PARENT",
+            "run_id": "run-parent",
+            "attempt": 1,
+            "hierarchy_generation": 7,
+            "workspace_path": path,
+            "checkouts": {},
+            "harness": "openhands_agent_server",
+            "model_profile": "default",
+            "requested_execution_scope": "parent_multi_checkout",
+            "effective_containment": "trusted_host"
+        }))
+        .expect("parent envelope should decode");
+        let mut run_manifest = RunManifest::new(
+            &workspace,
+            &crate::opensymphony_workspace::RunDescriptor::new("run-parent", 1)
+                .with_parent_runtime_envelope(Some(parent_envelope)),
+        );
+        let profile = ConversationLaunchProfile {
+            workspace_kind: "LocalWorkspace".to_owned(),
+            confirmation_policy_kind: "NeverConfirm".to_owned(),
+            agent_kind: "Agent".to_owned(),
+            llm_model: "test-model".to_owned(),
+            llm_credential_mode: "api_key".to_owned(),
+            llm_api_key_env: None,
+            llm_base_url_env: None,
+            llm_subscription: None,
+            condenser: None,
+            agent_tools: None,
+            agent_include_default_tools: None,
+            max_iterations: 10,
+            stuck_detection: true,
+            llm_api_key_fingerprint: None,
+        };
+        let conversation_id = must(ConversationId::new("conversation-parent"));
+        let mut manifest = IssueConversationManifest::new(
+            must(IssueId::new("parent-id")),
+            must(IssueIdentifier::new("COE-PARENT")),
+            conversation_id.clone(),
+            "per_issue",
+            workspace.openhands_dir(),
+            Utc::now(),
+            None,
+            profile,
+            &BTreeMap::new(),
+        );
+
+        bind_runtime_envelopes(&mut manifest, &mut run_manifest);
+
+        assert!(manifest.runtime_envelope.is_none());
+        assert_eq!(
+            manifest
+                .parent_runtime_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.conversation_binding.as_deref()),
+            Some(conversation_id.as_str())
+        );
+        assert_eq!(
+            manifest.parent_runtime_envelope,
+            run_manifest.parent_runtime_envelope
+        );
     }
 
     #[test]
@@ -4934,6 +5224,7 @@ mod tests {
             },
             branch_name: None,
             pr_url: None,
+            pr_urls: Vec::new(),
             url: None,
             labels: vec!["area:memory".to_string()],
             project_id: None,
@@ -5301,6 +5592,7 @@ mod tests {
                 memory: None,
                 repository_instructions: None,
                 terminal_prompt: None,
+                continuation_prompt: None,
             },
         );
 
@@ -5328,6 +5620,7 @@ mod tests {
             reset_reason: None,
             runtime_contract_version: None,
             runtime_envelope: None,
+            parent_runtime_envelope: None,
             codex_archive_state: None,
             last_turn_id: None,
             active_run_id: None,

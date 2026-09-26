@@ -1,12 +1,12 @@
-use std::{fmt, num::NonZeroU32, path::PathBuf};
+use std::{collections::BTreeMap, fmt, num::NonZeroU32, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use super::{
-    ConversationId, DurationMs, IssueId, IssueIdentifier, RepositoryBinding, TimestampMs, WorkerId,
-    WorkspaceKey,
+    CanonicalRepositoryId, ConversationId, DurationMs, IssueId, IssueIdentifier, RepositoryBinding,
+    TimestampMs, WorkerId, WorkspaceKey,
 };
 
 /// Normalized liveness phase for a long-running OpenSymphony execution turn.
@@ -519,6 +519,9 @@ pub enum RuntimeStreamState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_capability:
+        Option<Box<crate::opensymphony_gateway_schema::capability::HarnessRunCapability>>,
     pub conversation_id: ConversationId,
     pub server_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1063,6 +1066,30 @@ impl HarnessInterruptState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentVerificationEvidence {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub attempt: u32,
+    pub hierarchy_generation: u64,
+    pub repository_commits: BTreeMap<CanonicalRepositoryId, String>,
+    /// Exact command text in the worker-authored receipt. The trusted loader
+    /// replaces this with a redacted diagnostic before the evidence enters
+    /// durable orchestrator state.
+    pub command: String,
+    /// Non-reversible identity computed by the trusted loader from the exact
+    /// receipt command. Worker-authored values are ignored and overwritten.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command_hash: String,
+    /// `parent_root` or one checkout handle from the verified parent envelope.
+    pub root: String,
+    /// Optional canonical repository selected for a repair after a failed
+    /// integration command. This is a worker request; provider and Git
+    /// receipts remain orchestrator-owned and independently verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_repository_id: Option<CanonicalRepositoryId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerOutcomeRecord {
     pub worker_id: WorkerId,
     pub attempt: Option<RetryAttempt>,
@@ -1072,6 +1099,13 @@ pub struct WorkerOutcomeRecord {
     pub turn_count: u32,
     pub summary: Option<String>,
     pub error: Option<String>,
+    /// True only when the harness adapter observed a terminal runtime state or
+    /// an acknowledged stop before producing this outcome. Transport and
+    /// persistence failures must leave this false.
+    #[serde(default)]
+    pub harness_stopped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_verification: Option<ParentVerificationEvidence>,
 }
 
 impl WorkerOutcomeRecord {
@@ -1091,7 +1125,14 @@ impl WorkerOutcomeRecord {
             turn_count: run.turn_count,
             summary,
             error,
+            harness_stopped: false,
+            parent_verification: None,
         }
+    }
+
+    pub fn with_harness_stopped(mut self) -> Self {
+        self.harness_stopped = true;
+        self
     }
 }
 
@@ -1124,6 +1165,7 @@ mod tests {
 
     fn conversation() -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(ConversationId::new("conv_1")),
             server_base_url: None,
             transport_target: None,

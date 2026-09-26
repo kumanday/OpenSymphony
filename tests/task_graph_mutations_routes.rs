@@ -73,6 +73,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             total_cost_micros: 120_000,
         },
         issues: vec![IssueSnapshot {
+            operator_interactions: Vec::new(),
+            harness_capability: None,
             identifier: "COE-405".to_owned(),
             title: "Linear Milestone, Issue, And Sub-Issue Mutations".to_owned(),
             tracker_state: "In Progress".to_owned(),
@@ -97,6 +99,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             max_turns: 0,
             runtime_seconds: 0,
             blocked: false,
+            hierarchy_generation: None,
+            hierarchy_blocked_reason: None,
             repository_binding: None,
             blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -115,6 +119,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             cancel_failed: false,
             cancel_timed_out: false,
             cancel_reason: None,
+            operator: None,
             detached: false,
         }],
         recent_events: vec![RecentEvent {

@@ -854,6 +854,7 @@ async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
             "log.txt",
             "https://api.devin.ai/v3/attachments/att-1",
         )],
+        attachment_listing_error: None,
     };
 
     let manifest = collector

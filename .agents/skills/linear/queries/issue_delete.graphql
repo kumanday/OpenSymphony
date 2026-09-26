@@ -1,0 +1,5 @@
+mutation IssueDelete($id: String!) {
+  issueDelete(id: $id) {
+    success
+  }
+}

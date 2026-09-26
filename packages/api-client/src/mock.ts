@@ -22,6 +22,7 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  OperatorInteraction,
   AuthErrorCode,
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
@@ -40,6 +41,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   private mockRunFiles: Map<string, ChangedFileEntry[]> = new Map();
   private mockRunDiffs: Map<string, FileDiffPage> = new Map();
   private mockRunApprovals: Map<string, ApprovalRequest[]> = new Map();
+  private mockRunInputs: Map<string, OperatorInteraction[]> = new Map();
   private mockRunValidation: Map<string, RunValidationSummary> = new Map();
   private mockTerminalSnapshot: Map<string, TerminalSnapshot>;
   private mockEvents: GatewayEnvelope[] = [];
@@ -273,6 +275,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     return this.mockRunApprovals.get(runId) ?? [];
   }
 
+  async runInputs(runId: string): Promise<OperatorInteraction[]> {
+    return this.mockRunInputs.get(runId) ?? [];
+  }
+
   async runValidation(runId: string): Promise<RunValidationSummary> {
     return (
       this.mockRunValidation.get(runId) ?? {
@@ -463,43 +469,58 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     });
   }
 
-  async cancelRun(runId: string): Promise<ActionReceipt> {
+  async cancelRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `cancel-${runId}-${crypto.randomUUID()}`,
       action_kind: "cancel",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `cancel-${runId}`,
+      idempotency_key: `cancel-${runId}-${operationId}`,
     });
   }
 
-  async retryRun(runId: string): Promise<ActionReceipt> {
+  async replanParent(
+    parentId: string,
+    hierarchyGeneration: number,
+    operationId = crypto.randomUUID(),
+  ): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `replan-${parentId}-${crypto.randomUUID()}`,
+      action_kind: "replan",
+      target_entity: { entity_kind: "issue", entity_id: parentId },
+      payload: { hierarchy_generation: hierarchyGeneration },
+      idempotency_key: `replan-${parentId}-${operationId}`,
+    });
+  }
+
+  async retryRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `retry-${runId}-${crypto.randomUUID()}`,
       action_kind: "retry",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `retry-${runId}`,
+      idempotency_key: `retry-${runId}-${operationId}`,
     });
   }
 
-  async resumeRun(runId: string): Promise<ActionReceipt> {
+  async resumeRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `resume-${runId}-${crypto.randomUUID()}`,
       action_kind: "resume",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `resume-${runId}`,
+      idempotency_key: `resume-${runId}-${operationId}`,
     });
   }
 
-  async rehydrateRun(runId: string): Promise<ActionReceipt> {
+  async rehydrateRun(runId: string, operationId = crypto.randomUUID()): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `rehydrate-${runId}-${crypto.randomUUID()}`,
       action_kind: "rehydrate",
       target_entity: { entity_kind: "run", entity_id: runId },
-      idempotency_key: `rehydrate-${runId}`,
+      idempotency_key: `rehydrate-${runId}-${operationId}`,
     });
   }
 
@@ -529,14 +550,18 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     approvalId: string,
     decision: "approved" | "rejected",
     explanation?: string,
+    interaction?: OperatorInteraction,
+    optionId?: string,
   ): Promise<ActionReceipt> {
     return this.dispatchAction({
       schema_version: { major: 1, minor: 0, patch: 0 },
       correlation_id: `approval-${approvalId}-${crypto.randomUUID()}`,
       action_kind: "approval_decision",
-      target_entity: { entity_kind: "approval", entity_id: approvalId },
-      payload: { decision, explanation },
-      idempotency_key: `approval-${approvalId}-${decision}`,
+      target_entity: interaction
+        ? { entity_kind: "run", entity_id: interaction.issue_identifier }
+        : { entity_kind: "approval", entity_id: approvalId },
+      payload: interaction ? { decision, explanation, option_id: optionId, request_id: interaction.request_id, run_id: interaction.run_id, issue_id: interaction.issue_id, session_id: interaction.session_id, generation: interaction.generation, rpc_id: interaction.rpc_id } : { decision, explanation },
+      idempotency_key: interaction ? undefined : `approval-${approvalId}-${decision}`,
     });
   }
 
@@ -614,6 +639,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   /** Set mock approvals for a run. */
   setRunApprovals(runId: string, approvals: ApprovalRequest[]): void {
     this.mockRunApprovals.set(runId, approvals);
+  }
+
+  setRunInputs(runId: string, inputs: OperatorInteraction[]): void {
+    this.mockRunInputs.set(runId, inputs);
   }
 
   /** Set mock validation summary for a run. */

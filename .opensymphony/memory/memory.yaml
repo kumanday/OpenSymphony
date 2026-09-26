@@ -29,6 +29,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -37,6 +38,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -44,6 +46,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -56,11 +59,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -70,6 +77,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -83,8 +91,32 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
+  acp:
+    title: Acp
+    docs_target: docs/acp.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - acp
+    source_refs:
+      linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:orchestrator
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      linear_milestones:
+      - 'M12.99: ACP Harness Runtime Adapter'
   ai-pr-review-human-setup:
     title: OpenHands PR Review - Human Setup Guide
     docs_target: docs/ai-pr-review-human-setup.md
@@ -126,6 +158,8 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -143,6 +177,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -163,6 +198,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -178,9 +214,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -214,6 +253,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -230,6 +271,7 @@ areas:
       - docs/cli.md
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -250,6 +292,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -265,9 +308,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -301,6 +347,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -316,6 +364,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -324,6 +373,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -331,6 +381,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -343,11 +394,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -357,6 +412,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -370,6 +426,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   code-review:
@@ -384,6 +442,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -392,6 +451,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -399,6 +459,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -411,11 +472,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -425,6 +490,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -439,6 +505,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   codex:
@@ -452,6 +520,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -472,6 +541,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -487,9 +557,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -523,6 +596,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -560,6 +635,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -568,6 +644,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -575,6 +652,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -588,11 +666,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -602,6 +684,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -616,6 +699,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   configuration:
@@ -631,6 +716,7 @@ areas:
       - docs/configuration.md
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -639,6 +725,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -646,6 +733,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -658,11 +746,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -672,6 +764,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -691,6 +784,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M7: Shared Client And Desktop Alpha'
@@ -708,6 +803,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -728,6 +824,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -743,9 +840,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -779,6 +879,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -793,20 +895,37 @@ areas:
     - data-contracts
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
       - area:data-contracts
+      - area:docs
       - area:evidence
       - area:experiments
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:recovery
+      - area:review
       - area:runner
+      - area:runtime
       - area:scheduler
       - area:task-packets
+      - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   debugging:
     title: Debugging
@@ -819,6 +938,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -827,6 +947,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -834,6 +955,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -846,11 +968,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -860,6 +986,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -873,6 +1000,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   deployment-modes:
@@ -901,6 +1030,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -921,6 +1051,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -936,9 +1067,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -972,6 +1106,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -987,6 +1123,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1007,6 +1144,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1022,9 +1160,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1057,6 +1198,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1110,6 +1253,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1130,6 +1274,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1145,9 +1290,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1181,6 +1329,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1195,6 +1345,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -1203,6 +1354,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1210,6 +1362,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1222,11 +1375,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -1236,6 +1393,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1250,6 +1408,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   duckdb:
@@ -1263,6 +1423,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1283,6 +1444,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1298,9 +1460,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1334,6 +1499,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1358,19 +1525,36 @@ areas:
     - evidence
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
       - area:evidence
       - area:experiments
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:recovery
+      - area:review
       - area:runner
+      - area:runtime
       - area:scheduler
       - area:task-packets
+      - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   experiments:
     title: Experiments
@@ -1382,9 +1566,27 @@ areas:
     - experiments
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
       - area:experiments
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
       - area:scheduler
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   frontend:
     title: Frontend
@@ -1397,6 +1599,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -1405,6 +1608,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1412,6 +1616,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1424,11 +1629,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -1438,6 +1647,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1451,6 +1661,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   gateway:
@@ -1464,6 +1676,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1484,6 +1697,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1499,9 +1713,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1535,6 +1752,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1550,6 +1769,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -1558,6 +1778,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -1565,6 +1786,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -1577,11 +1799,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -1591,6 +1817,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -1604,8 +1831,39 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
+  harness:
+    title: Harness
+    docs_target: docs/harness.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - harness
+    source_refs:
+      linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
   harness-runtime:
     title: Harness Runtime
     docs_target: docs/harness-runtime.md
@@ -1618,6 +1876,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1638,6 +1897,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1653,9 +1913,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1688,6 +1951,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1780,6 +2045,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1800,6 +2066,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1815,9 +2082,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1850,6 +2120,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1864,6 +2136,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1884,6 +2157,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1899,9 +2173,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -1935,6 +2212,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -1964,6 +2243,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -1984,6 +2264,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -1999,9 +2280,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2034,6 +2318,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2054,6 +2340,7 @@ areas:
       - docs/memory.md
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -2074,6 +2361,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2089,9 +2377,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2125,6 +2416,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M6.5: Memory Server'
@@ -2144,6 +2437,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2152,6 +2446,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2159,6 +2454,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2171,11 +2467,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -2185,6 +2485,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2198,6 +2499,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   migration-1-0-0:
@@ -2223,6 +2526,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -2243,6 +2547,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2258,9 +2563,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2293,6 +2601,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2307,6 +2617,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -2327,6 +2638,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2342,9 +2654,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2377,6 +2692,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2420,6 +2737,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2428,6 +2746,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2435,6 +2754,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2447,11 +2767,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -2461,6 +2785,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2475,6 +2800,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   operations:
@@ -2490,6 +2817,7 @@ areas:
       - docs/operations.md
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -2510,6 +2838,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2525,9 +2854,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2562,6 +2894,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M6.5: Memory Server'
@@ -2581,6 +2915,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -2601,6 +2936,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -2616,9 +2952,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -2652,6 +2991,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -2665,9 +3006,27 @@ areas:
     - outcomes
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:outcomes
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
       - area:verifiers
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   planning:
     title: Planning
@@ -2680,6 +3039,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2688,6 +3048,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2695,6 +3056,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2707,11 +3069,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -2721,6 +3087,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2734,6 +3101,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   prerequisites:
@@ -2764,9 +3133,27 @@ areas:
     - process-protocol
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:process-protocol
+      - area:provider
+      - area:recovery
+      - area:review
       - area:runner
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   provenance:
     title: Provenance
@@ -2778,10 +3165,55 @@ areas:
     - provenance
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:provenance
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
       - area:task-packets
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
+  provider:
+    title: Provider
+    docs_target: docs/provider.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - provider
+    source_refs:
+      linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
   quality:
     title: Quality
     docs_target: docs/quality.md
@@ -2792,19 +3224,36 @@ areas:
     - quality
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
       - area:evidence
       - area:experiments
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
       - area:outcomes
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
+      - area:recovery
+      - area:review
       - area:runner
+      - area:runtime
       - area:scheduler
       - area:task-packets
+      - area:testing
+      - area:ui
       - area:verifiers
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
       - 'M0: Foundation And Evidence Contracts'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   query-packs:
     title: Query Packs
@@ -2818,6 +3267,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2826,6 +3276,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2833,6 +3284,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2845,11 +3297,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -2859,6 +3315,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2872,8 +3329,35 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
+  recovery:
+    title: Recovery
+    docs_target: docs/recovery.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - recovery
+    source_refs:
+      linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:orchestrator
+      - area:recovery
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
   release:
     title: Release
     docs_target: docs/release.md
@@ -2885,6 +3369,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2893,6 +3378,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2900,6 +3386,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2912,11 +3399,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -2926,6 +3417,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -2940,6 +3432,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   repository-layout:
@@ -2959,7 +3453,34 @@ areas:
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M12.6: Tree-sitter Code Intelligence'
+      - 'M12.96: Parent Integration Lifecycle'
       - 'M9.5: Developer Build Acceleration'
+  review:
+    title: Review
+    docs_target: docs/review.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - review
+    source_refs:
+      linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:orchestrator
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
+      linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
   run-detail:
     title: Run Detail
     docs_target: docs/run-detail.md
@@ -2972,6 +3493,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -2980,6 +3502,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -2987,6 +3510,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -2999,11 +3523,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3013,6 +3541,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3026,6 +3555,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   runner:
@@ -3038,8 +3569,26 @@ areas:
     - runner
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
       - area:runner
+      - area:runtime
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   runtime:
     title: Runtime
@@ -3052,6 +3601,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -3072,6 +3622,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3087,9 +3638,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3123,6 +3677,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3137,6 +3693,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3145,6 +3702,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3152,6 +3710,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3164,11 +3723,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3178,6 +3741,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3192,6 +3756,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   scheduler:
@@ -3204,8 +3770,26 @@ areas:
     - scheduler
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
       - area:scheduler
+      - area:testing
+      - area:ui
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   security:
     title: Security
@@ -3218,6 +3802,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -3238,6 +3823,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3253,9 +3839,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3289,6 +3878,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3312,6 +3903,7 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
       - 'M6: Gateway And Stream Contract'
       - 'M9: Collaborative Planning Alpha'
@@ -3338,6 +3930,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3346,6 +3939,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3353,6 +3947,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3365,11 +3960,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3379,6 +3978,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3392,6 +3992,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   task-packets:
@@ -3405,9 +4007,26 @@ areas:
     - task-packets
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
       - area:task-packets
+      - area:testing
+      - area:ui
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   template:
     title: Template
@@ -3420,6 +4039,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3428,6 +4048,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3435,6 +4056,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3447,11 +4069,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3461,6 +4087,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3474,6 +4101,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   testing:
@@ -3487,6 +4116,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -3507,6 +4137,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3522,9 +4153,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3558,6 +4192,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3586,6 +4222,8 @@ areas:
       - 'M12.6: Tree-sitter Code Intelligence'
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -3603,6 +4241,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3611,6 +4250,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3618,6 +4258,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3630,11 +4271,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3644,6 +4289,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3658,6 +4304,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   threejs:
@@ -3671,6 +4319,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3679,6 +4328,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3686,6 +4336,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3698,11 +4349,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3712,6 +4367,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3725,6 +4381,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   tui:
@@ -3738,6 +4396,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -3758,6 +4417,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3773,9 +4433,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3808,6 +4471,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3822,6 +4487,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:build
       - area:cli
       - area:code-intelligence
@@ -3842,6 +4508,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:harness-runtime
       - area:installer
       - area:linear
@@ -3857,9 +4524,12 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
       - area:runtime
@@ -3892,6 +4562,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
       - 'M9.5: Developer Build Acceleration'
@@ -3920,8 +4592,26 @@ areas:
     - verifiers
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
       - area:verifiers
+      - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   web:
     title: Web
@@ -3934,6 +4624,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -3942,6 +4633,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -3949,6 +4641,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -3961,11 +4654,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -3975,6 +4672,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -3988,6 +4686,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   websocket-runtime:
@@ -4016,6 +4716,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -4024,6 +4725,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4031,6 +4733,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -4043,11 +4746,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -4057,6 +4764,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4071,6 +4779,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
   workspace:
@@ -4083,8 +4793,25 @@ areas:
     - workspace
     source_refs:
       linear_labels:
+      - area:acp
+      - area:cli
+      - area:configuration
+      - area:docs
+      - area:gateway
+      - area:harness
+      - area:memory
+      - area:orchestrator
+      - area:provider
+      - area:recovery
+      - area:review
+      - area:runtime
+      - area:testing
+      - area:ui
       - area:workspace
+      - area:workspace-lifecycle
       linear_milestones:
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M1: Task And Run Orchestration'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
@@ -4100,6 +4827,7 @@ areas:
       - docs/workspace-and-lifecycle.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M12.99: ACP Harness Runtime Adapter'
   workspace-lifecycle:
     title: Workspace Lifecycle
     docs_target: docs/workspace-lifecycle.md
@@ -4112,6 +4840,7 @@ areas:
     source_refs:
       linear_labels:
       - area:accessibility
+      - area:acp
       - area:cli
       - area:code-intelligence
       - area:code-review
@@ -4120,6 +4849,7 @@ areas:
       - area:data-contracts
       - area:debugging
       - area:desktop
+      - area:docs
       - area:documentation
       - area:duckdb
       - area:evidence
@@ -4127,6 +4857,7 @@ areas:
       - area:frontend
       - area:gateway
       - area:graph-view
+      - area:harness
       - area:installer
       - area:linear
       - area:mcp
@@ -4139,11 +4870,15 @@ areas:
       - area:planning
       - area:process-protocol
       - area:provenance
+      - area:provider
       - area:quality
       - area:query-packs
+      - area:recovery
       - area:release
+      - area:review
       - area:run-detail
       - area:runner
+      - area:runtime
       - area:rust
       - area:scheduler
       - area:security
@@ -4153,6 +4888,7 @@ areas:
       - area:testing
       - area:tests
       - area:threejs
+      - area:ui
       - area:verifiers
       - area:web
       - area:workflow
@@ -4166,6 +4902,8 @@ areas:
       - 'M12.85: Codex Thread Lifecycle'
       - 'M12.8: Desktop App Installer And Auto-Update'
       - 'M12.95: Multi-Repository Foundations'
+      - 'M12.96: Parent Integration Lifecycle'
+      - 'M12.99: ACP Harness Runtime Adapter'
       - 'M12.9: Code Graph View'
       - 'M1: Task And Run Orchestration'
 redaction:

@@ -33,6 +33,10 @@ OpenHands provides the execution-layer primitives Symphony needs:
 OpenSymphony keeps all scheduling rules in Rust and uses OpenHands only as the
 runtime substrate.
 
+Operator snapshots label the requested execution scope separately from the
+harness's effective containment. Trusted-host execution is reported honestly
+and is not presented as workspace confinement.
+
 ## 3. Runtime modes
 
 ### Local supervised mode
@@ -96,6 +100,15 @@ truthful trusted-host process-`cwd` containment receipt. A compatible persisted
 conversation may be reused only when its envelope matches; a mismatch is
 rejected before attach.
 
+For an eligible parent, `workspace.working_dir` is the non-Git parent execution
+root. The conversation manifest binds the parent envelope to the OpenHands
+conversation ID and records the complete relative checkout map with requested
+`parent_multi_checkout` scope. Trusted local OpenHands runs report
+`trusted_host`; the prompt and `cwd` do not claim filesystem sandboxing. The
+full first prompt combines the generic parent lifecycle, optional verified
+project-set integration instructions, parent task facts, the checkout map, and
+repository instructions keyed by canonical repository ID.
+
 When the local memory server issues a process-scoped worker grant, the grant
 is also part of conversation compatibility. The agent-server create contract
 does not provide a conversation MCP-config update operation, so a persisted
@@ -125,6 +138,10 @@ barrier before its primary manifest is written, its pending ownership record
 is cleared only after remote retirement succeeds or equivalent superseded
 evidence is durable; if both operations fail, the pending record remains for
 restart recovery and later cleanup.
+When the configured harness changes, daemon startup applies the same
+run/envelope binding checks to pending OpenHands ownership before deciding
+whether to initialize the OpenHands client and managed server. A valid pending
+owner is promoted for recovery; stale or incompatible ownership is ignored.
 
 ## 6. Conversation model
 
@@ -175,6 +192,10 @@ The internal `opensymphony_openhands` module owns:
 - WebSocket attach/reconcile/reconnect behavior
 - ready-state detection
 - issue session launch and reuse
+
+The local `opensymphony run` worker keeps OpenHands attach and event-poll futures
+off its shared routing stack. Attach runs in a cancellation-owned task, so an
+aborted issue run also aborts its in-flight attach before it can report launch.
 
 Harness interrupt uses `POST /api/conversations/{id}/interrupt` as the primary
 mid-turn stop request. If an older agent-server returns a missing-route status

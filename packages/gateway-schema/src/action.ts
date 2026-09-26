@@ -4,6 +4,7 @@ import type { SchemaVersion } from "./version.js";
 export type ActionKind =
   | "retry"
   | "cancel"
+  | "replan"
   | "pause"
   | "resume"
   | "rehydrate"
@@ -13,6 +14,9 @@ export type ActionKind =
   | "transition_issue"
   | "create_followup"
   | "approval_decision"
+  | "input_response"
+  | "plan_decision"
+  | "harness_operation"
   | "publish_plan"
   | "task_graph_milestone"
   | "task_graph_issue"

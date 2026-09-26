@@ -15,11 +15,15 @@ mod tracker;
 pub const CRATE_NAME: &str = "opensymphony-domain";
 
 pub use control_plane::{
-    ControlPlaneAgentServerStatus, ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot,
-    ControlPlaneDaemonState, ControlPlaneDaemonStatus, ControlPlaneFileChange,
-    ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
-    ControlPlaneMemoryServerStatus, ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent,
-    ControlPlaneRecentEventKind, ControlPlaneWorkerOutcome, SnapshotEnvelope,
+    ControlPlaneAgentServerStatus, ControlPlaneCleanupSnapshot, ControlPlaneContainmentSnapshot,
+    ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot, ControlPlaneDaemonState,
+    ControlPlaneDaemonStatus, ControlPlaneFileChange, ControlPlaneFileChangeKind,
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot, ControlPlaneLeaseSnapshot,
+    ControlPlaneMemoryServerStatus, ControlPlaneMemorySnapshot, ControlPlaneMetricsSnapshot,
+    ControlPlaneOperatorSnapshot, ControlPlaneParentSnapshot, ControlPlaneProviderSnapshot,
+    ControlPlaneRecentEvent, ControlPlaneRecentEventKind, ControlPlaneRepairSnapshot,
+    ControlPlaneRepositorySnapshot, ControlPlaneVerificationSnapshot, ControlPlaneWorkerOutcome,
+    SnapshotEnvelope,
 };
 pub use harness::HarnessAdapter;
 pub use identifiers::{
@@ -37,13 +41,15 @@ pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason,
     HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
     HarnessInterruptState, HarnessInterruptStatus, HistorySyncStatus, LivenessState,
-    ReconnectStatus, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
-    RetryReason, RunAttempt, RuntimeLivenessPhase, RuntimeProgressSnapshot, RuntimeStreamState,
-    StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    ParentVerificationEvidence, ReconnectStatus, ReleaseReason, RetryAttempt,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeLivenessPhase,
+    RuntimeProgressSnapshot, RuntimeStreamState, StallMetadata, StreamHealth, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
-    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
-    RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals, WorkerAttemptSnapshot,
+    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, HierarchyStateSnapshot, IssueSnapshot,
+    OrchestratorSnapshot, RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals,
+    WorkerAttemptSnapshot,
 };
 pub use state_machine::{
     IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,
@@ -139,6 +145,7 @@ mod tests {
                 "leonardogonzalez/coe-260-domain-model-and-orchestrator-state-machine".to_owned(),
             ),
             pr_url: None,
+            pr_urls: Vec::new(),
             url: Some(
                 "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
                     .to_owned(),
@@ -190,6 +197,7 @@ mod tests {
 
     fn sample_conversation(fresh_conversation: bool) -> ConversationMetadata {
         ConversationMetadata {
+            harness_capability: None,
             conversation_id: must(super::ConversationId::new("conv_260")),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
@@ -802,6 +810,8 @@ mod tests {
             turn_count: 0,
             summary: None,
             error: Some("boom".to_owned()),
+            harness_stopped: false,
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,
@@ -1165,6 +1175,37 @@ mod tests {
     }
 
     #[test]
+    fn delayed_operator_resolution_restarts_idle_clock_without_extending_absolute_cap() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(100),
+            Some(sample_conversation(false)),
+        ));
+        // Both an answered request and a callback closed by the peer use this
+        // transition; each may arrive after the prior idle deadline.
+        execution.observe_operator_resolution(ts(500));
+        assert_eq!(execution.snapshot().runtime.stalled_at, Some(ts(600)));
+        execution.observe_operator_resolution(ts(800));
+        assert_eq!(execution.snapshot().runtime.stalled_at, Some(ts(900)));
+
+        let mut capped = super::StallMetadata::with_runtime_cap(
+            ts(50),
+            super::DurationMs::new(100),
+            Some(super::DurationMs::new(700)),
+        );
+        capped.observe_activity(ts(500));
+        assert_eq!(capped.stalled_at, ts(600));
+        capped.observe_activity(ts(800));
+        assert_eq!(capped.stalled_at, ts(750));
+    }
+
+    #[test]
     fn attach_workspace_rejects_rebinding_to_different_identity() {
         let issue = sample_issue();
         let workspace = sample_workspace();
@@ -1224,6 +1265,21 @@ mod tests {
 
         must(execution.attach_workspace(refreshed_workspace.clone()));
         assert_eq!(execution.workspace(), Some(&refreshed_workspace));
+    }
+
+    #[test]
+    fn attach_workspace_accepts_a_nested_parent_generation_identity() {
+        let issue = sample_issue();
+        let parent_key = "parent-COE-260-0123456789abcdef";
+        let workspace = WorkspaceRecord {
+            path: PathBuf::from(format!("/tmp/workspaces/parents/{parent_key}/4")),
+            workspace_key: must(WorkspaceKey::new(parent_key)),
+            ..sample_workspace()
+        };
+        let mut execution = IssueExecution::new(issue, ts(30));
+
+        must(execution.attach_workspace(workspace.clone()));
+        assert_eq!(execution.workspace(), Some(&workspace));
     }
 
     #[test]
@@ -1309,6 +1365,8 @@ mod tests {
             turn_count: 0,
             summary: Some("stale worker".to_owned()),
             error: Some("boom".to_owned()),
+            harness_stopped: false,
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,
@@ -1363,6 +1421,8 @@ mod tests {
             turn_count: 1,
             summary: Some("old attempt".to_owned()),
             error: Some("boom".to_owned()),
+            harness_stopped: false,
+            parent_verification: None,
         };
         let retry = must(RetryEntry::failure(
             &issue,

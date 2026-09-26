@@ -1,0 +1,5 @@
+query IssueByTitle($title: String!, $teamId: ID!) {
+  issues(filter: { title: { eq: $title }, team: { id: { eq: $teamId } } }, first: 2) {
+    nodes { id identifier title }
+  }
+}
