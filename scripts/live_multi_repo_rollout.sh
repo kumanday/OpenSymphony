@@ -785,7 +785,7 @@ pr_by_branch() {
   local branch="$2"
   gh api "repos/${repository}/pulls?state=all&head=${OPENSYMPHONY_LIVE_GITHUB_OWNER}:${branch}&base=develop&per_page=100" |
     jq -cer --arg branch "${branch}" '
-      [.[] | select(.head.ref == $branch and .base.ref == "develop")][0]
+      ([.[] | select(.head.ref == $branch and .base.ref == "develop")][0] // empty)
       | {number,url:.html_url,title,headRefOid:.head.sha,
          state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}'
 }
