@@ -2787,6 +2787,24 @@ fn non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn release_candidate_selected_central_config_validates() {
+        let Some(path) = env::var_os("OPENSYMPHONY_RELEASE_CONFIG") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let raw = fs::read_to_string(&path)
+            .await
+            .expect("selected config must be readable");
+        assert!(
+            looks_like_central_config(&raw),
+            "release candidate must select a central config"
+        );
+        load_central_config(&path)
+            .await
+            .expect("selected central config must validate");
+    }
+
     #[test]
     fn memory_bootstrap_is_required_when_auto_capture_is_enabled() {
         let repo = tempfile::tempdir().expect("temp repo should exist");

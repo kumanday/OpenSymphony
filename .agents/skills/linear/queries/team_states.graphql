@@ -1,0 +1,8 @@
+query TeamStates($id: String!) {
+  team(id: $id) {
+    id
+    states {
+      nodes { id name type }
+    }
+  }
+}

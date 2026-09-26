@@ -256,8 +256,11 @@ They first replace implicit repository scope with central config, canonical task
 bindings, verified checkouts, and one per-instance memory service; then add
 durable parent leases, child-storage reuse, integration, repair, and cleanup;
 finally they expose truthful operator state and gate activation on deterministic
-fault-injected validation. The wave reuses completed COE-448 memory-server work
-and M12.9 code snapshots/overlays instead of creating parallel implementations.
+fault-injected validation. M12.97 uses the composed hermetic gate and isolated
+rollout procedure in `docs/multi-repository-rollout.md`; production activation
+remains a separate operator decision. The wave reuses completed COE-448
+memory-server work and M12.9 code snapshots/overlays instead of creating
+parallel implementations.
 
 M12.99 follows `docs/specs/acp-harness-adapter.md`. It delivers a working generic
 ACP runtime through the real `opensymphony run` path, including configured

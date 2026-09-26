@@ -1955,6 +1955,7 @@ impl RuntimeTrackerBackend {
         pr_url: &str,
         repository: &CheckoutRepository,
         expected_head_branch: Option<&str>,
+        issue_identifier: &str,
     ) -> Result<Option<GithubMergeEvidence>, LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
@@ -2076,7 +2077,11 @@ impl RuntimeTrackerBackend {
                     .iter()
                     .any(|candidate| candidate == provider_id)
             })
-            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
+            && github_head_branch_matches_issue(
+                &pull_request.head.ref_name,
+                expected_head_branch,
+                issue_identifier,
+            );
         let merge_method_satisfied = if compatible && pull_request.merged_at.is_some() {
             let Some(satisfied) = self
                 .github_merge_method_satisfied(
@@ -2724,8 +2729,13 @@ query OpenSymphonyReviewThreads(
         let pull_requests = parent_pull_request_candidates(issue);
         let evidence = stream::iter(pull_requests)
             .map(|pr_url| async move {
-                self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
-                    .await
+                self.github_merge_evidence(
+                    &pr_url,
+                    repository,
+                    issue.branch_name.as_deref(),
+                    &issue.identifier,
+                )
+                .await
             })
             .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
             .collect::<Vec<_>>()
@@ -3838,6 +3848,30 @@ impl GithubMergeEvidence {
     }
 }
 
+fn github_head_branch_matches_issue(
+    head: &str,
+    suggested_branch: Option<&str>,
+    issue_identifier: &str,
+) -> bool {
+    let Some(suggested_branch) = suggested_branch else {
+        return true;
+    };
+    if head == suggested_branch {
+        return true;
+    }
+
+    // Linear regenerates its suggested branch when an issue title changes.
+    // A stable semantic branch remains bound to the issue identifier.
+    let head = head.to_ascii_lowercase();
+    let identifier = issue_identifier.to_ascii_lowercase();
+    ["feat", "fix", "docs", "chore", "refactor", "test"]
+        .iter()
+        .any(|kind| {
+            let stem = format!("{kind}/{identifier}");
+            head == stem || head.starts_with(&format!("{stem}-"))
+        })
+}
+
 fn select_current_github_merge_evidence(
     candidates: Vec<GithubMergeEvidence>,
 ) -> (
@@ -3882,6 +3916,31 @@ impl GitHubRepository {
             .chain(self.id.iter().map(ToString::to_string))
             .collect()
     }
+}
+
+fn parent_workspace_reentry_allowed(
+    state: &DurableOrchestratorState,
+    parent_id: &IssueId,
+    snapshot: &HierarchySnapshot,
+) -> bool {
+    use crate::opensymphony_orchestrator::ParentIntegrationState;
+
+    snapshot.dispatch_claimed()
+        && snapshot.blocked_reason.is_none()
+        && state
+            .parent_integrations
+            .get(parent_id)
+            .is_some_and(|controller| {
+                controller.hierarchy_generation == snapshot.generation
+                    && matches!(
+                        controller.state,
+                        ParentIntegrationState::RefreshingRepositories
+                            | ParentIntegrationState::Integrating
+                            | ParentIntegrationState::Fixing { .. }
+                            | ParentIntegrationState::RefreshingAfterFixes
+                            | ParentIntegrationState::FinalVerification
+                    )
+            })
 }
 
 fn parent_checkout_requests(
@@ -4364,20 +4423,28 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     "parent preparation requires a pinned hierarchy snapshot".to_owned(),
                 )
             })?;
-            if !snapshot.dispatch_intended() {
+            let parent = if snapshot.dispatch_intended() {
+                let requests = parent_checkout_requests(&state, &issue.id, snapshot)?;
+                self.manager
+                    .prepare_parent_execution_root(
+                        &issue_descriptor(issue),
+                        snapshot.generation,
+                        requests,
+                    )
+                    .await?
+            } else if parent_workspace_reentry_allowed(&state, &issue.id, snapshot) {
+                self.manager
+                    .open_parent_execution_root_for_retry(
+                        &issue_descriptor(issue),
+                        snapshot.generation,
+                    )
+                    .await?
+            } else {
                 return Err(CliWorkspaceError::RetryState(
-                    "parent preparation requires a persisted dispatch intent".to_owned(),
+                    "parent preparation requires a persisted dispatch intent or active dispatch claim"
+                        .to_owned(),
                 ));
-            }
-            let requests = parent_checkout_requests(&state, &issue.id, snapshot)?;
-            let parent = self
-                .manager
-                .prepare_parent_execution_root(
-                    &issue_descriptor(issue),
-                    snapshot.generation,
-                    requests,
-                )
-                .await?;
+            };
             self.terminal_cleanup_paths
                 .remove(parent.handle.workspace_path());
             return Ok(crate::opensymphony_domain::WorkspaceRecord {
@@ -11075,6 +11142,63 @@ mod tests {
     }
 
     #[test]
+    fn parent_workspace_reentry_requires_live_claimed_generation() {
+        use crate::opensymphony_orchestrator::{
+            ParentIntegrationController, ParentIntegrationState,
+        };
+
+        let parent_id = IssueId::new("parent-id").expect("parent id");
+        let mut snapshot = HierarchySnapshot {
+            parent_id: parent_id.clone(),
+            generation: 7,
+            required_child_edges: Vec::new(),
+            frozen: true,
+            blocked_reason: None,
+            eligibility_blocked_reason: None,
+            dispatched_generation: Some(7),
+            dispatch_intent_generation: None,
+            in_flight_generation: None,
+            dispatch_required_merge_commits: Vec::new(),
+        };
+        let mut controller =
+            ParentIntegrationController::new(parent_id.clone(), 7).expect("controller");
+        controller.state = ParentIntegrationState::Fixing {
+            repository_id: CanonicalRepositoryId::new("github:repository:a").expect("repo id"),
+            repair_attempt: 1,
+        };
+        let mut state = DurableOrchestratorState::default();
+        state
+            .parent_integrations
+            .insert(parent_id.clone(), controller);
+        assert!(parent_workspace_reentry_allowed(
+            &state, &parent_id, &snapshot
+        ));
+
+        snapshot.dispatched_generation = None;
+        assert!(!parent_workspace_reentry_allowed(
+            &state, &parent_id, &snapshot
+        ));
+        snapshot.dispatched_generation = Some(7);
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state = ParentIntegrationState::Completed;
+        assert!(!parent_workspace_reentry_allowed(
+            &state, &parent_id, &snapshot
+        ));
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state = ParentIntegrationState::RefreshingRepositories;
+        snapshot.generation = 8;
+        assert!(!parent_workspace_reentry_allowed(
+            &state, &parent_id, &snapshot
+        ));
+    }
+
+    #[test]
     fn parent_checkout_requests_require_generation_bound_leases_and_scoped_merges() {
         let parent_id = IssueId::new("parent-id").expect("parent id");
         let child_a = IssueId::new("child-a").expect("child id");
@@ -16368,6 +16492,36 @@ Run the scheduler.
         assert!(github_backed_review_provider("github"));
         assert!(github_backed_review_provider("Codex"));
         assert!(!github_backed_review_provider("gitlab"));
+    }
+
+    #[test]
+    fn github_merge_evidence_accepts_stable_semantic_issue_branch() {
+        let suggested = Some("leonardogonzalez/coe-666-renamed-title");
+        assert!(github_head_branch_matches_issue(
+            "feat/COE-666-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(github_head_branch_matches_issue(
+            "leonardogonzalez/coe-666-renamed-title",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "feat/COE-667-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "feat/COE-6667-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "other/COE-666-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
     }
 
     #[test]

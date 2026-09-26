@@ -475,7 +475,10 @@ Operational implications:
 - `opensymphony run` keeps its local worker/snapshot tick every 5s, while
   Linear reads use cheaper internal cadences: running state every 30s,
   dispatch discovery every 60s, terminal cleanup every 5 minutes, and full
-  issue details hourly after startup/dispatch
+  issue details hourly after startup/dispatch. When all required children of a
+  waiting parent have terminal orchestrator outcomes, full details refresh on
+  the 5-minute terminal cadence so parent eligibility can use a complete
+  hierarchy observation
 - if Linear returns a long rate-limit reset, the scheduler pauses all Linear
   reads behind one shared cooldown but continues processing worker updates; the
   same cooldown also suppresses later parent-provider eligibility lookups in
@@ -818,6 +821,9 @@ continuation. A repair request is accepted only when its receipt selects
 a completed command observed by the harness before the attempt deadline. Repair
 implementation retries stop at the configured scheduler limit, and provider
 rate-limit responses defer all repair lookups until their retry delay expires.
+While a parent is refreshing repositories, the scheduler requests complete
+tracker details on the terminal refresh cadence so a failed verification can
+retry without waiting for the hourly background scan.
 After a provider merge, refresh fetches the configured target, proves the
 recorded merge-result commit and every retained child merge result are
 reachable, and refreshes complete instruction provenance before final
@@ -826,6 +832,10 @@ call selects merge, squash, or rebase centrally. Historical child merge evidence
 can prove a merge commit from its multi-parent topology; GitHub does not expose
 enough evidence to distinguish squash from rebase by a single-parent commit
 alone, so an ambiguous result remains ineligible.
+Child merge evidence accepts either Linear's suggested head branch or a stable
+semantic branch beginning with the child's issue identifier, such as
+`feat/COE-666-delivery`. Linear can change its suggested branch when the issue
+title changes; an unrelated issue's branch remains ineligible.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before
@@ -880,6 +890,13 @@ so it fails validation rather than polling or creating a workspace.
 Activation markers are namespaced by the absolute central-config destination,
 so separate instances cannot overwrite or consume one another's rollback
 record.
+
+Before enabling strict routing for any project set, follow
+`docs/multi-repository-rollout.md`. The hermetic gate must pass at the clean
+candidate commit and selected config hash. The first enabled set must be the
+script-created disposable non-production set; its process, provider, tracker,
+port, credential-copy, and workspace cleanup receipts are part of the release
+evidence. Production project sets are enabled only by a later operator decision.
 
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the

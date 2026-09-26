@@ -74,7 +74,10 @@ an atomic rename. Existing generations are reused only after the same checks;
 remote, branch, HEAD, instruction, or cleanliness drift is quarantined rather
 than reset in place. Startup cleanup also requires the matching durable
 staging-intent marker created before a clone; unrelated files and directories
-under `.opensymphony-staging` are preserved.
+under `.opensymphony-staging` are preserved. Terminal deletion releases the
+matching checkout staging intent after removing the published generation and
+before completing its cleanup tombstone. A failed release remains retryable
+through that tombstone, including after the checkout path is gone.
 
 The checkout manifest records the generation, binding, target commit,
 instruction path/hash/source commit, scheduler-policy generation, resolved
@@ -155,6 +158,14 @@ parent runtime root and requires the runtime-visible map to match it on every
 reopen. A parent turn therefore cannot authorize an older integration target by
 rewriting its local map. Reopen also repeats provider merge-result reachability
 checks against the pinned target.
+Terminal parent cleanup removes the generation's external checkout pin and any
+pending refresh copy after the parent root is deleted. Pin removal participates
+in the durable cleanup retry, so a leftover pin cannot receive a completed
+cleanup acknowledgement.
+After the first dispatch consumes its intent, a parent retry opens that same
+generation-bound root through the retry verifier. It requires a current durable
+dispatch claim and an active parent integration state; it cannot prepare a new
+root from a retry or revive a terminal parent.
 
 Parent roots follow the same `after_create` contract as leaf workspaces. A new
 empty root runs the configured hook before metadata bootstrap, writes the
