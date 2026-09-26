@@ -952,6 +952,7 @@ managed_workspaces_remaining() {
     ! -name '.opensymphony-instance.lock' \
     ! \( -name '.opensymphony-staging' -type d \) \
     ! \( -name '.opensymphony-parent-pins' -type d \) \
+    ! \( -name '.opensymphony-cleanup-tombstones' -type d \) \
     ! \( -name parents -type d \) -print || printf 'scan-error:%s\n' "${root}"
   if [[ -L "${root}/.opensymphony-orchestrator-state.json" ]]; then
     printf '%s\n' "${root}/.opensymphony-orchestrator-state.json"

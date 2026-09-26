@@ -120,7 +120,9 @@ execution path uses verified per-issue clones. Before marking a child `Done`,
 the controller advances its seed to the merged `develop` commit so terminal
 memory capture has the current repository source. Parent subtree cleanup waits
 through two terminal refresh windows, then requires no managed workspace or
-parent pin to remain. The active process lock is checked during final teardown.
+parent pin to remain. Durable cleanup tombstones are receipts, not live
+workspaces; the disposable state root containing them is removed during final
+teardown. The active process lock is checked during final teardown.
 
 The active project set in that generated config contains only the disposable
 Linear project and the three disposable repositories. The release evidence must
