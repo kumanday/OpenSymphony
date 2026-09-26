@@ -647,7 +647,7 @@ scheduler:
     Rework: 1
   retry:
     max_attempts: 2
-  poll_interval_ms: 30000
+  poll_interval_ms: 120000
   max_turns: 8
   max_retry_backoff_ms: 10000
   stall_timeout_ms: 300000
@@ -808,7 +808,8 @@ publish_child_if_ready() {
   done
   [[ -n "${checkout}" ]] || return 0
   if (( CHILD_REVIEW_TRANSITIONED[index] == 0 )); then
-    jq -e --arg id "${CHILD_IDS[index]}" '.issue_id == $id and .status == "succeeded"' \
+    jq -e --arg id "${CHILD_IDS[index]}" \
+      '.issue_id == $id and .status == "succeeded" and .harness_stopped == true' \
       "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
     child_continuation_ready "${CHILD_IDENTIFIERS[index]}" || return 0
   fi
