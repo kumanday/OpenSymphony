@@ -334,7 +334,7 @@ and login -> Enable device code authorization for Codex before retrying.
 
 Current repository implementation:
 
-- `tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, Linear read cooldown and cadence, lightweight running-state refresh, and manifest-backed workspace recovery using fake backends
+- `tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, Linear read cooldown and cadence, lightweight running-state refresh, and manifest-backed workspace recovery using fake backends. Scheduler unit tests also cover the shorter full-detail refresh cadence for completed parent fan-in
 - local restart validation should confirm that `opensymphony run` publishes a recovered snapshot before the first post-restart launch wave, so the TUI issue list repopulates even when reused conversations still take time to attach
 - `crates/opensymphony-cli/src/orchestrator_run/backends.rs` covers immediate launch-failure cleanup and abort-on-drop cleanup for tracked runtime worker tasks in the production CLI adapter
 

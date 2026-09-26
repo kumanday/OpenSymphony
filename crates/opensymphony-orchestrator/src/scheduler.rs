@@ -117,6 +117,37 @@ fn parent_eligibility_timeout(provider_work_units: usize) -> Duration {
     PARENT_ELIGIBILITY_TIMEOUT.saturating_mul(multiplier)
 }
 
+fn full_detail_refresh_interval_ms(state: &DurableOrchestratorState) -> u64 {
+    // Summary discovery cannot admit a parent: it has no complete child-edge
+    // set. Once every required child is terminal, obtain that full snapshot on
+    // the terminal cadence instead of leaving fan-in behind the hourly scan.
+    let parent_ready_for_fan_in = state.hierarchy.iter().any(|(parent_id, snapshot)| {
+        state
+            .parent_integrations
+            .get(parent_id)
+            .is_some_and(|controller| {
+                matches!(
+                    controller.state,
+                    super::ParentIntegrationState::WaitingForChildren
+                )
+            })
+            && snapshot
+                .required_child_edges
+                .iter()
+                .any(|edge| edge.required)
+            && snapshot
+                .required_child_edges
+                .iter()
+                .filter(|edge| edge.required)
+                .all(|edge| state.terminal_orchestrator_issues.contains(&edge.child_id))
+    });
+    if parent_ready_for_fan_in {
+        TERMINAL_REFRESH_INTERVAL_MS
+    } else {
+        FULL_DETAIL_REFRESH_INTERVAL_MS
+    }
+}
+
 fn workspace_key_changed_for_issue(execution: &IssueExecution, issue: &NormalizedIssue) -> bool {
     let Some(workspace) = execution.workspace() else {
         return false;
@@ -2489,11 +2520,13 @@ where
             });
 
         self.expire_linear_cooldown(observed_at);
+        let full_detail_refresh_interval_ms =
+            full_detail_refresh_interval_ms(&self.hierarchy_state);
         let mut pre_update_full_snapshot = if !self.linear_cooldown_active(observed_at)
             && (subtree_cleanup_pending
                 || due(
                     self.last_full_detail_refresh_at,
-                    FULL_DETAIL_REFRESH_INTERVAL_MS,
+                    full_detail_refresh_interval_ms,
                     observed_at,
                 )) {
             if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
@@ -2585,7 +2618,7 @@ where
             if pre_update_full_snapshot.is_none()
                 && due(
                     self.last_full_detail_refresh_at,
-                    FULL_DETAIL_REFRESH_INTERVAL_MS,
+                    full_detail_refresh_interval_ms,
                     observed_at,
                 )
             {
@@ -10340,6 +10373,65 @@ mod tests {
         assert_eq!(
             parent_eligibility_timeout(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY * 2 + 1),
             Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn completed_child_hierarchy_shortens_full_refresh_only_until_parent_dispatch() {
+        let mut parent = tracker_issue_from_normalized(&issue_with_project(None, None));
+        let parent_id = IssueId::new(parent.id.clone()).expect("parent id");
+        let child_ids = [
+            IssueId::new("fan-in-child-a").expect("child id"),
+            IssueId::new("fan-in-child-b").expect("child id"),
+        ];
+        parent.sub_issues = child_ids
+            .iter()
+            .map(|child_id| TrackerIssueRef {
+                id: child_id.to_string(),
+                identifier: child_id.to_string(),
+                title: None,
+                url: None,
+                state: "Done".to_owned(),
+                state_kind: TrackerIssueStateKind::Completed,
+            })
+            .collect();
+        let snapshot = HierarchySnapshot::new(&parent);
+        let mut state = DurableOrchestratorState::default();
+        state.parent_integrations.insert(
+            parent_id.clone(),
+            ParentIntegrationController::new(parent_id.clone(), snapshot.generation)
+                .expect("parent controller"),
+        );
+        state.hierarchy.insert(parent_id.clone(), snapshot);
+
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS
+        );
+        state
+            .terminal_orchestrator_issues
+            .insert(child_ids[0].clone());
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS,
+            "one completed child must not accelerate incomplete fan-in"
+        );
+        state
+            .terminal_orchestrator_issues
+            .insert(child_ids[1].clone());
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            TERMINAL_REFRESH_INTERVAL_MS
+        );
+        state
+            .parent_integrations
+            .get_mut(&parent_id)
+            .expect("controller")
+            .state = crate::opensymphony_orchestrator::ParentIntegrationState::Integrating;
+        assert_eq!(
+            full_detail_refresh_interval_ms(&state),
+            FULL_DETAIL_REFRESH_INTERVAL_MS,
+            "dispatched parents must not keep the fast full-refresh cadence"
         );
     }
 
