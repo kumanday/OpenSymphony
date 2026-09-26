@@ -1169,11 +1169,29 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             "terminal cleanup must remove the Git worktree registration"
         );
     }
+    let cleanup_pin_dir = manager
+        .config()
+        .root
+        .join(".opensymphony-parent-pins")
+        .join(cleanup_parent.handle.workspace_key());
+    let pin = cleanup_pin_dir.join("9.json");
+    assert!(pin.exists());
+    std::fs::copy(&pin, cleanup_pin_dir.join("9.refresh.json"))
+        .expect("simulate a leftover refresh transaction");
     manager
         .cleanup_target(&cleanup_target)
         .await
         .expect("terminal parent cleanup should remove its prepared root");
     assert!(!cleanup_parent.handle.workspace_path().exists());
+    assert!(!pin.exists(), "terminal cleanup releases the checkout pin");
+    assert!(
+        !cleanup_pin_dir.join("9.refresh.json").exists(),
+        "terminal cleanup releases the pending refresh copy"
+    );
+    manager
+        .cleanup_target(&cleanup_target)
+        .await
+        .expect("terminal cleanup is idempotent after pin release");
     manager
         .prepare_parent_execution_root(&parent, 9, repeat_requests.clone())
         .await

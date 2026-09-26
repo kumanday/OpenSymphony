@@ -155,6 +155,10 @@ parent runtime root and requires the runtime-visible map to match it on every
 reopen. A parent turn therefore cannot authorize an older integration target by
 rewriting its local map. Reopen also repeats provider merge-result reachability
 checks against the pinned target.
+Terminal parent cleanup removes the generation's external checkout pin and any
+pending refresh copy after the parent root is deleted. Pin removal participates
+in the durable cleanup retry, so a leftover pin cannot receive a completed
+cleanup acknowledgement.
 After the first dispatch consumes its intent, a parent retry opens that same
 generation-bound root through the retry verifier. It requires a current durable
 dispatch claim and an active parent integration state; it cannot prepare a new
