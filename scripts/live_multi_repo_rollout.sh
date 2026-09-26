@@ -558,6 +558,11 @@ is the bounded parent verification command: it requires answer=42 in that
 checkout. Alpha is intentionally seeded with answer=41. On the initial turn,
 observe its failing integration command and request alpha through the
 verification receipt's repair_repository_id without editing any checkout.
+Copy the full command string from the harness-observed command execution into
+the receipt's command field, including the shell wrapper. For example, if the
+observed command is /bin/zsh -lc ./scripts/check-integration.sh, record that
+entire string, not just ./scripts/check-integration.sh. Select the same
+checkout handle in the receipt's root field.
 On the active repair continuation, fix only alpha and leave the verified
 checkout edit for OpenSymphony to publish. Do not perform Git or provider
 side effects yourself. Do not modify beta or gamma. Re-run both commands in
