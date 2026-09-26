@@ -96,8 +96,9 @@ requires a durable successful, stopped run receipt before moving the issue to
 `Human Review`; the isolated two-minute scheduler tick gives this transition
 time to land before any continuation dispatch. Alpha's rework requires a new
 successful receipt after the initial failed-check run. The controller publishes
-child edits from a fresh checkout using its GitHub credential; the worker never
-receives the checkout credential. Resource names are recorded before creation
+child edits on an issue-bound `feat/` branch from a fresh checkout using its
+GitHub credential; the worker never receives the checkout credential. Resource
+names are recorded before creation
 and reconciled during teardown if a provider response is lost. The script tears
 down processes, branches, pull requests, issues, project, repositories, port
 ownership, credential copies, and local roots, then writes a teardown inventory.

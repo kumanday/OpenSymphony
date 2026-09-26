@@ -1955,6 +1955,7 @@ impl RuntimeTrackerBackend {
         pr_url: &str,
         repository: &CheckoutRepository,
         expected_head_branch: Option<&str>,
+        issue_identifier: &str,
     ) -> Result<Option<GithubMergeEvidence>, LinearError> {
         let url = Url::parse(pr_url).map_err(|error| {
             LinearError::InvalidResponse(format!("invalid GitHub pull request URL: {error}"))
@@ -2076,7 +2077,11 @@ impl RuntimeTrackerBackend {
                     .iter()
                     .any(|candidate| candidate == provider_id)
             })
-            && expected_head_branch.is_none_or(|expected| pull_request.head.ref_name == expected);
+            && github_head_branch_matches_issue(
+                &pull_request.head.ref_name,
+                expected_head_branch,
+                issue_identifier,
+            );
         let merge_method_satisfied = if compatible && pull_request.merged_at.is_some() {
             let Some(satisfied) = self
                 .github_merge_method_satisfied(
@@ -2724,8 +2729,13 @@ query OpenSymphonyReviewThreads(
         let pull_requests = parent_pull_request_candidates(issue);
         let evidence = stream::iter(pull_requests)
             .map(|pr_url| async move {
-                self.github_merge_evidence(&pr_url, repository, issue.branch_name.as_deref())
-                    .await
+                self.github_merge_evidence(
+                    &pr_url,
+                    repository,
+                    issue.branch_name.as_deref(),
+                    &issue.identifier,
+                )
+                .await
             })
             .buffer_unordered(PARENT_ELIGIBILITY_PROVIDER_CONCURRENCY)
             .collect::<Vec<_>>()
@@ -3836,6 +3846,30 @@ impl GithubMergeEvidence {
             provider_evidence_at: None,
         }
     }
+}
+
+fn github_head_branch_matches_issue(
+    head: &str,
+    suggested_branch: Option<&str>,
+    issue_identifier: &str,
+) -> bool {
+    let Some(suggested_branch) = suggested_branch else {
+        return true;
+    };
+    if head == suggested_branch {
+        return true;
+    }
+
+    // Linear regenerates its suggested branch when an issue title changes.
+    // A stable semantic branch remains bound to the issue identifier.
+    let head = head.to_ascii_lowercase();
+    let identifier = issue_identifier.to_ascii_lowercase();
+    ["feat", "fix", "docs", "chore", "refactor", "test"]
+        .iter()
+        .any(|kind| {
+            let stem = format!("{kind}/{identifier}");
+            head == stem || head.starts_with(&format!("{stem}-"))
+        })
 }
 
 fn select_current_github_merge_evidence(
@@ -16368,6 +16402,36 @@ Run the scheduler.
         assert!(github_backed_review_provider("github"));
         assert!(github_backed_review_provider("Codex"));
         assert!(!github_backed_review_provider("gitlab"));
+    }
+
+    #[test]
+    fn github_merge_evidence_accepts_stable_semantic_issue_branch() {
+        let suggested = Some("leonardogonzalez/coe-666-renamed-title");
+        assert!(github_head_branch_matches_issue(
+            "feat/COE-666-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(github_head_branch_matches_issue(
+            "leonardogonzalez/coe-666-renamed-title",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "feat/COE-667-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "feat/COE-6667-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
+        assert!(!github_head_branch_matches_issue(
+            "other/COE-666-disposable-delivery",
+            suggested,
+            "COE-666"
+        ));
     }
 
     #[test]

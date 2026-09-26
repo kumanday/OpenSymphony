@@ -829,6 +829,10 @@ call selects merge, squash, or rebase centrally. Historical child merge evidence
 can prove a merge commit from its multi-parent topology; GitHub does not expose
 enough evidence to distinguish squash from rebase by a single-parent commit
 alone, so an ambiguous result remains ineligible.
+Child merge evidence accepts either Linear's suggested head branch or a stable
+semantic branch beginning with the child's issue identifier, such as
+`feat/COE-666-delivery`. Linear can change its suggested branch when the issue
+title changes; an unrelated issue's branch remains ineligible.
 
 Strict `opensymphony rehydrate` also derives the desired repository, harness,
 model, and generation envelope from the current central routing inventory before

@@ -787,7 +787,7 @@ publish_child_if_ready() {
   local index="$1"
   local alias=(alpha beta gamma)
   local repository="${REPOSITORIES[index]}"
-  local branch="feat/${SLUG}-${alias[index]}"
+  local branch="feat/${CHILD_IDENTIFIERS[index]}-${SLUG}-${alias[index]}"
   local checkout candidate publisher
   checkout=""
   for candidate in "${RUN_DIR}/workspaces/${CHILD_IDENTIFIERS[index]}-"*--*; do
@@ -940,7 +940,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     publish_child_if_ready "${index}"
     alias=(alpha beta gamma)
     repository="${REPOSITORIES[index]}"
-    branch="feat/${SLUG}-${alias[index]}"
+    branch="feat/${CHILD_IDENTIFIERS[index]}-${SLUG}-${alias[index]}"
     if ! pr="$(pr_by_branch "${repository}" "${branch}" 2>/dev/null)"; then
       continue
     fi
