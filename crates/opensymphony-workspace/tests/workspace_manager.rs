@@ -561,6 +561,21 @@ async fn parent_execution_root_reuses_three_repositories_and_preserves_children(
             .and_then(|record| record.merge_method.as_deref()),
         Some("squash")
     );
+    let retried = manager
+        .open_parent_execution_root_for_retry(&parent, 5)
+        .await
+        .expect("a dispatched parent should reopen its verified generation");
+    assert_eq!(
+        retried.handle.workspace_path(),
+        prepared.handle.workspace_path()
+    );
+    assert!(
+        manager
+            .open_parent_execution_root_for_retry(&parent, 9)
+            .await
+            .is_err(),
+        "a retry cannot create another parent generation"
+    );
     let repository_a = prepared
         .child_checkout_map
         .repositories

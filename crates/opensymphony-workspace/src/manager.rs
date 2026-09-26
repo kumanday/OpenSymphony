@@ -864,6 +864,21 @@ impl WorkspaceManager {
         .await
     }
 
+    pub async fn open_parent_execution_root_for_retry(
+        &self,
+        issue: &IssueDescriptor,
+        hierarchy_generation: u64,
+    ) -> Result<ParentExecutionRoot, WorkspaceError> {
+        let root = self
+            .config
+            .root
+            .join("parents")
+            .join(parent_workspace_key(&issue.identifier, &issue.issue_id)?)
+            .join(hierarchy_generation.to_string());
+        self.open_parent_execution_root_at_for_retry(issue, &root)
+            .await
+    }
+
     pub async fn open_parent_execution_root_at_for_repair(
         &self,
         issue: &IssueDescriptor,
