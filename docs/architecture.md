@@ -2,14 +2,17 @@
 
 ## 1. Objective
 
-Implement the Symphony orchestration model in Rust while using OpenHands as the
-execution substrate and FrankenTUI as an optional operator client.
+Implement the Symphony orchestration model in Rust. The scheduler can use the
+OpenHands agent-server, the local Codex app-server, or a configured local ACP
+v1 agent for execution. FrankenTUI is an optional operator client.
 
 The system must preserve these boundaries:
 
 - the orchestrator is the source of truth for scheduling state
 - the tracker is polled and reconciled by the orchestrator
-- each issue executes in its own workspace
+- each terminal issue executes in its bound repository workspace
+- a multi-repository parent uses a separate integration workspace after its
+  children merge
 - `WORKFLOW.md` remains the repo-owned policy and prompt contract
 - UI is optional and must not affect correctness
 
@@ -43,7 +46,7 @@ OpenSymphony is split into five layers:
 2. Configuration layer
    - typed workflow/config loader
    - env and path resolution
-   - OpenHands extension config
+   - project sets, repository inventory, and harness profiles
 3. Coordination layer
    - orchestrator actor
    - retry queue
@@ -54,6 +57,7 @@ OpenSymphony is split into five layers:
    - OpenHands REST client
    - OpenHands WebSocket runtime stream
    - local Codex app-server stdio adapter
+   - local ACP v1 stdio session host
    - issue session runner
 5. Observability layer
    - structured logs
@@ -66,6 +70,10 @@ Packaging distinction:
 - packaging is intentionally flat: crates.io publishes only `opensymphony`
 - the `crates/opensymphony-*` directories are internal module trees compiled
   into that one package
+
+Start with the [multi-repository guide](multi-repository.md) for issue binding
+and parent integration, or the [ACP guide](acp.md) for local agent setup and
+operator requests. The two choices are independent.
 
 ## 3. Main decisions
 
@@ -247,7 +255,7 @@ The completed cleanup intent remains in orchestrator state after the parent root
 is removed and seeds automatic-capture completion after daemon restart, so a
 terminal parent is not routed and captured again without first reopening.
 
-### 3.2 OpenHands is the execution adapter
+### 3.2 OpenHands adapter
 
 OpenHands provides:
 
@@ -260,7 +268,7 @@ OpenHands provides:
 
 OpenSymphony does not reimplement an agent loop.
 
-### 3.3 WebSocket-first, not WebSocket-only
+### 3.3 OpenHands uses WebSocket and REST
 
 REST is still required for:
 
@@ -271,7 +279,7 @@ REST is still required for:
 - reconnect reconciliation
 - restart recovery
 
-### 3.4 One local server, many workspaces
+### 3.4 One local OpenHands server, many workspaces
 
 The local supervised topology runs one OpenHands server for the daemon while
 passing a distinct `working_dir` per issue.
@@ -370,7 +378,7 @@ relations, attachments, project content/status updates, and introspection.
 
 ## 5. Process model
 
-Local MVP process graph:
+Local process graph when an OpenHands route is selected:
 
 ```text
 opensymphony run
@@ -380,16 +388,21 @@ opensymphony run
   ├─ openhands REST client
   ├─ openhands WebSocket client
   ├─ optional Codex app-server stdio worker
+  ├─ optional ACP v1 stdio session host
   ├─ gateway API
   ├─ control-plane compatibility API
   └─ local server supervisor
        └─ python -m openhands.agent_server
 ```
 
+An ACP-only or Codex-only run does not launch the OpenHands server.
+
 The scheduler attaches a `HarnessRouteDecision` to each worker start request.
 The default route remains `openhands_agent_server`. Workflow `routing.harness`
 or the `OPENSYMPHONY_HARNESS` environment override can select the local
-`codex_app_server` route when that harness is available and can start runs.
+`codex_app_server` or `acp` route when configured and available. ACP also
+requires a named `routing.harness_profile`; the scheduler binds the selected
+profile to each prepared run.
 Route decisions are emitted as `routing.decision` runtime audit events so dry-run
 previews and real dispatches show the selected harness, model, and model
 profile.

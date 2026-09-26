@@ -160,6 +160,40 @@ last_memory_sync: 2026-07-04T03:35:18.210566+00:00
 - COE-615
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## 3.0.0 multi-repository and ACP release boundary
+
+Version 3.0.0 includes explicit `project_set` routing and a production local
+ACP v1 worker route. Existing `legacy_single` routing remains available. The
+[multi-repository guide](multi-repository.md), [ACP guide](acp.md), and
+[3.0 upgrade guide](migration-3.0.0.md) explain selection and recovery for
+operators new to these paths.
+
+Before shipping the multi-repository route for a project set, run
+`scripts/hermetic_multi_repo_lifecycle.sh` against the selected config at a
+clean commit, then run the opt-in disposable live gate. Record the same commit
+and selected config SHA-256 in both artifacts, verify exact-head CI, and check
+that teardown left no disposable resources. The procedure and bounded rollout
+conditions are in [multi-repository rollout](multi-repository-rollout.md).
+
+Before claiming an ACP vendor profile is qualified, check the executable
+version and login, then run the authenticated tracked-issue and restoration
+tests in [ACP live qualification](acp-live-qualification.md). Profile preflight
+alone does not prove authentication or optional protocol support. The pinned
+Cursor and Devin runs qualified `session/load`; neither advertised
+`session/resume` in that run.
+
+Keep the root crate, desktop package, Tauri metadata, and both Cargo lockfiles
+at `3.0.0`. The root `package-lock.json` must record the desktop package at
+the same version. Run the default bundled-mode Clippy and tests, frontend
+build, and the desktop parity guard before tagging or publishing:
+
+```bash
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+The dry run checks desktop version parity without writing release assets.
+
 ## 2.11 Rust toolchain boundary
 
 OpenSymphony 2.11.0 requires Rust 1.97.1 for the root CLI and desktop crate and
