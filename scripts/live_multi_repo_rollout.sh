@@ -629,7 +629,7 @@ review_profiles:
     credential: github-review-token
     required_checks: true
     required_review: false
-    merge_method: squash
+    merge_method: merge
 workspace:
   root: ${RUN_DIR}/workspaces
   retain_failed: true
@@ -982,7 +982,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     if [[ "$(checks_are_green "${repository}" "${pr_number}")" != "true" ]]; then
       continue
     fi
-    gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=squash |
+    gh api -X PUT "repos/${repository}/pulls/${pr_number}/merge" -f merge_method=merge |
       jq -e '.merged == true' >/dev/null
     gh api -X DELETE "repos/${repository}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
     move_issue "${CHILD_IDS[index]}" "${DONE_STATE}"

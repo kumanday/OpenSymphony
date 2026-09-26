@@ -88,8 +88,9 @@ rework loop on the same PR branch. The rework requirement is placed in the
 issue title so the resumed worker receives it in continuation guidance. A
 parent-only integration command checks `answer=42` in each verified checkout,
 making alpha's seeded defect observable before repair. The disposable repositories
-exercise failed-check rework, not an automated PR-review webhook. Review of this
-repository's PR follows the configured OpenHands or Codex integration; the fixture
+exercise failed-check rework with provider-verifiable merge commits instead of
+an automated PR-review webhook. Review of this repository's PR follows the
+configured OpenHands or Codex integration; the fixture
 does not require a separate reviewer account. Each child calls its checked-in
 completion helper as its last action to verify the edit. The rollout controller
 requires a durable successful, stopped run receipt before moving the issue to
