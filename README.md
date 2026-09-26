@@ -10,7 +10,7 @@ OpenSymphony automates software development workflows by:
 
 1. **Polling Linear** for issues in active states (Todo, In Progress, etc.)
 2. **Creating isolated workspaces** for each issue with lifecycle hooks
-3. **Dispatching AI agents** via OpenHands or Codex to work on issues autonomously
+3. **Dispatching AI agents** through OpenHands, Codex, or a configured ACP profile
 4. **Managing retries, reconciliation, and cleanup** based on issue state changes
 5. **Providing a desktop operator dashboard** for task graph, run detail, and memory navigation
 
@@ -18,9 +18,9 @@ OpenSymphony automates software development workflows by:
 
 - **Hierarchy-aware scheduling**: Parent issues wait for sub-issues to complete
 - **Multi-repository projects**: Each child names one repository; a repository-neutral parent checks the merged result
-- **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
+- **Live runtime updates**: OpenHands uses WebSocket with REST reconciliation; Codex and ACP use local stdio
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
-- **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
+- **GraphQL-only Linear integration**: The scheduler polls Linear; agent-side writes use checked-in helper/query assets
 - **Dependency-aware Task Graph**: Shows dispatchable work, roadmap backlog, and selected-task critical paths
 - **Harness selection**: OpenHands, local Codex app-server, or a configured ACP v1 stdio agent
 - **Code Graph**: Tree-sitter-backed symbols, diagnostics, and source-cited structural context for agents

@@ -186,9 +186,13 @@ Cursor and Devin runs qualified `session/load`; neither advertised
 Keep the root crate, desktop package, Tauri metadata, and both Cargo lockfiles
 at `3.0.0`. The root `package-lock.json` must record the desktop package at
 the same version. Run the default bundled-mode Clippy and tests, frontend
-build, and `npm run package:release --workspace=@opensymphony/desktop --
---dry-run` before tagging or publishing. The dry run checks desktop version
-parity without writing release assets.
+build, and the desktop parity guard before tagging or publishing:
+
+```bash
+npm run package:release --workspace=@opensymphony/desktop -- --dry-run
+```
+
+The dry run checks desktop version parity without writing release assets.
 
 ## 2.11 Rust toolchain boundary
 
