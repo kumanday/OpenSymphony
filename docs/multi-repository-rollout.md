@@ -92,18 +92,16 @@ exercise failed-check rework, not an automated PR-review webhook. Review of this
 repository's PR follows the configured OpenHands or Codex integration; the fixture
 does not require a separate reviewer account. Each child calls its checked-in
 completion helper as its last action to verify the edit. The rollout controller
-requires the durable successful, stopped run receipt and the orchestrator's
-continuation outcome before moving the issue to `Human Review`; the isolated
-two-minute scheduler tick gives this transition time to land before any
-continuation dispatch. The controller then publishes child edits from a fresh
-checkout using its GitHub credential; the worker never receives the checkout
-credential. Resource names are recorded
-before creation and reconciled during teardown if a provider response is lost.
-The script tears down processes,
-branches, pull requests,
-issues, project, repositories, port ownership, credential copies, and local
-roots, then writes a teardown inventory. A missing cleanup receipt fails the
-gate.
+requires a durable successful, stopped run receipt before moving the issue to
+`Human Review`; the isolated two-minute scheduler tick gives this transition
+time to land before any continuation dispatch. Alpha's rework requires a new
+successful receipt after the initial failed-check run. The controller publishes
+child edits from a fresh checkout using its GitHub credential; the worker never
+receives the checkout credential. Resource names are recorded before creation
+and reconciled during teardown if a provider response is lost. The script tears
+down processes, branches, pull requests, issues, project, repositories, port
+ownership, credential copies, and local roots, then writes a teardown inventory.
+A missing cleanup receipt fails the gate.
 
 The active project set in that generated config contains only the disposable
 Linear project and the three disposable repositories. The release evidence must

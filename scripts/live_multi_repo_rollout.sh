@@ -55,7 +55,7 @@ if [[ ! "${MAX_SECONDS}" =~ ^[1-9][0-9]*$ || ! "${CLEANUP_MAX_SECONDS}" =~ ^[1-9
   exit 1
 fi
 
-for command in cargo codex curl git gh jq lsof python3 shasum; do
+for command in cargo codex git gh jq lsof python3 shasum; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "Missing required command: ${command}" >&2
     exit 1
@@ -783,17 +783,6 @@ pr_by_branch() {
          state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}'
 }
 
-child_continuation_ready() {
-  local identifier="$1"
-  deadline_command curl --silent --show-error --fail --max-time 5 \
-    "http://127.0.0.1:${PORT}/api/v1/snapshot" |
-    jq -e --arg identifier "${identifier}" '
-      .snapshot.issues | any(.[];
-        .identifier == $identifier and
-        (.tracker_state == "Todo" or .tracker_state == "Rework") and
-        .runtime_state == "retry_queued" and .last_outcome == "continued")' >/dev/null
-}
-
 publish_child_if_ready() {
   local index="$1"
   local alias=(alpha beta gamma)
@@ -811,7 +800,11 @@ publish_child_if_ready() {
     jq -e --arg id "${CHILD_IDS[index]}" \
       '.issue_id == $id and .status == "succeeded" and .harness_stopped == true' \
       "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
-    child_continuation_ready "${CHILD_IDENTIFIERS[index]}" || return 0
+    if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
+      [[ -n "${ALPHA_INITIAL_RECEIPT_RUN_ID}" ]] || return 1
+      jq -e --arg prior "${ALPHA_INITIAL_RECEIPT_RUN_ID}" \
+        '.run_id != $prior' "${checkout}/.opensymphony/run.json" >/dev/null || return 0
+    fi
   fi
   [[ -f "${checkout}/delivery.txt" && ! -L "${checkout}/delivery.txt" ]] || return 0
   [[ "$(cat "${checkout}/delivery.txt")" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
@@ -820,6 +813,9 @@ publish_child_if_ready() {
     [[ "$(cat "${checkout}/reviewed.txt" 2>/dev/null || true)" == "reviewed:${RUN_ID}" ]] || return 0
   fi
   if (( CHILD_REVIEW_TRANSITIONED[index] == 0 )); then
+    if (( index == 0 && ALPHA_REWORK_REQUIRED == 0 )); then
+      ALPHA_INITIAL_RECEIPT_RUN_ID="$(jq -er .run_id "${checkout}/.opensymphony/run.json")"
+    fi
     move_issue "${CHILD_IDS[index]}" "${HUMAN_REVIEW_STATE}"
     CHILD_REVIEW_TRANSITIONED[index]=1
   fi
@@ -882,6 +878,7 @@ declare -a CHILD_MERGED=(0 0 0)
 declare -a CHILD_REVIEW_TRANSITIONED=(0 0 0)
 ALPHA_REWORK_REQUIRED=0
 ALPHA_FAILED_SHA=""
+ALPHA_INITIAL_RECEIPT_RUN_ID=""
 PARENT_ATTACHED=0
 PARENT_DONE=0
 PARENT_MERGED=0
