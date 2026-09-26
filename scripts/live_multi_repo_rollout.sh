@@ -383,10 +383,10 @@ create_repository() {
 
 Work only in this repository. Create delivery.txt with the exact content
 delivered:${alias}:${RUN_ID} and run ./scripts/complete.sh as your last action.
-That script checks the edit and moves this issue to Human Review, so the
-orchestrator does not schedule another turn before the rollout controller
-publishes it. Leave the edit in this checkout for the controller to commit,
-push, and open the pull request. Do not perform Git or GitHub side effects.
+That script checks the edit. The rollout controller waits for your completed
+turn, moves the issue to Human Review, and publishes the edit. Leave the edit
+in this checkout for the controller to commit, push, and open the pull request.
+Do not perform Git, GitHub, or Linear side effects.
 EOF
   printf 'component=%s\n' "${alias}" > "${seed}/component.txt"
   if [[ "${alias}" == "alpha" ]]; then
@@ -513,28 +513,21 @@ for index in 0 1 2; do
 done
 record_manifest
 
-# A successful leaf leaves the active tracker set before its harness turn
-# ends, preventing the one-second continuation from replacing its run receipt.
+# The controller moves a successful leaf out of the active tracker set only
+# after its completed turn is durable, before the next scheduler retry tick.
 for index in 0 1 2; do
   alias=(alpha beta gamma)
   seed="${RESOURCE_DIR}/seeds/${alias[index]}"
-  cp "${LINEAR_HELPER}" "${seed}/scripts/linear_graphql.py"
-  cp "${LINEAR_QUERIES}/issue_move_to_state.graphql" "${seed}/scripts/issue_move_to_state.graphql"
   cat > "${seed}/scripts/complete.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "\$(dirname -- "\$0")/.."
 ./scripts/check.sh
-python3 scripts/linear_graphql.py \
-  --query-file scripts/issue_move_to_state.graphql \
-  --variables '{"id":"${CHILD_IDS[index]}","stateId":"${HUMAN_REVIEW_STATE}"}' \
-  | jq -e --arg id "${CHILD_IDS[index]}" \
-      '.data.issueUpdate.success == true and .data.issueUpdate.issue.id == \$id and .data.issueUpdate.issue.state.name == "Human Review"' >/dev/null
 EOF
   chmod +x "${seed}/scripts/complete.sh"
-  git -C "${seed}" add scripts/complete.sh scripts/linear_graphql.py scripts/issue_move_to_state.graphql
+  git -C "${seed}" add scripts/complete.sh
   git -C "${seed}" -c user.name='OpenSymphony Live Gate' -c user.email='live-gate@invalid.example' \
-    commit -m 'Add leaf completion transition' >/dev/null
+    commit -m 'Add leaf completion check' >/dev/null
   git -C "${seed}" push origin develop >/dev/null
 done
 
@@ -654,7 +647,7 @@ scheduler:
     Rework: 1
   retry:
     max_attempts: 2
-  poll_interval_ms: 2000
+  poll_interval_ms: 30000
   max_turns: 8
   max_retry_backoff_ms: 10000
   stall_timeout_ms: 300000
@@ -790,14 +783,15 @@ pr_by_branch() {
          state:(if .merged_at then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end)}'
 }
 
-child_completed_for_review() {
+child_continuation_ready() {
   local identifier="$1"
   deadline_command curl --silent --show-error --fail --max-time 5 \
     "http://127.0.0.1:${PORT}/api/v1/snapshot" |
     jq -e --arg identifier "${identifier}" '
       .snapshot.issues | any(.[];
-        .identifier == $identifier and .tracker_state == "Human Review" and
-        .runtime_state == "completed" and .last_outcome == "completed")' >/dev/null
+        .identifier == $identifier and
+        (.tracker_state == "Todo" or .tracker_state == "Rework") and
+        .runtime_state == "retry_queued" and .last_outcome == "continued")' >/dev/null
 }
 
 publish_child_if_ready() {
@@ -813,13 +807,23 @@ publish_child_if_ready() {
     checkout="${candidate}"
   done
   [[ -n "${checkout}" ]] || return 0
-  child_completed_for_review "${CHILD_IDENTIFIERS[index]}" || return 0
+  if (( CHILD_REVIEW_TRANSITIONED[index] == 0 )); then
+    jq -e --arg id "${CHILD_IDS[index]}" '.issue_id == $id and .status == "succeeded"' \
+      "${checkout}/.opensymphony/run.json" >/dev/null 2>&1 || return 0
+    child_continuation_ready "${CHILD_IDENTIFIERS[index]}" || return 0
+  fi
   [[ -f "${checkout}/delivery.txt" && ! -L "${checkout}/delivery.txt" ]] || return 0
   [[ "$(cat "${checkout}/delivery.txt")" == "delivered:${alias[index]}:${RUN_ID}" ]] || return 0
   if (( index == 0 && ALPHA_REWORK_REQUIRED == 1 )); then
     [[ -f "${checkout}/reviewed.txt" && ! -L "${checkout}/reviewed.txt" ]] || return 0
     [[ "$(cat "${checkout}/reviewed.txt" 2>/dev/null || true)" == "reviewed:${RUN_ID}" ]] || return 0
-  elif pr_by_branch "${repository}" "${branch}" >/dev/null 2>&1; then
+  fi
+  if (( CHILD_REVIEW_TRANSITIONED[index] == 0 )); then
+    move_issue "${CHILD_IDS[index]}" "${HUMAN_REVIEW_STATE}"
+    CHILD_REVIEW_TRANSITIONED[index]=1
+  fi
+  if (( index != 0 || ALPHA_REWORK_REQUIRED == 0 )) &&
+    pr_by_branch "${repository}" "${branch}" >/dev/null 2>&1; then
     return 0
   fi
   publisher="${RESOURCE_DIR}/seeds/publisher-${alias[index]}"
@@ -874,6 +878,7 @@ checks_have_failed() {
 
 declare -a CHILD_ATTACHED=(0 0 0)
 declare -a CHILD_MERGED=(0 0 0)
+declare -a CHILD_REVIEW_TRANSITIONED=(0 0 0)
 ALPHA_REWORK_REQUIRED=0
 ALPHA_FAILED_SHA=""
 PARENT_ATTACHED=0
@@ -947,7 +952,6 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
     pr_sha="$(jq -er .headRefOid <<<"${pr}")"
     if (( CHILD_ATTACHED[index] == 0 )); then
       attach_pr "${CHILD_IDS[index]}" "${pr_url}" "${pr_title}"
-      move_issue "${CHILD_IDS[index]}" "${HUMAN_REVIEW_STATE}"
       CHILD_ATTACHED[index]=1
     fi
 
@@ -959,6 +963,7 @@ while (( SECONDS - START_SECONDS < MAX_SECONDS )); do
       ALPHA_FAILED_SHA="${pr_sha}"
       update_issue_title "${CHILD_IDS[index]}" "${SLUG}-alpha: CI failed; create reviewed.txt containing reviewed:${RUN_ID}"
       move_issue "${CHILD_IDS[index]}" "${REWORK_STATE}"
+      CHILD_REVIEW_TRANSITIONED[index]=0
       feedback_vars="${RUN_DIR}/alpha-rework-comment.json"
       write_json "${feedback_vars}" --arg id "${CHILD_IDS[index]}" \
         --arg body "The fixture-check GitHub Actions job failed on this PR. Read its log, create reviewed.txt containing reviewed:${RUN_ID}, rerun ./scripts/check.sh, and leave the edit in this checkout for the rollout controller to publish to the same PR branch." \
