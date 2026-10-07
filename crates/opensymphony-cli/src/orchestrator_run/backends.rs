@@ -25,10 +25,10 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_devin::{
-    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_EVIDENCE_DIR_NAME, DevinCloudClient,
-    DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinMode,
-    DevinRemoteWorkspaceBinding, DevinRunOptions, DevinRunOutcome, DevinRunReport,
-    DevinSessionOptions, DevinSessionRunner, DevinStopOutcome, devin_event_payload,
+    DEFAULT_DEVIN_HEARTBEAT_INTERVAL, DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT,
+    DEVIN_EVIDENCE_DIR_NAME, DevinCloudClient, DevinCloudConfig, DevinEvidenceCollector,
+    DevinEvidenceLimits, DevinMode, DevinRemoteWorkspaceBinding, DevinRunOptions, DevinRunOutcome,
+    DevinRunReport, DevinSessionOptions, DevinSessionRunner, DevinStopOutcome, devin_event_payload,
     devin_event_summary, session_create_request, session_created_event, status_event,
 };
 use crate::opensymphony_domain::{
@@ -11020,7 +11020,10 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
     collector.record(&created_event);
     publish_devin_event(updates_tx, worker_id, &created_event);
 
-    let runner = DevinSessionRunner::new(client.clone(), devin_run_options());
+    let runner = DevinSessionRunner::new(
+        client.clone(),
+        devin_run_options(workflow.config.agent.stall_timeout_ms),
+    );
     let report = runner
         .follow(&created.session_id, |event| {
             collector.record(&event);
@@ -11312,12 +11315,22 @@ fn devin_remote_binding(
 /// polled until Devin suspends it for inactivity: that suspension would be
 /// reported as a stall and retried with a replacement session even though the
 /// original one may already have delivered its work.
-fn devin_run_options() -> DevinRunOptions {
+///
+/// Devin emits no message or status change while it works through a long
+/// step, so the runner publishes a liveness event for an executing session
+/// well inside the scheduler's stall window; otherwise that silence would be
+/// aborted as a stalled worker and replaced with a fresh session.
+fn devin_run_options(stall_timeout_ms: Option<u64>) -> DevinRunOptions {
+    let heartbeat_interval = match stall_timeout_ms {
+        Some(stall) => Duration::from_millis(stall / 3).min(DEFAULT_DEVIN_HEARTBEAT_INTERVAL),
+        None => DEFAULT_DEVIN_HEARTBEAT_INTERVAL,
+    };
     DevinRunOptions {
         stop_when_waiting_on_operator: true,
         max_duration: None,
         collect_attachments: true,
         message_page_size: 100,
+        heartbeat_interval: Some(heartbeat_interval.max(Duration::from_secs(1))),
     }
 }
 
@@ -16326,10 +16339,23 @@ mod tests {
 
     #[test]
     fn devin_run_options_settle_when_devin_waits_on_its_operator() {
-        let options = devin_run_options();
+        let options = devin_run_options(None);
         assert!(options.stop_when_waiting_on_operator);
         assert!(options.collect_attachments);
         assert_eq!(options.max_duration, None);
+        assert_eq!(options.heartbeat_interval, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn devin_run_options_heartbeat_fits_inside_the_stall_window() {
+        let options = devin_run_options(Some(300_000));
+        assert_eq!(options.heartbeat_interval, Some(Duration::from_secs(60)));
+
+        let options = devin_run_options(Some(30_000));
+        assert_eq!(options.heartbeat_interval, Some(Duration::from_secs(10)));
+
+        let options = devin_run_options(Some(1_000));
+        assert_eq!(options.heartbeat_interval, Some(Duration::from_secs(1)));
     }
 
     #[test]

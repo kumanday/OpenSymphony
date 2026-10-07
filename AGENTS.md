@@ -215,6 +215,10 @@ Devin hardening rules that must hold for any change to this harness:
   just a configured organization id; a failed `create_session` is reconciled
   through the correlation tag before it is retried.
 - Parent issues with sub-issues are not routed to remote-only harnesses.
+- A quiet, executing session is not a stalled one: the poll loop publishes a
+  `session.heartbeat` liveness event inside the scheduler stall window so a
+  long Devin step is never aborted and replaced as a stall. Heartbeats are
+  orchestrator observations and stay out of the evidence journal.
 
 Changes to the route or the client must keep the opt-in live suite
 (`OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live --

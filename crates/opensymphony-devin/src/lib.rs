@@ -673,6 +673,11 @@ impl SessionResponse {
                 .as_ref()
                 .is_some_and(DevinStatusDetail::is_inactivity)
     }
+
+    /// Devin is still executing: not settled and not parked on its operator.
+    pub fn is_executing(&self) -> bool {
+        !self.is_settled() && !self.is_waiting_on_operator()
+    }
 }
 
 /// `SessionMessage` from the Devin v3 OpenAPI document.
@@ -1757,6 +1762,9 @@ pub enum NormalizedDevinEventKind {
     SessionFailed,
     SessionSuspended,
     SessionTerminated,
+    /// Orchestrator-side liveness observation: the polled session is still
+    /// executing but produced no new message or status since the last event.
+    SessionHeartbeat,
     Unknown,
 }
 
@@ -1778,6 +1786,10 @@ pub struct NormalizedDevinEvent {
 /// with the full raw JSON so future Devin schema additions replay unchanged.
 /// `event_type` of a normalized message authored by Devin itself.
 pub const DEVIN_MESSAGE_EVENT_KIND: &str = "session.message.devin";
+/// `event_type` of the liveness event emitted while a quiet session executes.
+pub const DEVIN_HEARTBEAT_EVENT_KIND: &str = "session.heartbeat";
+/// Default spacing between liveness events for a quiet, executing session.
+pub const DEFAULT_DEVIN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn normalize_session_message(
     session_id: &str,
@@ -1874,6 +1886,35 @@ pub fn session_created_event(session: &SessionResponse) -> NormalizedDevinEvent 
     }
 }
 
+/// Liveness event for a session that keeps executing without new output.
+///
+/// Devin reports neither a message nor a status change while it works through
+/// a long tool call, so a polling observer would otherwise go silent for as
+/// long as the task takes; the scheduler's activity-based stall policy would
+/// read that silence as a hung worker. The raw payload is the session snapshot
+/// the observation was made from, not a Devin-authored event.
+pub fn heartbeat_event(session: &SessionResponse) -> NormalizedDevinEvent {
+    let status = match session.status_detail.as_ref() {
+        Some(detail) => format!("{}:{}", session.status.as_str(), detail.as_str()),
+        None => session.status.as_str().to_owned(),
+    };
+    NormalizedDevinEvent {
+        kind: NormalizedDevinEventKind::SessionHeartbeat,
+        event_type: DEVIN_HEARTBEAT_EVENT_KIND.into(),
+        event_id: None,
+        session_id: Some(session.session_id.clone()),
+        timestamp: Some(session.updated_at.to_string()),
+        message: None,
+        status: Some(status),
+        raw: json!({
+            "status": session.status.as_str(),
+            "status_detail": session.status_detail.as_ref().map(DevinStatusDetail::as_str),
+            "acus_consumed": session.acus_consumed,
+            "updated_at": session.updated_at,
+        }),
+    }
+}
+
 /// Tracks the message cursor and last observed status for one polled session.
 ///
 /// Messages are paginated by `end_cursor`, but the cursor is only advanced
@@ -1955,6 +1996,10 @@ pub fn devin_event_summary(event: &NormalizedDevinEvent) -> String {
         NormalizedDevinEventKind::SessionFailed => "Devin session errored".into(),
         NormalizedDevinEventKind::SessionSuspended => "Devin session was suspended".into(),
         NormalizedDevinEventKind::SessionTerminated => "Devin session terminated".into(),
+        NormalizedDevinEventKind::SessionHeartbeat => match event.status.as_deref() {
+            Some(status) => format!("Devin session still executing ({status})"),
+            None => "Devin session still executing".into(),
+        },
         NormalizedDevinEventKind::Unknown => {
             format!("Unknown Devin event `{}`", event.event_type)
         }
@@ -2101,6 +2146,9 @@ pub struct DevinRunOptions {
     pub collect_attachments: bool,
     /// Page size for message polling.
     pub message_page_size: u32,
+    /// Emit a [`heartbeat_event`] when an executing session has produced no
+    /// event for this long; `None` disables liveness events.
+    pub heartbeat_interval: Option<Duration>,
 }
 
 impl Default for DevinRunOptions {
@@ -2110,6 +2158,7 @@ impl Default for DevinRunOptions {
             max_duration: None,
             collect_attachments: true,
             message_page_size: 100,
+            heartbeat_interval: Some(DEFAULT_DEVIN_HEARTBEAT_INTERVAL),
         }
     }
 }
@@ -2153,18 +2202,35 @@ impl DevinSessionRunner {
         mut observer: impl FnMut(NormalizedDevinEvent),
     ) -> Result<DevinRunReport, DevinClientError> {
         let started = Instant::now();
+        let mut last_event_at = started;
         let mut cursor = DevinMessageCursor::new();
 
         loop {
             let session = self.client.get_session(devin_id).await?;
-            self.drain_messages(devin_id, &mut cursor, &mut observer)
+            let drained = self
+                .drain_messages(devin_id, &mut cursor, &mut observer)
                 .await?;
-            if let Some(event) = cursor.ingest_status(&session) {
-                observer(event);
+            let status_changed = match cursor.ingest_status(&session) {
+                Some(event) => {
+                    observer(event);
+                    true
+                }
+                None => false,
+            };
+            if drained > 0 || status_changed {
+                last_event_at = Instant::now();
             }
 
             if let Some(outcome) = self.settled_outcome(&session) {
                 return self.report(session, outcome).await;
+            }
+
+            if let Some(interval) = self.options.heartbeat_interval
+                && session.is_executing()
+                && last_event_at.elapsed() >= interval
+            {
+                observer(heartbeat_event(&session));
+                last_event_at = Instant::now();
             }
 
             if let Some(max_duration) = self.options.max_duration
@@ -2233,7 +2299,8 @@ impl DevinSessionRunner {
         devin_id: &str,
         cursor: &mut DevinMessageCursor,
         observer: &mut impl FnMut(NormalizedDevinEvent),
-    ) -> Result<(), DevinClientError> {
+    ) -> Result<usize, DevinClientError> {
+        let mut emitted = 0;
         loop {
             let page = self
                 .client
@@ -2245,12 +2312,13 @@ impl DevinSessionRunner {
                 .await?;
             let previous = cursor.cursor().map(str::to_owned);
             for event in cursor.ingest_messages(devin_id, &page) {
+                emitted += 1;
                 observer(event);
             }
             // A page that reports more data but does not advance the cursor
             // would otherwise be requested forever.
             if !page.has_next_page || cursor.cursor().map(str::to_owned) == previous {
-                return Ok(());
+                return Ok(emitted);
             }
         }
     }
@@ -2428,7 +2496,12 @@ impl DevinEvidenceCollector {
     }
 
     /// Records one normalized event for the journal written at settle time.
+    /// Heartbeats are orchestrator-side observations, not remote events, and
+    /// stay out of the journal.
     pub fn record(&mut self, event: &NormalizedDevinEvent) {
+        if event.kind == NormalizedDevinEventKind::SessionHeartbeat {
+            return;
+        }
         self.events.push(devin_event_payload(event));
     }
 

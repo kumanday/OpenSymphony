@@ -337,7 +337,12 @@ capability to `available: true`:
 Remaining limitations (advertised as capability `feature_gaps`, not blockers):
 
 - Runtime events arrive by cursor-paginated HTTPS polling; there is no push
-  stream, so event latency is bounded by `poll_interval_ms`.
+  stream, so event latency is bounded by `poll_interval_ms`. While an
+  executing session produces no new message or status the route publishes a
+  `session.heartbeat` liveness event (every third of the scheduler stall
+  timeout, at most once a minute) so the stall policy does not abort and
+  replace a session that is merely busy; heartbeats are scheduler activity,
+  not journaled evidence.
 - There is no mid-run interrupt in the v3 contract: cancellation terminates and
   archives the session rather than stopping one turn.
 - Pause/resume and approval flows are not exposed by the v3 session contract.

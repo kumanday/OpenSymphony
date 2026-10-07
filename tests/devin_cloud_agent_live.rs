@@ -139,6 +139,7 @@ async fn devin_live_session_lifecycle() {
             max_duration: Some(Duration::from_secs(240)),
             collect_attachments: true,
             message_page_size: 100,
+            ..DevinRunOptions::default()
         },
     );
 
@@ -244,6 +245,7 @@ async fn devin_live_poll_timeout_terminates_the_remote_session() {
             max_duration: Some(Duration::from_secs(10)),
             collect_attachments: false,
             message_page_size: 100,
+            ..DevinRunOptions::default()
         },
     );
 

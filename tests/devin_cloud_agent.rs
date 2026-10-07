@@ -9,19 +9,20 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use opensymphony::opensymphony_devin::{
-    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_MAX_OPERATOR_TAGS,
-    DEVIN_MAX_SESSION_TAGS, DEVIN_REMOTE_CONTAINMENT, DEVIN_UNDISCRIMINATED_EVENT_KIND,
-    DevinClientError, DevinCloudAdapter, DevinCloudClient, DevinCloudConfig,
-    DevinEvidenceCollector, DevinEvidenceLimits, DevinHttpMethod, DevinMessageCursor, DevinMode,
-    DevinOperation, DevinProblemDetail, DevinRemoteWorkspaceBinding, DevinRequest,
-    DevinRequestBuilder, DevinRunOutcome, DevinRunReport, DevinSelfResponse, DevinSessionOptions,
+    DEFAULT_DEVIN_HEARTBEAT_INTERVAL, DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT,
+    DEVIN_HEARTBEAT_EVENT_KIND, DEVIN_MAX_OPERATOR_TAGS, DEVIN_MAX_SESSION_TAGS,
+    DEVIN_REMOTE_CONTAINMENT, DEVIN_UNDISCRIMINATED_EVENT_KIND, DevinClientError,
+    DevinCloudAdapter, DevinCloudClient, DevinCloudConfig, DevinEvidenceCollector,
+    DevinEvidenceLimits, DevinHttpMethod, DevinMessageCursor, DevinMode, DevinOperation,
+    DevinProblemDetail, DevinRemoteWorkspaceBinding, DevinRequest, DevinRequestBuilder,
+    DevinRunOptions, DevinRunOutcome, DevinRunReport, DevinSelfResponse, DevinSessionOptions,
     DevinSessionStatus, DevinStatusDetail, DevinStopOutcome, DevinTenancy,
     NormalizedDevinEventKind, PaginatedResponse, SecretResponse, SessionAttachment, SessionMessage,
     SessionResponse, SessionsQueryParams, attachment_download_url, devin_event_summary,
-    ensure_session_tenant, evidence_file_name, normalize_devin_event, normalize_session_message,
-    normalized_event_to_journal_record, pull_request_urls_in_text, reconcile_tenant,
-    rejected_termination_outcome, resolve_secret_references, select_reconciled_session,
-    session_create_request, session_created_event,
+    ensure_session_tenant, evidence_file_name, heartbeat_event, normalize_devin_event,
+    normalize_session_message, normalized_event_to_journal_record, pull_request_urls_in_text,
+    reconcile_tenant, rejected_termination_outcome, resolve_secret_references,
+    select_reconciled_session, session_create_request, session_created_event,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
@@ -1168,6 +1169,50 @@ fn rejected_termination_counts_as_stopped_only_for_terminal_sessions() {
         None
     );
     assert_eq!(rejected_termination_outcome(&session("new", None)), None);
+}
+
+#[test]
+fn quiet_executing_sessions_publish_heartbeats_outside_the_evidence_journal() {
+    // Only a session that is still doing work is a liveness candidate; settled
+    // or operator-parked sessions settle the run instead.
+    assert!(session("running", Some("working")).is_executing());
+    assert!(session("claimed", None).is_executing());
+    assert!(!session("running", Some("finished")).is_executing());
+    assert!(!session("running", Some("waiting_for_user")).is_executing());
+    assert!(!session("suspended", Some("inactivity")).is_executing());
+    assert!(!session("exit", None).is_executing());
+
+    let event = heartbeat_event(&session("running", Some("working")));
+    assert_eq!(event.kind, NormalizedDevinEventKind::SessionHeartbeat);
+    assert_eq!(event.event_type, DEVIN_HEARTBEAT_EVENT_KIND);
+    assert_eq!(event.session_id.as_deref(), Some("devin-1"));
+    assert_eq!(event.status.as_deref(), Some("running:working"));
+    assert_eq!(event.raw["acus_consumed"], json!(1.5));
+    assert_eq!(event.raw["status_detail"], json!("working"));
+    assert_eq!(
+        devin_event_summary(&event),
+        "Devin session still executing (running:working)"
+    );
+    let record = normalized_event_to_journal_record("run-1", 3, &event);
+    assert_eq!(
+        record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: DEVIN_HEARTBEAT_EVENT_KIND.to_owned(),
+        }
+    );
+
+    // Heartbeats are orchestrator observations, not remote events.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut collector =
+        DevinEvidenceCollector::new(temp.path().join("evidence"), DevinEvidenceLimits::default());
+    collector.record(&session_created_event(&session("running", Some("working"))));
+    collector.record(&event);
+    assert_eq!(collector.event_count(), 1);
+
+    assert_eq!(
+        DevinRunOptions::default().heartbeat_interval,
+        Some(DEFAULT_DEVIN_HEARTBEAT_INTERVAL)
+    );
 }
 
 #[test]

@@ -993,6 +993,14 @@ than interrupting a turn, pause/resume and approvals are unavailable, the model
 is fixed at session creation through `devin_mode`, and TLS certificate pinning
 is not implemented.
 
+Devin reports no message or status change while it works through a long step,
+so the route publishes a `session.heartbeat` runtime event for a session that is
+still executing whenever it has been quiet for one third of
+`scheduler.stall_timeout_ms` (at most every 60 seconds). The scheduler's
+activity-based stall policy therefore applies to a Devin session that has
+genuinely stopped reporting, not to one that is simply busy; heartbeats appear
+on the run timeline but are not written to the `events.jsonl` evidence journal.
+
 ## Runtime Config
 
 `opensymphony init` also copies a starter `config.yaml` next to the target
