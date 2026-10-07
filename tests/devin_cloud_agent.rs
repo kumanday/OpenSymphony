@@ -15,12 +15,13 @@ use opensymphony::opensymphony_devin::{
     DevinEvidenceCollector, DevinEvidenceLimits, DevinHttpMethod, DevinMessageCursor, DevinMode,
     DevinOperation, DevinProblemDetail, DevinRemoteWorkspaceBinding, DevinRequest,
     DevinRequestBuilder, DevinRunOutcome, DevinRunReport, DevinSelfResponse, DevinSessionOptions,
-    DevinSessionStatus, DevinStatusDetail, DevinTenancy, NormalizedDevinEventKind,
-    PaginatedResponse, SecretResponse, SessionAttachment, SessionMessage, SessionResponse,
-    SessionsQueryParams, attachment_download_url, devin_event_summary, ensure_session_tenant,
-    evidence_file_name, normalize_devin_event, normalized_event_to_journal_record,
-    reconcile_tenant, resolve_secret_references, select_reconciled_session, session_create_request,
-    session_created_event,
+    DevinSessionStatus, DevinStatusDetail, DevinStopOutcome, DevinTenancy,
+    NormalizedDevinEventKind, PaginatedResponse, SecretResponse, SessionAttachment, SessionMessage,
+    SessionResponse, SessionsQueryParams, attachment_download_url, devin_event_summary,
+    ensure_session_tenant, evidence_file_name, normalize_devin_event, normalize_session_message,
+    normalized_event_to_journal_record, pull_request_urls_in_text, reconcile_tenant,
+    rejected_termination_outcome, resolve_secret_references, select_reconciled_session,
+    session_create_request, session_created_event,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
@@ -260,6 +261,11 @@ fn request_paths_match_the_vendored_v3_contract() {
             builder.delete_session("devin-1", true),
             DevinHttpMethod::Delete,
             DevinOperation::DeleteSession,
+        ),
+        (
+            builder.archive_session("devin-1"),
+            DevinHttpMethod::Post,
+            DevinOperation::ArchiveSession,
         ),
         (
             builder.list_attachments("devin-1"),
@@ -1027,6 +1033,30 @@ async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
     collector.record(&normalize_devin_event(
         json!({ "session_id": "devin-1", "unrecognized": true }),
     ));
+    let message = |event_id: &str, source: &str, text: &str| {
+        normalize_session_message(
+            &session.session_id,
+            &serde_json::from_value::<SessionMessage>(json!({
+                "event_id": event_id,
+                "source": source,
+                "message": text,
+                "created_at": 1,
+            }))
+            .expect("session message"),
+        )
+    };
+    // The API-reported PR is not repeated; a PR Devin only mentioned in a
+    // message is surfaced separately; operator text is never mined.
+    collector.record(&message(
+        "event-1",
+        "devin",
+        "Opened https://github.com/acme/api/pull/7 and https://github.com/acme/api/pull/8.",
+    ));
+    collector.record(&message(
+        "event-2",
+        "user",
+        "Please look at https://github.com/acme/api/pull/9",
+    ));
 
     let report = DevinRunReport {
         session_id: session.session_id.clone(),
@@ -1055,11 +1085,23 @@ async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
         .await
         .expect("persist");
 
-    assert_eq!(manifest.event_count, 2);
+    assert_eq!(manifest.event_count, 4);
     assert_eq!(manifest.containment, DEVIN_REMOTE_CONTAINMENT);
     assert_eq!(
         manifest.pull_request_urls,
         vec!["https://github.com/acme/api/pull/7"]
+    );
+    assert_eq!(
+        manifest.message_pull_request_urls,
+        vec!["https://github.com/acme/api/pull/8"]
+    );
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(evidence_root.join("evidence.json")).expect("evidence.json"),
+    )
+    .expect("evidence json");
+    assert_eq!(
+        on_disk["message_pull_request_urls"],
+        json!(["https://github.com/acme/api/pull/8"])
     );
     assert_eq!(manifest.acus_consumed, 1.5);
     // Downloads were disabled, so the attachment is reported as skipped rather
@@ -1068,7 +1110,7 @@ async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
     assert_eq!(manifest.skipped_attachments.len(), 1);
 
     let journal = std::fs::read_to_string(evidence_root.join("events.jsonl")).expect("journal");
-    assert_eq!(journal.lines().count(), 2);
+    assert_eq!(journal.lines().count(), 4);
     // Unknown payloads survive the round trip into local evidence.
     assert!(journal.contains("unrecognized"));
 
@@ -1085,4 +1127,74 @@ async fn evidence_persists_remote_run_artifacts_into_the_local_workspace() {
     assert_eq!(written["session_id"], json!("devin-1"));
     // Everything Devin returned stays under the orchestrator-owned root.
     assert!(evidence_root.starts_with(root.path()));
+}
+
+#[test]
+fn idle_suspension_is_treated_as_waiting_on_operator() {
+    let idle = session("suspended", Some("inactivity"));
+    assert!(idle.is_idle_suspended());
+    assert!(!idle.is_waiting_on_operator());
+    assert!(
+        idle.status_detail
+            .as_ref()
+            .is_some_and(DevinStatusDetail::is_inactivity)
+    );
+
+    let out_of_quota = session("suspended", Some("out_of_quota"));
+    assert!(!out_of_quota.is_idle_suspended());
+
+    let waiting = session("running", Some("waiting_for_user"));
+    assert!(waiting.is_waiting_on_operator());
+    assert!(!waiting.is_idle_suspended());
+    assert!(!session("running", Some("inactivity")).is_idle_suspended());
+}
+
+#[test]
+fn rejected_termination_counts_as_stopped_only_for_terminal_sessions() {
+    assert_eq!(
+        rejected_termination_outcome(&session("exit", None)),
+        Some(DevinStopOutcome::AlreadyStopped)
+    );
+    assert_eq!(
+        rejected_termination_outcome(&session("suspended", Some("inactivity"))),
+        Some(DevinStopOutcome::AlreadyStopped)
+    );
+    assert_eq!(
+        rejected_termination_outcome(&session("error", Some("error"))),
+        Some(DevinStopOutcome::AlreadyStopped)
+    );
+    assert_eq!(
+        rejected_termination_outcome(&session("running", Some("working"))),
+        None
+    );
+    assert_eq!(rejected_termination_outcome(&session("new", None)), None);
+}
+
+#[test]
+fn archived_exit_sessions_decode_as_closed_rather_than_finished() {
+    let mut value = session_json();
+    value["status"] = json!("exit");
+    value["status_detail"] = Value::Null;
+    value["is_archived"] = json!(true);
+    let closed: SessionResponse = serde_json::from_value(value).expect("session decodes");
+    assert!(closed.is_archived);
+    assert!(closed.status.is_terminal());
+    assert!(!closed.is_waiting_on_operator());
+}
+
+#[test]
+fn pull_request_urls_are_extracted_from_message_text_only_when_well_formed() {
+    let text = "PR is open: https://github.com/acme/api/pull/52.\n\
+        See (https://gitlab.com/acme/api/-/merge_requests/3) and \
+        <https://github.com/acme/api/pull/52?diff=split#issuecomment-1>; \
+        not https://github.com/acme/api/pull/abc, not https://github.com/acme/api/issues/5, \
+        not http://github.com/acme/api/pull/6, not github.com/acme/api/pull/7";
+    assert_eq!(
+        pull_request_urls_in_text(text),
+        vec![
+            "https://github.com/acme/api/pull/52",
+            "https://gitlab.com/acme/api/-/merge_requests/3",
+        ]
+    );
+    assert!(pull_request_urls_in_text("no links here").is_empty());
 }

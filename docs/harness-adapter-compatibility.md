@@ -184,9 +184,11 @@ Certificate pinning is **not** implemented.
 Settled runs write `session.json`, `events.jsonl`, sanitized `attachments/`, and
 `evidence.json` under `<issue-workspace>/.opensymphony/devin/<run-id>`. The
 manifest records session id and URL, outcome, status and status detail, ACU
-usage, pull-request URLs, normalized event count, stored and skipped
-attachments, structured output, and the `devin_owned_remote_workspace`
-containment marker. Attachment downloads must match the authenticated API
+usage, pull-request URLs (`pull_request_urls` from the API's
+`SessionResponse.pull_requests`, plus `message_pull_request_urls` for
+`/pull/<n>` or `/merge_requests/<n>` URLs that only appear in Devin's messages),
+normalized event count, stored and skipped attachments, structured output, and
+the `devin_owned_remote_workspace` containment marker. Attachment downloads must match the authenticated API
 origin, are bounded to 25 MiB each and 50 per run (both `Content-Length` and
 decoded body are checked), and land under sanitized names that cannot escape the
 evidence directory. A failed download is recorded as a skipped attachment. A
@@ -232,15 +234,30 @@ launch, so cancellation and restart recovery can always find the live session.
 If termination after a polling failure fails, the route keeps the cleanup guard
 armed and settles as `CancelFailed`, which does not retry, rather than as an
 ordinary failure that would start a second session while the first still bills.
-A session waiting for operator input keeps its worker and polling loop active.
-The operator answers in Devin, and OpenSymphony follows that session through
-completion and imports the final evidence; OpenSymphony itself does not forward
+A session that stops to wait for operator input (`waiting_for_user`,
+`waiting_for_approval`), or that Devin has already suspended for `inactivity`
+while waiting, settles the run as the non-retrying `Detached` outcome: the
+session stays alive and bound, its journal (including any pull request URL
+Devin reported in a message) is imported as evidence, and the operator answers
+in the Devin console. Polling through that state is not an option: Devin
+suspends an unanswered session within minutes, and a suspension would otherwise
+be reported as a stall and retried with a replacement session that repeats work
+the first one may already have delivered. OpenSymphony itself does not forward
 operator messages, which is why the capability reports
-`send_user_message: false`. A configured scheduler stall timeout still applies
-to a session that has no new runtime activity. For every other outcome the
+`send_user_message: false`. An `exit` session that is also archived was closed
+by a terminate request or the console rather than by Devin finishing, and
+settles as `Cancelled`. For every other outcome the
 cleanup guard stays armed until the local evidence is durable: an evidence
 import failure archives the settled session (awaited) before the retryable
 failure is reported, and keeps `CancelFailed` ownership if even that fails.
+Every stop path (interrupt, worker abort, terminal cleanup, shutdown) goes
+through `DevinCloudClient::stop_session`: Devin rejects `DELETE` for a session
+that has already exited (`400 Devin session already exited`), so a rejected
+termination is re-checked against the session's current status, and a session
+that is already terminal counts as stopped (and is archived if it was not),
+while a missing session (`404`) is treated the same way. Only a session that is
+still live after a rejected termination keeps the error, and therefore keeps
+the execution or workspace retained.
 
 Parent issues with sub-issues are not routed to Devin. Parent execution roots,
 shared child worktrees, repair/merge, and the orchestrator-owned final

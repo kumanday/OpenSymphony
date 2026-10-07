@@ -10431,6 +10431,60 @@ async fn terminal_recovery_honors_failed_workspace_retention() {
 }
 
 #[tokio::test]
+async fn terminal_recovery_stops_a_retried_in_flight_run_before_workspace_removal() {
+    let recovered_worker_id =
+        WorkerId::new("worker-terminal-retried").expect("worker id should be valid");
+    let recovered_workspace = workspace_record("COE-275", "/tmp/recovered/COE-275");
+    let tracker = FakeTracker {
+        terminal: vec![tracker_issue("lin-275", "COE-275", "Done", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            terminal_worker_outcome: None,
+            issue: normalized_issue("lin-275", "COE-275", "In Progress"),
+            workspace: recovered_workspace.clone(),
+            successful_run: false,
+            cancelled_run: false,
+            completed_run: false,
+            had_in_flight_run: true,
+            pending_retry: false,
+            normal_retry_count: 2,
+            retry_scheduled_at: None,
+            retry_due_at: None,
+            retry_reason: None,
+            retry_error: None,
+            harness_kind: Some("devin_cloud_agent".to_string()),
+            interrupt_reason: None,
+            recovered_run: Some(RecoveredRun {
+                worker_id: recovered_worker_id.clone(),
+                conversation: conversation(&recovered_worker_id),
+                normal_retry_count: 2,
+                repository_binding: None,
+            }),
+        }],
+        records: HashMap::from([("lin-275".to_string(), recovered_workspace)]),
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("a retried in-flight run on a terminal issue must recover");
+
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(scheduler.worker().aborted[0].0, "worker-terminal-retried");
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::BindingSuperseded
+    );
+    assert_eq!(scheduler.workspace().cleaned.len(), 1);
+    assert!(scheduler.worker().launches.is_empty());
+}
+
+#[tokio::test]
 async fn terminal_recovery_preserves_cancelled_workspace_policy() {
     let recovered_workspace = workspace_record("COE-275", "/tmp/recovered/COE-275");
     let tracker = FakeTracker {

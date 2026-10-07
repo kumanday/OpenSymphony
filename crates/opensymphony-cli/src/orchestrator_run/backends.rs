@@ -25,11 +25,11 @@ use crate::opensymphony_codex::{
     turn_status,
 };
 use crate::opensymphony_devin::{
-    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_EVIDENCE_DIR_NAME, DevinClientError,
-    DevinCloudClient, DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinMode,
+    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_EVIDENCE_DIR_NAME, DevinCloudClient,
+    DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinMode,
     DevinRemoteWorkspaceBinding, DevinRunOptions, DevinRunOutcome, DevinRunReport,
-    DevinSessionOptions, DevinSessionRunner, devin_event_payload, devin_event_summary,
-    session_create_request, session_created_event, status_event,
+    DevinSessionOptions, DevinSessionRunner, DevinStopOutcome, devin_event_payload,
+    devin_event_summary, session_create_request, session_created_event, status_event,
 };
 use crate::opensymphony_domain::{
     CanonicalRepositoryId, ConversationId, ConversationMetadata, HarnessInterruptReason, IssueId,
@@ -5869,13 +5869,8 @@ impl RuntimeWorkerBackend {
             Err(_) => Vec::new(),
         };
         for (session_id, client) in tracked {
-            match timeout(
-                DEVIN_TERMINATION_TIMEOUT,
-                client.delete_session(&session_id, true),
-            )
-            .await
-            {
-                Ok(Ok(())) => {
+            match timeout(DEVIN_TERMINATION_TIMEOUT, client.stop_session(&session_id)).await {
+                Ok(Ok(_)) => {
                     tracing::info!(
                         session_id,
                         "terminated and archived devin session before releasing its worker"
@@ -10623,15 +10618,11 @@ async fn terminate_devin_session_for_cleanup(
         .map_err(|error| {
             format!("devin tenant binding failed while stopping `{session_id}`: {error}")
         })?;
-    match client.delete_session(session_id, true).await {
-        Ok(()) => Ok(()),
-        // An already-deleted session is the state cleanup wants; retaining the
-        // workspace forever over it would leak local state instead.
-        Err(DevinClientError::Status { status: 404, .. }) => Ok(()),
-        Err(error) => Err(format!(
-            "devin session `{session_id}` could not be terminated: {error}"
-        )),
-    }
+    client
+        .stop_session(session_id)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("devin session `{session_id}` could not be terminated: {error}"))
 }
 
 fn conversation_manifest_is_devin(manifest: &IssueConversationManifest) -> bool {
@@ -10783,12 +10774,19 @@ impl DevinSessionGuard {
 
 impl Drop for DevinSessionGuard {
     fn drop(&mut self) {
-        if let Ok(mut sessions) = self.registry.lock() {
-            sessions.remove(&self.session_id);
-        }
+        // `abort_worker` and `shutdown` untrack a session once they have
+        // terminated it; a guard dropped after that has nothing left to stop.
+        let still_tracked = self
+            .registry
+            .lock()
+            .map(|mut sessions| sessions.remove(&self.session_id).is_some())
+            .unwrap_or(true);
         let Some(client) = self.client.take() else {
             return;
         };
+        if !still_tracked {
+            return;
+        }
         // `drop` cannot await. The guarantees live elsewhere: `abort_worker`
         // and `shutdown` terminate tracked sessions *before* aborting the task,
         // and the conversation manifest keeps the binding so the pre-creation
@@ -10801,7 +10799,7 @@ impl Drop for DevinSessionGuard {
         );
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = client.delete_session(&session_id, true).await {
+                if let Err(error) = client.stop_session(&session_id).await {
                     tracing::warn!(
                         session_id,
                         error = %error,
@@ -11007,15 +11005,7 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
     collector.record(&created_event);
     publish_devin_event(updates_tx, worker_id, &created_event);
 
-    let runner = DevinSessionRunner::new(
-        client.clone(),
-        DevinRunOptions {
-            stop_when_waiting_on_operator: false,
-            max_duration: None,
-            collect_attachments: true,
-            message_page_size: 100,
-        },
-    );
+    let runner = DevinSessionRunner::new(client.clone(), devin_run_options());
     let report = runner
         .follow(&created.session_id, |event| {
             collector.record(&event);
@@ -11028,8 +11018,8 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
             // Polling gave up (timeout, transport failure) while the remote
             // session is still live, so it has to be stopped explicitly rather
             // than left burning ACUs in Devin's cloud.
-            match client.delete_session(&created.session_id, true).await {
-                Ok(()) => {
+            match client.stop_session(&created.session_id).await {
+                Ok(_) => {
                     guard.disarm();
                     return Err(format!(
                         "devin session polling failed: {error} (remote session terminated)"
@@ -11066,7 +11056,7 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
         // A suspended session still exists remotely; stop it before the
         // scheduler is allowed to start a replacement, and before evidence
         // import gets the chance to fail with the session still alive.
-        if let Err(stop_error) = client.delete_session(&created.session_id, true).await {
+        if let Err(stop_error) = client.stop_session(&created.session_id).await {
             return Ok(DevinSettlement {
                 outcome: WorkerOutcomeKind::CancelFailed,
                 summary: format!(
@@ -11111,7 +11101,7 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
             // The settled session is archived (awaited, not left to `drop`)
             // before the retryable failure is reported; if even that fails,
             // ownership stays with this run.
-            if let Err(stop_error) = client.delete_session(&created.session_id, true).await {
+            if let Err(stop_error) = client.stop_session(&created.session_id).await {
                 return Ok(DevinSettlement {
                     outcome: WorkerOutcomeKind::CancelFailed,
                     summary: format!(
@@ -11130,6 +11120,18 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
         }
     };
     guard.disarm();
+    let settlement = if manifest.message_pull_request_urls.is_empty() {
+        settlement
+    } else {
+        DevinSettlement {
+            summary: format!(
+                "{}; pull requests reported in messages: {}",
+                settlement.summary,
+                manifest.message_pull_request_urls.join(", ")
+            ),
+            ..settlement
+        }
+    };
     let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
         worker_id: worker_id.clone(),
         observed_at: now_timestamp(),
@@ -11176,8 +11178,10 @@ fn devin_settlement(report: &DevinRunReport) -> DevinSettlement {
             WorkerOutcomeKind::Detached,
             RunStatus::Paused,
             Some(format!(
-                "devin session {} is waiting on operator input and stays active: {}",
-                report.session_id, report.session_url
+                "devin session {} is waiting on operator input (status `{}`) and stays bound: {}",
+                report.session_id,
+                report.status.as_str(),
+                report.session_url
             )),
         ),
         // Reached only after the route terminated the suspended session.
@@ -11274,6 +11278,22 @@ fn devin_remote_binding(
         Some(repository.target_branch.clone()),
     )
     .map_err(|error| format!("devin repository binding rejected: {error}"))
+}
+
+/// Polling policy for a scheduler-owned Devin session.
+///
+/// A session that stops to ask its operator a question (`waiting_for_user`,
+/// `waiting_for_approval`) settles the run as `Detached` instead of being
+/// polled until Devin suspends it for inactivity: that suspension would be
+/// reported as a stall and retried with a replacement session even though the
+/// original one may already have delivered its work.
+fn devin_run_options() -> DevinRunOptions {
+    DevinRunOptions {
+        stop_when_waiting_on_operator: true,
+        max_duration: None,
+        collect_attachments: true,
+        message_page_size: 100,
+    }
 }
 
 /// Renders the workflow prompt plus the issue facts Devin needs.
@@ -12057,15 +12077,21 @@ async fn stop_devin_session(
         }
     };
 
-    client
-        .delete_session(session_id, true)
+    let outcome = client
+        .stop_session(session_id)
         .await
         .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
     Ok(WorkerInterruptAcknowledgement {
         accepted: true,
-        detail: Some(format!(
-            "devin session `{session_id}` terminated and archived"
-        )),
+        detail: Some(match outcome {
+            DevinStopOutcome::Terminated => {
+                format!("devin session `{session_id}` terminated and archived")
+            }
+            DevinStopOutcome::AlreadyStopped => {
+                format!("devin session `{session_id}` had already stopped; archived")
+            }
+            DevinStopOutcome::Missing => format!("devin session `{session_id}` no longer exists"),
+        }),
         timed_out: false,
     })
 }
@@ -16098,6 +16124,14 @@ mod tests {
         assert_eq!(addressed.api_key_env, "ORIGINAL_DEVIN_TOKEN");
         assert_eq!(addressed.session, current.session);
         assert_eq!(devin_config_for_identity(&current, None), current);
+    }
+
+    #[test]
+    fn devin_run_options_settle_when_devin_waits_on_its_operator() {
+        let options = devin_run_options();
+        assert!(options.stop_when_waiting_on_operator);
+        assert!(options.collect_attachments);
+        assert_eq!(options.max_duration, None);
     }
 
     #[test]

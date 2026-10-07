@@ -914,10 +914,20 @@ opensymphony run             # creates real sessions and consumes ACUs
 any directory. Nothing loads `.env` for you; export the variables (or
 `set -a; . ./.env`). Watch progress with `opensymphony tui`; per-run evidence
 lands under `<workspace root>/<issue>/.opensymphony/devin/<run-id>/`.
-Interrupting the orchestrator with Ctrl-C does not stop remote sessions: they
-keep running within `max_acu_limit`, and the next `opensymphony run`
-reattaches to them through the persisted binding. To stop a session, move its
-issue to a terminal tracker state; terminal cleanup terminates and archives it.
+Interrupting the orchestrator with Ctrl-C terminates and archives every
+session it is still tracking before the process exits, so a stopped daemon
+leaves no session consuming ACUs; a session that was already detached
+(waiting on its operator) is stopped by terminal cleanup once its issue
+reaches a terminal tracker state. A daemon that dies without running its
+shutdown path leaves the session alive within `max_acu_limit`; the next
+`opensymphony run` reattaches to it through the persisted binding.
+
+When Devin finishes its turn and waits for a reply (`waiting_for_user` or
+`waiting_for_approval`), the run settles as a non-retrying `Detached` outcome:
+the session stays alive and bound, its message journal (including any pull
+request URL Devin reported) is imported as evidence, and the operator continues
+the conversation in the Devin console. The orchestrator does not forward
+replies.
 
 ### What a Devin run does
 
@@ -934,7 +944,11 @@ issue to a terminal tracker state; terminal cleanup terminates and archives it.
 5. On settlement, imports evidence into the issue workspace under
    `.opensymphony/devin/<run-id>`: `session.json`, `events.jsonl`,
    `evidence.json` (outcome, status, ACU usage, pull-request URLs, structured
-   output), and downloaded attachments.
+   output), and downloaded attachments. `pull_request_urls` lists the pull
+   requests the Devin API reports; `message_pull_request_urls` lists any
+   further `/pull/<n>` URLs Devin mentioned in its messages (for example when
+   it opened the PR outside its built-in PR tool), so operators can find the
+   PR without reading `events.jsonl`.
 6. Terminates and archives the remote session on cancellation, poll timeout, or
    transport failure, so an abandoned run cannot keep burning ACUs.
 

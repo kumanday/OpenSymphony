@@ -557,6 +557,28 @@ impl DevinSessionStatus {
     }
 }
 
+/// How [`DevinCloudClient::stop_session`] left a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevinStopOutcome {
+    /// The terminate request was accepted; the session is stopped and archived.
+    Terminated,
+    /// Devin refused to terminate because the session had already reached a
+    /// terminal status; it is archived now if it was not before.
+    AlreadyStopped,
+    /// The session no longer exists.
+    Missing,
+}
+
+/// Outcome of a termination Devin rejected, decided from the session's current
+/// status: a session that is already terminal counts as stopped, anything else
+/// keeps the rejection as an error.
+pub fn rejected_termination_outcome(session: &SessionResponse) -> Option<DevinStopOutcome> {
+    session
+        .status
+        .is_terminal()
+        .then_some(DevinStopOutcome::AlreadyStopped)
+}
+
 /// `status_detail` from `SessionResponse`. Kept as a string so unlisted detail
 /// values survive decoding; the interesting ones are exposed as predicates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +598,11 @@ impl DevinStatusDetail {
     /// Devin needs operator input or an action approval before continuing.
     pub fn is_waiting_on_operator(&self) -> bool {
         matches!(self.0.as_str(), "waiting_for_user" | "waiting_for_approval")
+    }
+
+    /// Devin put the session to sleep because nobody answered it.
+    pub fn is_inactivity(&self) -> bool {
+        self.0 == "inactivity"
     }
 }
 
@@ -635,6 +662,16 @@ impl SessionResponse {
         self.status_detail
             .as_ref()
             .is_some_and(DevinStatusDetail::is_waiting_on_operator)
+    }
+
+    /// The session went to sleep waiting for a reply; it stays resumable and
+    /// is treated like a session that is still waiting on its operator.
+    pub fn is_idle_suspended(&self) -> bool {
+        self.status == DevinSessionStatus::Suspended
+            && self
+                .status_detail
+                .as_ref()
+                .is_some_and(DevinStatusDetail::is_inactivity)
     }
 }
 
@@ -802,6 +839,7 @@ pub enum DevinOperation {
     ListSessionMessages,
     SendSessionMessage,
     DeleteSession,
+    ArchiveSession,
     ListSessionAttachments,
     UpdateSessionTags,
     ListSecrets,
@@ -817,6 +855,7 @@ impl DevinOperation {
             Self::ListSessionMessages => "list_session_messages",
             Self::SendSessionMessage => "send_session_message",
             Self::DeleteSession => "delete_session",
+            Self::ArchiveSession => "archive_session",
             Self::ListSessionAttachments => "list_session_attachments",
             Self::UpdateSessionTags => "update_session_tags",
             Self::ListSecrets => "list_secrets",
@@ -964,6 +1003,16 @@ impl DevinRequestBuilder {
             operation: DevinOperation::DeleteSession,
             method: DevinHttpMethod::Delete,
             path: format!("{}?archive={archive}", self.session_path(devin_id)),
+            body: None,
+        }
+    }
+
+    /// `POST /v3/organizations/{org_id}/sessions/{devin_id}/archive`
+    pub fn archive_session(&self, devin_id: &str) -> DevinRequest {
+        DevinRequest {
+            operation: DevinOperation::ArchiveSession,
+            method: DevinHttpMethod::Post,
+            path: format!("{}/archive", self.session_path(devin_id)),
             body: None,
         }
     }
@@ -1378,6 +1427,38 @@ impl DevinCloudClient {
             .map(|_| ())
     }
 
+    pub async fn archive_session(&self, devin_id: &str) -> Result<(), DevinClientError> {
+        self.send(&self.requests()?.archive_session(devin_id))
+            .await
+            .map(|_| ())
+    }
+
+    /// Stops a session so that it no longer runs or bills: terminates and
+    /// archives it, or confirms that it already reached a terminal status.
+    ///
+    /// Devin rejects `DELETE` for a session that has already exited
+    /// (`400 Devin session already exited`), so a rejected termination is
+    /// re-checked against the session's current status before it counts as
+    /// a failure; a session that is already terminal is archived if needed.
+    pub async fn stop_session(&self, devin_id: &str) -> Result<DevinStopOutcome, DevinClientError> {
+        let rejection = match self.delete_session(devin_id, true).await {
+            Ok(()) => return Ok(DevinStopOutcome::Terminated),
+            Err(DevinClientError::Status { status: 404, .. }) => {
+                return Ok(DevinStopOutcome::Missing);
+            }
+            Err(error @ DevinClientError::Status { .. }) => error,
+            Err(error) => return Err(error),
+        };
+        let session = self.get_session(devin_id).await?;
+        let Some(outcome) = rejected_termination_outcome(&session) else {
+            return Err(rejection);
+        };
+        if !session.is_archived {
+            self.archive_session(devin_id).await?;
+        }
+        Ok(outcome)
+    }
+
     pub async fn list_attachments(
         &self,
         devin_id: &str,
@@ -1695,6 +1776,9 @@ pub struct NormalizedDevinEvent {
 ///
 /// Unrecognized sources are retained as [`NormalizedDevinEventKind::Unknown`]
 /// with the full raw JSON so future Devin schema additions replay unchanged.
+/// `event_type` of a normalized message authored by Devin itself.
+pub const DEVIN_MESSAGE_EVENT_KIND: &str = "session.message.devin";
+
 pub fn normalize_session_message(
     session_id: &str,
     message: &SessionMessage,
@@ -1875,6 +1959,46 @@ pub fn devin_event_summary(event: &NormalizedDevinEvent) -> String {
             format!("Unknown Devin event `{}`", event.event_type)
         }
     }
+}
+
+/// Extracts pull-request URLs (`.../pull/<n>` or `.../merge_requests/<n>`)
+/// from free-form message text. Only absolute `https` URLs are accepted and
+/// trailing punctuation is stripped.
+pub fn pull_request_urls_in_text(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'')
+    }) {
+        let candidate = token.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        if !candidate.starts_with("https://") {
+            continue;
+        }
+        let Ok(parsed) = Url::parse(candidate) else {
+            continue;
+        };
+        if parsed.scheme() != "https" || parsed.host_str().is_none() {
+            continue;
+        }
+        let Some(segments) = parsed.path_segments() else {
+            continue;
+        };
+        let segments = segments.collect::<Vec<_>>();
+        let is_pull_request = segments.windows(2).any(|pair| {
+            matches!(pair[0], "pull" | "merge_requests")
+                && !pair[1].is_empty()
+                && pair[1].chars().all(|c| c.is_ascii_digit())
+        });
+        if is_pull_request {
+            let mut normalized = parsed.clone();
+            normalized.set_query(None);
+            normalized.set_fragment(None);
+            let url = normalized.to_string();
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+    urls
 }
 
 pub fn devin_event_payload(event: &NormalizedDevinEvent) -> Value {
@@ -2079,7 +2203,15 @@ impl DevinSessionRunner {
     fn settled_outcome(&self, session: &SessionResponse) -> Option<DevinRunOutcome> {
         match &session.status {
             DevinSessionStatus::Error => Some(DevinRunOutcome::Failed),
+            DevinSessionStatus::Suspended
+                if self.options.stop_when_waiting_on_operator && session.is_idle_suspended() =>
+            {
+                Some(DevinRunOutcome::WaitingOnOperator)
+            }
             DevinSessionStatus::Suspended => Some(DevinRunOutcome::Suspended),
+            // An archived session was closed by someone (a terminate request,
+            // the console), not by Devin finishing the task.
+            DevinSessionStatus::Exit if session.is_archived => Some(DevinRunOutcome::Terminated),
             DevinSessionStatus::Exit => Some(DevinRunOutcome::Finished),
             _ if session
                 .status_detail
@@ -2221,7 +2353,12 @@ pub struct DevinEvidenceManifest {
     #[serde(default)]
     pub status_detail: Option<String>,
     pub acus_consumed: f64,
+    /// Pull requests reported by the Devin API (`SessionResponse.pull_requests`).
     pub pull_request_urls: Vec<String>,
+    /// Pull-request URLs Devin mentioned in its messages but that the API did
+    /// not report, e.g. when Devin opened the PR outside its built-in PR tool.
+    #[serde(default)]
+    pub message_pull_request_urls: Vec<String>,
     pub event_count: usize,
     pub attachments: Vec<DevinStoredAttachment>,
     pub skipped_attachments: Vec<DevinSkippedAttachment>,
@@ -2300,6 +2437,11 @@ impl DevinEvidenceCollector {
 
         let (attachments, skipped) = self.import_attachments(client, report).await?;
 
+        let pull_request_urls = report
+            .pull_requests
+            .iter()
+            .map(|pull_request| pull_request.pr_url.clone())
+            .collect::<Vec<_>>();
         let manifest = DevinEvidenceManifest {
             session_id: report.session_id.clone(),
             session_url: report.session_url.clone(),
@@ -2310,11 +2452,8 @@ impl DevinEvidenceCollector {
                 .as_ref()
                 .map(|detail| detail.as_str().to_owned()),
             acus_consumed: report.acus_consumed,
-            pull_request_urls: report
-                .pull_requests
-                .iter()
-                .map(|pull_request| pull_request.pr_url.clone())
-                .collect(),
+            pull_request_urls: pull_request_urls.clone(),
+            message_pull_request_urls: self.message_pull_request_urls(&pull_request_urls),
             event_count: self.events.len(),
             attachments,
             skipped_attachments: skipped,
@@ -2330,6 +2469,28 @@ impl DevinEvidenceCollector {
         .await?;
 
         Ok(manifest)
+    }
+
+    fn message_pull_request_urls(&self, reported: &[String]) -> Vec<String> {
+        let mut urls = Vec::new();
+        for event in &self.events {
+            let is_devin_message = event
+                .get("source_kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == DEVIN_MESSAGE_EVENT_KIND);
+            let Some(message) = event.get("message").and_then(Value::as_str) else {
+                continue;
+            };
+            if !is_devin_message {
+                continue;
+            }
+            for url in pull_request_urls_in_text(message) {
+                if !reported.contains(&url) && !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        urls
     }
 
     /// Downloads attachments into `attachments/`. A single failed download is

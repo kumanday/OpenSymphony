@@ -5364,6 +5364,18 @@ where
         .with_repository_binding(recovered_run.repository_binding.clone());
         let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
         execution.attach_workspace(record.workspace.clone())?;
+        if let Some(attempt) = run.attempt {
+            execution = execution.restore_retry(RetryEntry {
+                issue_id: record.issue.id.clone(),
+                identifier: record.issue.identifier.clone(),
+                attempt,
+                normal_retry_count: recovered_run.normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            })?;
+        }
         execution = execution.claim(run.clone())?.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
