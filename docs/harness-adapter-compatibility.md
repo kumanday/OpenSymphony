@@ -152,6 +152,19 @@ cleanup also skips checkout hooks after a restart. Recovery compares the
 repository identity against the live tracker binding and retains the evidence
 for a remote session whose termination is unconfirmed.
 
+Repository instructions still reach the prompt. Because there is no local
+checkout to read `instructions.path` from, the route fetches the configured file
+from the GitHub remote at the repository's target branch (`GET
+/repos/{owner}/{repo}/contents/{path}?ref=<branch>` with the checkout
+credential), strips `WORKFLOW.md` front matter through the shared
+`instruction_body` helper, bounds it to `MAX_INSTRUCTION_FILE_BYTES`, renders it
+into the `## Repository Instructions` section of `compose_terminal_prompt`, and
+records path, ref, SHA-256 and size as `repository_instructions` in
+`evidence.json`. A configured file that cannot be fetched is a retryable launch
+failure, matching the local route. The repository's agent-side steps (attaching
+the PR to the Linear issue, pushing) run inside Devin, so the secrets they need
+must be referenced through `devin.session.secret_ids`.
+
 A `--dry-run` route settles before any credential resolution or session
 creation, so it neither contacts the API nor consumes ACUs; it writes the local
 run manifest and no conversation binding.

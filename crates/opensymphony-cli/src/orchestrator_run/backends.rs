@@ -60,12 +60,12 @@ use crate::opensymphony_orchestrator::{
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
     AcpRunRoute, CheckoutRepository, CleanupConfig, HookConfig, HookDefinition, IssueDescriptor,
-    IssueLifecycleState, ParentCheckoutRequest, ParentRuntimeDescriptor, ParentRuntimeEnvelope,
-    RunDescriptor, RunManifest, RunStatus, TerminalRuntimeEnvelope, WorkspaceError,
-    WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
-    checkout_credential_environment_variables, compose_parent_continuation_prompt,
-    compose_parent_prompt, compose_terminal_prompt, environment_variable_names_equal,
-    redact_runtime_diagnostic,
+    IssueLifecycleState, MAX_INSTRUCTION_FILE_BYTES, ParentCheckoutRequest,
+    ParentRuntimeDescriptor, ParentRuntimeEnvelope, RunDescriptor, RunManifest, RunStatus,
+    TerminalRuntimeEnvelope, WorkspaceError, WorkspaceHandle, WorkspaceManager,
+    WorkspaceManagerConfig, checkout_credential_environment_variables,
+    compose_parent_continuation_prompt, compose_parent_prompt, compose_terminal_prompt,
+    environment_variable_names_equal, instruction_body, redact_runtime_diagnostic,
 };
 use async_trait::async_trait;
 use thiserror::Error;
@@ -10838,9 +10838,10 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
             .as_ref()
             .and_then(|target| target.identity.as_ref()),
     );
-    let binding = devin_remote_binding(issue, run, run_id, workspace_manager)?;
+    let repository = devin_checkout_repository(issue, run, workspace_manager)?;
+    let binding = devin_remote_binding(issue, run, run_id, &repository)?;
     let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
-    let task_prompt = devin_task_prompt(workflow, issue, attempt, route)?;
+    let mut repository_instructions = None;
 
     let client = DevinCloudClient::from_environment(&config, |name| ProcessEnvironment.get(name))
         .map_err(|error| format!("devin client configuration failed: {error}"))?;
@@ -10905,6 +10906,19 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
                     "terminated the previously bound devin session before creating a replacement"
                 );
             }
+
+            // Devin has no local checkout to read the repository's instruction
+            // file from, so it is fetched from the remote at the target branch
+            // and rendered into the prompt exactly like a local harness sees it.
+            let instructions = fetch_devin_repository_instructions(&repository).await?;
+            let task_prompt = devin_task_prompt(
+                workflow,
+                issue,
+                attempt,
+                route,
+                instructions.as_ref().map(|found| found.body.as_str()),
+            )?;
+            repository_instructions = instructions.map(|found| found.record);
 
             let mut session_options = config.session.clone();
             if let Some(references) = session_options.secret_ids.as_ref() {
@@ -10997,6 +11011,7 @@ async fn run_devin_cloud_route(context: DevinRouteContext<'_>) -> Result<DevinSe
         binding.local_evidence_path.clone(),
         DevinEvidenceLimits::default(),
     );
+    collector.set_repository_instructions(repository_instructions);
     let created_event = if reattached {
         status_event(&created)
     } else {
@@ -11239,12 +11254,13 @@ fn publish_devin_event(
 ///
 /// The local path handed to the binding is an evidence directory inside the
 /// scheduler-bound issue workspace; it is never Devin's working directory.
-fn devin_remote_binding(
+/// Checkout policy of the repository the issue is bound to; Devin clones that
+/// remote itself, OpenSymphony only needs its identity, branch and credential.
+fn devin_checkout_repository(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
-    run_id: &str,
     workspace_manager: &WorkspaceManager,
-) -> Result<DevinRemoteWorkspaceBinding, String> {
+) -> Result<CheckoutRepository, String> {
     let repository_binding = run
         .repository_binding
         .as_ref()
@@ -11257,14 +11273,23 @@ fn devin_remote_binding(
         .ok_or_else(|| {
             "devin routing requires a resolved repository binding for the issue".to_owned()
         })?;
-    let repository = workspace_manager
+    workspace_manager
         .checkout_repository(repository_binding.repository_id().as_str())
+        .cloned()
         .ok_or_else(|| {
             format!(
                 "repository `{}` has no configured checkout policy to bind a devin workspace",
                 repository_binding.repository_id()
             )
-        })?;
+        })
+}
+
+fn devin_remote_binding(
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    run_id: &str,
+    repository: &CheckoutRepository,
+) -> Result<DevinRemoteWorkspaceBinding, String> {
     let evidence_path = run
         .workspace_path
         .join(".opensymphony")
@@ -11296,12 +11321,185 @@ fn devin_run_options() -> DevinRunOptions {
     }
 }
 
+/// Instruction file fetched from the repository remote for a Devin prompt.
+#[derive(Debug)]
+struct DevinFetchedInstructions {
+    record: crate::opensymphony_devin::DevinRepositoryInstructions,
+    body: String,
+}
+
+/// GitHub contents URL of the repository's instruction file at the target
+/// branch. Each path component becomes its own segment so names are escaped
+/// and the path cannot climb out of the repository.
+fn devin_instructions_contents_url(
+    api_root: &str,
+    owner: &str,
+    repository_name: &str,
+    instructions_path: &Path,
+    target_branch: &str,
+) -> Result<Url, String> {
+    let mut url =
+        Url::parse(api_root).map_err(|error| format!("invalid GitHub API root: {error}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "GitHub API root cannot be a base URL".to_owned())?;
+        segments
+            .pop_if_empty()
+            .push("repos")
+            .push(owner)
+            .push(repository_name)
+            .push("contents");
+        for component in instructions_path.components() {
+            match component {
+                std::path::Component::Normal(name) => {
+                    segments.push(name.to_str().ok_or_else(|| {
+                        format!(
+                            "instruction path `{}` is not valid UTF-8",
+                            instructions_path.display()
+                        )
+                    })?);
+                }
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(format!(
+                        "instruction path `{}` must stay inside the repository",
+                        instructions_path.display()
+                    ));
+                }
+            }
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", target_branch);
+    Ok(url)
+}
+
+/// Reads the repository's configured instruction file from its GitHub remote.
+///
+/// Returns `None` when the repository configures no instruction file. A
+/// configured file that cannot be fetched is a launch failure, matching the
+/// local route, which refuses to start without its verified checkout
+/// instructions rather than silently running without them.
+async fn fetch_devin_repository_instructions(
+    repository: &CheckoutRepository,
+) -> Result<Option<DevinFetchedInstructions>, String> {
+    if repository.instructions_path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if repository.provider != "github" {
+        return Err(format!(
+            "repository instructions `{}` cannot be fetched for provider `{}`; devin routing reads instructions from GitHub remotes only",
+            repository.instructions_path.display(),
+            repository.provider
+        ));
+    }
+    let (api_root, owner, repository_name) =
+        github_repository_api(repository).map_err(|error| error.to_string())?;
+    let url = devin_instructions_contents_url(
+        &api_root,
+        &owner,
+        &repository_name,
+        &repository.instructions_path,
+        &repository.target_branch,
+    )?;
+    let token = repository
+        .credential_env
+        .as_deref()
+        .or(repository.review_credential_env.as_deref())
+        .map(|name| {
+            env::var(name)
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("configured repository credential variable `{name}` is not set")
+                })
+        })
+        .transpose()?;
+    fetch_devin_repository_instructions_at(repository, url, token).await
+}
+
+async fn fetch_devin_repository_instructions_at(
+    repository: &CheckoutRepository,
+    url: Url,
+    token: Option<String>,
+) -> Result<Option<DevinFetchedInstructions>, String> {
+    let http = reqwest::Client::builder()
+        .timeout(GITHUB_ELIGIBILITY_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("GitHub client: {error}"))?;
+    let mut request = http
+        .get(url.clone())
+        .header(reqwest::header::USER_AGENT, "opensymphony-orchestrator")
+        .header(reqwest::header::ACCEPT, "application/vnd.github.raw+json");
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|error| {
+        format!(
+            "failed to fetch repository instructions `{}` from {}: {error}",
+            repository.instructions_path.display(),
+            repository.remote_locator
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "failed to fetch repository instructions `{}` at `{}` from {}: HTTP {}",
+            repository.instructions_path.display(),
+            repository.target_branch,
+            repository.remote_locator,
+            status.as_u16()
+        ));
+    }
+    let too_large = || {
+        format!(
+            "repository instructions `{}` exceed the {} byte limit",
+            repository.instructions_path.display(),
+            MAX_INSTRUCTION_FILE_BYTES
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_INSTRUCTION_FILE_BYTES)
+    {
+        return Err(too_large());
+    }
+    let mut response = response;
+    let mut raw: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed to read repository instructions: {error}"))?
+    {
+        if (raw.len() as u64).saturating_add(chunk.len() as u64) > MAX_INSTRUCTION_FILE_BYTES {
+            return Err(too_large());
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&raw);
+    let content_hash = format!("sha256:{:x}", hasher.finalize());
+    let body = String::from_utf8_lossy(&instruction_body(&repository.instructions_path, &raw))
+        .into_owned();
+    Ok(Some(DevinFetchedInstructions {
+        record: crate::opensymphony_devin::DevinRepositoryInstructions {
+            path: repository.instructions_path.to_string_lossy().into_owned(),
+            git_ref: repository.target_branch.clone(),
+            content_hash,
+            bytes: raw.len() as u64,
+        },
+        body,
+    }))
+}
+
 /// Renders the workflow prompt plus the issue facts Devin needs.
 fn devin_task_prompt(
     workflow: &ResolvedWorkflow,
     issue: &NormalizedIssue,
     attempt: u32,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    repository_instructions: Option<&str>,
 ) -> Result<String, String> {
     let central_procedure = workflow
         .render_prompt(issue, Some(attempt))
@@ -11323,7 +11521,7 @@ fn devin_task_prompt(
         "Work in your own Devin cloud workspace. The OpenSymphony workspace on \
          the orchestrator host stores evidence only and is not reachable from \
          your environment.",
-        None,
+        repository_instructions,
         &format!(
             "harness={} containment={}",
             route.harness_kind,
@@ -18846,6 +19044,230 @@ Run the scheduler.
             category: IssueStateCategory::Terminal,
         };
         issue
+    }
+
+    fn devin_instruction_repository(instructions_path: &str) -> CheckoutRepository {
+        CheckoutRepository {
+            provider: "github".into(),
+            provider_id: None,
+            remote_locator: "https://github.com/trilogy-group/StackPerf.git".into(),
+            remote: "https://github.com/trilogy-group/StackPerf.git".into(),
+            target_branch: "main".into(),
+            credential_kind: "environment".into(),
+            credential_reference: None,
+            credential_env: None,
+            review_credential_env: None,
+            instructions_path: instructions_path.into(),
+            policy_generation: "policy-1".into(),
+            review_profile: "github".into(),
+            review_provider: "github".into(),
+            review_policy_generation: "review-1".into(),
+            required_checks: false,
+            required_review: false,
+            merge_method: None,
+        }
+    }
+
+    /// Serves exactly one HTTP response and returns the request head it saw.
+    async fn serve_one_response(
+        status: &'static str,
+        headers: &'static str,
+        body: Vec<u8>,
+    ) -> (String, JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                request.extend_from_slice(&buffer[..read]);
+                if read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let mut response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
+                body.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(&body);
+            socket.write_all(&response).await.expect("write response");
+            socket.shutdown().await.ok();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[test]
+    fn devin_instructions_contents_url_targets_the_configured_branch() {
+        let url = devin_instructions_contents_url(
+            "https://api.github.com",
+            "trilogy-group",
+            "StackPerf",
+            Path::new("docs/agent notes/WORKFLOW.md"),
+            "release/next",
+        )
+        .expect("contents url");
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/trilogy-group/StackPerf/contents/docs/agent%20notes/WORKFLOW.md?ref=release%2Fnext"
+        );
+
+        let enterprise = devin_instructions_contents_url(
+            "https://github.example.com/api/v3",
+            "org",
+            "repo",
+            Path::new("./AGENTS.md"),
+            "main",
+        )
+        .expect("enterprise contents url");
+        assert_eq!(
+            enterprise.as_str(),
+            "https://github.example.com/api/v3/repos/org/repo/contents/AGENTS.md?ref=main"
+        );
+
+        let escape = devin_instructions_contents_url(
+            "https://api.github.com",
+            "org",
+            "repo",
+            Path::new("../other/WORKFLOW.md"),
+            "main",
+        )
+        .expect_err("parent components must be rejected");
+        assert!(
+            escape.contains("must stay inside the repository"),
+            "{escape}"
+        );
+    }
+
+    #[tokio::test]
+    async fn devin_repository_instructions_are_fetched_from_the_remote_and_stripped() {
+        let raw = b"---\nname: workflow\n---\n# Procedure\n\nAttach the PR.\n".to_vec();
+        let (origin, server) = serve_one_response(
+            "200 OK",
+            "Content-Type: application/vnd.github.raw+json\r\n",
+            raw.clone(),
+        )
+        .await;
+        let repository = devin_instruction_repository("WORKFLOW.md");
+        let url = devin_instructions_contents_url(
+            &origin,
+            "trilogy-group",
+            "StackPerf",
+            &repository.instructions_path,
+            &repository.target_branch,
+        )
+        .expect("contents url");
+
+        let fetched = fetch_devin_repository_instructions_at(
+            &repository,
+            url,
+            Some("token-under-test".to_owned()),
+        )
+        .await
+        .expect("fetch succeeds")
+        .expect("instructions are configured");
+        let request = server.await.expect("server task");
+
+        assert!(
+            request.starts_with(
+                "GET /repos/trilogy-group/StackPerf/contents/WORKFLOW.md?ref=main HTTP/1.1"
+            ),
+            "{request}"
+        );
+        assert!(
+            request.contains("authorization: Bearer token-under-test"),
+            "{request}"
+        );
+        assert!(
+            request.contains("accept: application/vnd.github.raw+json"),
+            "{request}"
+        );
+        assert_eq!(fetched.body, "# Procedure\n\nAttach the PR.\n");
+        let mut hasher = Sha256::new();
+        hasher.update(&raw);
+        assert_eq!(
+            fetched.record,
+            crate::opensymphony_devin::DevinRepositoryInstructions {
+                path: "WORKFLOW.md".into(),
+                git_ref: "main".into(),
+                content_hash: format!("sha256:{:x}", hasher.finalize()),
+                bytes: raw.len() as u64,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn devin_repository_instructions_fetch_failures_are_launch_errors() {
+        let (origin, server) = serve_one_response("404 Not Found", "", b"{}".to_vec()).await;
+        let repository = devin_instruction_repository("WORKFLOW.md");
+        let url = devin_instructions_contents_url(
+            &origin,
+            "trilogy-group",
+            "StackPerf",
+            &repository.instructions_path,
+            &repository.target_branch,
+        )
+        .expect("contents url");
+        let error = fetch_devin_repository_instructions_at(&repository, url, None)
+            .await
+            .expect_err("missing instruction file fails the launch");
+        let request = server.await.expect("server task");
+        assert!(!request.contains("authorization:"), "{request}");
+        assert!(error.contains("HTTP 404"), "{error}");
+
+        let oversized = vec![b'#'; (MAX_INSTRUCTION_FILE_BYTES + 1) as usize];
+        let (origin, server) = serve_one_response("200 OK", "", oversized).await;
+        let url = devin_instructions_contents_url(
+            &origin,
+            "trilogy-group",
+            "StackPerf",
+            &repository.instructions_path,
+            &repository.target_branch,
+        )
+        .expect("contents url");
+        let error = fetch_devin_repository_instructions_at(&repository, url, None)
+            .await
+            .expect_err("oversized instructions are rejected");
+        server.abort();
+        assert!(error.contains("exceed"), "{error}");
+
+        let unconfigured = devin_instruction_repository("");
+        assert!(
+            fetch_devin_repository_instructions(&unconfigured)
+                .await
+                .expect("no instruction file configured")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn devin_task_prompt_renders_repository_instructions() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workflow = sample_workflow(tempdir.path(), &tempdir.path().join("workspace-root"));
+        let issue = sample_issue();
+        let route = devin_test_route(false);
+
+        let without = devin_task_prompt(&workflow, &issue, 1, &route, None)
+            .expect("prompt without instructions");
+        assert!(without.contains("No repository-specific instructions were selected."));
+
+        let with = devin_task_prompt(
+            &workflow,
+            &issue,
+            2,
+            &route,
+            Some("# Procedure\n\nAttach the PR URL to the Linear issue.\n"),
+        )
+        .expect("prompt with instructions");
+        assert!(with.contains("## Repository Instructions\n\n# Procedure\n\nAttach the PR URL"));
+        assert!(!with.contains("No repository-specific instructions were selected."));
+        assert!(with.contains("Attempt: 2"));
     }
 
     fn devin_test_route(dry_run: bool) -> crate::opensymphony_orchestrator::HarnessRouteDecision {

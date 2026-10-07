@@ -2343,6 +2343,20 @@ pub struct DevinSkippedAttachment {
     pub reason: String,
 }
 
+/// Repository instructions rendered into the session prompt, fetched from the
+/// repository remote because the evidence-only issue workspace has no checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevinRepositoryInstructions {
+    /// Repository-relative path of the instruction file.
+    pub path: String,
+    /// Git ref the file was read from (the configured target branch).
+    pub git_ref: String,
+    /// `sha256:<hex>` over the raw file bytes before any front matter is removed.
+    pub content_hash: String,
+    /// Size of the raw file.
+    pub bytes: u64,
+}
+
 /// Index of everything written into the local evidence directory for a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevinEvidenceManifest {
@@ -2364,6 +2378,10 @@ pub struct DevinEvidenceManifest {
     pub skipped_attachments: Vec<DevinSkippedAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_listing_error: Option<String>,
+    /// Repository instructions the session prompt carried, when the
+    /// repository configures an instruction file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_instructions: Option<DevinRepositoryInstructions>,
     /// Absolute path of the evidence root inside the local issue workspace.
     pub evidence_root: PathBuf,
     pub containment: String,
@@ -2380,6 +2398,7 @@ pub struct DevinEvidenceCollector {
     root: PathBuf,
     events: Vec<Value>,
     limits: DevinEvidenceLimits,
+    repository_instructions: Option<DevinRepositoryInstructions>,
 }
 
 impl DevinEvidenceCollector {
@@ -2388,7 +2407,16 @@ impl DevinEvidenceCollector {
             root: root.into(),
             events: Vec::new(),
             limits,
+            repository_instructions: None,
         }
+    }
+
+    /// Records which repository instructions the session prompt carried.
+    pub fn set_repository_instructions(
+        &mut self,
+        instructions: Option<DevinRepositoryInstructions>,
+    ) {
+        self.repository_instructions = instructions;
     }
 
     pub fn root(&self) -> &Path {
@@ -2424,6 +2452,7 @@ impl DevinEvidenceCollector {
             "structured_output": report.structured_output,
             "attachments": report.attachments,
             "attachment_listing_error": report.attachment_listing_error,
+            "repository_instructions": self.repository_instructions,
             "containment": DEVIN_REMOTE_CONTAINMENT,
         });
         write_file(&self.root.join("session.json"), pretty(&summary).as_bytes()).await?;
@@ -2458,6 +2487,7 @@ impl DevinEvidenceCollector {
             attachments,
             skipped_attachments: skipped,
             attachment_listing_error: report.attachment_listing_error.clone(),
+            repository_instructions: self.repository_instructions.clone(),
             evidence_root: self.root.clone(),
             containment: DEVIN_REMOTE_CONTAINMENT.to_owned(),
         };

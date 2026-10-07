@@ -49,7 +49,7 @@ use super::{
 };
 use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
 
-const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_INSTRUCTION_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -7711,6 +7711,16 @@ async fn read_bounded_instruction_file(
     }
     *total_bytes += file_bytes;
     Ok((format!("sha256:{:x}", hasher.finalize()), contents))
+}
+
+/// Instruction text to present to a harness for `path`: `WORKFLOW.md` keeps
+/// only its body, every other instruction file is used verbatim.
+pub fn instruction_body(path: &Path, bytes: &[u8]) -> Vec<u8> {
+    if is_workflow_instruction_path(path) {
+        workflow_body(bytes)
+    } else {
+        bytes.to_vec()
+    }
 }
 
 fn workflow_body(bytes: &[u8]) -> Vec<u8> {

@@ -937,20 +937,40 @@ replies.
 2. Resolves `secret_ids` against that organization's Devin secrets, by secret id
    or key. Unknown or out-of-organization references fail the run; secret
    *values* are never read by OpenSymphony — Devin injects them remotely.
-3. Creates the session with the rendered issue prompt, repository, tags, and
-   session options, and reports the session URL as the run conversation link.
-4. Polls session status and cursor-paginated messages, publishing normalized
+3. Fetches the repository's configured instruction file (`instructions.path`,
+   usually `WORKFLOW.md`) from the GitHub remote at the target branch through
+   the contents API, using the repository's checkout credential. The evidence-only
+   issue workspace has no checkout to read it from, yet Devin must see the same
+   repository procedure a local harness gets — including the agent-side step
+   that attaches the PR to the Linear issue. `WORKFLOW.md` front matter is
+   stripped exactly as for local checkouts, the file is bounded to 1 MiB, and a
+   configured file that cannot be fetched fails the launch (retryable) rather
+   than starting a session without instructions. Non-GitHub providers cannot
+   supply instructions to Devin yet.
+4. Creates the session with the rendered issue prompt (central procedure, task
+   facts, repository instructions), repository, tags, and session options, and
+   reports the session URL as the run conversation link.
+5. Polls session status and cursor-paginated messages, publishing normalized
    runtime events onto the run timeline.
-5. On settlement, imports evidence into the issue workspace under
+6. On settlement, imports evidence into the issue workspace under
    `.opensymphony/devin/<run-id>`: `session.json`, `events.jsonl`,
    `evidence.json` (outcome, status, ACU usage, pull-request URLs, structured
-   output), and downloaded attachments. `pull_request_urls` lists the pull
+   output, and `repository_instructions` — the instruction path, git ref,
+   SHA-256 and size the prompt carried), and downloaded attachments. `pull_request_urls` lists the pull
    requests the Devin API reports; `message_pull_request_urls` lists any
    further `/pull/<n>` URLs Devin mentioned in its messages (for example when
    it opened the PR outside its built-in PR tool), so operators can find the
    PR without reading `events.jsonl`.
-6. Terminates and archives the remote session on cancellation, poll timeout, or
+7. Terminates and archives the remote session on cancellation, poll timeout, or
    transport failure, so an abandoned run cannot keep burning ACUs.
+
+Repository workflows that end with agent-side tracker writes (the repo-local
+`linear` skill attaching the PR URL to the issue) and `git push` need their
+credentials inside Devin's workspace. Reference them through
+`devin.session.secret_ids` (for example `[LINEAR_API_KEY, GH_TOKEN_TG]`,
+matching the keys of the organization's Devin secrets); without them the
+session can open a PR through Devin's own GitHub integration but cannot run the
+repository's Linear helper, and the PR never appears on the issue.
 
 The local issue workspace is evidence and manifest storage only; it is never
 Devin's execution directory, and no local checkout is prepared for the run.
