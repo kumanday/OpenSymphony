@@ -211,6 +211,11 @@ Devin hardening rules that must hold for any change to this harness:
   route identity (`devin-route.json`) are the durable fence, and a bound
   session is stopped through *its own* persisted origin/organization before
   any replacement is created.
+- Scheduler abort and daemon shutdown terminate the session first and then
+  give the route task a bounded window to observe the archived session,
+  import its evidence, and finish `run.json`; the task is aborted only if it
+  does not settle in time. Aborting first leaves a `running` manifest with no
+  evidence for a run the tracker already moved on from.
 - Organization-scoped requests require verified tenancy (`bind_tenant`), not
   just a configured organization id; a failed `create_session` is reconciled
   through the correlation tag before it is retried.

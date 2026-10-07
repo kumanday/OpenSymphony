@@ -215,8 +215,13 @@ poll timeout and transport failure terminate and archive the session before the
 route returns, and a scheduler interrupt looks the session up in the
 live-session registry and deletes it. Worker abort and daemon shutdown
 (`WorkerBackend::abort_worker` / `WorkerBackend::shutdown`) terminate the
-sessions tracked for the affected workers and *await* the acknowledgement
-before the task is aborted; `DevinSessionGuard::drop` only makes an
+sessions tracked for the affected workers, *await* the acknowledgement, and
+then give the route task a bounded window (`DEVIN_SETTLE_TIMEOUT`, 30s) to
+observe the archived session on its next poll, import the evidence, and finish
+`run.json` as cancelled before the task is aborted — a tracker state change
+such as `In Progress -> Human Review` releases the worker this way, and the
+imported evidence is how the run stays inspectable afterwards;
+`DevinSessionGuard::drop` only makes an
 opportunistic attempt, because a `Drop` cannot await and a task spawned during
 runtime teardown may never run. A scheduler interrupt that finds no tracked
 session — the normal state after a daemon restart — rebuilds a tenant-bound

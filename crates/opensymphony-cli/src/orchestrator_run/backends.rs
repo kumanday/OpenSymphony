@@ -541,6 +541,9 @@ struct TrackedDevinSession {
 
 /// Upper bound for one awaited remote termination during abort or shutdown.
 const DEVIN_TERMINATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for letting terminated Devin route tasks settle (observe the
+/// archived session, import evidence, finish the run manifest) before abort.
+const DEVIN_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Clock skew tolerated when matching a reconciled session's `created_at`
 /// against the local creation attempt.
 const DEVIN_CREATION_CLOCK_SKEW_SECS: i64 = 120;
@@ -5888,6 +5891,81 @@ impl RuntimeWorkerBackend {
                     session_id,
                     "devin session termination timed out; its binding is retained for cleanup"
                 ),
+            }
+        }
+    }
+
+    fn owns_devin_session(&self, worker_id: &str) -> bool {
+        self.devin_sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .any(|tracked| tracked.worker_id == worker_id)
+            })
+            .unwrap_or(false)
+    }
+
+    fn owns_devin_session_any(&self) -> bool {
+        self.devin_sessions
+            .lock()
+            .map(|sessions| !sessions.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Lets the Devin route tasks whose sessions were just terminated observe
+    /// the archived session themselves: the next poll settles it, imports the
+    /// evidence, and finishes the run manifest. Aborting the task straight
+    /// away would leave `run.json` as `running` with no evidence. Bounded, so
+    /// a wedged poll still falls through to the task abort; a task that
+    /// panicked is reported through the normal worker message boundary.
+    async fn settle_devin_tasks(&mut self, worker_id: Option<&str>, settle_timeout: Duration) {
+        let worker_ids: Vec<String> = self
+            .tasks
+            .keys()
+            .filter(|id| worker_id.is_none_or(|worker_id| worker_id == id.as_str()))
+            .cloned()
+            .collect();
+        let deadline = tokio::time::Instant::now() + settle_timeout;
+        for id in worker_ids {
+            let Some(mut task) = self.tasks.remove(&id) else {
+                continue;
+            };
+            match timeout(deadline - tokio::time::Instant::now(), &mut task.handle).await {
+                Ok(Ok(())) => {
+                    self.worker_issue_ids.remove(&id);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        worker_id = %id,
+                        error = %error,
+                        "devin worker task failed while settling its terminated session"
+                    );
+                    self.worker_issue_ids.remove(&id);
+                    let Ok(worker) = crate::opensymphony_domain::WorkerId::new(&id) else {
+                        continue;
+                    };
+                    let _ = self.updates_tx.send(WorkerUpdate::Finished {
+                        worker_id: worker,
+                        outcome: WorkerOutcomeRecord::from_run(
+                            &task.run,
+                            WorkerOutcomeKind::Failed,
+                            now_timestamp(),
+                            Some(
+                                "devin worker task failed while settling after termination".into(),
+                            ),
+                            Some(error.to_string()),
+                        )
+                        .with_harness_stopped(),
+                    });
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        worker_id = %id,
+                        "devin worker did not settle its terminated session in time; aborting its task"
+                    );
+                    self.tasks.insert(id, task);
+                }
             }
         }
     }
@@ -12092,8 +12170,22 @@ impl WorkerBackend for RuntimeWorkerBackend {
         worker_id: &crate::opensymphony_domain::WorkerId,
         reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
+        let issue_identifier = self
+            .worker_issue_ids
+            .get(worker_id.as_str())
+            .cloned()
+            .or_else(|| {
+                self.tasks
+                    .get(worker_id.as_str())
+                    .map(|task| task.run.issue_identifier.to_string())
+            });
+        let owns_devin_session = self.owns_devin_session(worker_id.as_str());
         self.terminate_tracked_devin_sessions(Some(worker_id.as_str()))
             .await;
+        if owns_devin_session {
+            self.settle_devin_tasks(Some(worker_id.as_str()), DEVIN_SETTLE_TIMEOUT)
+                .await;
+        }
         let acp_session = self
             .acp_active
             .lock()
@@ -12157,14 +12249,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 }
             }
         }
-        let issue_identifier = self
-            .worker_issue_ids
-            .remove(worker_id.as_str())
-            .or_else(|| {
-                self.tasks
-                    .get(worker_id.as_str())
-                    .map(|task| task.run.issue_identifier.to_string())
-            });
+        self.worker_issue_ids.remove(worker_id.as_str());
         let revoke_after_stop = matches!(
             reason,
             WorkerAbortReason::TrackerInactive
@@ -12188,7 +12273,11 @@ impl WorkerBackend for RuntimeWorkerBackend {
     }
 
     async fn shutdown(&mut self) {
+        let owns_devin_sessions = self.owns_devin_session_any();
         self.terminate_tracked_devin_sessions(None).await;
+        if owns_devin_sessions {
+            self.settle_devin_tasks(None, DEVIN_SETTLE_TIMEOUT).await;
+        }
         self.abort_all_tracked_tasks();
     }
 
@@ -16595,6 +16684,94 @@ mod tests {
 
         assert!(backend.tasks.is_empty());
         assert!(backend.worker_issue_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn settling_terminated_devin_tasks_waits_for_settled_runs_and_abandons_wedged_ones() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+        let workspace = sample_workspace(&workspace_root);
+        let mut track = |worker_id: &str, handle: JoinHandle<()>| {
+            let run = RunAttempt::new(
+                WorkerId::new(worker_id).expect("worker id should be valid"),
+                IssueId::new(format!("issue-{worker_id}")).expect("issue id should be valid"),
+                IssueIdentifier::new("COE-373").expect("issue identifier should be valid"),
+                workspace.path.clone(),
+                TimestampMs::new(1),
+                None,
+                8,
+            );
+            backend
+                .worker_issue_ids
+                .insert(worker_id.to_string(), run.issue_identifier.to_string());
+            backend
+                .tasks
+                .insert(worker_id.to_string(), ActiveWorkerTask { handle, run });
+        };
+        // A route that observes the archived session on its next poll and
+        // finishes its manifest after a short delay.
+        track(
+            "devin-settles",
+            tokio::spawn(async { tokio::time::sleep(Duration::from_millis(50)).await }),
+        );
+        // A route whose poll is wedged for longer than the settle budget.
+        track(
+            "devin-wedged",
+            tokio::spawn(async { tokio::time::sleep(Duration::from_secs(60)).await }),
+        );
+        // A route task that panics while settling.
+        track(
+            "devin-panics",
+            tokio::spawn(async { panic!("settle panic") }),
+        );
+        // Only the named worker is settled.
+        track(
+            "devin-other",
+            tokio::spawn(async { tokio::time::sleep(Duration::from_secs(60)).await }),
+        );
+
+        backend
+            .settle_devin_tasks(Some("devin-settles"), Duration::from_millis(500))
+            .await;
+        assert!(!backend.tasks.contains_key("devin-settles"));
+        assert!(!backend.worker_issue_ids.contains_key("devin-settles"));
+        assert!(backend.tasks.contains_key("devin-other"));
+
+        let started = tokio::time::Instant::now();
+        backend
+            .settle_devin_tasks(Some("devin-wedged"), Duration::from_millis(200))
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            backend.tasks.contains_key("devin-wedged"),
+            "a wedged task stays tracked so the abort path can drop it"
+        );
+        assert!(backend.worker_issue_ids.contains_key("devin-wedged"));
+
+        backend
+            .settle_devin_tasks(Some("devin-panics"), Duration::from_millis(500))
+            .await;
+        assert!(!backend.tasks.contains_key("devin-panics"));
+        assert!(!backend.worker_issue_ids.contains_key("devin-panics"));
+        let updates = backend.poll_updates().await.expect("poll updates");
+        assert!(updates.iter().any(|update| matches!(update,
+            WorkerUpdate::Finished { worker_id, outcome } if worker_id.as_str() == "devin-panics"
+                && outcome.outcome == WorkerOutcomeKind::Failed && outcome.harness_stopped)));
+
+        backend.abort_all_tracked_tasks();
+        assert!(backend.tasks.is_empty());
     }
 
     #[tokio::test]
