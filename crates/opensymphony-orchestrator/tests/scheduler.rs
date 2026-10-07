@@ -244,6 +244,40 @@ fn selected_route_uses_configured_codex_harness_and_model() {
 }
 
 #[test]
+fn remote_only_harness_refuses_parent_issues_with_sub_issues() {
+    let mut parent = normalized_issue("lin-parent", "COE-700", "In Progress");
+    parent.sub_issues = vec![IssueRef {
+        id: IssueId::new("lin-child").expect("child id should be valid"),
+        identifier: IssueIdentifier::new("COE-701").expect("child identifier should be valid"),
+        state: "Done".to_string(),
+    }];
+    let mut config = scheduler_config();
+    config.routing.harness = "devin_cloud_agent".into();
+
+    // Parent integration (execution roots, shared child worktrees, final
+    // verification) needs a local checkout that a remote-only harness lacks.
+    let error = decide_issue_route(&parent, &config).expect_err("parent must be refused");
+    assert!(
+        error.to_string().contains("parent issue `COE-700`"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("local checkout"), "{error}");
+
+    // The same harness still routes a leaf issue, and a local harness still
+    // routes the parent.
+    let mut leaf = normalized_issue("lin-leaf", "COE-702", "In Progress");
+    leaf.sub_issues.clear();
+    assert_eq!(
+        decide_issue_route(&leaf, &config)
+            .expect("leaf route")
+            .harness_kind,
+        "devin_cloud_agent"
+    );
+    config.routing.harness = "openhands_agent_server".into();
+    assert!(decide_issue_route(&parent, &config).is_ok());
+}
+
+#[test]
 fn selected_acp_route_persists_profile_and_model_identity() {
     let issue = normalized_issue("lin-acp", "COE-611", "In Progress");
     let mut config = scheduler_config();

@@ -839,6 +839,12 @@ pub trait WorkerBackend {
             timed_out: false,
         })
     }
+
+    /// Releases every worker the backend still tracks before the process
+    /// exits. Backends whose workers hold remote resources (a Devin session
+    /// keeps billing after its local task is gone) must stop them here and
+    /// await the acknowledgement; dropping the backend cannot await anything.
+    async fn shutdown(&mut self) {}
 }
 
 pub struct OperatorResponseDelivery(
@@ -9382,7 +9388,7 @@ impl TrackerSnapshot {
 }
 
 pub fn decide_issue_route(
-    _issue: &NormalizedIssue,
+    issue: &NormalizedIssue,
     config: &SchedulerConfig,
 ) -> Result<HarnessRouteDecision, SchedulerError> {
     let capability = harness_capability(&config.routing.harness)?;
@@ -9391,6 +9397,20 @@ pub fn decide_issue_route(
             detail: format!(
                 "selected harness `{}` cannot start issue execution",
                 config.routing.harness
+            ),
+        });
+    }
+    // Parent execution roots, shared child worktrees, repair, merge, and the
+    // orchestrator-owned final verification all operate on a local checkout. A
+    // harness that only executes remotely has none, so the parent would settle
+    // without the verification evidence `enforce_parent_outcome_trust` needs.
+    if !issue.sub_issues.is_empty() && capability.transport.remote && !capability.transport.local {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "selected harness `{}` executes remotely and cannot run parent issue `{}` with {} sub-issue(s); parent integration needs a local checkout",
+                config.routing.harness,
+                issue.identifier,
+                issue.sub_issues.len()
             ),
         });
     }

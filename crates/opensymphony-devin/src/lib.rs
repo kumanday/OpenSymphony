@@ -49,6 +49,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 use crate::{
@@ -72,6 +73,9 @@ pub const DEFAULT_DEVIN_SESSION_POLL_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_DEVIN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// Maximum number of tags Devin accepts on a session.
 pub const DEVIN_MAX_SESSION_TAGS: usize = 50;
+/// Tags an operator may configure; one slot is reserved for the correlation
+/// tag that lets OpenSymphony find its own sessions again.
+pub const DEVIN_MAX_OPERATOR_TAGS: usize = DEVIN_MAX_SESSION_TAGS - 1;
 /// Maximum page size accepted by the paginated v3 collection endpoints.
 pub const DEVIN_MAX_PAGE_SIZE: u32 = 200;
 /// Prefix used for the tag that correlates a Devin session with an issue.
@@ -106,7 +110,9 @@ pub enum DevinConfigError {
     InvalidOrgIdFromEnvironment,
     #[error("devin.session.max_acu_limit must be greater than zero")]
     InvalidAcuLimit,
-    #[error("devin sessions accept at most {DEVIN_MAX_SESSION_TAGS} tags")]
+    #[error(
+        "devin sessions accept at most {DEVIN_MAX_OPERATOR_TAGS} configured tags; one slot is reserved for the correlation tag"
+    )]
     TooManyTags,
     #[error("devin session tags must not be blank")]
     BlankTag,
@@ -155,6 +161,10 @@ pub enum DevinClientError {
     CrossTenantPayload { expected: String, observed: String },
     #[error("devin secret `{reference}` is not available to organization `{org_id}`")]
     UnknownSecret { reference: String, org_id: String },
+    #[error(
+        "devin tenancy is unverified: `GET /v3/self` must bind the organization before session requests"
+    )]
+    TenantUnbound,
     #[error("devin attachment `{name}` is served from `{origin}`, which is not the api origin")]
     ForeignAttachmentOrigin { name: String, origin: String },
     #[error("devin attachment `{name}` exceeds the {limit} byte evidence download limit")]
@@ -282,7 +292,7 @@ impl DevinCloudConfig {
         if self.session.max_acu_limit == Some(0) {
             return Err(DevinConfigError::InvalidAcuLimit);
         }
-        if self.session.tags.len() > DEVIN_MAX_SESSION_TAGS {
+        if self.session.tags.len() > DEVIN_MAX_OPERATOR_TAGS {
             return Err(DevinConfigError::TooManyTags);
         }
         if self.session.tags.iter().any(|tag| tag.trim().is_empty()) {
@@ -1022,12 +1032,17 @@ pub fn session_create_request(
     binding: &DevinRemoteWorkspaceBinding,
     options: &DevinSessionOptions,
 ) -> SessionCreateRequest {
-    let mut tags = options.tags.clone();
+    // The correlation tag is how an uncertain creation is reconciled and how
+    // operators find OpenSymphony sessions, so it always survives truncation.
     let correlation = binding.correlation_tag();
-    if !tags.iter().any(|tag| tag == &correlation) {
-        tags.push(correlation);
-    }
-    tags.truncate(DEVIN_MAX_SESSION_TAGS);
+    let mut tags: Vec<String> = options
+        .tags
+        .iter()
+        .filter(|tag| *tag != &correlation)
+        .take(DEVIN_MAX_OPERATOR_TAGS)
+        .cloned()
+        .collect();
+    tags.push(correlation);
 
     SessionCreateRequest {
         prompt: binding.compose_prompt(task_prompt),
@@ -1151,13 +1166,42 @@ impl DevinCloudClient {
         self.poll_interval
     }
 
-    /// Request builder bound to the resolved organization.
+    /// Request builder bound to the verified organization.
+    ///
+    /// Only [`Self::identity`] may run before [`Self::bind_tenant`]: a
+    /// configured organization alone is an operator claim, not evidence that
+    /// the credential belongs to it.
     pub fn requests(&self) -> Result<DevinRequestBuilder, DevinClientError> {
-        let org_id = self
-            .org_id
-            .as_deref()
-            .ok_or(DevinClientError::MissingOrgId)?;
-        Ok(DevinRequestBuilder::new(self.base_url.clone(), org_id))
+        let tenancy = self
+            .tenancy
+            .as_ref()
+            .ok_or(DevinClientError::TenantUnbound)?;
+        Ok(DevinRequestBuilder::new(
+            self.base_url.clone(),
+            tenancy.org_id.as_str(),
+        ))
+    }
+
+    /// Adopts a tenancy that was already verified against `GET /v3/self`.
+    ///
+    /// This exists for callers that hold the verified identity from another
+    /// client of the same credential (and for offline fixtures); the
+    /// configured organization must still agree with it.
+    pub fn bind_verified_tenancy(
+        mut self,
+        tenancy: DevinTenancy,
+    ) -> Result<Self, DevinClientError> {
+        if let Some(configured) = self.org_id.as_deref()
+            && configured != tenancy.org_id
+        {
+            return Err(DevinClientError::TenantMismatch {
+                configured: configured.to_owned(),
+                credential: tenancy.org_id,
+            });
+        }
+        self.org_id = Some(tenancy.org_id.clone());
+        self.tenancy = Some(tenancy);
+        Ok(self)
     }
 
     /// Verified tenancy, once [`Self::bind_tenant`] has run.
@@ -1189,10 +1233,32 @@ impl DevinCloudClient {
     /// Rejects a session payload owned by a different organization.
     fn ensure_tenant(&self, session: &SessionResponse) -> Result<(), DevinClientError> {
         let expected = self
-            .org_id
-            .as_deref()
-            .ok_or(DevinClientError::MissingOrgId)?;
-        ensure_session_tenant(expected, session)
+            .tenancy
+            .as_ref()
+            .ok_or(DevinClientError::TenantUnbound)?;
+        ensure_session_tenant(&expected.org_id, session)
+    }
+
+    /// Finds the live session a lost `create_session` response may have
+    /// produced, so a retry never leaves an untracked session billing.
+    ///
+    /// Sessions are matched by the correlation tag, must not be archived, and
+    /// must have been created at or after `not_before`. Every candidate is
+    /// tenant-checked; the newest one wins.
+    pub async fn reconcile_created_session(
+        &self,
+        correlation_tag: &str,
+        not_before: i64,
+    ) -> Result<Option<SessionResponse>, DevinClientError> {
+        let mut query = SessionsQueryParams::by_tag(correlation_tag);
+        query.is_archived = Some(false);
+        query.first = Some(DEVIN_MAX_PAGE_SIZE);
+        let page = self.list_sessions(&query).await?;
+        Ok(select_reconciled_session(
+            page.items,
+            correlation_tag,
+            not_before,
+        ))
     }
 
     pub async fn identity(&self) -> Result<DevinSelfResponse, DevinClientError> {
@@ -1491,6 +1557,34 @@ pub fn ensure_session_tenant(
     }
 
     Ok(())
+}
+
+/// Picks the session that an uncertain `create_session` most plausibly
+/// produced: tagged with this run's correlation tag, not archived, and not
+/// older than the creation attempt. Devin reports `created_at` in epoch
+/// seconds; a millisecond value is normalized so a unit change cannot make
+/// every candidate look too old.
+pub fn select_reconciled_session(
+    sessions: Vec<SessionResponse>,
+    correlation_tag: &str,
+    not_before: i64,
+) -> Option<SessionResponse> {
+    sessions
+        .into_iter()
+        .filter(|session| {
+            !session.is_archived
+                && session.tags.iter().any(|tag| tag == correlation_tag)
+                && epoch_seconds(session.created_at) >= not_before
+        })
+        .max_by_key(|session| epoch_seconds(session.created_at))
+}
+
+fn epoch_seconds(value: i64) -> i64 {
+    if value > 100_000_000_000 {
+        value / 1_000
+    } else {
+        value
+    }
 }
 
 /// Maps secret references onto ids owned by the bound organization.
@@ -2357,22 +2451,128 @@ fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
 }
 
-async fn create_dir(path: &Path) -> Result<(), DevinClientError> {
-    tokio::fs::create_dir_all(path)
-        .await
-        .map_err(|source| DevinClientError::Evidence {
-            path: path.to_path_buf(),
-            source,
-        })
+fn evidence_error(path: &Path, source: std::io::Error) -> DevinClientError {
+    DevinClientError::Evidence {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
+/// Creates `path` and its ancestors without ever following a symlink.
+///
+/// The evidence root lives inside an issue workspace that a remote session
+/// could influence through imported artifacts, so a symlinked directory on the
+/// way down would redirect journal writes anywhere on the host. Every existing
+/// component must be a real directory; missing ones are created one at a time.
+async fn create_dir(path: &Path) -> Result<(), DevinClientError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        if matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Prefix(_)
+        ) {
+            continue;
+        }
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(evidence_error(
+                    &current,
+                    std::io::Error::other("evidence path component is a symlink"),
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(evidence_error(
+                    &current,
+                    std::io::Error::other("evidence path component is not a directory"),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match tokio::fs::create_dir(&current).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // Raced with another writer; re-check that it is a
+                        // real directory on the next iteration.
+                        let metadata = tokio::fs::symlink_metadata(&current)
+                            .await
+                            .map_err(|error| evidence_error(&current, error))?;
+                        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                            return Err(evidence_error(
+                                &current,
+                                std::io::Error::other(
+                                    "evidence path component appeared as a non-directory",
+                                ),
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(evidence_error(&current, error)),
+                }
+            }
+            Err(error) => return Err(evidence_error(&current, error)),
+        }
+    }
+    Ok(())
+}
+
+/// Writes an evidence file without following symlinks at the destination.
+///
+/// The parent must already be a verified real directory (see [`create_dir`]).
+/// Content is staged under a fresh exclusive name, so a symlink or foreign
+/// file planted at the destination is replaced by the rename rather than
+/// written through; `rename` never dereferences its target.
 async fn write_file(path: &Path, contents: &[u8]) -> Result<(), DevinClientError> {
-    tokio::fs::write(path, contents)
+    let parent = path.parent().ok_or_else(|| {
+        evidence_error(path, std::io::Error::other("evidence file has no parent"))
+    })?;
+    let parent_metadata = tokio::fs::symlink_metadata(parent)
         .await
-        .map_err(|source| DevinClientError::Evidence {
-            path: path.to_path_buf(),
-            source,
-        })
+        .map_err(|error| evidence_error(parent, error))?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(evidence_error(
+            parent,
+            std::io::Error::other("evidence directory is not a real directory"),
+        ));
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| evidence_error(path, std::io::Error::other("evidence file has no name")))?;
+    if let Ok(existing) = tokio::fs::symlink_metadata(path).await
+        && !existing.is_file()
+    {
+        return Err(evidence_error(
+            path,
+            std::io::Error::other("evidence destination is not a regular file"),
+        ));
+    }
+
+    let staged = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .await
+        .map_err(|error| evidence_error(&staged, error))?;
+    let written = async {
+        file.write_all(contents).await?;
+        file.sync_data().await?;
+        drop(file);
+        tokio::fs::rename(&staged, path).await
+    }
+    .await;
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&staged).await;
+        return Err(evidence_error(path, error));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

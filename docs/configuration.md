@@ -813,7 +813,7 @@ devin:
 | `knowledge_ids` | unset | Knowledge notes to attach. |
 | `secret_ids` | unset | *References* to Devin-held organization secrets; values never live in OpenSymphony config. |
 | `max_acu_limit` | unset | Positive ACU cap for the session. |
-| `tags` | `[]` | At most 50 tags; an `opensymphony:<issue-workspace-key>` correlation tag is appended automatically. |
+| `tags` | `[]` | At most 49 tags; the 50th slot is reserved for the `opensymphony:<issue-workspace-key>` correlation tag that is always appended. |
 | `title` | unset | Session title. |
 | `devin_mode` | unset | One of `normal`, `fast`, `lite`, `ultra`, `fusion`. |
 | `platform` | unset | VM platform / outpost pool override. |

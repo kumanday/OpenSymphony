@@ -457,7 +457,7 @@ impl HarnessCapability {
             runtime_contract_version: Some("devin-api-v3".into()),
             actions: HarnessActionCapability {
                 start_run: true,
-                send_user_message: true,
+                send_user_message: false,
                 retry: true,
                 cancel: true,
                 pause: false,
@@ -520,6 +520,10 @@ impl HarnessCapability {
                 "Pause/resume and approval flows are not exposed by the Devin API v3 session contract."
                     .into(),
                 "Model settings are fixed at session creation through `devin_mode`; per-run model overrides are unavailable."
+                    .into(),
+                "Operator messages are not forwarded to the remote session: a session waiting on input is answered in Devin's own UI while OpenSymphony keeps following it."
+                    .into(),
+                "Parent issues with sub-issues are not routed to Devin: parent execution roots, shared child worktrees, and final verification need a local checkout."
                     .into(),
             ],
         }

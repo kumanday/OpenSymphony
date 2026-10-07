@@ -880,6 +880,9 @@ fn devin_cloud_agent_capability_shape_is_stable() {
     assert!(back.actions.start_run);
     assert!(back.actions.cancel);
     assert!(!back.actions.approve);
+    // The route follows a session but has no operator-to-Devin message path,
+    // so advertising `send_user_message` would be a false promise to clients.
+    assert!(!back.actions.send_user_message);
     assert!(back.cancellation.acknowledges_cancel);
     assert!(back.history.preserve_unknown_events);
     assert_eq!(back.model_settings.credential_reference_kinds, vec!["env"]);
@@ -888,6 +891,8 @@ fn devin_cloud_agent_capability_shape_is_stable() {
         "No mid-run interrupt",
         "Pause/resume",
         "per-run model overrides",
+        "Operator messages are not forwarded",
+        "Parent issues with sub-issues",
     ] {
         assert!(
             back.feature_gaps

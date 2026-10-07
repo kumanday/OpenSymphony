@@ -197,12 +197,34 @@ the session outcome is preserved.
 
 A Devin session outlives the worker process, so every abandoned path stops it:
 poll timeout and transport failure terminate and archive the session before the
-route returns, a scheduler interrupt looks the session up in the live-session
-registry and deletes it, and dropping the worker task (scheduler abort) fires
-`DevinSessionGuard`, which archives the session in the background. A scheduler
-interrupt that finds no tracked session — the normal state after a daemon
-restart — rebuilds a tenant-bound client from configuration and stops the
-session recorded in the conversation manifest.
+route returns, and a scheduler interrupt looks the session up in the
+live-session registry and deletes it. Worker abort and daemon shutdown
+(`WorkerBackend::abort_worker` / `WorkerBackend::shutdown`) terminate the
+sessions tracked for the affected workers and *await* the acknowledgement
+before the task is aborted; `DevinSessionGuard::drop` only makes an
+opportunistic attempt, because a `Drop` cannot await and a task spawned during
+runtime teardown may never run. A scheduler interrupt that finds no tracked
+session — the normal state after a daemon restart — rebuilds a tenant-bound
+client and stops the session recorded in the conversation manifest.
+
+The durable fence is the binding itself. Beside the conversation manifest the
+route writes `devin-route.json`: the session id, API origin, organization, and
+the *name* of the credential environment variable (never its value). Every
+later cleanup — terminal issue cleanup, and the pre-creation check that stops
+a session a dropped or crashed worker left bound — is addressed through that
+persisted identity, so a workflow that has since been pointed at another origin
+or organization cannot produce a 404 that looks like proof the original
+session is gone; `bind_tenant` refuses the mismatched credential instead. If
+the bound session cannot be terminated, the route refuses to create a
+replacement and settles as non-retrying `CancelFailed`.
+
+Session creation is reconciled before it is retried. Devin may accept a
+`POST /sessions` whose response is lost or undecodable, so a failed create
+first lists unarchived sessions carrying the run's correlation tag (the tag
+always survives operator tag truncation; operators get 49 slots). A match
+created at or after the attempt is followed as if the create had succeeded; a
+confirmed miss is an ordinary retryable failure; a lookup that fails too
+settles as `CancelFailed` and names the tag to search for in Devin.
 
 Ownership is only released once the remote session is provably gone. The route
 writes `run.json` and the Devin conversation binding *before* it reports the
@@ -212,8 +234,19 @@ armed and settles as `CancelFailed`, which does not retry, rather than as an
 ordinary failure that would start a second session while the first still bills.
 A session waiting for operator input keeps its worker and polling loop active.
 The operator answers in Devin, and OpenSymphony follows that session through
-completion and imports the final evidence. A configured scheduler stall timeout
-still applies to a session that has no new runtime activity.
+completion and imports the final evidence; OpenSymphony itself does not forward
+operator messages, which is why the capability reports
+`send_user_message: false`. A configured scheduler stall timeout still applies
+to a session that has no new runtime activity. For every other outcome the
+cleanup guard stays armed until the local evidence is durable: an evidence
+import failure archives the settled session (awaited) before the retryable
+failure is reported, and keeps `CancelFailed` ownership if even that fails.
+
+Parent issues with sub-issues are not routed to Devin. Parent execution roots,
+shared child worktrees, repair/merge, and the orchestrator-owned final
+verification all run against a local checkout, so `decide_issue_route` rejects
+a parent for any harness whose transport is remote-only; the limitation is
+listed in the capability's `feature_gaps`.
 
 When termination fails, the run manifest persists `CancelFailed` in
 `terminal_worker_outcome`. Scheduler recovery restores that outcome before

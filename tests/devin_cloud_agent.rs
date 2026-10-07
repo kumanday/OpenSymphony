@@ -9,16 +9,18 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use opensymphony::opensymphony_devin::{
-    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_REMOTE_CONTAINMENT,
-    DEVIN_UNDISCRIMINATED_EVENT_KIND, DevinClientError, DevinCloudAdapter, DevinCloudClient,
-    DevinCloudConfig, DevinEvidenceCollector, DevinEvidenceLimits, DevinHttpMethod,
-    DevinMessageCursor, DevinMode, DevinOperation, DevinProblemDetail, DevinRemoteWorkspaceBinding,
-    DevinRequest, DevinRequestBuilder, DevinRunOutcome, DevinRunReport, DevinSelfResponse,
-    DevinSessionOptions, DevinSessionStatus, DevinStatusDetail, NormalizedDevinEventKind,
+    DEVIN_CLOUD_AGENT_KIND, DEVIN_CLOUD_API_CONTRACT, DEVIN_MAX_OPERATOR_TAGS,
+    DEVIN_MAX_SESSION_TAGS, DEVIN_REMOTE_CONTAINMENT, DEVIN_UNDISCRIMINATED_EVENT_KIND,
+    DevinClientError, DevinCloudAdapter, DevinCloudClient, DevinCloudConfig,
+    DevinEvidenceCollector, DevinEvidenceLimits, DevinHttpMethod, DevinMessageCursor, DevinMode,
+    DevinOperation, DevinProblemDetail, DevinRemoteWorkspaceBinding, DevinRequest,
+    DevinRequestBuilder, DevinRunOutcome, DevinRunReport, DevinSelfResponse, DevinSessionOptions,
+    DevinSessionStatus, DevinStatusDetail, DevinTenancy, NormalizedDevinEventKind,
     PaginatedResponse, SecretResponse, SessionAttachment, SessionMessage, SessionResponse,
     SessionsQueryParams, attachment_download_url, devin_event_summary, ensure_session_tenant,
     evidence_file_name, normalize_devin_event, normalized_event_to_journal_record,
-    reconcile_tenant, resolve_secret_references, session_create_request, session_created_event,
+    reconcile_tenant, resolve_secret_references, select_reconciled_session, session_create_request,
+    session_created_event,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
@@ -389,12 +391,77 @@ fn create_session_request_maps_binding_and_options_onto_v3_fields() {
     assert!(body.get("structured_output_schema").is_none());
     assert_eq!(body["max_acu_limit"], json!(20));
 
+    // Operators get at most 49 tags: the 50th slot always carries the
+    // correlation tag, because it is how an uncertain creation is found again.
     let crowded = DevinSessionOptions {
         tags: (0..60).map(|index| format!("tag-{index}")).collect(),
         ..DevinSessionOptions::default()
     };
     let request = session_create_request("fix the flake", &binding(), &crowded);
-    assert_eq!(request.tags.expect("tags").len(), 50);
+    let tags = request.tags.expect("tags");
+    assert_eq!(tags.len(), DEVIN_MAX_SESSION_TAGS);
+    assert_eq!(
+        tags.last().map(String::as_str),
+        Some("opensymphony:acme-123")
+    );
+    assert!(
+        tags.iter()
+            .take(DEVIN_MAX_OPERATOR_TAGS)
+            .all(|tag| tag.starts_with("tag-"))
+    );
+    assert!(
+        DevinCloudConfig {
+            session: crowded,
+            ..DevinCloudConfig::default()
+        }
+        .validate()
+        .is_err(),
+        "more than {DEVIN_MAX_OPERATOR_TAGS} configured tags must be rejected"
+    );
+    assert!(
+        DevinCloudConfig {
+            session: DevinSessionOptions {
+                tags: (0..DEVIN_MAX_OPERATOR_TAGS)
+                    .map(|index| format!("tag-{index}"))
+                    .collect(),
+                ..DevinSessionOptions::default()
+            },
+            ..DevinCloudConfig::default()
+        }
+        .validate()
+        .is_ok()
+    );
+}
+
+#[test]
+fn uncertain_creation_reconciles_only_this_runs_live_session() {
+    let mut mine = session("working", None);
+    mine.tags = vec!["opensymphony:acme-123".into()];
+    mine.created_at = 1_700_000_100;
+    let mut newer = mine.clone();
+    newer.session_id = "devin-newer".into();
+    newer.created_at = 1_700_000_200_000; // milliseconds are normalized
+    let mut archived = mine.clone();
+    archived.session_id = "devin-archived".into();
+    archived.is_archived = true;
+    let mut other_issue = mine.clone();
+    other_issue.session_id = "devin-other".into();
+    other_issue.tags = vec!["opensymphony:acme-999".into()];
+    let mut stale = mine.clone();
+    stale.session_id = "devin-stale".into();
+    stale.created_at = 1_699_999_000;
+
+    let picked = select_reconciled_session(
+        vec![stale, archived, other_issue, mine, newer],
+        "opensymphony:acme-123",
+        1_700_000_000,
+    )
+    .expect("the tagged live session is found");
+    assert_eq!(picked.session_id, "devin-newer");
+
+    assert!(
+        select_reconciled_session(Vec::new(), "opensymphony:acme-123", 1_700_000_000).is_none()
+    );
 }
 
 #[test]
@@ -573,7 +640,46 @@ fn client_requires_credentials_and_a_resolvable_organization() {
     })
     .expect("client");
     assert!(unresolved.org_id().is_none());
-    assert!(unresolved.requests().is_err());
+    assert!(matches!(
+        unresolved.requests(),
+        Err(DevinClientError::TenantUnbound)
+    ));
+
+    // A configured organization is an operator claim, not verified tenancy:
+    // until `GET /v3/self` binds the credential, no organization-scoped
+    // request may be built. `identity()` is the only call allowed before that.
+    assert_eq!(discovered.org_id(), Some(ORG_ID));
+    assert!(discovered.tenancy().is_none());
+    assert!(matches!(
+        discovered.requests(),
+        Err(DevinClientError::TenantUnbound)
+    ));
+    let bound = discovered
+        .bind_verified_tenancy(DevinTenancy {
+            org_id: ORG_ID.into(),
+            principal_type: None,
+            service_user_id: None,
+            service_user_name: None,
+        })
+        .expect("matching tenancy binds");
+    assert!(bound.requests().is_ok());
+    let foreign =
+        DevinCloudClient::from_environment(&DevinCloudConfig::default(), |name| match name {
+            "COG_SERVICE_USER_TOKEN" => Some("cog_token".to_owned()),
+            "DEVIN_ORG_ID" => Some(ORG_ID.to_owned()),
+            _ => None,
+        })
+        .expect("client")
+        .bind_verified_tenancy(DevinTenancy {
+            org_id: "org-other".into(),
+            principal_type: None,
+            service_user_id: None,
+            service_user_name: None,
+        });
+    assert!(matches!(
+        foreign,
+        Err(DevinClientError::TenantMismatch { .. })
+    ));
 
     // A bearer credential is attached to every request, so an invalid endpoint
     // must be rejected before the token is read.
@@ -815,6 +921,93 @@ fn remote_attachment_names_stay_inside_the_evidence_directory() {
     );
     assert!(evidence_file_name(3, &long).len() <= 128);
     assert!(evidence_file_name(3, &long).starts_with("003-"));
+}
+
+fn finished_report(session: &SessionResponse) -> DevinRunReport {
+    DevinRunReport {
+        session_id: session.session_id.clone(),
+        session_url: session.url.clone(),
+        outcome: DevinRunOutcome::Finished,
+        status: session.status.clone(),
+        status_detail: session.status_detail.clone(),
+        acus_consumed: 0.0,
+        pull_requests: Vec::new(),
+        structured_output: None,
+        attachments: Vec::new(),
+        attachment_listing_error: None,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn evidence_writes_refuse_symlinked_directories() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside");
+    // `.opensymphony/devin` points outside the workspace, as an imported
+    // artifact or a hostile checkout could arrange.
+    std::fs::create_dir_all(root.path().join(".opensymphony")).expect("metadata dir");
+    std::os::unix::fs::symlink(outside.path(), root.path().join(".opensymphony/devin"))
+        .expect("symlink");
+    let evidence_root = root.path().join(".opensymphony/devin/run-1");
+    let mut collector = DevinEvidenceCollector::new(
+        &evidence_root,
+        DevinEvidenceLimits {
+            download_attachments: false,
+            ..DevinEvidenceLimits::default()
+        },
+    );
+    let session = session("exit", Some("finished"));
+    collector.record(&session_created_event(&session));
+
+    let error = collector
+        .persist(&client(), &finished_report(&session))
+        .await
+        .expect_err("a symlinked evidence directory must be refused");
+    assert!(
+        matches!(error, DevinClientError::Evidence { .. }),
+        "{error}"
+    );
+    assert!(
+        std::fs::read_dir(outside.path())
+            .expect("outside dir")
+            .next()
+            .is_none(),
+        "nothing may be written through the symlink"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn evidence_writes_do_not_follow_symlinked_output_files() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let target = root.path().join("victim.txt");
+    std::fs::write(&target, "untouched").expect("victim");
+    let evidence_root = root.path().join(".opensymphony/devin/run-1");
+    std::fs::create_dir_all(&evidence_root).expect("evidence root");
+    std::os::unix::fs::symlink(&target, evidence_root.join("events.jsonl")).expect("symlink");
+    let mut collector = DevinEvidenceCollector::new(
+        &evidence_root,
+        DevinEvidenceLimits {
+            download_attachments: false,
+            ..DevinEvidenceLimits::default()
+        },
+    );
+    let session = session("exit", Some("finished"));
+    collector.record(&session_created_event(&session));
+
+    let error = collector
+        .persist(&client(), &finished_report(&session))
+        .await
+        .expect_err("a symlinked evidence file must be refused");
+    assert!(
+        matches!(error, DevinClientError::Evidence { .. }),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("victim still readable"),
+        "untouched",
+        "the symlink target must not be written through"
+    );
 }
 
 #[tokio::test]

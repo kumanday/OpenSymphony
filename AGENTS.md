@@ -205,8 +205,16 @@ Devin hardening rules that must hold for any change to this harness:
   size and count limits, and written under sanitized names inside the issue
   workspace.
 - Every abandoned path (poll timeout, transport failure, scheduler interrupt,
-  worker task drop) must terminate and archive the remote session; an orphaned
-  Devin session keeps consuming ACUs.
+  worker abort, daemon shutdown) must terminate and archive the remote session
+  and await the acknowledgement; an orphaned Devin session keeps consuming
+  ACUs. `Drop` is never the only safeguard: the persisted session binding and
+  route identity (`devin-route.json`) are the durable fence, and a bound
+  session is stopped through *its own* persisted origin/organization before
+  any replacement is created.
+- Organization-scoped requests require verified tenancy (`bind_tenant`), not
+  just a configured organization id; a failed `create_session` is reconciled
+  through the correlation tag before it is retried.
+- Parent issues with sub-issues are not routed to remote-only harnesses.
 
 Changes to the route or the client must keep the opt-in live suite
 (`OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live --
