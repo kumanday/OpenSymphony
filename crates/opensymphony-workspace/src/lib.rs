@@ -11,8 +11,8 @@ pub use environment::environment_variable_names_equal;
 pub(crate) use environment::{has_environment_name_collision, insert_environment_value};
 pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
 pub use manager::{
-    WorkspaceManager, compose_parent_continuation_prompt, compose_parent_prompt,
-    compose_terminal_prompt,
+    MAX_INSTRUCTION_FILE_BYTES, WorkspaceManager, compose_parent_continuation_prompt,
+    compose_parent_prompt, compose_terminal_prompt, instruction_body,
 };
 pub use models::{
     AcpProcessState, AcpRecovery, AcpRunRoute, AcpSessionIdentity, AcpSessionState,

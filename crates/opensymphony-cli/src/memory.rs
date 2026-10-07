@@ -10254,6 +10254,7 @@ mod tests {
                 updated_at: now,
                 last_seen_tracker_refresh_at: None,
                 repository_binding: None,
+                evidence_only: false,
             })
             .expect("workspace manifest json"),
         )
@@ -10464,6 +10465,7 @@ mod tests {
                 updated_at: now,
                 last_seen_tracker_refresh_at: None,
                 repository_binding: None,
+                evidence_only: false,
             })
             .expect("manifest json"),
         )
@@ -15098,6 +15100,7 @@ Public memory concept.
         .expect("runtime envelope");
         let now = Utc::now();
         let run = RunManifest {
+            terminal_worker_outcome: None,
             run_id: "run-551".to_string(),
             issue_id: "issue-551".to_string(),
             identifier: "COE-551".to_string(),

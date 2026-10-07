@@ -296,6 +296,9 @@ pub struct RecoveryRecord {
     pub retry_error: Option<String>,
     pub harness_kind: Option<String>,
     pub interrupt_reason: Option<HarnessInterruptReason>,
+    /// A persisted outcome that forbids a replacement run because the work it
+    /// describes is still live outside this process.
+    pub terminal_worker_outcome: Option<WorkerOutcomeKind>,
     pub recovered_run: Option<RecoveredRun>,
 }
 
@@ -546,6 +549,18 @@ pub trait WorkspaceBackend {
         issue: &NormalizedIssue,
         observed_at: TimestampMs,
     ) -> Result<WorkspaceRecord, Self::Error>;
+
+    /// Prepares an issue workspace for a harness that executes remotely.
+    ///
+    /// The workspace holds manifests, journals, and imported evidence only, so
+    /// no local checkout is required and the host needs no repository access.
+    async fn ensure_evidence_workspace(
+        &mut self,
+        issue: &NormalizedIssue,
+        observed_at: TimestampMs,
+    ) -> Result<WorkspaceRecord, Self::Error> {
+        self.ensure_workspace(issue, observed_at).await
+    }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error>;
 
@@ -824,6 +839,12 @@ pub trait WorkerBackend {
             timed_out: false,
         })
     }
+
+    /// Releases every worker the backend still tracks before the process
+    /// exits. Backends whose workers hold remote resources (a Devin session
+    /// keeps billing after its local task is gone) must stop them here and
+    /// await the acknowledgement; dropping the backend cannot await anything.
+    async fn shutdown(&mut self) {}
 }
 
 pub struct OperatorResponseDelivery(
@@ -4530,7 +4551,13 @@ where
                 // the live tracker binding, discard the old workspace before
                 // restoring the retry so the replacement is materialized by
                 // the normal dispatch path.
-                if recovered_run.is_none() && recovered_workspace.is_some() && binding_changed {
+                // Preserve evidence for a remote session whose persisted
+                // outcome forbids a replacement run.
+                if recovered_run.is_none()
+                    && recovered_workspace.is_some()
+                    && binding_changed
+                    && record.terminal_worker_outcome.is_none()
+                {
                     self.release_stale_binding_leases(
                         &record.issue,
                         recovered_workspace
@@ -4548,7 +4575,41 @@ where
                     recovered_workspace = None;
                 }
                 self.upsert_active_execution(normalized.clone(), observed_at, recovered_workspace)?;
-                if record.had_in_flight_run {
+                if let Some(terminal_outcome) = record.terminal_worker_outcome {
+                    // `Paused` and `Failed` alone would make this dispatchable
+                    // again. The persisted outcome says the previous run left
+                    // something alive outside this process, so restart must
+                    // reach the same non-retrying release the in-process path
+                    // produces instead of launching a replacement.
+                    tracing::info!(
+                        issue = %issue_id,
+                        outcome = ?terminal_outcome,
+                        "restored a non-retrying worker outcome during recovery"
+                    );
+                    let worker_id = self.next_worker_id()?;
+                    let mut execution = self
+                        .remove_execution(&issue_id)
+                        .expect("active recovery execution should be present");
+                    execution.restore_worker_outcome(WorkerOutcomeRecord {
+                        worker_id,
+                        attempt: None,
+                        outcome: terminal_outcome,
+                        started_at: observed_at,
+                        finished_at: observed_at,
+                        turn_count: 0,
+                        summary: Some(
+                            "restored a non-retrying worker outcome from the run manifest"
+                                .to_owned(),
+                        ),
+                        error: None,
+                        harness_stopped: false,
+                        parent_verification: None,
+                    });
+                    self.insert_execution(
+                        issue_id.clone(),
+                        execution.release(observed_at, ReleaseReason::TrackerInactive, None)?,
+                    );
+                } else if record.had_in_flight_run {
                     if recovered_run.is_some() {
                         self.restore_recovered_run(
                             &issue_id,
@@ -5303,6 +5364,18 @@ where
         .with_repository_binding(recovered_run.repository_binding.clone());
         let mut execution = IssueExecution::new(record.issue.clone(), observed_at);
         execution.attach_workspace(record.workspace.clone())?;
+        if let Some(attempt) = run.attempt {
+            execution = execution.restore_retry(RetryEntry {
+                issue_id: record.issue.id.clone(),
+                identifier: record.issue.identifier.clone(),
+                attempt,
+                normal_retry_count: recovered_run.normal_retry_count,
+                scheduled_at: observed_at,
+                due_at: observed_at,
+                reason: RetryReason::Reconciliation,
+                error: None,
+            })?;
+        }
         execution = execution.claim(run.clone())?.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),
@@ -5400,11 +5473,15 @@ where
         let replacement_workspace = if retain_workspace {
             execution.workspace().cloned()
         } else if retry.is_some() && has_resolved_replacement {
-            match self
-                .workspace
-                .ensure_workspace(&replacement, observed_at)
-                .await
-            {
+            match if harness_executes_remotely(&self.config.routing.harness) {
+                self.workspace
+                    .ensure_evidence_workspace(&replacement, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&replacement, observed_at)
+                    .await
+            } {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
                     if let Some(retry) = retry.as_ref()
@@ -6346,11 +6423,30 @@ where
                 }
             }
 
-            let workspace = match self
-                .workspace
-                .ensure_workspace(&normalized, observed_at)
-                .await
-            {
+            // Validate the route before materializing a workspace. A remote-only
+            // harness keeps evidence here but executes in its own environment.
+            let route = match decide_issue_route(&normalized, &self.config) {
+                Ok(route) => route,
+                Err(error) => {
+                    let error = self
+                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
+                        .await;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
+            let workspace_result = if harness_executes_remotely(&route.harness_kind) {
+                self.workspace
+                    .ensure_evidence_workspace(&normalized, observed_at)
+                    .await
+            } else {
+                self.workspace
+                    .ensure_workspace(&normalized, observed_at)
+                    .await
+            };
+            let workspace = match workspace_result {
                 Ok(workspace) => workspace,
                 Err(error) => {
                     let error = self
@@ -6494,18 +6590,6 @@ where
                     .and_then(RepositoryBindingOutcome::resolved_binding)
                     .cloned(),
             );
-            let route = match decide_issue_route(&normalized, &self.config) {
-                Ok(route) => route,
-                Err(error) => {
-                    let error = self
-                        .clear_parent_dispatch_intent_after_preparation_failure(&issue_id, error)
-                        .await;
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                    continue;
-                }
-            };
 
             let mut execution = self
                 .remove_execution(&issue_id)
@@ -9316,7 +9400,7 @@ impl TrackerSnapshot {
 }
 
 pub fn decide_issue_route(
-    _issue: &NormalizedIssue,
+    issue: &NormalizedIssue,
     config: &SchedulerConfig,
 ) -> Result<HarnessRouteDecision, SchedulerError> {
     let capability = harness_capability(&config.routing.harness)?;
@@ -9325,6 +9409,20 @@ pub fn decide_issue_route(
             detail: format!(
                 "selected harness `{}` cannot start issue execution",
                 config.routing.harness
+            ),
+        });
+    }
+    // Parent execution roots, shared child worktrees, repair, merge, and the
+    // orchestrator-owned final verification all operate on a local checkout. A
+    // harness that only executes remotely has none, so the parent would settle
+    // without the verification evidence `enforce_parent_outcome_trust` needs.
+    if !issue.sub_issues.is_empty() && capability.transport.remote && !capability.transport.local {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "selected harness `{}` executes remotely and cannot run parent issue `{}` with {} sub-issue(s); parent integration needs a local checkout",
+                config.routing.harness,
+                issue.identifier,
+                issue.sub_issues.len()
             ),
         });
     }
@@ -9401,6 +9499,16 @@ fn recovered_worker_ordinal(worker_id: &WorkerId) -> Option<u64> {
         .as_str()
         .strip_prefix("scheduler-worker-")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+/// Whether a harness runs the agent outside this host.
+///
+/// A remote-only harness owns its execution workspace, so the scheduler
+/// prepares an evidence-only local workspace instead of a checkout.
+fn harness_executes_remotely(kind: &str) -> bool {
+    HarnessKind::parse(kind)
+        .map(HarnessKind::capability)
+        .is_some_and(|capability| capability.transport.remote && !capability.transport.local)
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {

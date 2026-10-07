@@ -162,6 +162,7 @@ const authMethods = new Set<SubscriptionCredentialAuthMethod>([
 const harnessKinds = new Set<ModelHarnessKind>([
   "openhands_agent_server",
   "codex_app_server",
+  "devin_cloud_agent",
   "rust_native",
 ]);
 

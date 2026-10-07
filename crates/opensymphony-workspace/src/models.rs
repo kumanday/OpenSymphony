@@ -8,7 +8,9 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::opensymphony_domain::{RepositoryBinding, RepositoryBindingOutcome, WorkspaceRecord};
+use crate::opensymphony_domain::{
+    RepositoryBinding, RepositoryBindingOutcome, WorkerOutcomeKind, WorkspaceRecord,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutRepository {
@@ -1103,6 +1105,8 @@ pub struct IssueManifest {
     pub last_seen_tracker_refresh_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_binding: Option<RepositoryBindingOutcome>,
+    #[serde(default)]
+    pub evidence_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1163,6 +1167,10 @@ pub struct RunManifest {
     pub retry_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
+    /// A worker outcome that must survive restart because retrying it would
+    /// duplicate work that is still live outside this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_worker_outcome: Option<WorkerOutcomeKind>,
     pub status: RunStatus,
     /// True only when the harness adapter observed a terminal runtime state or
     /// a reconciled interrupt acknowledgement. A failed transport alone does
@@ -1203,6 +1211,7 @@ impl RunManifest {
             retry_reason: None,
             retry_error: None,
             interrupt_reason: None,
+            terminal_worker_outcome: None,
             status: RunStatus::Preparing,
             harness_stopped: false,
             created_at: now,

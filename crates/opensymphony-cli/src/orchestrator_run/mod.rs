@@ -1613,6 +1613,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         }
     }
 
+    // Remote-harness workers (Devin) hold sessions that keep billing after
+    // their local task is gone; stop them before the runtime tears down.
+    scheduler.worker_mut().shutdown().await;
     server_task.abort();
     shutdown_task.abort();
     shutdown_memory_server(&mut memory_server).await?;

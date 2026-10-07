@@ -49,7 +49,7 @@ use super::{
 };
 use crate::opensymphony_domain::{RepositoryBinding, SafeRemoteFingerprint};
 
-const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_INSTRUCTION_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_INSTRUCTION_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -64,6 +64,16 @@ pub struct WorkspaceManager {
 struct HookFailure {
     error: WorkspaceError,
     record: HookExecutionRecord,
+}
+
+/// Whether workspace lifecycle hooks run while a workspace is materialized.
+///
+/// Hooks operate on a local checkout, so an evidence-only workspace for a
+/// remote-execution harness skips them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceHooks {
+    Executed,
+    Skipped,
 }
 
 enum ExistingIssueManifestState {
@@ -270,6 +280,14 @@ impl WorkspaceManager {
 
     pub fn checkout_credential_envs(&self) -> &BTreeSet<String> {
         &self.checkout_credential_envs
+    }
+
+    /// Configured checkout policy for a canonical repository id.
+    ///
+    /// Remote harnesses that never materialize a local checkout still need the
+    /// configured remote and target branch to bind their own workspace.
+    pub fn checkout_repository(&self, repository_id: &str) -> Option<&CheckoutRepository> {
+        self.checkout_repositories.get(repository_id)
     }
 
     pub fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf, WorkspaceError> {
@@ -594,7 +612,7 @@ impl WorkspaceManager {
             .await?;
             self.write_manifest_atomically(&handle, &handle.parent_manifest_path(), &manifest)
                 .await?;
-            let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+            let issue_manifest = self.upsert_issue_manifest(issue, &handle, None).await?;
             debug_assert_eq!(issue_manifest.workspace_path, handle.workspace_path());
             self.remove_cleanup_tombstone(&handle, &format!("parent:{hierarchy_generation}"))
                 .await?;
@@ -2271,6 +2289,24 @@ impl WorkspaceManager {
         self.ensure(issue).await
     }
 
+    /// Ensures an issue workspace without preparing a local checkout.
+    ///
+    /// A remote-execution harness owns its own workspace, so the local one
+    /// carries manifests, journals, and imported evidence only. Cloning the
+    /// repository or running the workspace hooks here would demand repository
+    /// access and Git on a host that never runs the agent.
+    pub async fn ensure_evidence_only(
+        &self,
+        issue: &IssueDescriptor,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
+        // The binding is kept in the issue manifest: it records which
+        // repository the remote run belongs to, and dropping it makes the
+        // workspace look unbound to every later binding comparison. Only the
+        // checkout it would otherwise drive is skipped.
+        self.ensure_local_workspace(issue, WorkspaceHooks::Skipped)
+            .await
+    }
+
     pub async fn ensure_with_run_id(
         &self,
         issue: &IssueDescriptor,
@@ -2288,6 +2324,15 @@ impl WorkspaceManager {
                 .await;
         }
 
+        self.ensure_local_workspace(issue, WorkspaceHooks::Executed)
+            .await
+    }
+
+    async fn ensure_local_workspace(
+        &self,
+        issue: &IssueDescriptor,
+        hooks: WorkspaceHooks,
+    ) -> Result<EnsureWorkspaceResult, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
@@ -2373,7 +2418,7 @@ impl WorkspaceManager {
             existing_state,
             ExistingWorkspaceState::Missing | ExistingWorkspaceState::ForeignArtifact
         );
-        let after_create = if created {
+        let after_create = if created && hooks == WorkspaceHooks::Executed {
             match self.execute_hook(HookKind::AfterCreate, &handle).await {
                 Ok(record) => {
                     if record.is_some() {
@@ -2387,7 +2432,9 @@ impl WorkspaceManager {
             None
         };
         self.bootstrap_workspace_layout(&handle).await?;
-        let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+        let issue_manifest = self
+            .upsert_issue_manifest(issue, &handle, Some(hooks == WorkspaceHooks::Skipped))
+            .await?;
         if created {
             self.remove_cleanup_tombstone(&handle, &format!("workspace:{}", issue.issue_id))
                 .await?;
@@ -2667,7 +2714,7 @@ impl WorkspaceManager {
                 .await;
             return Err(error);
         }
-        let issue_manifest = match self.upsert_issue_manifest(issue, &workspace).await {
+        let issue_manifest = match self.upsert_issue_manifest(issue, &workspace, None).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 self.handle_receipt_owned_checkout_failure(&workspace, &error)
@@ -3304,7 +3351,7 @@ impl WorkspaceManager {
                         .await?;
                         continue;
                     }
-                    let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+                    let issue_manifest = self.upsert_issue_manifest(issue, &handle, None).await?;
                     return Ok(Some(EnsureWorkspaceResult {
                         handle,
                         issue_manifest,
@@ -4624,6 +4671,38 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// Starts a run in an evidence-only workspace.
+    ///
+    /// The configured `before_run` hook operates on a local checkout, which a
+    /// remote-execution harness never materializes, so it is not executed.
+    pub async fn start_evidence_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+    ) -> Result<RunManifest, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+
+        let mut manifest = RunManifest::new(workspace, run);
+        manifest.status = RunStatus::Prepared;
+        self.write_run_manifest(workspace, &manifest).await?;
+        Ok(manifest)
+    }
+
+    /// Finishes a run in an evidence-only workspace without the `after_run`
+    /// hook, which likewise assumes a local checkout.
+    pub async fn finish_evidence_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        status: RunStatus,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+
+        run_manifest.status = status;
+        run_manifest.updated_at = Utc::now();
+        self.write_run_manifest(workspace, run_manifest).await
+    }
+
     pub async fn start_run(
         &self,
         workspace: &WorkspaceHandle,
@@ -4682,6 +4761,23 @@ impl WorkspaceManager {
         }
     }
 
+    async fn workspace_hooks(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<WorkspaceHooks, WorkspaceError> {
+        Ok(
+            if self
+                .load_issue_manifest(workspace)
+                .await?
+                .is_some_and(|manifest| manifest.evidence_only)
+            {
+                WorkspaceHooks::Skipped
+            } else {
+                WorkspaceHooks::Executed
+            },
+        )
+    }
+
     pub async fn cleanup(
         &self,
         workspace: &WorkspaceHandle,
@@ -4695,6 +4791,27 @@ impl WorkspaceManager {
                 generation,
                 outcome: CleanupTerminalOutcome::Succeeded,
                 remove: self.config.cleanup.remove_terminal_workspaces,
+            },
+        )
+        .await
+    }
+
+    /// Applies terminal cleanup to an evidence-only workspace. The durable
+    /// issue manifest tells the cleanup transaction to skip repository hooks.
+    pub async fn cleanup_evidence_only(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+        force_remove: bool,
+    ) -> Result<CleanupOutcome, WorkspaceError> {
+        let generation = self.cleanup_generation(workspace).await?;
+        self.cleanup_with_request(
+            workspace,
+            state,
+            CleanupRequest {
+                generation,
+                outcome: CleanupTerminalOutcome::Succeeded,
+                remove: force_remove || self.config.cleanup.remove_terminal_workspaces,
             },
         )
         .await
@@ -4894,9 +5011,14 @@ impl WorkspaceManager {
         };
 
         if decision == CleanupDecision::Retain {
-            let before_remove = match self.execute_hook(HookKind::BeforeRemove, workspace).await {
-                Ok(record) => record,
-                Err(failure) => Some(failure.record),
+            let before_remove = match self.workspace_hooks(workspace).await? {
+                WorkspaceHooks::Skipped => None,
+                WorkspaceHooks::Executed => {
+                    match self.execute_hook(HookKind::BeforeRemove, workspace).await {
+                        Ok(record) => record,
+                        Err(failure) => Some(failure.record),
+                    }
+                }
             };
             return Ok(CleanupOutcome {
                 decision,
@@ -5000,7 +5122,9 @@ impl WorkspaceManager {
             .as_ref()
             .and_then(|intent| intent.before_remove.as_ref())
             .is_some();
-        if !before_remove_recorded {
+        if !before_remove_recorded
+            && self.workspace_hooks(workspace).await? == WorkspaceHooks::Executed
+        {
             let mut run_before_remove = true;
             if let Some(hook) = self.hook_definition(HookKind::BeforeRemove).cloned() {
                 let started_at = Utc::now();
@@ -6169,9 +6293,15 @@ impl WorkspaceManager {
         &self,
         issue: &IssueDescriptor,
         workspace: &WorkspaceHandle,
+        evidence_only: Option<bool>,
     ) -> Result<IssueManifest, WorkspaceError> {
-        self.upsert_issue_manifest_at_path(issue, workspace, workspace.workspace_path())
-            .await
+        self.upsert_issue_manifest_at_path(
+            issue,
+            workspace,
+            workspace.workspace_path(),
+            evidence_only,
+        )
+        .await
     }
 
     async fn upsert_issue_manifest_at_path(
@@ -6179,6 +6309,7 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         workspace: &WorkspaceHandle,
         manifest_workspace_path: &Path,
+        evidence_only: Option<bool>,
     ) -> Result<IssueManifest, WorkspaceError> {
         let existing = match self.inspect_issue_manifest_state(issue, workspace).await? {
             ExistingIssueManifestState::Owned(manifest) => Some(manifest),
@@ -6213,6 +6344,11 @@ impl WorkspaceManager {
             updated_at: now,
             last_seen_tracker_refresh_at: issue.last_seen_tracker_refresh_at,
             repository_binding: issue.repository_binding.clone(),
+            evidence_only: evidence_only.unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.evidence_only)
+            }),
         };
 
         self.write_manifest_atomically(workspace, &workspace.issue_manifest_path(), &manifest)
@@ -6558,6 +6694,7 @@ impl WorkspaceManager {
             repository_binding: receipt
                 .repository_binding
                 .map(crate::opensymphony_domain::RepositoryBindingOutcome::Resolved),
+            evidence_only: false,
         }))
     }
 
@@ -7574,6 +7711,16 @@ async fn read_bounded_instruction_file(
     }
     *total_bytes += file_bytes;
     Ok((format!("sha256:{:x}", hasher.finalize()), contents))
+}
+
+/// Instruction text to present to a harness for `path`: `WORKFLOW.md` keeps
+/// only its body, every other instruction file is used verbatim.
+pub fn instruction_body(path: &Path, bytes: &[u8]) -> Vec<u8> {
+    if is_workflow_instruction_path(path) {
+        workflow_body(bytes)
+    } else {
+        bytes.to_vec()
+    }
 }
 
 fn workflow_body(bytes: &[u8]) -> Vec<u8> {
