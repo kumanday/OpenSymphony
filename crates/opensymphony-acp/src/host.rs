@@ -132,10 +132,18 @@ pub async fn inspect_recorded_session(
     if state.identity.workspace_path != workspace.workspace_path() {
         return Err(HostError::IdentityMismatch);
     }
-    // A recorded native session can be inspected after its owner exits.  A
-    // launch that never received a native session ID has no transcript to
-    // inspect and must remain an unavailable context.
-    if state.session_id.is_some() {
+    // Preserve negotiated restoration/reset outcomes.  Otherwise a recorded
+    // native session can be inspected after its owner exits.  A launch that
+    // never received a native session ID has no transcript to inspect and
+    // remains an unavailable context.
+    if manifest.reset_reason.is_some() {
+        state.recovery = AcpRecovery::Fresh;
+    } else if state.session_id.is_some()
+        && !matches!(
+            state.recovery,
+            AcpRecovery::RestoredLoad | AcpRecovery::RestoredResume
+        )
+    {
         state.recovery = AcpRecovery::TranscriptOnly;
     }
     Ok(SessionSnapshot {

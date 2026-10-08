@@ -7,8 +7,8 @@
 
 use super::{HostError, SessionHandle, SessionHost, SessionSnapshot};
 use crate::opensymphony_workspace::{
-    AcpRecovery, AcpSessionIdentity, ConversationManifest, RunManifest, WorkspaceHandle,
-    WorkspaceManager,
+    AcpRecovery, AcpSessionIdentity, ConversationManifest, IssueDescriptor, ParentRuntimeEnvelope,
+    RunManifest, WorkspaceHandle, WorkspaceManager,
 };
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,8 @@ pub struct AttachmentTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentMode {
     Live,
+    CapabilityGatedRestoration { recovery: AcpRecovery },
+    FreshContextReset,
     TranscriptInspection,
     Unavailable,
 }
@@ -58,6 +60,10 @@ impl DebugAttachment {
     /// A transcript is evidence only.  It cannot be used to submit a prompt.
     pub fn is_transcript_only(&self) -> bool {
         self.mode == AttachmentMode::TranscriptInspection
+    }
+
+    pub fn is_restoration(&self) -> bool {
+        matches!(self.mode, AttachmentMode::CapabilityGatedRestoration { .. })
     }
 }
 
@@ -127,20 +133,37 @@ pub async fn resolve(
         .acp
         .as_ref()
         .ok_or(AttachmentError::BindingMismatch("harness is not ACP"))?;
-    let envelope = run
-        .runtime_envelope
-        .as_ref()
-        .ok_or(AttachmentError::BindingMismatch(
+    let session_id = state.session_id.as_deref();
+    validate_route(&run, state)?;
+    if let Some(envelope) = run.runtime_envelope.as_ref() {
+        validate_binding(
+            &issue,
+            &run,
+            &conversation,
+            state.identity.clone(),
+            session_id,
+            envelope,
+        )?;
+        manager.verify_runtime_envelope(workspace, envelope).await?;
+    } else if let Some(envelope) = run.parent_runtime_envelope.as_ref() {
+        validate_parent_binding(&run, &conversation, state, envelope, session_id)?;
+        let parent_issue = IssueDescriptor {
+            issue_id: issue.issue_id.clone(),
+            identifier: issue.identifier.clone(),
+            title: issue.title.clone(),
+            current_state: issue.current_state.clone(),
+            last_seen_tracker_refresh_at: issue.last_seen_tracker_refresh_at,
+            repository_binding: issue.repository_binding.clone(),
+        };
+        let parent = manager
+            .open_parent_execution_root_at(&parent_issue, workspace.workspace_path())
+            .await?;
+        manager.verify_parent_runtime_envelope(&parent, envelope)?;
+    } else {
+        return Err(AttachmentError::BindingMismatch(
             "runtime envelope is missing",
-        ))?;
-    validate_binding(
-        &issue,
-        &run,
-        &conversation,
-        state.identity.clone(),
-        state.session_id.as_deref(),
-        envelope,
-    )?;
+        ));
+    }
     if let Some(requested) = request.profile_id.as_deref()
         && requested != state.identity.profile_id
     {
@@ -165,36 +188,58 @@ pub async fn resolve(
         .lookup(target.owner_id.clone(), target.generation)
         .await
     {
-        Ok(owner) => {
-            let snapshot = owner
-                .inspect()
-                .await
-                .map_err(|error| AttachmentError::BindingMismatch(host_error_detail(error)))?;
-            Ok(DebugAttachment {
-                target,
-                mode: AttachmentMode::Live,
-                snapshot,
-                owner: Some(owner),
-            })
-        }
-        Err(HostError::Unavailable) => {
-            let snapshot = super::inspect_recorded_session(manager, workspace)
-                .await
-                .map_err(|error| AttachmentError::BindingMismatch(host_error_detail(error)))?;
-            let mode = if snapshot.state.recovery == AcpRecovery::TranscriptOnly {
-                AttachmentMode::TranscriptInspection
-            } else {
-                AttachmentMode::Unavailable
-            };
-            Ok(DebugAttachment {
-                target,
-                mode,
-                snapshot,
-                owner: None,
-            })
-        }
+        Ok(owner) => match owner.inspect().await {
+            Ok(snapshot) => {
+                validate_owner_snapshot(
+                    &snapshot,
+                    &state.identity,
+                    state.session_id.as_deref(),
+                    &state.owner_id,
+                )?;
+                Ok(DebugAttachment {
+                    target,
+                    mode: AttachmentMode::Live,
+                    snapshot,
+                    owner: Some(owner),
+                })
+            }
+            Err(HostError::Unavailable) => recorded_attachment(manager, workspace, target).await,
+            Err(error) => Err(AttachmentError::BindingMismatch(host_error_detail(error))),
+        },
+        Err(HostError::Unavailable) => recorded_attachment(manager, workspace, target).await,
         Err(error) => Err(AttachmentError::BindingMismatch(host_error_detail(error))),
     }
+}
+
+async fn recorded_attachment(
+    manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    target: AttachmentTarget,
+) -> Result<DebugAttachment, AttachmentError> {
+    let snapshot = super::inspect_recorded_session(manager, workspace)
+        .await
+        .map_err(|error| AttachmentError::BindingMismatch(host_error_detail(error)))?;
+    let mode = if snapshot.state.session_id.is_none() {
+        AttachmentMode::Unavailable
+    } else {
+        match snapshot.state.recovery {
+            AcpRecovery::RestoredLoad | AcpRecovery::RestoredResume => {
+                AttachmentMode::CapabilityGatedRestoration {
+                    recovery: snapshot.state.recovery,
+                }
+            }
+            AcpRecovery::Fresh => AttachmentMode::FreshContextReset,
+            AcpRecovery::TranscriptOnly | AcpRecovery::LiveAttach => {
+                AttachmentMode::TranscriptInspection
+            }
+        }
+    };
+    Ok(DebugAttachment {
+        target,
+        mode,
+        snapshot,
+        owner: None,
+    })
 }
 
 fn run_matches_workspace(manifest: &RunManifest, workspace: &WorkspaceHandle) -> bool {
@@ -240,6 +285,63 @@ fn validate_binding(
         || envelope.acp_session.as_ref() != Some(&identity)
     {
         return Err(AttachmentError::BindingMismatch("runtime/session"));
+    }
+    Ok(())
+}
+
+fn validate_parent_binding(
+    run: &RunManifest,
+    conversation: &ConversationManifest,
+    state: &crate::opensymphony_workspace::AcpSessionState,
+    envelope: &ParentRuntimeEnvelope,
+    session_id: Option<&str>,
+) -> Result<(), AttachmentError> {
+    if envelope.harness != "acp"
+        || envelope.workspace_path != run.workspace_path
+        || envelope.run_id != run.run_id
+        || envelope.attempt != run.attempt
+        || state.harness != "acp"
+        || state.identity.workspace_path != run.workspace_path
+        || state.identity.run_id != run.run_id
+        || state.identity.attempt != run.attempt
+        || state.identity.checkout_generation.is_some()
+        || conversation.conversation_id != session_id.unwrap_or_default()
+        || envelope.conversation_binding.as_deref() != session_id
+        || conversation.parent_runtime_envelope.as_ref() != Some(envelope)
+    {
+        return Err(AttachmentError::BindingMismatch("parent runtime/session"));
+    }
+    Ok(())
+}
+
+fn validate_route(
+    run: &RunManifest,
+    state: &crate::opensymphony_workspace::AcpSessionState,
+) -> Result<(), AttachmentError> {
+    let route = run
+        .acp_route
+        .as_ref()
+        .ok_or(AttachmentError::BindingMismatch("ACP route is missing"))?;
+    if route.harness_kind != "acp"
+        || route.harness_profile.as_deref() != Some(state.identity.profile_id.as_str())
+    {
+        return Err(AttachmentError::BindingMismatch("ACP route/profile"));
+    }
+    Ok(())
+}
+
+fn validate_owner_snapshot(
+    snapshot: &SessionSnapshot,
+    identity: &AcpSessionIdentity,
+    session_id: Option<&str>,
+    owner_id: &str,
+) -> Result<(), AttachmentError> {
+    if snapshot.state.harness != "acp"
+        || snapshot.state.owner_id != owner_id
+        || snapshot.state.identity != *identity
+        || snapshot.state.session_id.as_deref() != session_id
+    {
+        return Err(AttachmentError::BindingMismatch("live owner identity"));
     }
     Ok(())
 }

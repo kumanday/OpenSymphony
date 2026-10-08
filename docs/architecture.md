@@ -539,12 +539,13 @@ and ordered source events for a separate debug process. It does not grant IDE
 writer control; scheduler holds and writer transfer belong to OSYM-907.
 
 The shared debug attachment resolver validates the exact issue workspace, issue
-and run manifests, runtime envelope, persisted ACP profile, run/attempt and
-opaque native session binding before it looks up an owner. A live result borrows
-the existing `SessionHandle`, so a separate debug process uses the owner's
-control and event seam without launching another agent. If the owner is gone,
-the resolver returns transcript inspection only when a native session ID and
-recorded state exist. A launch without a native session is reported as
+and run manifests, persisted ACP route/profile, run/attempt, current checkout
+or parent execution envelope, and opaque native session binding before it looks
+up an owner. A live result borrows the existing `SessionHandle`, so a separate
+debug process uses the owner's control and event seam without launching another
+agent. Owner snapshots are compared with the complete persisted identity before
+control or events are exposed. If the owner is gone, the resolver distinguishes
+capability-gated restoration, fresh-context reset, transcript inspection, and
 unavailable context. The resolver does not create a debug manifest or session
 database.
 

@@ -666,11 +666,14 @@ capability advertisement. The production scheduler/gateway fixture routes a
 permission and a choice form through HTTP action receipts to the blocked peer.
 
 Debug attachment core regression tests also cover parent/store/nested-path
-rejection, exact workspace binding and the no-runtime-binding failure path. The
-host control-plane tests verify authenticated commands and ordered events reach
-the same retained owner, so a separate attachment cannot create a competing
-runtime. Multi-profile live qualification remains an integration test against
-the configured ACP profiles and their negotiated capabilities.
+rejection, exact workspace binding, terminal and parent envelope verification,
+persisted route/profile mismatches, complete owner identity comparison, the
+no-runtime-binding failure path, owner-loss races, and the distinct
+restoration/reset/transcript/unavailable modes. The host control-plane tests
+verify authenticated commands and ordered events reach the same retained owner,
+so a separate attachment cannot create a competing runtime. Multi-profile live
+qualification remains an integration test against the configured ACP profiles
+and their negotiated capabilities.
 The extension peer verifies a registered outbound request has the host-bound
 session ID and permitted `_meta`, returns a structured result, and rejects
 unregistered methods, stale runs, and unexpected argument keys. The peer sends
