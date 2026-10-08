@@ -538,6 +538,16 @@ conversation manifest, with additive ACP identity in its runtime envelope.
 and ordered source events for a separate debug process. It does not grant IDE
 writer control; scheduler holds and writer transfer belong to OSYM-907.
 
+The shared debug attachment resolver validates the exact issue workspace, issue
+and run manifests, runtime envelope, persisted ACP profile, run/attempt and
+opaque native session binding before it looks up an owner. A live result borrows
+the existing `SessionHandle`, so a separate debug process uses the owner's
+control and event seam without launching another agent. If the owner is gone,
+the resolver returns transcript inspection only when a native session ID and
+recorded state exist. A launch without a native session is reported as
+unavailable context. The resolver does not create a debug manifest or session
+database.
+
 Handlers are installed before initialization. Permission callbacks receive the
 protocol cancellation outcome; unknown requests receive method-not-found and
 unknown notifications receive no response. Updates are processed before the

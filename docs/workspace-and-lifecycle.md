@@ -958,6 +958,14 @@ Recovery projects those descriptors for inspection, while a new invocation
 still requires the live owner, current run, exact profile registration, and
 peer capability check; a durable descriptor alone grants no execution right.
 
+Debug attachment uses the same persisted records and owner registry. It accepts
+only the canonical issue workspace path and checks the issue manifest, run
+identity, checkout generation, repository binding, runtime envelope, profile,
+attempt and opaque native session ID before returning a target. A live attach
+borrows the retained owner and its status/event/command interfaces. An owner
+loss produces either transcript inspection or unavailable context; it never
+starts a replacement session.
+
 The manifest is atomically replaced and synced, including its parent directory,
 before a prompt can reach the transport. Cancellation after the synced
 `submitted` marker is rechecked before transport submission; when no prompt was

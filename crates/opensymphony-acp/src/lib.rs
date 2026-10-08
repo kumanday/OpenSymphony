@@ -42,6 +42,7 @@ use tokio_util::{
 use tracing::instrument::WithSubscriber;
 
 mod atomic_file;
+mod attachment;
 mod durable;
 mod extensions;
 mod host;
@@ -49,6 +50,10 @@ mod operator;
 mod projection;
 mod services;
 mod session_config;
+pub use attachment::{
+    AttachmentError, AttachmentMode, AttachmentRequest, AttachmentTarget, DebugAttachment,
+    resolve as resolve_debug_attachment,
+};
 pub use extensions::OperationCapability;
 pub use host::*;
 pub use operator::{
