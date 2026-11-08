@@ -647,11 +647,12 @@ Only `main` saves the Rust caches (`Swatinem/rust-cache` with `save-if`). A pull
 request can read the `main` cache but not another pull request's cache, so
 per-PR caches only consumed the 10 GB repository quota and evicted the shared
 one.
-rust-cache prunes `target/duckdb-download` before it saves, but keeps the
-`libduckdb-sys` build-script output that links against it, so a cache hit would
-skip the download and the test binaries would fail to link against `-lduckdb`.
-The `rust-test` job removes that build-script output whenever the download
-directory is missing, and the build script downloads the library again.
+rust-cache prunes the library under `target/duckdb-download` before it saves,
+but keeps the `libduckdb-sys` build-script output that links against it, so a
+cache hit would skip the download and the test binaries would fail to link
+against `-lduckdb`. The `rust-test` job removes that build-script output
+whenever `libduckdb.so` is missing, and the build script downloads the library
+again.
 
 Timing evidence is attached to every run:
 
