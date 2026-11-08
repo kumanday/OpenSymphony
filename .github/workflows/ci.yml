@@ -57,14 +57,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # rust-cache prunes the library under target/duckdb-download before it
       # saves, but keeps the libduckdb-sys build-script output that links
-      # against it. Drop that output when the library is missing so the build
-      # script downloads it again.
+      # against it. Drop that output so the build script downloads the library
+      # again; a cache miss has nothing to drop.
       - name: restore downloaded DuckDB library
-        run: |
-          if ! ls target/duckdb-download/*/*/libduckdb.so >/dev/null 2>&1; then
-            echo "libduckdb.so is missing from the restored cache; rebuilding libduckdb-sys"
-            rm -rf target/debug/build/libduckdb-sys-* target/debug/.fingerprint/libduckdb-sys-*
-          fi
+        run: rm -rf target/debug/build/libduckdb-sys-* target/debug/.fingerprint/libduckdb-sys-*
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

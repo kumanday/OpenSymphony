@@ -650,9 +650,8 @@ one.
 rust-cache prunes the library under `target/duckdb-download` before it saves,
 but keeps the `libduckdb-sys` build-script output that links against it, so a
 cache hit would skip the download and the test binaries would fail to link
-against `-lduckdb`. The `rust-test` job removes that build-script output
-whenever `libduckdb.so` is missing, and the build script downloads the library
-again.
+against `-lduckdb`. The `rust-test` job removes that build-script output after
+restoring the cache, and the build script downloads the library again.
 
 Timing evidence is attached to every run:
 
