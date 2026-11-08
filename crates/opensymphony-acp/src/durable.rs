@@ -65,14 +65,19 @@ pub(super) struct Durability {
     workspace: WorkspaceHandle,
     manifest: ConversationManifest,
     // Never unlink this file: another process may already be waiting on its inode.
-    _owner_lock: File,
+    _owner_lock: OwnerLock,
 }
 
-impl Drop for Durability {
+/// A held owner lock that is released explicitly on every drop path.
+///
+/// A concurrent fork can temporarily inherit an open descriptor before exec
+/// closes it, so relying on close alone can keep the flock alive after a
+/// failed claim returns, making the next claim observe a spurious `Owned`.
+struct OwnerLock(File);
+
+impl Drop for OwnerLock {
     fn drop(&mut self) {
-        // Release explicitly: a concurrent fork can temporarily inherit an open
-        // descriptor before exec closes it, delaying close-only flock release.
-        let _ = self._owner_lock.unlock();
+        let _ = self.0.unlock();
     }
 }
 
@@ -169,11 +174,12 @@ impl Durability {
             .create(true)
             .truncate(false)
             .open(&lock_path)?;
-        match owner_lock.try_lock() {
-            Ok(()) => {}
+        let owner_lock = match owner_lock.try_lock() {
+            // Wrap immediately so binding and metadata rejections below unlock too.
+            Ok(()) => OwnerLock(owner_lock),
             Err(std::fs::TryLockError::WouldBlock) => return Err(DurabilityError::Owned),
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-        }
+        };
         match tokio::fs::symlink_metadata(workspace.conversation_manifest_path()).await {
             Ok(metadata) if metadata.len() > MAX_MANIFEST_BYTES as u64 => {
                 return Err(DurabilityError::InvalidMetadata);
