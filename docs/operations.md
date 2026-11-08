@@ -482,7 +482,11 @@ Operational implications:
 - `opensymphony run` keeps its local worker/snapshot tick every 5s, while
   Linear reads use cheaper internal cadences: running state every 30s,
   dispatch discovery every 60s, terminal cleanup every 5 minutes, and full
-  issue details hourly after startup/dispatch. When all required children of a
+  issue details hourly after startup/dispatch.
+  `OPENSYMPHONY_RUNNING_STATE_REFRESH_MS` overrides the running-state cadence
+  with a positive millisecond value for local diagnostics and process-level
+  tests; invalid values are ignored with a warning. Leave it unset against
+  hosted Linear so running-state reads stay bounded. When all required children of a
   waiting parent have terminal orchestrator outcomes, full details refresh on
   the 5-minute terminal cadence so parent eligibility can use a complete
   hierarchy observation

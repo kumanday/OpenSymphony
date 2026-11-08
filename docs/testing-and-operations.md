@@ -664,6 +664,13 @@ than 30 s without terminating them. To reproduce the CI test run locally, use
 with `DUCKDB_DOWNLOAD_LIB=1`, or the system-DuckDB environment from the
 `cargo *-system-duckdb` aliases.
 
+Keep long tests event-driven rather than clock-driven. A process-level test
+that waits for the scheduler to notice a tracker transition on a running issue
+sets `OPENSYMPHONY_RUNNING_STATE_REFRESH_MS` on the `opensymphony run` child
+instead of waiting out the 30 s production cadence. Test helpers that need a
+real shell resolve it with a non-login `bash -c`; a login shell sources the
+developer's profile and can add seconds per call.
+
 ## 6. Operations
 
 Operational guidance now lives in [operations.md](operations.md).
