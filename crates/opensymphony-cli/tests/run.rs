@@ -20,6 +20,25 @@ use tokio::{
     time::{Instant, sleep},
 };
 
+/// The mock tracker keeps the issue active, so a successful run is followed
+/// within milliseconds by a continuation retry that rewrites run.json as
+/// `preparation_failed` with `pending_retry`. Polling only for `succeeded`
+/// races that rewrite; a pending continuation retry (scheduled only after a
+/// normal worker exit) on a manifest that recorded `after_run` is equally
+/// stable evidence that the run completed normally.
+fn acp_run_completed_normally(run: &Value) -> bool {
+    let after_run_succeeded = run["hooks"].as_array().is_some_and(|hooks| {
+        hooks
+            .iter()
+            .any(|hook| hook["kind"] == "after_run" && hook["status"] == "succeeded")
+    });
+    let normal_exit = run["status"] == "succeeded"
+        || (run["pending_retry"] == true
+            && run["retry_reason"] == "continuation"
+            && run["retry_error"].is_null());
+    after_run_succeeded && normal_exit
+}
+
 #[tokio::test]
 async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
     let linear = MockLinearGraphqlServer::start_with_active_issue().await;
@@ -46,7 +65,7 @@ async fn run_dispatches_acp_with_exact_cwd_hooks_and_no_openhands() {
         if std::fs::read_to_string(workspace.join(".opensymphony/run.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .is_some_and(|run| run["status"] == "succeeded")
+            .is_some_and(|run| acp_run_completed_normally(&run))
             && std::fs::read_to_string(workspace.join("hooks"))
                 .is_ok_and(|hooks| hooks.contains("after_run\n"))
         {
