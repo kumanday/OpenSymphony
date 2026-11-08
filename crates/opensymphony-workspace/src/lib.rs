@@ -1,5 +1,6 @@
 mod environment;
 mod error;
+mod git_program;
 mod manager;
 mod models;
 mod paths;
@@ -10,6 +11,7 @@ pub(crate) use sensitive_fields::{normalize_secret_field_name, runtime_field_is_
 pub use environment::environment_variable_names_equal;
 pub(crate) use environment::{has_environment_name_collision, insert_environment_value};
 pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
+pub use git_program::git_program;
 pub use manager::{
     WorkspaceManager, compose_parent_continuation_prompt, compose_parent_prompt,
     compose_terminal_prompt,

@@ -94,7 +94,13 @@ checkout manifests form a mutually consistent ownership set (or a completed
 partial, or malformed generation-shaped directories are preserved unless the
 matching staging intent proves them to be abandoned. Git verification and
 clone helpers clear inherited repository-selection variables such as `GIT_DIR`
-and `GIT_WORK_TREE` before using an explicit checkout path.
+and `GIT_WORK_TREE` before using an explicit checkout path. On macOS, when
+`git` on `PATH` is the `/usr/bin/git` `xcrun` trampoline, the workspace manager
+and code indexer resolve the real binary once with `xcrun --find git` and spawn
+it directly, which removes about 10 ms of developer-directory lookup from every
+Git process. Checkout verification reads the repository layout, shallow state,
+HEAD, and current branch with batched `git rev-parse` calls, and parent
+preparation reuses that verified state rather than querying it again.
 Checkout retention and deletion remain `WorkspaceManager` decisions. Generated
 tree instruction pruning asks Git only for tracked `AGENTS.md` paths, so a
 large vendored tree with unrelated tracked files does not become an unbounded

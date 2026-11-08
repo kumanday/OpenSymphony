@@ -17,6 +17,7 @@ use crate::opensymphony_gateway_schema::{
         CodeSymbolProvenance,
     },
 };
+use crate::opensymphony_workspace::git_program;
 use duckdb::OptionalExt;
 use url::Url;
 use std::sync::{Mutex, OnceLock};
@@ -1363,7 +1364,7 @@ fn unindexed_code_repo_summary(config: &MemoryConfig) -> CodeRepoSummary {
 }
 
 fn configured_code_repo_id(config: &MemoryConfig) -> String {
-    let remote = Command::new("git")
+    let remote = Command::new(git_program())
         .args(["-C"])
         .arg(&config.repo_root)
         .args(["remote", "get-url", "origin"])
@@ -3170,7 +3171,7 @@ fn workspace_git_bytes<const N: usize>(
     workspace_path: &Path,
     args: [&str; N],
 ) -> Result<Vec<u8>, CodeGraphProjectionError> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .arg("-C")
         .arg(workspace_path)
         .args(args)
@@ -3931,7 +3932,7 @@ pub fn code_index_target(
 }
 
 pub fn code_index_repository_is_git(config: &MemoryConfig) -> bool {
-    Command::new("git")
+    Command::new(git_program())
         .args(["-C"])
         .arg(&config.repo_root)
         .args(["rev-parse", "--git-dir"])
@@ -5035,7 +5036,7 @@ fn validate_code_index_branch(
             "configured target branch is invalid".to_string(),
         ));
     }
-    let branch_check = Command::new("git")
+    let branch_check = Command::new(git_program())
         .args(["check-ref-format", "--branch", branch])
         .output()
         .map_err(|source| CodeGraphProjectionError::Memory(MemoryError::ResolvePath {
@@ -5058,7 +5059,7 @@ fn git_target_commit(
         format!("refs/remotes/origin/{branch}"),
         format!("refs/heads/{branch}"),
     ] {
-        let output = Command::new("git")
+        let output = Command::new(git_program())
             .args(["-C"])
             .arg(root)
             .args(["rev-parse", "--verify", "--quiet"])
@@ -5087,7 +5088,7 @@ fn git_tree_paths(
         } else {
             format!("{directory}/")
         };
-        let output = Command::new("git")
+        let output = Command::new(git_program())
             .args(["-C"])
             .arg(root)
             .args(["ls-tree", "-z"])
@@ -5139,7 +5140,7 @@ fn git_tree_paths(
 }
 
 fn git_repo_prefix(root: &Path) -> Result<PathBuf, CodeGraphProjectionError> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["-C"])
         .arg(root)
         .args(["rev-parse", "--show-prefix"])
@@ -5162,7 +5163,7 @@ fn git_changed_tree_paths(
     head: &str,
     repo_prefix: &Path,
 ) -> Result<BTreeSet<String>, CodeGraphProjectionError> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["-C"])
         .arg(root)
         .args(["diff", "--name-only", "-z", base, head, "--", "."])
@@ -5197,7 +5198,7 @@ fn git_blob(
     path: &Path,
 ) -> Result<Vec<u8>, CodeGraphProjectionError> {
     let object = format!("{}:{}", commit, repo_prefix.join(path).to_string_lossy());
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["-C"])
         .arg(root)
         .args(["cat-file", "blob"])
@@ -5223,7 +5224,7 @@ fn git_blob_size(
     path: &Path,
 ) -> Result<u64, CodeGraphProjectionError> {
     let object = format!("{}:{}", commit, repo_prefix.join(path).to_string_lossy());
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["-C"])
         .arg(root)
         .args(["cat-file", "-s"])
