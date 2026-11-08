@@ -245,6 +245,17 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
         .arg(&config_path)
         .current_dir(project.path())
         .env_clear()
+        // Keep the dynamic loader search path: builds with the
+        // `duckdb-prebuilt` feature link libduckdb as a shared library.
+        .envs(
+            [
+                "LD_LIBRARY_PATH",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+            ]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+        )
         .env("OPENHANDS_API_KEY", "test-openhands-key")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -620,6 +620,50 @@ Expected assertions:
 - the terminal runtime status is still reached after reconnect
 - the final message history includes `OpenSymphony reconnect probe OK`
 
+## 5.1 Rust CI pipeline
+
+`.github/workflows/ci.yml` splits the Rust gate into parallel jobs. The
+aggregate `rust` job is the stable check name and passes only when every Rust
+job passed or was intentionally skipped.
+
+- `rust-lint` runs `cargo fmt --all --check` and Clippy with
+  `--no-default-features --features duckdb-prebuilt`.
+- `rust-test` builds the test binaries, runs them with
+  `cargo nextest run --profile ci`, then runs doctests with `cargo test --doc`.
+  The nextest profile lives in `.config/nextest.toml`.
+- `rust-bundled` builds the shipped library and binary with default features,
+  which compile the bundled DuckDB C++ sources. It runs on pushes to `main` and
+  on pull requests that change `Cargo.toml`, `Cargo.lock`, `.cargo/`, the
+  toolchain file, or the CI workflow.
+
+Lint and test link the prebuilt DuckDB library (`DUCKDB_DOWNLOAD_LIB=1`), the
+same mode as the `cargo *-dev` aliases. No Rust code is conditional on the
+DuckDB feature, so the bundled build only adds C++ compilation and linking,
+which `rust-bundled` covers. CI builds without debuginfo
+(`CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`) to cut link time for
+the integration-test binaries and keep the cache small.
+
+Only `main` saves the Rust caches (`Swatinem/rust-cache` with `save-if`). A pull
+request can read the `main` cache but not another pull request's cache, so
+per-PR caches only consumed the 10 GB repository quota and evicted the shared
+one.
+
+Timing evidence is attached to every run:
+
+- the `rust-test` job summary lists the slowest tests, summed time per test
+  binary, and counts of tests at or over 5 s and 30 s, rendered by
+  `scripts/ci/nextest_timing_summary.py` from the nextest JUnit report;
+- the `rust-test-timings` artifact holds `junit.xml` and the Cargo build
+  timing report for the test build;
+- the `cargo-timings-clippy` and `cargo-timings-bundled` artifacts hold the
+  Cargo build timing reports for those jobs.
+
+nextest runs each test in its own process and reports tests running longer
+than 30 s without terminating them. To reproduce the CI test run locally, use
+`cargo nextest run --no-default-features --features duckdb-prebuilt --profile ci`
+with `DUCKDB_DOWNLOAD_LIB=1`, or the system-DuckDB environment from the
+`cargo *-system-duckdb` aliases.
+
 ## 6. Operations
 
 Operational guidance now lives in [operations.md](operations.md).
