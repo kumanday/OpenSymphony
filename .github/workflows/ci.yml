@@ -59,6 +59,8 @@ jobs:
           # library it downloaded, so a cache hit skips the download and the
           # test binaries fail to link with `-lduckdb`. Cache the library too.
           cache-directories: target/duckdb-download
+          # Bumped with cache-directories so restores carry the library.
+          key: duckdb-download
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
