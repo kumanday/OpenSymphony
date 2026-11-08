@@ -229,7 +229,9 @@ brew pin duckdb
 
 Homebrew currently provides `duckdb`, not a versioned `duckdb@...` formula.
 Pinning keeps the verified local version from moving during routine Homebrew
-upgrades. The expected version for this release line is DuckDB `1.5.3`. To
+upgrades. The expected version for this release line is DuckDB `1.5.6`; Homebrew's
+`duckdb` formula now installs the 2.x line, so verify `duckdb --version` before
+linking against it. To
 build manually against that system library:
 
 ```bash

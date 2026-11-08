@@ -183,7 +183,7 @@ Fake server, live tests, doctor command, packaging.
 Fast iterative checks on a macOS/Homebrew development machine should use the
 system-linked DuckDB aliases. They build with `--no-default-features --features
 duckdb-prebuilt` and point Cargo at `/opt/homebrew/opt/duckdb` for the aliased
-command. The expected native DuckDB version is `1.5.3`, matching the pinned
+command. The expected native DuckDB version is `1.5.6`, matching the pinned
 Rust `duckdb` and `libduckdb-sys` dependency line.
 
 ```bash
@@ -200,10 +200,12 @@ brew install duckdb
 brew pin duckdb
 ```
 
-Homebrew does not currently provide a versioned `duckdb@...` formula. Pinning
+Homebrew does not currently provide a versioned `duckdb@...` formula, and its
+`duckdb` formula has moved to the 2.x line, so a fresh install will not match
+the pinned `1.5.6` dependency line. Pinning
 prevents routine Homebrew upgrades from moving the system library after it has
 been verified. If Homebrew DuckDB is later unpinned or upgraded, run
-`duckdb --version` and verify it is still DuckDB `1.5.3` before trusting
+`duckdb --version` and verify it is still DuckDB `1.5.6` before trusting
 system-linked checks. If Homebrew DuckDB is unavailable, use the portable
 downloaded fallback aliases:
 
