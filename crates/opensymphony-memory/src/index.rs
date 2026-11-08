@@ -1,3 +1,4 @@
+use duckdb::types::Value as SqlValue;
 const UNDATED_LOG_DATE: &str = "1970-01-01";
 const LIVE_CAPTURE_OWNER: &str = "__live_capture__";
 const LIVE_CAPTURE_OWNER_PREFIX: &str = "__live_capture__:";
@@ -762,8 +763,149 @@ fn code_edges_read_model_ready(connection: &Connection, path: &Path) -> Result<b
     )
 }
 
+/// Tables that receive the `worktree_dirty` and `legacy_source_path` columns
+/// after the SQL migration batch runs.
+const MEMORY_CODE_TABLES: &[&str] = &[
+    "code_documents",
+    "code_documents_staging",
+    "code_document_revisions",
+    "code_symbols",
+    "code_edges",
+    "code_edge_revisions",
+    "code_skipped_files",
+    "code_skipped_files_staging",
+    "code_diagnostics",
+    "code_diagnostic_revisions",
+    "code_index_snapshots",
+    "code_snapshot_membership",
+    "code_snapshot_membership_staging",
+];
+
+/// Bump when `ensure_worktree_dirty_column` or `ensure_legacy_source_column`
+/// change, so stores that recorded the previous migration run it again.
+/// Changes to the SQL batch or to `MEMORY_CODE_TABLES` are detected without a
+/// bump because they are part of the fingerprint.
+const MEMORY_MIGRATION_RUST_STEPS_REVISION: u32 = 1;
+
+/// Brings the index schema up to date. A completed migration records its
+/// fingerprint, and later opens skip the migration while the recorded
+/// fingerprint matches; a fresh or recreated store has no fingerprint, and a
+/// changed migration has a new one, so both migrate.
 fn migrate_index(connection: &Connection) -> Result<(), duckdb::Error> {
-    connection.execute_batch(&format!(
+    let fingerprint = memory_migration_fingerprint();
+    if applied_memory_migration_fingerprint(connection)?.as_deref() == Some(fingerprint) {
+        return Ok(());
+    }
+    apply_memory_migration(connection)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_migrations (component TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, applied_at TEXT NOT NULL);",
+    )?;
+    connection.execute(
+        "INSERT OR REPLACE INTO memory_migrations (component, fingerprint, applied_at) VALUES ('memory', ?, CAST(current_timestamp AS TEXT))",
+        params![fingerprint],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod migration_gate_tests {
+    use super::{applied_memory_migration_fingerprint, memory_migration_fingerprint, migrate_index};
+    use duckdb::Connection;
+
+    fn has_schema_version_table(connection: &Connection) -> bool {
+        connection
+            .query_row(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'schema_version'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("table listing")
+            == 1
+    }
+
+    #[test]
+    fn migration_runs_once_per_fingerprint() {
+        let connection = Connection::open_in_memory().expect("in-memory index");
+        assert_eq!(applied_memory_migration_fingerprint(&connection).expect("read"), None);
+
+        migrate_index(&connection).expect("first migration");
+        assert_eq!(
+            applied_memory_migration_fingerprint(&connection)
+                .expect("read")
+                .as_deref(),
+            Some(memory_migration_fingerprint())
+        );
+        assert!(has_schema_version_table(&connection));
+
+        // A matching fingerprint skips the migration, so a table removed
+        // behind its back stays removed.
+        connection
+            .execute_batch("DROP TABLE schema_version;")
+            .expect("drop table");
+        migrate_index(&connection).expect("skipped migration");
+        assert!(!has_schema_version_table(&connection));
+
+        // A different recorded fingerprint runs the migration again.
+        connection
+            .execute_batch("UPDATE memory_migrations SET fingerprint = 'previous-release';")
+            .expect("record an older migration");
+        migrate_index(&connection).expect("repeated migration");
+        assert!(has_schema_version_table(&connection));
+        assert_eq!(
+            applied_memory_migration_fingerprint(&connection)
+                .expect("read")
+                .as_deref(),
+            Some(memory_migration_fingerprint())
+        );
+    }
+}
+
+fn applied_memory_migration_fingerprint(
+    connection: &Connection,
+) -> Result<Option<String>, duckdb::Error> {
+    let recorded: i64 = connection.query_row(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'memory_migrations'",
+        [],
+        |row| row.get(0),
+    )?;
+    if recorded == 0 {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT fingerprint FROM memory_migrations WHERE component = 'memory'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+fn memory_migration_fingerprint() -> &'static str {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        sha256_hex(&format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            env!("CARGO_PKG_VERSION"),
+            MEMORY_MIGRATION_RUST_STEPS_REVISION,
+            MEMORY_CODE_TABLES.join(","),
+            memory_migration_sql(),
+        ))
+    })
+}
+
+fn apply_memory_migration(connection: &Connection) -> Result<(), duckdb::Error> {
+    connection.execute_batch(memory_migration_sql())?;
+    for table in MEMORY_CODE_TABLES {
+        ensure_worktree_dirty_column(connection, table)?;
+        ensure_legacy_source_column(connection, table)?;
+    }
+    Ok(())
+}
+
+fn memory_migration_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!(
         r#"
 CREATE TABLE IF NOT EXISTS schema_version (
   component TEXT PRIMARY KEY,
@@ -1206,26 +1348,8 @@ CREATE INDEX IF NOT EXISTS idx_code_snapshot_membership_staging_repo ON code_sna
 CREATE INDEX IF NOT EXISTS idx_code_documents_staging_repo ON code_documents_staging(repo_id, commit_sha);
 CREATE INDEX IF NOT EXISTS idx_code_skipped_files_staging_repo ON code_skipped_files_staging(repo_id, commit_sha);
 "#,
-    ))?;
-    for table in [
-        "code_documents",
-        "code_documents_staging",
-        "code_document_revisions",
-        "code_symbols",
-        "code_edges",
-        "code_edge_revisions",
-        "code_skipped_files",
-        "code_skipped_files_staging",
-        "code_diagnostics",
-        "code_diagnostic_revisions",
-        "code_index_snapshots",
-        "code_snapshot_membership",
-        "code_snapshot_membership_staging",
-    ] {
-        ensure_worktree_dirty_column(connection, table)?;
-        ensure_legacy_source_column(connection, table)?;
-    }
-    Ok(())
+        )
+    })
 }
 
 fn ensure_worktree_dirty_column(connection: &Connection, table: &str) -> Result<(), duckdb::Error> {
@@ -1281,12 +1405,29 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
         path: config.index_path.clone(),
         source,
     })?;
-    let transaction = connection
-        .transaction()
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-        })?;
+    persist_code_intel_documents_with_freshness_on(
+        &mut connection,
+        config,
+        batch,
+        freshness,
+        stale_existing,
+    )
+}
+
+/// Persists one document batch on a connection the caller already opened and
+/// migrated, so an index run can reuse one connection for every batch.
+pub(crate) fn persist_code_intel_documents_with_freshness_on(
+    connection: &mut Connection,
+    config: &MemoryConfig,
+    batch: CodeIntelPersistBatch,
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<CodeIntelPersistReport, MemoryError> {
+    let duckdb_error = |source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    };
+    let transaction = connection.transaction().map_err(duckdb_error)?;
     if freshness == "current"
         && !batch.worktree_dirty
         && !config.repository_sources.is_empty()
@@ -1299,12 +1440,7 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
         ) {
             Ok(commit) => Some(commit),
             Err(duckdb::Error::QueryReturnedNoRows) => None,
-            Err(source) => {
-                return Err(MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                });
-            }
+            Err(source) => return Err(duckdb_error(source)),
         };
         if let Some(registered_commit) = registered_commit
             && registered_commit != commit_sha
@@ -1314,6 +1450,11 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                 batch.repo_id
             )));
         }
+    }
+    if freshness == "staged" && batch.commit_sha.is_none() && !batch.documents.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "staged code documents require a commit revision".to_string(),
+        ));
     }
     let indexed_at = Utc::now().to_rfc3339();
     let mut report = CodeIntelPersistReport {
@@ -1326,10 +1467,43 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
         skipped_files: Vec::new(),
         diagnostics: Vec::new(),
     };
-    let worktree_dirty = if batch.worktree_dirty { 1_i64 } else { 0_i64 };
-    for document in batch.documents {
+    // Rows are buffered and written with multi-row upserts unless a
+    // per-document stale update must run between one document's rows and the
+    // next. That only happens when stale marking is requested and two
+    // documents share a path; distinct paths are staled for the whole batch
+    // up front, which matches staling each document just before its rows.
+    let stale_as_set = stale_existing && code_document_paths_are_distinct(&batch.documents);
+    let buffered = !stale_existing || stale_as_set;
+    if stale_as_set {
+        report.stale_rows += stale_code_rows_for_documents(
+            &transaction,
+            &batch.repo_id,
+            batch.commit_sha.as_deref(),
+            &batch.documents,
+        )
+        .map_err(duckdb_error)?;
+    }
+    let mut upserts = CodeIntelUpserts::new(buffered);
+    // Staged rows never create current rows, so when nothing is staled the
+    // current symbols and edges that suppress staged copies are the ones that
+    // exist before the batch, and one lookup per table finds them all.
+    let preloaded_current = if freshness == "staged" && !stale_existing {
+        Some(CurrentCodeRowIds::load(
+            &transaction,
+            &batch.repo_id,
+            batch.commit_sha.as_deref(),
+            batch.worktree_dirty,
+            &batch.documents,
+        )
+        .map_err(duckdb_error)?)
+    } else {
+        None
+    };
+    let worktree_dirty = batch.worktree_dirty;
+    let revision_commit = batch.commit_sha.as_deref().filter(|_| !batch.worktree_dirty);
+    for document in &batch.documents {
         let path = document.path.to_string_lossy().to_string();
-        if stale_existing {
+        if stale_existing && !stale_as_set {
             report.stale_rows += stale_code_rows(
                 &transaction,
                 &CodeFreshnessKey {
@@ -1341,91 +1515,75 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                     query_pack_version: &document.query_pack_version,
                 },
             )
-            .map_err(|source| MemoryError::DuckDb {
-                path: config.index_path.clone(),
-                source,
-            })?;
+            .map_err(duckdb_error)?;
         }
 
         if freshness == "staged" {
-            let Some(commit_sha) = batch.commit_sha.as_deref() else {
-                return Err(MemoryError::InvalidInput(
-                    "staged code documents require a commit revision".to_string(),
-                ));
-            };
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_documents_staging (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        batch.repo_id,
-                        commit_sha,
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        document.content_sha256,
-                        document.parser_id,
-                        document.parser_version,
-                        document.query_pack_version,
-                        document.byte_len as i64,
-                        document.line_count as i64,
-                        indexed_at,
+            let commit_sha = batch.commit_sha.as_deref().unwrap_or_default();
+            upserts
+                .documents_staging
+                .write(
+                    &transaction,
+                    vec![
+                        sql_text(&batch.repo_id),
+                        sql_text(commit_sha),
+                        SqlValue::Boolean(worktree_dirty),
+                        sql_text(&path),
+                        sql_text(&document.language),
+                        sql_text(&document.content_sha256),
+                        sql_text(&document.parser_id),
+                        sql_text(&document.parser_version),
+                        sql_text(&document.query_pack_version),
+                        SqlValue::BigInt(document.byte_len as i64),
+                        SqlValue::BigInt(document.line_count as i64),
+                        sql_text(&indexed_at),
                     ],
                 )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
-            report.persisted_documents += 1;
+                .map_err(duckdb_error)?;
         } else {
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_documents (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, byte_len, line_count, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        batch.repo_id,
-                        batch.commit_sha.clone(),
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        document.content_sha256,
-                        document.parser_id,
-                        document.parser_version,
-                        document.query_pack_version,
-                        document.byte_len as i64,
-                        document.line_count as i64,
-                        indexed_at,
-                        freshness,
+            upserts
+                .documents
+                .write(
+                    &transaction,
+                    vec![
+                        sql_text(&batch.repo_id),
+                        sql_optional_text(batch.commit_sha.as_deref()),
+                        SqlValue::Boolean(worktree_dirty),
+                        sql_text(&path),
+                        sql_text(&document.language),
+                        sql_text(&document.content_sha256),
+                        sql_text(&document.parser_id),
+                        sql_text(&document.parser_version),
+                        sql_text(&document.query_pack_version),
+                        SqlValue::BigInt(document.byte_len as i64),
+                        SqlValue::BigInt(document.line_count as i64),
+                        sql_text(&indexed_at),
+                        sql_text(freshness),
                     ],
                 )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
-            report.persisted_documents += 1;
+                .map_err(duckdb_error)?;
         }
-        if !batch.worktree_dirty
-            && let Some(commit_sha) = batch.commit_sha.as_deref()
-        {
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO code_document_revisions (repo_id, commit_sha, worktree_dirty, path, language, content_sha256, parser_id, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        batch.repo_id,
-                        commit_sha,
-                        worktree_dirty,
-                        path,
-                        document.language,
-                        document.content_sha256,
-                        document.parser_id,
-                        document.parser_version,
-                        document.query_pack_version,
-                        indexed_at,
-                        freshness,
+        report.persisted_documents += 1;
+        if let Some(commit_sha) = revision_commit {
+            upserts
+                .document_revisions
+                .write(
+                    &transaction,
+                    vec![
+                        sql_text(&batch.repo_id),
+                        sql_text(commit_sha),
+                        SqlValue::Boolean(worktree_dirty),
+                        sql_text(&path),
+                        sql_text(&document.language),
+                        sql_text(&document.content_sha256),
+                        sql_text(&document.parser_id),
+                        sql_text(&document.parser_version),
+                        sql_text(&document.query_pack_version),
+                        sql_text(&indexed_at),
+                        sql_text(freshness),
                     ],
                 )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
+                .map_err(duckdb_error)?;
         }
 
         let prepared_symbols = prepare_code_symbols(
@@ -1433,11 +1591,15 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             batch.commit_sha.as_deref(),
             batch.worktree_dirty,
             &path,
-            &document,
+            document,
         );
         for prepared in &prepared_symbols {
             let symbol = prepared.symbol;
-            let current_symbol_exists = if freshness == "staged" {
+            let current_symbol_exists = if freshness != "staged" {
+                false
+            } else if let Some(preloaded) = &preloaded_current {
+                preloaded.symbols.contains(&prepared.symbol_id)
+            } else {
                 transaction
                     .query_row(
                         "SELECT 1 FROM code_symbols WHERE symbol_id = ? AND freshness = 'current' LIMIT 1",
@@ -1445,51 +1607,44 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?
+                    .map_err(duckdb_error)?
                     .is_some()
-            } else {
-                false
             };
             if !current_symbol_exists {
-                transaction
-                    .execute(
-                        "INSERT OR REPLACE INTO code_symbols (symbol_id, symbol_key, repo_id, commit_sha, worktree_dirty, path, language, kind, name, container_symbol_id, container_chain, signature, start_line, start_col, end_line, end_col, start_byte, end_byte, selection_start_line, selection_end_line, content_sha256, snippet_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            prepared.symbol_id,
-                            prepared.symbol_key,
-                            batch.repo_id,
-                            batch.commit_sha.clone(),
-                            worktree_dirty,
-                            path,
-                            document.language,
-                            symbol.kind,
-                            symbol.name,
-                            prepared.container_symbol_id,
-                            symbol.container_chain.join("\u{1f}"),
-                            symbol.signature,
-                            symbol.start_line as i64,
-                            symbol.start_col as i64,
-                            symbol.end_line as i64,
-                            symbol.end_col as i64,
-                            symbol.start_byte as i64,
-                            symbol.end_byte as i64,
-                            symbol.selection_start_line as i64,
-                            symbol.selection_end_line as i64,
-                            document.content_sha256,
-                            symbol.snippet_sha256,
-                            document.parser_version,
-                            document.query_pack_version,
-                            indexed_at,
-                            freshness,
+                upserts
+                    .symbols
+                    .write(
+                        &transaction,
+                        vec![
+                            sql_text(&prepared.symbol_id),
+                            sql_text(&prepared.symbol_key),
+                            sql_text(&batch.repo_id),
+                            sql_optional_text(batch.commit_sha.as_deref()),
+                            SqlValue::Boolean(worktree_dirty),
+                            sql_text(&path),
+                            sql_text(&document.language),
+                            sql_text(&symbol.kind),
+                            sql_text(&symbol.name),
+                            sql_optional_text(prepared.container_symbol_id.as_deref()),
+                            sql_text(&symbol.container_chain.join("\u{1f}")),
+                            sql_optional_text(symbol.signature.as_deref()),
+                            SqlValue::BigInt(symbol.start_line as i64),
+                            SqlValue::BigInt(symbol.start_col as i64),
+                            SqlValue::BigInt(symbol.end_line as i64),
+                            SqlValue::BigInt(symbol.end_col as i64),
+                            SqlValue::BigInt(symbol.start_byte as i64),
+                            SqlValue::BigInt(symbol.end_byte as i64),
+                            SqlValue::BigInt(symbol.selection_start_line as i64),
+                            SqlValue::BigInt(symbol.selection_end_line as i64),
+                            sql_text(&document.content_sha256),
+                            sql_text(&symbol.snippet_sha256),
+                            sql_text(&document.parser_version),
+                            sql_text(&document.query_pack_version),
+                            sql_text(&indexed_at),
+                            sql_text(freshness),
                         ],
                     )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
+                    .map_err(duckdb_error)?;
                 report.persisted_symbols += 1;
             }
         }
@@ -1498,22 +1653,12 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             let resolved = resolve_code_edge(edge, &prepared_symbols);
             let normalized_confidence =
                 normalize_edge_confidence(&edge.confidence, resolved.target_resolved);
-            let edge_id = code_row_id(&[
-                &batch.repo_id,
-                &path,
-                &document.content_sha256,
-                &document.parser_version,
-                &document.query_pack_version,
-                &edge.edge_kind,
-                edge.target_hint.as_deref().unwrap_or(""),
-                &edge.start_line.to_string(),
-                &edge.start_col.to_string(),
-                &edge.end_line.to_string(),
-                &edge.end_col.to_string(),
-                &edge.start_byte.to_string(),
-                &edge.end_byte.to_string(),
-            ]);
-            let current_edge_exists = if freshness == "staged" {
+            let edge_id = code_edge_row_id(&batch.repo_id, &path, document, edge);
+            let current_edge_exists = if freshness != "staged" {
+                false
+            } else if let Some(preloaded) = &preloaded_current {
+                preloaded.edges.contains(&edge_id)
+            } else {
                 transaction
                     .query_row(
                         "SELECT 1 FROM code_edges WHERE edge_id = ? AND freshness = 'current' AND NOT worktree_dirty LIMIT 1",
@@ -1521,87 +1666,51 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?
+                    .map_err(duckdb_error)?
                     .is_some()
-            } else {
-                false
+            };
+            let edge_values = |commit_sha: SqlValue| {
+                vec![
+                    sql_text(&edge_id),
+                    sql_text(&batch.repo_id),
+                    commit_sha,
+                    SqlValue::Boolean(worktree_dirty),
+                    sql_text(&path),
+                    sql_text(&document.language),
+                    sql_text(&edge.edge_kind),
+                    sql_optional_text(resolved.source_symbol_id.as_deref()),
+                    sql_optional_text(resolved.source_symbol_key.as_deref()),
+                    sql_optional_text(resolved.target_symbol_id.as_deref()),
+                    sql_optional_text(resolved.target_symbol_key.as_deref()),
+                    sql_optional_text(edge.target_hint.as_deref()),
+                    sql_text(normalized_confidence),
+                    SqlValue::BigInt(edge.start_line as i64),
+                    SqlValue::BigInt(edge.start_col as i64),
+                    SqlValue::BigInt(edge.end_line as i64),
+                    SqlValue::BigInt(edge.end_col as i64),
+                    SqlValue::BigInt(edge.start_byte as i64),
+                    SqlValue::BigInt(edge.end_byte as i64),
+                    sql_text(&document.content_sha256),
+                    sql_text(&document.parser_version),
+                    sql_text(&document.query_pack_version),
+                    sql_text(&indexed_at),
+                    sql_text(freshness),
+                ]
             };
             if !current_edge_exists {
-                transaction
-                    .execute(
-                        "INSERT OR REPLACE INTO code_edges (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            edge_id,
-                            batch.repo_id,
-                            batch.commit_sha.clone(),
-                            worktree_dirty,
-                            path,
-                            document.language,
-                            edge.edge_kind,
-                            resolved.source_symbol_id,
-                            resolved.source_symbol_key,
-                            resolved.target_symbol_id,
-                            resolved.target_symbol_key,
-                            edge.target_hint,
-                            normalized_confidence,
-                            edge.start_line as i64,
-                            edge.start_col as i64,
-                            edge.end_line as i64,
-                            edge.end_col as i64,
-                            edge.start_byte as i64,
-                            edge.end_byte as i64,
-                            document.content_sha256,
-                            document.parser_version,
-                            document.query_pack_version,
-                            indexed_at,
-                            freshness,
-                        ],
+                upserts
+                    .edges
+                    .write(
+                        &transaction,
+                        edge_values(sql_optional_text(batch.commit_sha.as_deref())),
                     )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
+                    .map_err(duckdb_error)?;
             }
-            if !batch.worktree_dirty
-                && let Some(commit_sha) = batch.commit_sha.as_deref()
-            {
-                transaction
-                    .execute(
-                        "INSERT OR REPLACE INTO code_edge_revisions (edge_id, repo_id, commit_sha, worktree_dirty, path, language, edge_kind, source_symbol_id, source_symbol_key, target_symbol_id, target_symbol_key, target_hint, confidence, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            edge_id,
-                            batch.repo_id,
-                            commit_sha,
-                            worktree_dirty,
-                            path,
-                            document.language,
-                            edge.edge_kind,
-                            resolved.source_symbol_id,
-                            resolved.source_symbol_key,
-                            resolved.target_symbol_id,
-                            resolved.target_symbol_key,
-                            edge.target_hint,
-                            normalized_confidence,
-                            edge.start_line as i64,
-                            edge.start_col as i64,
-                            edge.end_line as i64,
-                            edge.end_col as i64,
-                            edge.start_byte as i64,
-                            edge.end_byte as i64,
-                            document.content_sha256,
-                            document.parser_version,
-                            document.query_pack_version,
-                            indexed_at,
-                            freshness,
-                        ],
-                    )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
+            if let Some(commit_sha) = revision_commit {
+                upserts
+                    .edge_revisions
+                    .write(&transaction, edge_values(sql_text(commit_sha)))
+                    .map_err(duckdb_error)?;
             }
             report.persisted_edges += 1;
         }
@@ -1631,81 +1740,441 @@ pub(crate) fn persist_code_intel_documents_with_freshness(
             } else {
                 diagnostic_id.clone()
             };
-            transaction
-                    .execute(
-                        "INSERT OR REPLACE INTO code_diagnostics (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            &read_model_diagnostic_id,
-                            batch.repo_id,
-                            batch.commit_sha.clone(),
-                            worktree_dirty,
-                            path,
-                            document.language,
-                            diagnostic.kind,
-                            diagnostic.severity,
-                            diagnostic.message,
-                            diagnostic.start_line as i64,
-                            diagnostic.start_col as i64,
-                            diagnostic.end_line as i64,
-                            diagnostic.end_col as i64,
-                            diagnostic.start_byte as i64,
-                            diagnostic.end_byte as i64,
-                            document.content_sha256,
-                            document.parser_version,
-                            document.query_pack_version,
-                            indexed_at,
-                            freshness,
-                        ],
+            let diagnostic_values = |row_id: &str, commit_sha: SqlValue| {
+                vec![
+                    sql_text(row_id),
+                    sql_text(&batch.repo_id),
+                    commit_sha,
+                    SqlValue::Boolean(worktree_dirty),
+                    sql_text(&path),
+                    sql_text(&document.language),
+                    sql_text(&diagnostic.kind),
+                    sql_text(&diagnostic.severity),
+                    sql_text(&diagnostic.message),
+                    SqlValue::BigInt(diagnostic.start_line as i64),
+                    SqlValue::BigInt(diagnostic.start_col as i64),
+                    SqlValue::BigInt(diagnostic.end_line as i64),
+                    SqlValue::BigInt(diagnostic.end_col as i64),
+                    SqlValue::BigInt(diagnostic.start_byte as i64),
+                    SqlValue::BigInt(diagnostic.end_byte as i64),
+                    sql_text(&document.content_sha256),
+                    sql_text(&document.parser_version),
+                    sql_text(&document.query_pack_version),
+                    sql_text(&indexed_at),
+                    sql_text(freshness),
+                ]
+            };
+            upserts
+                .diagnostics
+                .write(
+                    &transaction,
+                    diagnostic_values(
+                        &read_model_diagnostic_id,
+                        sql_optional_text(batch.commit_sha.as_deref()),
+                    ),
+                )
+                .map_err(duckdb_error)?;
+            if let Some(commit_sha) = revision_commit {
+                upserts
+                    .diagnostic_revisions
+                    .write(
+                        &transaction,
+                        diagnostic_values(&diagnostic_id, sql_text(commit_sha)),
                     )
-                .map_err(|source| MemoryError::DuckDb {
-                    path: config.index_path.clone(),
-                    source,
-                })?;
-            if !batch.worktree_dirty
-                && let Some(commit_sha) = batch.commit_sha.as_deref()
-            {
-                transaction
-                    .execute(
-                        "INSERT OR REPLACE INTO code_diagnostic_revisions (diagnostic_id, repo_id, commit_sha, worktree_dirty, path, language, kind, severity, message, start_line, start_col, end_line, end_col, start_byte, end_byte, content_sha256, parser_version, query_pack_version, indexed_at, freshness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            &diagnostic_id,
-                            batch.repo_id,
-                            commit_sha,
-                            worktree_dirty,
-                            path,
-                            document.language,
-                            diagnostic.kind,
-                            diagnostic.severity,
-                            diagnostic.message,
-                            diagnostic.start_line as i64,
-                            diagnostic.start_col as i64,
-                            diagnostic.end_line as i64,
-                            diagnostic.end_col as i64,
-                            diagnostic.start_byte as i64,
-                            diagnostic.end_byte as i64,
-                            document.content_sha256,
-                            document.parser_version,
-                            document.query_pack_version,
-                            indexed_at,
-                            freshness,
-                        ],
-                    )
-                    .map_err(|source| MemoryError::DuckDb {
-                        path: config.index_path.clone(),
-                        source,
-                    })?;
+                    .map_err(duckdb_error)?;
             }
             report.persisted_diagnostics += 1;
         }
     }
 
-    transaction
-        .commit()
-        .map_err(|source| MemoryError::DuckDb {
-            path: config.index_path.clone(),
-            source,
-    })?;
+    upserts.flush(&transaction).map_err(duckdb_error)?;
+    transaction.commit().map_err(duckdb_error)?;
     Ok(report)
+}
+
+fn sql_text(value: &str) -> SqlValue {
+    SqlValue::Text(value.to_owned())
+}
+
+fn sql_optional_text(value: Option<&str>) -> SqlValue {
+    value.map_or(SqlValue::Null, sql_text)
+}
+
+fn code_edge_row_id(
+    repo_id: &str,
+    path: &str,
+    document: &CodeIntelDocumentInput,
+    edge: &CodeIntelEdgeInput,
+) -> String {
+    code_row_id(&[
+        repo_id,
+        path,
+        &document.content_sha256,
+        &document.parser_version,
+        &document.query_pack_version,
+        &edge.edge_kind,
+        edge.target_hint.as_deref().unwrap_or(""),
+        &edge.start_line.to_string(),
+        &edge.start_col.to_string(),
+        &edge.end_line.to_string(),
+        &edge.end_col.to_string(),
+        &edge.start_byte.to_string(),
+        &edge.end_byte.to_string(),
+    ])
+}
+
+/// Rows written per multi-row `INSERT OR REPLACE` statement.
+const CODE_UPSERT_ROWS_PER_STATEMENT: usize = 256;
+
+/// `INSERT OR REPLACE` writes for one code table. When buffered, rows are
+/// collected and written with multi-row statements on `flush`; otherwise each
+/// row is written immediately.
+struct CodeRowUpserts {
+    table: &'static str,
+    columns: &'static [&'static str],
+    key_columns: &'static [usize],
+    buffered: bool,
+    rows: Vec<Vec<SqlValue>>,
+}
+
+impl CodeRowUpserts {
+    fn new(
+        table: &'static str,
+        columns: &'static [&'static str],
+        key_columns: &'static [usize],
+        buffered: bool,
+    ) -> Self {
+        Self {
+            table,
+            columns,
+            key_columns,
+            buffered,
+            rows: Vec::new(),
+        }
+    }
+
+    fn statement(&self, rows: usize) -> String {
+        let placeholders = format!("({})", vec!["?"; self.columns.len()].join(", "));
+        format!(
+            "INSERT OR REPLACE INTO {} ({}) VALUES {}",
+            self.table,
+            self.columns.join(", "),
+            vec![placeholders; rows].join(", ")
+        )
+    }
+
+    fn write(&mut self, connection: &Connection, row: Vec<SqlValue>) -> Result<(), duckdb::Error> {
+        debug_assert_eq!(row.len(), self.columns.len());
+        if self.buffered {
+            self.rows.push(row);
+            return Ok(());
+        }
+        connection.execute(&self.statement(1), duckdb::params_from_iter(row))?;
+        Ok(())
+    }
+
+    /// Writes buffered rows. A statement may not upsert one key twice, so
+    /// only the last row per primary key is written, which leaves the table
+    /// as writing each row in turn would.
+    fn flush(&mut self, connection: &Connection) -> Result<(), duckdb::Error> {
+        let rows = std::mem::take(&mut self.rows);
+        let mut last_row_for_key = BTreeMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            let key = self
+                .key_columns
+                .iter()
+                .map(|column| format!("{:?}", row[*column]))
+                .collect::<Vec<_>>();
+            last_row_for_key.insert(key, index);
+        }
+        let mut kept = last_row_for_key.into_values().collect::<Vec<_>>();
+        kept.sort_unstable();
+        for chunk in kept.chunks(CODE_UPSERT_ROWS_PER_STATEMENT) {
+            connection.execute(
+                &self.statement(chunk.len()),
+                duckdb::params_from_iter(chunk.iter().flat_map(|index| rows[*index].iter())),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The upserts of one document batch, one per code table.
+struct CodeIntelUpserts {
+    documents: CodeRowUpserts,
+    documents_staging: CodeRowUpserts,
+    document_revisions: CodeRowUpserts,
+    symbols: CodeRowUpserts,
+    edges: CodeRowUpserts,
+    edge_revisions: CodeRowUpserts,
+    diagnostics: CodeRowUpserts,
+    diagnostic_revisions: CodeRowUpserts,
+}
+
+const CODE_EDGE_COLUMNS: &[&str] = &[
+    "edge_id",
+    "repo_id",
+    "commit_sha",
+    "worktree_dirty",
+    "path",
+    "language",
+    "edge_kind",
+    "source_symbol_id",
+    "source_symbol_key",
+    "target_symbol_id",
+    "target_symbol_key",
+    "target_hint",
+    "confidence",
+    "start_line",
+    "start_col",
+    "end_line",
+    "end_col",
+    "start_byte",
+    "end_byte",
+    "content_sha256",
+    "parser_version",
+    "query_pack_version",
+    "indexed_at",
+    "freshness",
+];
+
+const CODE_DIAGNOSTIC_COLUMNS: &[&str] = &[
+    "diagnostic_id",
+    "repo_id",
+    "commit_sha",
+    "worktree_dirty",
+    "path",
+    "language",
+    "kind",
+    "severity",
+    "message",
+    "start_line",
+    "start_col",
+    "end_line",
+    "end_col",
+    "start_byte",
+    "end_byte",
+    "content_sha256",
+    "parser_version",
+    "query_pack_version",
+    "indexed_at",
+    "freshness",
+];
+
+impl CodeIntelUpserts {
+    fn new(buffered: bool) -> Self {
+        Self {
+            // PRIMARY KEY (repo_id, path, content_sha256, parser_version, query_pack_version)
+            documents: CodeRowUpserts::new(
+                "code_documents",
+                &[
+                    "repo_id",
+                    "commit_sha",
+                    "worktree_dirty",
+                    "path",
+                    "language",
+                    "content_sha256",
+                    "parser_id",
+                    "parser_version",
+                    "query_pack_version",
+                    "byte_len",
+                    "line_count",
+                    "indexed_at",
+                    "freshness",
+                ],
+                &[0, 3, 5, 7, 8],
+                buffered,
+            ),
+            // PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+            documents_staging: CodeRowUpserts::new(
+                "code_documents_staging",
+                &[
+                    "repo_id",
+                    "commit_sha",
+                    "worktree_dirty",
+                    "path",
+                    "language",
+                    "content_sha256",
+                    "parser_id",
+                    "parser_version",
+                    "query_pack_version",
+                    "byte_len",
+                    "line_count",
+                    "indexed_at",
+                ],
+                &[0, 1, 3, 7, 8],
+                buffered,
+            ),
+            // PRIMARY KEY (repo_id, commit_sha, path, parser_version, query_pack_version)
+            document_revisions: CodeRowUpserts::new(
+                "code_document_revisions",
+                &[
+                    "repo_id",
+                    "commit_sha",
+                    "worktree_dirty",
+                    "path",
+                    "language",
+                    "content_sha256",
+                    "parser_id",
+                    "parser_version",
+                    "query_pack_version",
+                    "indexed_at",
+                    "freshness",
+                ],
+                &[0, 1, 3, 7, 8],
+                buffered,
+            ),
+            // PRIMARY KEY (symbol_id)
+            symbols: CodeRowUpserts::new(
+                "code_symbols",
+                &[
+                    "symbol_id",
+                    "symbol_key",
+                    "repo_id",
+                    "commit_sha",
+                    "worktree_dirty",
+                    "path",
+                    "language",
+                    "kind",
+                    "name",
+                    "container_symbol_id",
+                    "container_chain",
+                    "signature",
+                    "start_line",
+                    "start_col",
+                    "end_line",
+                    "end_col",
+                    "start_byte",
+                    "end_byte",
+                    "selection_start_line",
+                    "selection_end_line",
+                    "content_sha256",
+                    "snippet_sha256",
+                    "parser_version",
+                    "query_pack_version",
+                    "indexed_at",
+                    "freshness",
+                ],
+                &[0],
+                buffered,
+            ),
+            // PRIMARY KEY (edge_id)
+            edges: CodeRowUpserts::new("code_edges", CODE_EDGE_COLUMNS, &[0], buffered),
+            // PRIMARY KEY (repo_id, commit_sha, edge_id)
+            edge_revisions: CodeRowUpserts::new(
+                "code_edge_revisions",
+                CODE_EDGE_COLUMNS,
+                &[1, 2, 0],
+                buffered,
+            ),
+            // PRIMARY KEY (diagnostic_id)
+            diagnostics: CodeRowUpserts::new(
+                "code_diagnostics",
+                CODE_DIAGNOSTIC_COLUMNS,
+                &[0],
+                buffered,
+            ),
+            // PRIMARY KEY (repo_id, commit_sha, diagnostic_id)
+            diagnostic_revisions: CodeRowUpserts::new(
+                "code_diagnostic_revisions",
+                CODE_DIAGNOSTIC_COLUMNS,
+                &[1, 2, 0],
+                buffered,
+            ),
+        }
+    }
+
+    fn flush(&mut self, connection: &Connection) -> Result<(), duckdb::Error> {
+        for upserts in [
+            &mut self.documents,
+            &mut self.documents_staging,
+            &mut self.document_revisions,
+            &mut self.symbols,
+            &mut self.edges,
+            &mut self.edge_revisions,
+            &mut self.diagnostics,
+            &mut self.diagnostic_revisions,
+        ] {
+            upserts.flush(connection)?;
+        }
+        Ok(())
+    }
+}
+
+/// Ids of current symbol and edge rows that a staged batch would otherwise
+/// copy, read with one query per table.
+struct CurrentCodeRowIds {
+    symbols: BTreeSet<String>,
+    edges: BTreeSet<String>,
+}
+
+impl CurrentCodeRowIds {
+    fn load(
+        connection: &Connection,
+        repo_id: &str,
+        commit_sha: Option<&str>,
+        worktree_dirty: bool,
+        documents: &[CodeIntelDocumentInput],
+    ) -> Result<Self, duckdb::Error> {
+        let mut symbol_ids = Vec::new();
+        let mut edge_ids = Vec::new();
+        for document in documents {
+            let path = document.path.to_string_lossy().to_string();
+            symbol_ids.extend(
+                prepare_code_symbols(repo_id, commit_sha, worktree_dirty, &path, document)
+                    .into_iter()
+                    .map(|prepared| prepared.symbol_id),
+            );
+            edge_ids.extend(
+                document
+                    .edges
+                    .iter()
+                    .map(|edge| code_edge_row_id(repo_id, &path, document, edge)),
+            );
+        }
+        Ok(Self {
+            symbols: existing_code_row_ids(
+                connection,
+                &symbol_ids,
+                "SELECT DISTINCT current.symbol_id FROM code_symbols AS current JOIN temp.{ids} AS candidate ON current.symbol_id = candidate.id WHERE current.freshness = 'current'",
+            )?,
+            edges: existing_code_row_ids(
+                connection,
+                &edge_ids,
+                "SELECT DISTINCT current.edge_id FROM code_edges AS current JOIN temp.{ids} AS candidate ON current.edge_id = candidate.id WHERE current.freshness = 'current' AND NOT current.worktree_dirty",
+            )?,
+        })
+    }
+}
+
+/// Connection-local temporary table holding candidate row ids.
+const CODE_CANDIDATE_IDS_TABLE: &str = "opensymphony_code_candidate_ids";
+
+/// Returns the ids among `ids` that `query` finds, where `{ids}` in `query`
+/// names a temporary table holding the candidates.
+fn existing_code_row_ids(
+    connection: &Connection,
+    ids: &[String],
+    query: &str,
+) -> Result<BTreeSet<String>, duckdb::Error> {
+    if ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {CODE_CANDIDATE_IDS_TABLE} (id TEXT NOT NULL); DELETE FROM temp.{CODE_CANDIDATE_IDS_TABLE};"
+    ))?;
+    {
+        let mut appender =
+            connection.appender_to_catalog_and_db(CODE_CANDIDATE_IDS_TABLE, "temp", "main")?;
+        for id in ids {
+            appender.append_row(params![id])?;
+        }
+        appender.flush()?;
+    }
+    let mut statement = connection.prepare(&query.replace("{ids}", CODE_CANDIDATE_IDS_TABLE))?;
+    statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect()
 }
 
 pub fn persist_code_intel_skipped_files(
@@ -1740,10 +2209,7 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
     freshness: &str,
     stale_existing: bool,
 ) -> Result<usize, MemoryError> {
-    let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
-        return Ok(0);
-    };
-    if skipped_files.is_empty() {
+    if commit_sha.is_none() || worktree_dirty || skipped_files.is_empty() {
         return Ok(0);
     }
     let mut connection = open_index(config)?;
@@ -1751,6 +2217,37 @@ pub(crate) fn persist_code_intel_skipped_files_with_freshness(
         path: config.index_path.clone(),
         source,
     })?;
+    persist_code_intel_skipped_files_with_freshness_on(
+        &mut connection,
+        config,
+        repo_id,
+        commit_sha,
+        worktree_dirty,
+        skipped_files,
+        freshness,
+        stale_existing,
+    )
+}
+
+/// Persists skipped-file rows on a connection the caller already opened and
+/// migrated.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist_code_intel_skipped_files_with_freshness_on(
+    connection: &mut Connection,
+    config: &MemoryConfig,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    worktree_dirty: bool,
+    skipped_files: &[CodeIntelSkippedFileInput],
+    freshness: &str,
+    stale_existing: bool,
+) -> Result<usize, MemoryError> {
+    let Some(commit_sha) = commit_sha.filter(|_| !worktree_dirty) else {
+        return Ok(0);
+    };
+    if skipped_files.is_empty() {
+        return Ok(0);
+    }
     let transaction = connection
         .transaction()
         .map_err(|source| MemoryError::DuckDb {
@@ -2667,6 +3164,68 @@ struct CodeFreshnessKey<'a> {
     content_sha256: &'a str,
     parser_version: &'a str,
     query_pack_version: &'a str,
+}
+
+/// Connection-local temporary table holding the freshness keys of one
+/// document batch.
+const CODE_FRESHNESS_KEYS_TABLE: &str = "opensymphony_code_freshness_keys";
+
+/// Whether every document in a batch has its own path.
+fn code_document_paths_are_distinct(documents: &[CodeIntelDocumentInput]) -> bool {
+    let mut paths = BTreeSet::new();
+    documents
+        .iter()
+        .all(|document| paths.insert(document.path.to_string_lossy()))
+}
+
+/// Marks superseded rows stale for a whole document batch with one statement
+/// per table. Callers use it only when document paths are distinct: every
+/// existing row then matches at most one document, so the rows and counts are
+/// those of calling `stale_code_rows` before each document's inserts.
+fn stale_code_rows_for_documents(
+    connection: &Connection,
+    repo_id: &str,
+    commit_sha: Option<&str>,
+    documents: &[CodeIntelDocumentInput],
+) -> Result<usize, duckdb::Error> {
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {CODE_FRESHNESS_KEYS_TABLE} (path TEXT NOT NULL, content_sha256 TEXT NOT NULL, parser_version TEXT NOT NULL, query_pack_version TEXT NOT NULL); DELETE FROM temp.{CODE_FRESHNESS_KEYS_TABLE};"
+    ))?;
+    {
+        let mut appender = connection.appender_to_catalog_and_db(CODE_FRESHNESS_KEYS_TABLE, "temp", "main")?;
+        for document in documents {
+            appender.append_row(params![
+                document.path.to_string_lossy().to_string(),
+                document.content_sha256,
+                document.parser_version,
+                document.query_pack_version,
+            ])?;
+        }
+        appender.flush()?;
+    }
+    let mut stale_rows = 0;
+    for table in [
+        "code_documents",
+        "code_symbols",
+        "code_edges",
+        "code_diagnostics",
+    ] {
+        stale_rows += connection.execute(
+            &format!(
+                "UPDATE {table} AS existing SET freshness = 'stale' FROM temp.{CODE_FRESHNESS_KEYS_TABLE} AS incoming WHERE existing.repo_id = ? AND existing.path = incoming.path AND existing.freshness = 'current' AND NOT (existing.content_sha256 = incoming.content_sha256 AND existing.parser_version = incoming.parser_version AND existing.query_pack_version = incoming.query_pack_version)"
+            ),
+            params![repo_id],
+        )?;
+    }
+    if let Some(commit_sha) = commit_sha {
+        stale_rows += connection.execute(
+            &format!(
+                "UPDATE code_skipped_files SET freshness = 'stale' WHERE repo_id = ? AND commit_sha = ? AND freshness = 'current' AND path IN (SELECT path FROM temp.{CODE_FRESHNESS_KEYS_TABLE})"
+            ),
+            params![repo_id, commit_sha],
+        )?;
+    }
+    Ok(stale_rows)
 }
 
 fn stale_code_rows(

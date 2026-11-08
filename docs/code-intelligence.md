@@ -84,6 +84,14 @@ membership and only changed, added, or deleted paths are parsed or staled.
 DuckDB writes are serialized through the repository index writer; reads remain
 available while a gateway request performs the background job.
 
+An index run lists the tree once with `git ls-tree -l`, which also supplies
+blob sizes, and streams file contents through one `git cat-file --batch`
+process. It opens the index for writing twice: once to discard leftover staged
+rows, read the previous snapshot, and record the running state, and once to
+persist, compare, and promote. No index connection is held while files are
+parsed. Rows are written with multi-row upserts, and stale marking for changed
+paths runs as one statement per table.
+
 The gateway returns `accepted`, `progress`, `completed`, `unavailable`, or
 `failed` reports and journals progress/failure events plus `code_graph_updated`
 after completion. This shared target-branch baseline is not the live truth for

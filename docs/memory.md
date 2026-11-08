@@ -442,7 +442,12 @@ for the same style of kickoff bundle and writes it to
 server is disabled, the runner falls back to direct local memory reads.
 
 Read commands open the DuckDB index in read-only mode and do not run migrations.
-Startup and write paths own schema creation or migration.
+Startup and write paths own schema creation or migration. A completed migration
+records its fingerprint in the `memory_migrations` table. The fingerprint
+covers the migration SQL, the per-table column steps, the schema version, and
+the OpenSymphony version. Later write opens skip the migration while the
+recorded fingerprint matches, so a new release, a changed migration, or a fresh
+or recreated store migrates once.
 
 When central configuration is active, one supervised memory server owns one
 instance-wide catalog. Repository inventory entries are registered in that
