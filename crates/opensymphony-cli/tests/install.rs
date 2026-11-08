@@ -302,8 +302,10 @@ fn write_bash_wrapper(path: PathBuf) {
 }
 
 fn real_bash_path() -> PathBuf {
+    // A non-login shell resolves the same `bash` this command launched without
+    // sourcing the developer's profile, which can take seconds.
     let output = Command::new("bash")
-        .args(["-lc", "command -v bash"])
+        .args(["-c", "command -v bash"])
         .output()
         .expect("bash lookup should run");
     assert!(
