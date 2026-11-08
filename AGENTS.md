@@ -258,7 +258,7 @@ DuckDB is bundled by default so `cargo install opensymphony`, release builds,
 and normal user builds do not require a separate system DuckDB installation.
 For iterative OpenSymphony development on this macOS/Homebrew environment,
 prefer the system-linked DuckDB aliases. They use the pinned Homebrew DuckDB
-installation, currently DuckDB `1.5.3`, and avoid both bundled source
+installation, currently DuckDB `1.5.6`, and avoid both bundled source
 compilation and per-workspace download caches:
 
 ```bash
@@ -284,8 +284,10 @@ unaffected because it does not compile dependencies. If a fallback command must
 override `CARGO_TARGET_DIR`, use the default target directory or an absolute
 path. Because the system aliases link whatever Homebrew exposes at
 `/opt/homebrew/opt/duckdb`, verify `duckdb --version` is still the expected
-`1.5.3` after any Homebrew upgrade or unpin before trusting system-linked test
-results. Before release-sensitive, packaging, or dependency changes, also run the
+`1.5.6` after any Homebrew upgrade or unpin before trusting system-linked test
+results. Homebrew's `duckdb` formula has moved to the 2.x line, so a fresh
+`brew install duckdb` no longer provides `1.5.6`; use the `-dev` aliases until
+the host library matches. Before release-sensitive, packaging, or dependency changes, also run the
 default bundled-mode validation commands such as
 `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 For any release version bump, keep the root crate and desktop app metadata in

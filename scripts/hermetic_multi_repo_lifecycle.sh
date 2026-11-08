@@ -26,8 +26,8 @@ if [[ -z "${CONFIG_PATH}" || ! -f "${CONFIG_PATH}" ]]; then
   exit 1
 fi
 
-if [[ "$(duckdb --version 2>/dev/null || true)" != v1.5.3* ]]; then
-  echo "DuckDB 1.5.3 is required for the system-linked release gate." >&2
+if [[ "$(duckdb --version 2>/dev/null || true)" != v1.5.6* ]]; then
+  echo "DuckDB 1.5.6 is required for the system-linked release gate." >&2
   exit 1
 fi
 

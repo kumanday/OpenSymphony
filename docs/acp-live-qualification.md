@@ -31,7 +31,7 @@ usage accounting; a possibly submitted prompt is never replayed on recovery.
 Verify the CLI versions and authenticated status locally, then set
 `OPENSYMPHONY_CURSOR_AGENT_BIN` and `OPENSYMPHONY_DEVIN_BIN` to the respective
 executables. The manual tests are ignored by unauthenticated CI. On a macOS
-installation with system DuckDB 1.5.3, run:
+installation with system DuckDB 1.5.6, run:
 
 ```sh
 agent --version

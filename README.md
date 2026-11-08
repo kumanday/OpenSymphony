@@ -332,8 +332,9 @@ size, but keeps the memory database portable for local-first operator workflows.
 Repository developers on macOS/Homebrew can use `cargo check-system-duckdb`,
 `cargo test-system-duckdb`, and `cargo clippy-system-duckdb` to build against a
 system DuckDB installation with `--no-default-features --features
-duckdb-prebuilt`. The expected Homebrew DuckDB version is `1.5.3`, pinned after
-installation. That avoids both bundled source compilation and per-workspace
+duckdb-prebuilt`. The expected system DuckDB version is `1.5.6`, pinned after
+installation; Homebrew's current `duckdb` formula is on the 2.x line, so use the
+fallback aliases when the host library does not match. That avoids both bundled source compilation and per-workspace
 download caches. The portable fallback aliases `cargo check-dev`,
 `cargo test-dev`, and `cargo clippy-dev` set `DUCKDB_DOWNLOAD_LIB=1` for the
 aliased command so they reuse a downloaded prebuilt libduckdb during iterative
