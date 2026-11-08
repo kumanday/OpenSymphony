@@ -566,6 +566,12 @@ For local Codex stdio execution, `OPENSYMPHONY_CODEX_BIN` may point to an
 alternate Codex binary in trusted operator environments only; it is not a
 hosted-mode tenant input.
 
+`OPENSYMPHONY_RUNNING_STATE_REFRESH_MS` sets how often `opensymphony run`
+re-reads tracker states for issues it is already running. The default is
+30000 ms. Shorter values make tracker transitions such as Merging visible
+sooner at the cost of more Linear reads, so reserve them for local diagnostics
+and tests against a local tracker stub.
+
 OpenAI ChatGPT/Codex subscription credentials are available only when
 OpenSymphony is built with the `openhands-subscription-credentials` Cargo
 feature. The workflow stores environment-variable names and auth-directory

@@ -647,6 +647,10 @@ Only `main` saves the Rust caches (`Swatinem/rust-cache` with `save-if`). A pull
 request can read the `main` cache but not another pull request's cache, so
 per-PR caches only consumed the 10 GB repository quota and evicted the shared
 one.
+The `rust-test` cache also holds `target/duckdb-download`. rust-cache keeps the
+`libduckdb-sys` build-script output but prunes directories it does not know, so
+without that entry a cache hit skips the download and the test binaries fail to
+link against `-lduckdb`.
 
 Timing evidence is attached to every run:
 
@@ -663,6 +667,13 @@ than 30 s without terminating them. To reproduce the CI test run locally, use
 `cargo nextest run --no-default-features --features duckdb-prebuilt --profile ci`
 with `DUCKDB_DOWNLOAD_LIB=1`, or the system-DuckDB environment from the
 `cargo *-system-duckdb` aliases.
+
+Keep long tests event-driven rather than clock-driven. A process-level test
+that waits for the scheduler to notice a tracker transition on a running issue
+sets `OPENSYMPHONY_RUNNING_STATE_REFRESH_MS` on the `opensymphony run` child
+instead of waiting out the 30 s production cadence. Test helpers that need a
+real shell resolve it with a non-login `bash -c`; a login shell sources the
+developer's profile and can add seconds per call.
 
 ## 6. Operations
 

@@ -3436,6 +3436,33 @@ async fn gateway_serves_code_graph_contract_endpoints() {
             .contains(&"src/empty.rs".to_string())
     );
 
+    server_task.abort();
+}
+
+/// The atlas caps file nodes at the 500-record gateway contract limit. These
+/// fixtures need more than 500 documents each, so they use their own store and
+/// run alongside the contract-endpoint checks above.
+#[tokio::test]
+async fn gateway_code_graph_atlas_caps_and_dedupes_large_repositories() {
+    let repo = tempfile::tempdir().expect("memory repo");
+    let config_for_revision_regression =
+        MemoryConfig::load(repo.path(), None).expect("memory config should load");
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server =
+        GatewayServer::new(store).with_memory_config(Some(config_for_revision_regression.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}/api/v1/code");
+
     persist_code_intel_documents(
         &config_for_revision_regression,
         CodeIntelPersistBatch {
