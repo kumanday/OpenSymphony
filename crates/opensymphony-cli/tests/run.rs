@@ -632,7 +632,7 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
         .await;
     seed_fake_openhands_conversation(&openhands, conversation_id, project.path()).await;
 
-    let mut child = spawn_run_child(project.path(), &[]);
+    let mut child = spawn_run_child_with_fast_running_refresh(project.path(), &[], None);
 
     let snapshot = wait_for_merging_supersede_event(&format!("http://{bind_addr}/api/v1/snapshot"))
         .await
@@ -661,12 +661,14 @@ async fn run_interrupts_active_codex_stdio_worker_when_tracker_reports_merging()
     write_codex_merging_supersede_project_files(project.path(), linear.base_url(), bind_addr);
     write_memory_config(project.path());
 
-    let mut child = spawn_run_child_with_codex_bin(
+    let mut child = spawn_run_child_with_fast_running_refresh(
         project.path(),
         &[],
-        fake_codex
-            .to_str()
-            .expect("fake codex path should be utf-8"),
+        Some(
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+        ),
     );
 
     wait_for_codex_merging_interrupt_ack(&format!("http://{bind_addr}/api/v1/snapshot"))
@@ -814,7 +816,26 @@ Run the scheduler.
 }
 
 fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child {
-    spawn_run_child_configured(project_root, extra_args, None, None)
+    spawn_run_child_configured(project_root, extra_args, None, None, None)
+}
+
+/// Running-state refresh cadence for tests that wait for the scheduler to
+/// observe a tracker transition on an already-running issue. The production
+/// default is 30 seconds; the mock tracker is local, so poll it every tick.
+const FAST_RUNNING_STATE_REFRESH_MS: u64 = 50;
+
+fn spawn_run_child_with_fast_running_refresh(
+    project_root: &std::path::Path,
+    extra_args: &[&str],
+    codex_bin: Option<&str>,
+) -> Child {
+    spawn_run_child_configured(
+        project_root,
+        extra_args,
+        codex_bin,
+        None,
+        Some(FAST_RUNNING_STATE_REFRESH_MS),
+    )
 }
 
 fn spawn_run_child_with_worker_stack(
@@ -822,15 +843,7 @@ fn spawn_run_child_with_worker_stack(
     extra_args: &[&str],
     stack_bytes: usize,
 ) -> Child {
-    spawn_run_child_configured(project_root, extra_args, None, Some(stack_bytes))
-}
-
-fn spawn_run_child_with_codex_bin(
-    project_root: &std::path::Path,
-    extra_args: &[&str],
-    codex_bin: &str,
-) -> Child {
-    spawn_run_child_configured(project_root, extra_args, Some(codex_bin), None)
+    spawn_run_child_configured(project_root, extra_args, None, Some(stack_bytes), None)
 }
 
 fn spawn_run_child_configured(
@@ -838,6 +851,7 @@ fn spawn_run_child_configured(
     extra_args: &[&str],
     codex_bin: Option<&str>,
     worker_stack_bytes: Option<usize>,
+    running_state_refresh_ms: Option<u64>,
 ) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
@@ -852,11 +866,18 @@ fn spawn_run_child_configured(
         .env_remove("LLM_MODEL")
         .env_remove("LLM_API_KEY")
         .env_remove("LLM_BASE_URL")
+        .env_remove("OPENSYMPHONY_RUNNING_STATE_REFRESH_MS")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(codex_bin) = codex_bin {
         command.env("OPENSYMPHONY_CODEX_BIN", codex_bin);
+    }
+    if let Some(interval_ms) = running_state_refresh_ms {
+        command.env(
+            "OPENSYMPHONY_RUNNING_STATE_REFRESH_MS",
+            interval_ms.to_string(),
+        );
     }
     if cfg!(unix)
         && let Some(stack_bytes) = worker_stack_bytes
@@ -1190,7 +1211,7 @@ async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
             }
             last_snapshot = Some(snapshot);
         }
-        sleep(Duration::from_millis(250)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     Err(format!(
         "timed out waiting for Merging supersede event at {url}; last snapshot: {}",
@@ -1212,7 +1233,7 @@ async fn wait_for_codex_merging_interrupt_ack(url: &str) -> Result<Value, String
         {
             return Ok(snapshot);
         }
-        sleep(Duration::from_millis(250)).await;
+        sleep(Duration::from_millis(50)).await;
     }
     Err(format!(
         "timed out waiting for Codex Merging interrupt acknowledgement at {url}"

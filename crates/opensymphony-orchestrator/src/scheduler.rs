@@ -48,6 +48,9 @@ use super::{
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
+/// Default cadence for refreshing tracker states of issues the scheduler is
+/// already running. Operators keep this default; `SchedulerConfig` allows a
+/// shorter cadence for local diagnostics and process-level tests.
 const RUNNING_STATE_REFRESH_INTERVAL_MS: u64 = 30_000;
 const DISPATCH_DISCOVERY_INTERVAL_MS: u64 = 60_000;
 const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
@@ -213,6 +216,9 @@ pub struct SchedulerConfig {
     pub tracker_project_slugs: Vec<String>,
     pub routing: RoutingConfig,
     pub repository_routing: Option<RepositoryRouting>,
+    /// How often running issues have their tracker state refreshed between
+    /// full-detail snapshots. `from_workflow` uses the 30-second default.
+    pub running_state_refresh_interval_ms: u64,
 }
 
 impl SchedulerConfig {
@@ -272,6 +278,7 @@ impl SchedulerConfig {
             tracker_project_slugs: workflow.config.tracker.project_slugs.clone(),
             routing: workflow.config.routing.clone(),
             repository_routing: None,
+            running_state_refresh_interval_ms: RUNNING_STATE_REFRESH_INTERVAL_MS,
         })
     }
 
@@ -2573,7 +2580,7 @@ where
             && pre_update_full_snapshot.is_none()
             && due(
                 self.last_running_state_refresh_at,
-                RUNNING_STATE_REFRESH_INTERVAL_MS,
+                self.config.running_state_refresh_interval_ms,
                 observed_at,
             )
             && self.has_reconcilable_executions()
@@ -10774,6 +10781,7 @@ mod tests {
                 dry_run: false,
             },
             repository_routing: None,
+            running_state_refresh_interval_ms: 30_000,
         };
 
         assert!(!project_belongs_to_configured_project(

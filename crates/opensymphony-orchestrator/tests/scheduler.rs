@@ -80,6 +80,7 @@ fn scheduler_config() -> SchedulerConfig {
             dry_run: false,
         },
         repository_routing: None,
+        running_state_refresh_interval_ms: 30_000,
     }
 }
 

@@ -68,6 +68,25 @@ use self::{
 
 const MEMORY_SERVER_BIND_STATE: &str = ".opensymphony-memory-bind.json";
 
+/// Overrides how often `opensymphony run` refreshes tracker states for running
+/// issues. Intended for local diagnostics and process-level tests; production
+/// runs keep the scheduler's 30-second default to bound Linear reads.
+const RUNNING_STATE_REFRESH_INTERVAL_ENV: &str = "OPENSYMPHONY_RUNNING_STATE_REFRESH_MS";
+
+fn running_state_refresh_interval_override(value: Option<&str>) -> Option<u64> {
+    let value = value?.trim();
+    match value.parse::<u64>() {
+        Ok(interval_ms) if interval_ms > 0 => Some(interval_ms),
+        _ => {
+            tracing::warn!(
+                value,
+                "ignoring invalid {RUNNING_STATE_REFRESH_INTERVAL_ENV}; expected a positive integer of milliseconds"
+            );
+            None
+        }
+    }
+}
+
 enum RunWake {
     Shutdown,
     Server(Result<io::Result<()>, tokio::task::JoinError>),
@@ -1236,6 +1255,17 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut scheduler_config = SchedulerConfig::from_workflow(&runtime.workflow)?;
     scheduler_config.max_retry_attempts = runtime.retry_max_attempts;
     scheduler_config.repository_routing = runtime.repository_routing.clone();
+    if let Some(interval_ms) = running_state_refresh_interval_override(
+        std::env::var(RUNNING_STATE_REFRESH_INTERVAL_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        tracing::info!(
+            interval_ms,
+            "using {RUNNING_STATE_REFRESH_INTERVAL_ENV} running-state refresh cadence"
+        );
+        scheduler_config.running_state_refresh_interval_ms = interval_ms;
+    }
     let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config);
 
     let mut recent_events = VecDeque::new();
@@ -2239,6 +2269,22 @@ pub(super) fn now_timestamp() -> TimestampMs {
 mod tests {
     use super::*;
     use crate::opensymphony_memory::MemoryError;
+
+    #[test]
+    fn running_state_refresh_override_accepts_only_positive_milliseconds() {
+        assert_eq!(running_state_refresh_interval_override(None), None);
+        assert_eq!(
+            running_state_refresh_interval_override(Some("250")),
+            Some(250)
+        );
+        assert_eq!(
+            running_state_refresh_interval_override(Some(" 50 ")),
+            Some(50)
+        );
+        assert_eq!(running_state_refresh_interval_override(Some("0")), None);
+        assert_eq!(running_state_refresh_interval_override(Some("-5")), None);
+        assert_eq!(running_state_refresh_interval_override(Some("soon")), None);
+    }
 
     #[tokio::test]
     async fn pending_operator_flush_allows_worker_wake_and_shutdown() {
