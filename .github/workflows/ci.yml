@@ -6,21 +6,134 @@ on:
     branches:
       - main
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  # Debuginfo dominated link time for the 37 integration-test binaries and
+  # doubled the cache. Panic messages keep file:line without it.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
 jobs:
-  rust:
+  # Lint and test link the prebuilt DuckDB library instead of compiling the
+  # bundled C++ amalgamation (about 9 minutes per cold build). No Rust code is
+  # conditional on the DuckDB feature, so the bundled build is validated
+  # separately by rust-bundled only when it can change.
+  rust-lint:
     runs-on: ubuntu-latest
+    env:
+      DUCKDB_DOWNLOAD_LIB: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # PR caches are unreadable by other PRs and evicted the main cache
+          # under the 10 GB repository quota; only main seeds the cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fmt
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-default-features --features duckdb-prebuilt --timings -- -D warnings
+      - name: upload build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-clippy
+          path: target/cargo-timings/cargo-timing.html
+          if-no-files-found: ignore
+
+  rust-test:
+    runs-on: ubuntu-latest
+    env:
+      DUCKDB_DOWNLOAD_LIB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: build tests
+        run: cargo test --workspace --no-default-features --features duckdb-prebuilt --no-run --timings
       - name: test
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --no-default-features --features duckdb-prebuilt --profile ci
+      - name: doctests
+        run: cargo test --workspace --doc --no-default-features --features duckdb-prebuilt
+      - name: test timing summary
+        if: always()
+        run: python3 scripts/ci/nextest_timing_summary.py target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
+      - name: upload test timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-timings
+          path: |
+            target/nextest/ci/junit.xml
+            target/cargo-timings/cargo-timing.html
+          if-no-files-found: ignore
+
+  rust-changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      bundled: ${{ steps.filter.outputs.bundled }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            bundled:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - '.github/workflows/ci.yml'
+
+  # Default-feature (bundled DuckDB) build of the shipped library and binary.
+  # Runs on main and on PRs that change dependencies or build configuration,
+  # matching the AGENTS.md rule for release-sensitive and dependency changes.
+  rust-bundled:
+    needs: rust-changes
+    if: github.event_name == 'push' || needs.rust-changes.outputs.bundled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build (bundled DuckDB)
+        run: cargo build --workspace --timings
+      - name: upload build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-bundled
+          path: target/cargo-timings/cargo-timing.html
+          if-no-files-found: ignore
+
+  # Stable aggregate check name for branch protection and required-check
+  # evidence; passes only when every Rust job passed or was intentionally skipped.
+  rust:
+    if: always()
+    needs: [rust-lint, rust-test, rust-changes, rust-bundled]
+    runs-on: ubuntu-latest
+    steps:
+      - name: require rust jobs
+        run: |
+          test "${{ needs.rust-lint.result }}" = success
+          test "${{ needs.rust-test.result }}" = success
+          test "${{ needs.rust-changes.result }}" = success
+          case "${{ needs.rust-bundled.result }}" in success|skipped) ;; *) exit 1 ;; esac
+
   acp-windows:
     runs-on: windows-latest
     steps:
