@@ -13,8 +13,8 @@ pub(crate) use environment::{has_environment_name_collision, insert_environment_
 pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
 pub use git_program::git_program;
 pub use manager::{
-    WorkspaceManager, compose_parent_continuation_prompt, compose_parent_prompt,
-    compose_terminal_prompt,
+    MAX_INSTRUCTION_FILE_BYTES, WorkspaceManager, compose_parent_continuation_prompt,
+    compose_parent_prompt, compose_terminal_prompt, instruction_body,
 };
 pub use models::{
     AcpProcessState, AcpRecovery, AcpRunRoute, AcpSessionIdentity, AcpSessionState,

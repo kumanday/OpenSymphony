@@ -101,6 +101,263 @@ Known gaps:
   tokens in OpenSymphony workspaces or browser payloads.
 - Hosted Codex worker pools and remote routing remain future work.
 
+## Devin Cloud Agent
+
+Devin is a remote, vendor-hosted implementation agent. The adapter lives in
+`crates/opensymphony-devin` (source-included by the root crate, not a separate
+Cargo package) and advertises `devin_cloud_agent` as available over an HTTPS
+transport (`remote: true`, `local: false`) with runtime contract
+`devin-api-v3`.
+
+The client targets the **Devin API v3** contract, vendored from
+`https://docs.devin.ai/v3-openapi.yaml` into
+`crates/opensymphony-devin/contracts/devin-v3-openapi.yaml` and asserted against
+in `tests/devin_cloud_agent.rs`. v3 is organization-scoped and authenticated
+with a `cog_` service-user bearer token, so every session route is
+`/v3/organizations/{org_id}/sessions...` and the organization id is resolved
+from config, `DEVIN_ORG_ID`, or `GET /v3/self`.
+
+The module provides: validated configuration (HTTPS-only endpoint, credential
+*environment variable name* rather than a token, `org-` id shape, tag/ACU/mode
+limits); a request builder covering `GET /v3/self`, session create/get/list,
+cursor-paginated messages, operator message send, delete/archive, attachments,
+and tag replacement; a client that reads the token from the configured
+environment variable, disables redirects, and injects the bearer only on the
+wire; a poll-driven session lifecycle that drains messages by cursor,
+deduplicates by `event_id`, emits status/status-detail transitions, and collects
+pull requests, ACU usage, structured output, and attachments as run evidence;
+and normalization that maps documented message sources and statuses into journal
+records while preserving every unknown payload as raw JSON (unknown statuses and
+sources decode rather than fail).
+
+Devin owns its execution workspace. `DevinRemoteWorkspaceBinding` binds an issue
+workspace key and repository URL to that remote workspace and keeps the local
+OpenSymphony checkout as an evidence-only path; it is never used as Devin's
+working directory. The CLI route in
+`crates/opensymphony-cli/src/orchestrator_run/backends.rs` skips local checkout
+preparation entirely for this harness: it binds tenancy, resolves secret
+references, creates the session, streams normalized events as
+`WorkerUpdate::RuntimeEvent`, imports evidence, and maps the settled session
+onto a scheduler outcome.
+
+Because nothing is executed locally, the scheduler prepares the issue workspace
+through `ensure_evidence_workspace` for any harness whose capability transport
+is remote-only. That path materializes the contained issue directory for run
+manifests, journals, and evidence without cloning or verifying a checkout and
+without running repository hooks, so a host with no local repository access can
+still launch a session Devin itself can clone. All four hooks are skipped:
+`after_create`, `before_run`, `after_run`, and `before_remove`. The issue manifest
+records both the repository binding and the evidence-only workspace policy, so
+cleanup also skips checkout hooks after a restart. Recovery compares the
+repository identity against the live tracker binding and retains the evidence
+for a remote session whose termination is unconfirmed.
+
+Repository instructions still reach the prompt. Because there is no local
+checkout to read `instructions.path` from, the route fetches the configured file
+from the GitHub remote at the repository's target branch (`GET
+/repos/{owner}/{repo}/contents/{path}?ref=<branch>` with the checkout
+credential), strips `WORKFLOW.md` front matter through the shared
+`instruction_body` helper, bounds it to `MAX_INSTRUCTION_FILE_BYTES`, renders it
+into the `## Repository Instructions` section of `compose_terminal_prompt`, and
+records path, ref, SHA-256 and size as `repository_instructions` in
+`evidence.json`. A configured file that cannot be fetched is a retryable launch
+failure, matching the local route. The repository's agent-side steps (attaching
+the PR to the Linear issue, pushing) run inside Devin, so the secrets they need
+must be referenced through `devin.session.secret_ids`.
+
+A `--dry-run` route settles before any credential resolution or session
+creation, so it neither contacts the API nor consumes ACUs; it writes the local
+run manifest and no conversation binding.
+
+### Tenant isolation and secrets
+
+Every client binds to exactly one organization before it issues session traffic:
+`bind_tenant()` calls `GET /v3/self`, rejects a configured organization that the
+credential does not own (`TenantMismatch`), and adopts the credential's
+organization when none is configured. Session, listing, and message payloads
+carrying a different `org_id` are rejected as `CrossTenantPayload` rather than
+journaled.
+
+Secrets are references, never values. `devin.session.secret_ids` holds Devin
+secret ids or keys; they are resolved against `GET /v3/organizations/{org_id}/secrets`
+for the bound organization, and anything not owned by it fails the run with
+`UnknownSecret`. Only resolved ids are sent to Devin, which injects the values
+into its own environment — OpenSymphony never reads them.
+
+### Transport hardening
+
+The base URL must be an absolute HTTPS URL with no embedded credentials, query,
+or fragment; the client enforces HTTPS, requires TLS 1.2 or newer, disables
+redirects so the bearer cannot follow a rewrite off-origin, and reads the token
+from the configured environment variable without ever serializing or logging it.
+Certificate pinning is **not** implemented.
+
+### Evidence import
+
+Settled runs write `session.json`, `events.jsonl`, sanitized `attachments/`, and
+`evidence.json` under `<issue-workspace>/.opensymphony/devin/<run-id>`. The
+manifest records session id and URL, outcome, status and status detail, ACU
+usage, pull-request URLs (`pull_request_urls` from the API's
+`SessionResponse.pull_requests`, plus `message_pull_request_urls` for
+`/pull/<n>` or `/merge_requests/<n>` URLs that only appear in Devin's messages),
+normalized event count, stored and skipped attachments, structured output, and
+the `devin_owned_remote_workspace` containment marker. Attachment downloads must match the authenticated API
+origin, are bounded to 25 MiB each and 50 per run (both `Content-Length` and
+decoded body are checked), and land under sanitized names that cannot escape the
+evidence directory. A failed download is recorded as a skipped attachment. A
+failed attachment-list request is recorded in `attachment_listing_error` while
+the session outcome is preserved.
+
+### Session cleanup
+
+A Devin session outlives the worker process, so every abandoned path stops it:
+poll timeout and transport failure terminate and archive the session before the
+route returns, and a scheduler interrupt looks the session up in the
+live-session registry and deletes it. Worker abort and daemon shutdown
+(`WorkerBackend::abort_worker` / `WorkerBackend::shutdown`) terminate the
+sessions tracked for the affected workers, *await* the acknowledgement, and
+then give the route task a bounded window (`DEVIN_SETTLE_TIMEOUT`, 30s) to
+observe the archived session on its next poll, import the evidence, and finish
+`run.json` as cancelled before the task is aborted — a tracker state change
+such as `In Progress -> Human Review` releases the worker this way, and the
+imported evidence is how the run stays inspectable afterwards;
+`DevinSessionGuard::drop` only makes an
+opportunistic attempt, because a `Drop` cannot await and a task spawned during
+runtime teardown may never run. A scheduler interrupt that finds no tracked
+session — the normal state after a daemon restart — rebuilds a tenant-bound
+client and stops the session recorded in the conversation manifest.
+
+The durable fence is the binding itself. Beside the conversation manifest the
+route writes `devin-route.json`: the session id, API origin, organization, and
+the *name* of the credential environment variable (never its value). Every
+later cleanup — terminal issue cleanup, and the pre-creation check that stops
+a session a dropped or crashed worker left bound — is addressed through that
+persisted identity, so a workflow that has since been pointed at another origin
+or organization cannot produce a 404 that looks like proof the original
+session is gone; `bind_tenant` refuses the mismatched credential instead. If
+the bound session cannot be terminated, the route refuses to create a
+replacement and settles as non-retrying `CancelFailed`.
+
+Session creation is reconciled before it is retried. Devin may accept a
+`POST /sessions` whose response is lost or undecodable, so a failed create
+first lists unarchived sessions carrying the run's correlation tag (the tag
+always survives operator tag truncation; operators get 49 slots). A match
+created at or after the attempt is followed as if the create had succeeded; a
+confirmed miss is an ordinary retryable failure; a lookup that fails too
+settles as `CancelFailed` and names the tag to search for in Devin.
+
+Ownership is only released once the remote session is provably gone. The route
+writes `run.json` and the Devin conversation binding *before* it reports the
+launch, so cancellation and restart recovery can always find the live session.
+If termination after a polling failure fails, the route keeps the cleanup guard
+armed and settles as `CancelFailed`, which does not retry, rather than as an
+ordinary failure that would start a second session while the first still bills.
+A session that stops to wait for operator input (`waiting_for_user`,
+`waiting_for_approval`), or that Devin has already suspended for `inactivity`
+while waiting, settles the run as the non-retrying `Detached` outcome: the
+session stays alive and bound, its journal (including any pull request URL
+Devin reported in a message) is imported as evidence, and the operator answers
+in the Devin console. Polling through that state is not an option: Devin
+suspends an unanswered session within minutes, and a suspension would otherwise
+be reported as a stall and retried with a replacement session that repeats work
+the first one may already have delivered. OpenSymphony itself does not forward
+operator messages, which is why the capability reports
+`send_user_message: false`. An `exit` session that is also archived was closed
+by a terminate request or the console rather than by Devin finishing, and
+settles as `Cancelled`. For every other outcome the
+cleanup guard stays armed until the local evidence is durable: an evidence
+import failure archives the settled session (awaited) before the retryable
+failure is reported, and keeps `CancelFailed` ownership if even that fails.
+Every stop path (interrupt, worker abort, terminal cleanup, shutdown) goes
+through `DevinCloudClient::stop_session`: Devin rejects `DELETE` for a session
+that has already exited (`400 Devin session already exited`), so a rejected
+termination is re-checked against the session's current status, and a session
+that is already terminal counts as stopped (and is archived if it was not),
+while a missing session (`404`) is treated the same way. Only a session that is
+still live after a rejected termination keeps the error, and therefore keeps
+the execution or workspace retained.
+
+Parent issues with sub-issues are not routed to Devin. Parent execution roots,
+shared child worktrees, repair/merge, and the orchestrator-owned final
+verification all run against a local checkout, so `decide_issue_route` rejects
+a parent for any harness whose transport is remote-only; the limitation is
+listed in the capability's `feature_gaps`.
+
+When termination fails, the run manifest persists `CancelFailed` in
+`terminal_worker_outcome`. Scheduler recovery restores that outcome before
+dispatch, preventing a replacement session. Local finalization or evidence
+import failures keep the non-retrying outcome while remote termination remains
+unconfirmed.
+
+Recovery after a daemon restart reattaches instead of creating: the route reads
+the Devin session id from the conversation manifest and follows the existing
+session, and a session that cannot be looked up settles as a non-retrying
+`CancelFailed` rather than launching a second one. When an issue becomes
+terminal, workspace cleanup inspects the conversation manifest first,
+terminates and archives the remote session, and only then removes the local
+binding; if termination fails the workspace is retained so a later cleanup can
+retry it.
+
+Workflow configuration lives under the `devin.api` and `devin.session`
+front-matter blocks (see `docs/configuration.md`). Endpoints must be absolute
+HTTPS URLs without embedded credentials, query, or fragment; credential values
+are never serialized into workflow config, manifests, or logs.
+
+### Live contract evidence
+
+`tests/devin_cloud_agent_live.rs` exercises the same client against
+`https://api.devin.ai` and is opt-in (`#[ignore]` plus
+`OPENSYMPHONY_DEVIN_LIVE=1`) because the lifecycle test creates a real session
+and consumes ACUs:
+
+```bash
+OPENSYMPHONY_DEVIN_LIVE=1 cargo test --test devin_cloud_agent_live -- --ignored --nocapture
+```
+
+A run on 2026-09-09 against a service-user token confirmed, end to end:
+`GET /v3/self` (`principal_type: service_user`, `org-` id), organization-scoped
+session listing including the `qs` query document, session create with `repos`,
+tags, title, `max_acu_limit` and `resumable`, cursor-paginated message polling,
+the `claimed -> running/working` status-detail transitions, operator message
+send, attachment listing, and `DELETE ...?archive=true` (the session settled at
+`status: exit`, `is_archived: true`, with the `opensymphony:<key>` correlation
+tag applied). The normalized event sequence observed was `SessionCreated`,
+`UserMessage`, two `StatusChanged`, `DevinMessage`, `SessionBlocked`.
+
+A second run on 2026-09-09 covered the hardening paths and is what moved the
+capability to `available: true`:
+
+- `devin_live_tenant_binding_and_secret_scope`: `bind_tenant()` records a
+  `service_user` tenancy; a configured foreign `org-` id is rejected with
+  `TenantMismatch`; organization secrets list and resolve by id; an unknown
+  reference fails with `UnknownSecret`. No ACUs.
+- `devin_live_session_lifecycle`: create, poll, normalize, message, import
+  evidence (6 normalized events, manifest and journal written under a temporary
+  issue workspace), then terminate and archive.
+- `devin_live_poll_timeout_terminates_the_remote_session`: an over-budget poll
+  returns `PollTimeout`, the cleanup path deletes and archives the session, and
+  a follow-up `GET` confirms `is_archived: true` — the orphaned-session case
+  that costs money if it regresses.
+
+Remaining limitations (advertised as capability `feature_gaps`, not blockers):
+
+- Runtime events arrive by cursor-paginated HTTPS polling; there is no push
+  stream, so event latency is bounded by `poll_interval_ms`. While an
+  executing session produces no new message or status the route publishes a
+  `session.heartbeat` liveness event (every third of the scheduler stall
+  timeout, at most once a minute) so the stall policy does not abort and
+  replace a session that is merely busy; heartbeats are scheduler activity,
+  not journaled evidence.
+- There is no mid-run interrupt in the v3 contract: cancellation terminates and
+  archives the session rather than stopping one turn.
+- Pause/resume and approval flows are not exposed by the v3 session contract.
+- Model selection is fixed at session creation through `devin_mode`; per-run
+  model overrides are unavailable.
+- TLS certificate pinning is not implemented; transport security relies on the
+  platform trust store with TLS 1.2+ and redirects disabled.
+- Live evidence covers happy-path, waiting-on-operator, and timeout settlement.
+  Devin-side failure and suspension settlements are covered by fixtures only.
+
 ## ACP live profile matrix
 
 [ACP live qualification](acp-live-qualification.md) records the pinned Cursor
@@ -109,8 +366,8 @@ tracked-issue outcomes, and optional-feature limits. Both advertise
 `loadSession` and omit `resumeSession`; profile preflight does not claim
 either. Cursor alone has a qualified pinned extension registration for
 observed `cursor/create_plan` and `cursor/update_todos` ID-bearing requests.
-Devin requires no custom scheduler path; its before-response session updates
-are bound by the common ACP client. The public capabilities response exposes
+The Devin ACP profile uses the common ACP scheduler path; its before-response
+session updates are bound by the ACP client. The public capabilities response exposes
 generic adapter support, configured profile readiness, and negotiated run
 support as distinct states.
 

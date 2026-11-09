@@ -1,0 +1,1800 @@
+# Vendored subset of the published Devin API v3 OpenAPI document.
+# Source: https://docs.devin.ai/v3-openapi.yaml (Devin API v3, version 3.0.0).
+# Contains only the session and identity operations this harness calls, plus
+# every schema they reference.
+openapi: 3.1.0
+info:
+  description: Devin v3 API with Service User authentication and RBAC
+  title: Devin API v3
+  version: 3.0.0
+servers: []
+security:
+- bearerAuth: []
+paths:
+  /v3/organizations/{org_id}/sessions:
+    get:
+      description: List sessions.
+      operationId: handle_get_sessions_v3_organizations__org_id__sessions_get
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - in: query
+        name: qs
+        required: true
+        schema:
+          $ref: '#/components/schemas/SessionsQueryParams'
+      - in: query
+        name: devin_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse_SessionResponse_'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: List Sessions
+      tags:
+      - sessions
+    post:
+      description: Create a new session
+      operationId: handle_create_session_v3_organizations__org_id__sessions_post
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - in: query
+        name: devin_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Devin Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Create Session
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}:
+    delete:
+      description: Terminate session
+      operationId: handle_terminate_session_v3_organizations__org_id__sessions__devin_id__delete
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      - description: Whether to archive the Devin session
+        in: query
+        name: archive
+        required: false
+        schema:
+          default: false
+          description: Whether to archive the Devin session
+          title: Archive
+          type: boolean
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Terminate Session
+      tags:
+      - sessions
+    get:
+      description: Get details of a specific session.
+      operationId: handle_get_session_v3_organizations__org_id__sessions__devin_id__get
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Get Session
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}/archive:
+    post:
+      description: Archive session and put it to sleep if currently running
+      operationId: handle_archive_session_v3_organizations__org_id__sessions__devin_id__archive_post
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Archive Session
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}/attachments:
+    get:
+      description: List all attachments for a session.
+      operationId: handle_get_session_attachments_v3_organizations__org_id__sessions__devin_id__attachments_get
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/SessionAttachment'
+                title: Response Handle Get Session Attachments V3 Organizations  Org Id  Sessions  Devin
+                  Id  Attachments Get
+                type: array
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: List session attachments
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}/messages:
+    get:
+      description: List all messages for a session with cursor-based pagination, ordered chronologically.
+      operationId: handle_get_session_messages_v3_organizations__org_id__sessions__devin_id__messages_get
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      - in: query
+        name: after
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: After
+      - in: query
+        name: first
+        required: false
+        schema:
+          default: 100
+          maximum: 200
+          minimum: 1
+          title: First
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse_SessionMessage_'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: List session messages
+      tags:
+      - sessions
+    post:
+      description: Send a message to an active session. The session will be automatically resumed if suspended.
+      operationId: handle_post_message_v3_organizations__org_id__sessions__devin_id__messages_post
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionMessageCreateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Send a message to a session
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}/tags:
+    get:
+      description: Get the tags for a specific session.
+      operationId: handle_get_session_tags_v3_organizations__org_id__sessions__devin_id__tags_get
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTagsResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Get session tags
+      tags:
+      - sessions
+    post:
+      description: Append tags to a session (deduplicating with existing tags).
+      operationId: handle_append_session_tags_v3_organizations__org_id__sessions__devin_id__tags_post
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionTagsUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTagsResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Append session tags
+      tags:
+      - sessions
+    put:
+      description: Replace all tags on a session.
+      operationId: handle_replace_session_tags_v3_organizations__org_id__sessions__devin_id__tags_put
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionTagsUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTagsResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Replace session tags
+      tags:
+      - sessions
+  /v3/organizations/{org_id}/sessions/{devin_id}/unarchive:
+    post:
+      description: Unarchive session (does not cascade to child sessions)
+      operationId: handle_unarchive_session_v3_organizations__org_id__sessions__devin_id__unarchive_post
+      parameters:
+      - description: 'Organization ID (prefix: org-)'
+        in: path
+        name: org_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: org-abc123def456
+          title: Org Id
+      - description: 'Devin session ID (prefix: devin-)'
+        in: path
+        name: devin_id
+        required: true
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          example: devin-abc123def456
+          title: Devin Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Unarchive Session
+      tags:
+      - sessions
+  /v3/self:
+    get:
+      operationId: handle_get_self_v3_self_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/ServiceUserSelf'
+                - $ref: '#/components/schemas/PatUserSelf'
+                - $ref: '#/components/schemas/DevinBrainUserSelf'
+                - $ref: '#/components/schemas/WindsurfSessionUserSelf'
+                title: Response Handle Get Self V3 Self Get
+          description: Successful Response
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unauthorized
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Forbidden
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Not Found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Conflict
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Unprocessable Content
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+          description: Too Many Requests
+      summary: Get Self
+      tags:
+      - self
+components:
+  schemas:
+    DevinBrainUserSelf:
+      description: Identity information for an authenticated Devin brain session.
+      properties:
+        creator_service_user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Creator Service User Id
+        devin_id:
+          title: Devin Id
+          type: string
+        org_id:
+          title: Org Id
+          type: string
+        principal_type:
+          const: devin_brain
+          title: Principal Type
+          type: string
+        user_id:
+          title: User Id
+          type: string
+      required:
+      - principal_type
+      - devin_id
+      - org_id
+      - user_id
+      title: DevinBrainUserSelf
+      type: object
+    PaginatedResponse_SessionMessage_:
+      properties:
+        end_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Cursor to fetch the next page, or None if this is the last page.
+          title: End Cursor
+        has_next_page:
+          default: false
+          description: Whether there are more items available after this page.
+          title: Has Next Page
+          type: boolean
+        items:
+          items:
+            $ref: '#/components/schemas/SessionMessage'
+          title: Items
+          type: array
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Optional total count (can be omitted for performance).
+          title: Total
+      required:
+      - items
+      title: PaginatedResponse[SessionMessage]
+      type: object
+    PaginatedResponse_SessionResponse_:
+      properties:
+        end_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Cursor to fetch the next page, or None if this is the last page.
+          title: End Cursor
+        has_next_page:
+          default: false
+          description: Whether there are more items available after this page.
+          title: Has Next Page
+          type: boolean
+        items:
+          items:
+            $ref: '#/components/schemas/SessionResponse'
+          title: Items
+          type: array
+        total:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Optional total count (can be omitted for performance).
+          title: Total
+      required:
+      - items
+      title: PaginatedResponse[SessionResponse]
+      type: object
+    PatUserSelf:
+      description: Identity information for an authenticated PAT user.
+      properties:
+        api_key_id:
+          title: Api Key Id
+          type: string
+        api_key_name:
+          title: Api Key Name
+          type: string
+        org_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Org Id
+        principal_type:
+          const: pat_user
+          title: Principal Type
+          type: string
+        user_id:
+          title: User Id
+          type: string
+        user_name:
+          title: User Name
+          type: string
+      required:
+      - principal_type
+      - user_id
+      - user_name
+      - api_key_id
+      - api_key_name
+      title: PatUserSelf
+      type: object
+    ProblemDetail:
+      description: 'RFC 9457 application/problem+json error body for the v3 API.
+
+
+        detail is retained from the legacy {"detail": ...} body for back-compat; the
+
+        other members are additive. errors carries field-level validation failures
+
+        (422 only).'
+      properties:
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: A human-readable explanation specific to this occurrence.
+          title: Detail
+        errors:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          description: Field-level validation errors (422 responses only).
+          title: Errors
+        instance:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: A URI reference (the request path) for this occurrence.
+          title: Instance
+        status:
+          description: The HTTP status code.
+          title: Status
+          type: integer
+        title:
+          description: A short, human-readable summary of the problem type.
+          title: Title
+          type: string
+        type:
+          default: about:blank
+          description: A URI reference identifying the problem type.
+          title: Type
+          type: string
+      required:
+      - title
+      - status
+      title: ProblemDetail
+      type: object
+    ServiceUserSelf:
+      description: Identity information for an authenticated service user.
+      properties:
+        org_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Org Id
+        principal_type:
+          const: service_user
+          title: Principal Type
+          type: string
+        service_user_id:
+          title: Service User Id
+          type: string
+        service_user_name:
+          title: Service User Name
+          type: string
+      required:
+      - principal_type
+      - service_user_id
+      - service_user_name
+      title: ServiceUserSelf
+      type: object
+    SessionAttachment:
+      description: An attachment sent during a session.
+      properties:
+        attachment_id:
+          title: Attachment Id
+          type: string
+        content_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content Type
+        name:
+          title: Name
+          type: string
+        source:
+          enum:
+          - devin
+          - user
+          title: Source
+          type: string
+        url:
+          title: Url
+          type: string
+      required:
+      - attachment_id
+      - name
+      - url
+      - source
+      title: SessionAttachment
+      type: object
+    SessionCreateRequest:
+      properties:
+        attachment_urls:
+          anyOf:
+          - items:
+              format: uri
+              maxLength: 2083
+              minLength: 1
+              type: string
+            type: array
+          - type: 'null'
+          title: Attachment Urls
+        bypass_approval:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Bypass Approval
+        child_playbook_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Child Playbook Id
+        create_as_user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Create As User Id
+        devin_mode:
+          anyOf:
+          - enum:
+            - normal
+            - fast
+            - lite
+            - ultra
+            - fusion
+            type: string
+          - type: 'null'
+          description: Override the Devin agent mode for the session. 'normal' uses the default Agent
+            mode, 'fast' uses Fast mode, 'lite' uses Devin Lite, 'ultra' uses Devin Ultra, and 'fusion'
+            uses Fusion. Preview modes are subject to the same feature flag and enterprise agent preview
+            restrictions as the web app.
+          title: Devin Mode
+        knowledge_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Knowledge Ids
+        max_acu_limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Acu Limit
+        platform:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: "Override the VM platform for the session (e.g. 'windows'), or the name of an outpost\
+            \ (BYOB) pool to run the session on one of your own machines. When omitted (or set to 'inherit'),\
+            \ a session created by a parent Devin inherits the parent's placement \u2014 both its platform\
+            \ and its outpost pool, so an outpost-placed parent spawns children on the same pool; otherwise\
+            \ the organization default is used. Any value must match either a platform configured for\
+            \ your organization or an outpost pool name (case-insensitive) \u2014 built-in platforms take\
+            \ priority when a name matches both. Unrecognized values are rejected with a 400 whose error\
+            \ body lists the available platform labels and outpost pool names for the org."
+          title: Platform
+        playbook_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Playbook Id
+        prompt:
+          title: Prompt
+          type: string
+        repos:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Repos
+        resumable:
+          default: true
+          description: Whether to preserve the session's VM state after it stops so the session can be
+            resumed. Set to false for disposable sessions.
+          title: Resumable
+          type: boolean
+        secret_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Secret Ids
+        session_links:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Session Links
+        session_secrets:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/SessionSecretInput'
+            type: array
+          - type: 'null'
+          title: Session Secrets
+        structured_output_required:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          description: "When true (default), the agent MUST call provide_structured_output with is_final=true\
+            \ before its turn ends. When false, the tool is available but not required \u2014 it is not\
+            \ guaranteed to be called in a given turn."
+          title: Structured Output Required
+        structured_output_schema:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          description: JSON Schema (Draft 7) for validating structured output. Max 64KB. Must be self-contained
+            (no external $ref).
+          title: Structured Output Schema
+        tags:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Tags
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+      required:
+      - prompt
+      title: SessionCreateRequest
+      type: object
+    SessionMessage:
+      description: A message in a Devin session.
+      properties:
+        created_at:
+          title: Created At
+          type: integer
+        event_id:
+          title: Event Id
+          type: string
+        message:
+          title: Message
+          type: string
+        source:
+          enum:
+          - devin
+          - user
+          title: Source
+          type: string
+      required:
+      - event_id
+      - source
+      - message
+      - created_at
+      title: SessionMessage
+      type: object
+    SessionMessageCreateRequest:
+      properties:
+        attachment_urls:
+          anyOf:
+          - items:
+              format: uri
+              maxLength: 2083
+              minLength: 1
+              type: string
+            type: array
+          - type: 'null'
+          title: Attachment Urls
+        message:
+          title: Message
+          type: string
+        message_as_user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message As User Id
+      required:
+      - message
+      title: SessionMessageCreateRequest
+      type: object
+    SessionPullRequest:
+      properties:
+        pr_state:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pr State
+        pr_url:
+          title: Pr Url
+          type: string
+      required:
+      - pr_url
+      - pr_state
+      title: SessionPullRequest
+      type: object
+    SessionResponse:
+      properties:
+        acus_consumed:
+          title: Acus Consumed
+          type: number
+        automation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: ID of the automation that created this session, if any.
+          title: Automation Id
+        category:
+          anyOf:
+          - enum:
+            - bug_fixing
+            - ci_cd_and_devops
+            - code_quality_and_security
+            - code_review
+            - code_review_and_analysis
+            - data_and_automation
+            - documentation_and_content
+            - feature_development
+            - migrations_and_upgrades
+            - other
+            - production_investigation
+            - refactoring_and_optimization
+            - research_and_exploration
+            - security
+            - unit_test_generation
+            type: string
+          - type: 'null'
+          description: The session's assigned use-case category, if categorisation has run. Only populated
+            on get/list endpoints.
+          title: Category
+        child_session_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Child Session Ids
+        created_at:
+          title: Created At
+          type: integer
+        devin_mode:
+          anyOf:
+          - enum:
+            - normal
+            - fast
+            - lite
+            - ultra
+            - fusion
+            type: string
+          - type: 'null'
+          description: The Devin agent mode the session was created with, after resolving org/user defaults
+            and parent-session inheritance. None when the session runs an agent preview that has no mode
+            equivalent.
+          title: Devin Mode
+        is_archived:
+          default: false
+          title: Is Archived
+          type: boolean
+        org_id:
+          title: Org Id
+          type: string
+        origin:
+          anyOf:
+          - enum:
+            - webapp
+            - slack
+            - teams
+            - api
+            - linear
+            - jira
+            - automation
+            - cli
+            - desktop
+            - code_scan
+            - other
+            type: string
+          - type: 'null'
+          description: The origin from which the session was created.
+          title: Origin
+        parent_session_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Session Id
+        playbook_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Playbook Id
+        pull_requests:
+          items:
+            $ref: '#/components/schemas/SessionPullRequest'
+          title: Pull Requests
+          type: array
+        service_user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Service User Id
+        session_id:
+          title: Session Id
+          type: string
+        status:
+          enum:
+          - new
+          - claimed
+          - running
+          - exit
+          - error
+          - suspended
+          - resuming
+          title: Status
+          type: string
+        status_detail:
+          anyOf:
+          - enum:
+            - working
+            - waiting_for_user
+            - waiting_for_approval
+            - finished
+            - inactivity
+            - user_request
+            - usage_limit_exceeded
+            - out_of_credits
+            - out_of_quota
+            - no_quota_allocation
+            - payment_declined
+            - org_usage_limit_exceeded
+            - user_usage_limit_exceeded
+            - total_session_limit_exceeded
+            - error
+            type: string
+          - type: 'null'
+          description: 'Additional detail about the session''s current status. When status is ''running'':
+            ''working'' (actively working), ''waiting_for_user'' (needs user input), ''waiting_for_approval''
+            (awaiting action approval in safe mode), or ''finished'' (task complete). When status is ''suspended'':
+            the reason for suspension such as ''inactivity'', ''user_request'', ''usage_limit_exceeded'',
+            ''out_of_credits'', ''out_of_quota'', ''no_quota_allocation'', ''payment_declined'', ''org_usage_limit_exceeded'',
+            ''user_usage_limit_exceeded'', ''total_session_limit_exceeded'', or ''error''. Only populated
+            on get/list endpoints.'
+          title: Status Detail
+        structured_output:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          description: Validated structured output from the session. Only populated on get/list endpoints.
+          title: Structured Output
+        subcategory:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: The session's assigned subcategory display name. 'Other' when a category is set
+            but no subcategory was assigned or resolved. Only populated on get/list endpoints.
+          title: Subcategory
+        tags:
+          items:
+            type: string
+          title: Tags
+          type: array
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+        updated_at:
+          title: Updated At
+          type: integer
+        url:
+          title: Url
+          type: string
+        user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      required:
+      - session_id
+      - url
+      - status
+      - tags
+      - org_id
+      - created_at
+      - updated_at
+      - acus_consumed
+      - pull_requests
+      title: SessionResponse
+      type: object
+    SessionSecretInput:
+      description: Input model for a session secret provided via API.
+      properties:
+        key:
+          maxLength: 256
+          minLength: 1
+          title: Key
+          type: string
+        sensitive:
+          default: true
+          title: Sensitive
+          type: boolean
+        value:
+          maxLength: 65536
+          title: Value
+          type: string
+      required:
+      - key
+      - value
+      title: SessionSecretInput
+      type: object
+    SessionTagsResponse:
+      properties:
+        tags:
+          items:
+            type: string
+          title: Tags
+          type: array
+      required:
+      - tags
+      title: SessionTagsResponse
+      type: object
+    SessionTagsUpdateRequest:
+      properties:
+        tags:
+          items:
+            type: string
+          maxItems: 50
+          title: Tags
+          type: array
+      required:
+      - tags
+      title: SessionTagsUpdateRequest
+      type: object
+    SessionsQueryParams:
+      properties:
+        after:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: After
+        automation_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          description: Filter to sessions created by any of these automations
+          title: Automation Ids
+        category:
+          anyOf:
+          - enum:
+            - bug_fixing
+            - ci_cd_and_devops
+            - code_quality_and_security
+            - code_review
+            - code_review_and_analysis
+            - data_and_automation
+            - documentation_and_content
+            - feature_development
+            - migrations_and_upgrades
+            - other
+            - production_investigation
+            - refactoring_and_optimization
+            - research_and_exploration
+            - security
+            - unit_test_generation
+            type: string
+          - type: 'null'
+          title: Category
+        created_after:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Created After
+        created_before:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Created Before
+        first:
+          default: 100
+          maximum: 200.0
+          minimum: 1.0
+          title: First
+          type: integer
+        is_archived:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Is Archived
+        origins:
+          anyOf:
+          - items:
+              enum:
+              - webapp
+              - slack
+              - teams
+              - api
+              - linear
+              - jira
+              - automation
+              - cli
+              - desktop
+              - code_scan
+              - other
+              type: string
+            type: array
+          - type: 'null'
+          title: Origins
+        parent_session_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filter to child sessions spawned by this parent session
+          title: Parent Session Id
+        playbook_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Playbook Id
+        repo_names:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          description: Filter by repository names (e.g., 'owner/repo')
+          title: Repo Names
+        schedule_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Schedule Id
+        service_user_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Service User Ids
+        session_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Session Ids
+        tags:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Tags
+        updated_after:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Updated After
+        updated_before:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Updated Before
+        user_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: User Ids
+      title: SessionsQueryParams
+      type: object
+    WindsurfSessionUserSelf:
+      description: Identity information for an authenticated Windsurf session user.
+      properties:
+        org_id:
+          title: Org Id
+          type: string
+        principal_type:
+          const: windsurf_session
+          title: Principal Type
+          type: string
+        user_id:
+          title: User Id
+          type: string
+        user_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Name
+      required:
+      - principal_type
+      - user_id
+      - org_id
+      title: WindsurfSessionUserSelf
+      type: object
+  securitySchemes:
+    bearerAuth:
+      description: 'Service User credential (prefix: cog_)'
+      scheme: bearer
+      type: http

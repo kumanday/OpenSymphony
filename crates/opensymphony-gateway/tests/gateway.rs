@@ -1385,6 +1385,18 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
         caps_response
             .harnesses
             .iter()
+            .any(|harness| harness.kind == "devin_cloud_agent"
+                && harness.available
+                && harness.runtime_contract_version.as_deref() == Some("devin-api-v3")
+                && harness.transport.protocol == "https"
+                && harness.transport.remote
+                && !harness.transport.local
+                && !harness.feature_gaps.is_empty())
+    );
+    assert!(
+        caps_response
+            .harnesses
+            .iter()
             .any(|harness| harness.kind == "acp"
                 && harness.available
                 && harness.approvals.human_decision

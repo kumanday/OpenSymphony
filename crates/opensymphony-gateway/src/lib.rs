@@ -1139,6 +1139,7 @@ fn build_capabilities() -> GatewayCapabilities {
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
             HarnessCapability::codex_app_server_local(),
+            HarnessCapability::devin_cloud_agent(),
             HarnessCapability::acp(),
             HarnessCapability::rust_native_future(),
         ],

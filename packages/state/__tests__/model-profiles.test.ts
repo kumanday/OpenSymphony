@@ -394,6 +394,32 @@ describe("createModelProfileStore", () => {
     ]));
   });
 
+  it("retains the devin_cloud_agent harness kind through a storage round trip", async () => {
+    const storage = new MemoryStorage();
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+    const profile = {
+      ...createModelProfile("api_key"),
+      id: "devin-profile",
+      harnesses: ["devin_cloud_agent"],
+    };
+
+    await store.storeProfile(profile);
+    const reloaded = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+    const saved = (await reloaded.listProfiles()).find(
+      (candidate) => candidate.id === "devin-profile",
+    );
+
+    expect(saved?.harnesses).toEqual(["devin_cloud_agent"]);
+    expect(quarantineReasons).toEqual([]);
+  });
+
   it("warns and uses defaults when persisted harnesses are not an array", async () => {
     const storage = new MemoryStorage();
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
