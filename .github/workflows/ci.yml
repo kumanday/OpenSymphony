@@ -55,12 +55,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # rust-cache keeps the duckdb build-script output but prunes the
-          # library it downloaded, so a cache hit skips the download and the
-          # test binaries fail to link with `-lduckdb`. Cache the library too.
-          cache-directories: target/duckdb-download
-          # Bumped with cache-directories so restores carry the library.
-          key: duckdb-download
+      # rust-cache prunes the library under target/duckdb-download before it
+      # saves, but keeps the libduckdb-sys build-script output that links
+      # against it. Drop that output so the build script downloads the library
+      # again; a cache miss has nothing to drop.
+      - name: restore downloaded DuckDB library
+        run: rm -rf target/debug/build/libduckdb-sys-* target/debug/.fingerprint/libduckdb-sys-*
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

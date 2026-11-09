@@ -38,6 +38,7 @@ use super::{
     ParentRuntimeDescriptor, ParentRuntimeEnvelope, PromptCaptureDescriptor, PromptCaptureManifest,
     RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, TerminalRuntimeEnvelope,
     WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
+    git_program,
     models::{
         AfterCreateBootstrapReceipt, InstructionProvenance, SSH_AUTH_SOCK_ENV,
         redact_runtime_diagnostic,
@@ -407,8 +408,8 @@ impl WorkspaceManager {
                     ),
                 )
                 .await?;
-                let checkout = self
-                    .verify_checkout_with_worker_changes_timeout(
+                let (checkout, facts) = self
+                    .verify_checkout_facts_with_worker_changes_timeout(
                         &child_handle,
                         true,
                         true,
@@ -421,36 +422,17 @@ impl WorkspaceManager {
                         "retained child checkout has the wrong canonical repository",
                     ));
                 }
-                let status = checkout_operation_with_timeout(
-                    checkout_time_remaining(deadline),
-                    child_handle.workspace_path(),
-                    "verify retained child cleanliness",
-                    self.git(
-                        child_handle.workspace_path(),
-                        &["status", "--porcelain", "--untracked-files=all"],
-                    ),
-                )
-                .await?;
-                if !status.is_empty() {
+                if !facts.clean {
                     return Err(checkout_verification(
                         child_handle.workspace_path(),
                         "retained child checkout is dirty",
                     ));
                 }
-                let child_branch = checkout_operation_with_timeout(
-                    checkout_time_remaining(deadline),
-                    child_handle.workspace_path(),
-                    "verify retained child branch",
-                    self.git(child_handle.workspace_path(), &["branch", "--show-current"]),
-                )
-                .await?;
-                let child_head = checkout_operation_with_timeout(
-                    checkout_time_remaining(deadline),
-                    child_handle.workspace_path(),
-                    "verify retained child head",
-                    self.git(child_handle.workspace_path(), &["rev-parse", "HEAD"]),
-                )
-                .await?;
+                let GitFacts {
+                    branch: child_branch,
+                    head: child_head,
+                    ..
+                } = facts;
                 source.get_or_insert((child_handle.clone(), checkout.clone()));
                 required_merge_commits.extend(
                     request
@@ -1777,7 +1759,7 @@ impl WorkspaceManager {
             })?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_directory.path());
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("-c")
             .arg("credential.helper=")
@@ -1953,18 +1935,24 @@ impl WorkspaceManager {
         }
         self.reject_checkout_controlled_process_filters(&integration)
             .await?;
-        let worktree_root = self
-            .git(&integration, &["rev-parse", "--show-toplevel"])
+        let layout = self
+            .git(
+                &integration,
+                &["rev-parse", "--show-toplevel", "--git-common-dir", "HEAD"],
+            )
             .await?;
-        if self.canonicalize_path(Path::new(&worktree_root)).await? != canonical_integration {
+        let [worktree_root, common, head] = rev_parse_lines(&layout).ok_or_else(|| {
+            checkout_verification(
+                &integration,
+                "integration checkout Git root is inconsistent",
+            )
+        })?;
+        if self.canonicalize_path(Path::new(worktree_root)).await? != canonical_integration {
             return Err(checkout_verification(
                 &integration,
                 "integration checkout Git root is inconsistent",
             ));
         }
-        let common = self
-            .git(&integration, &["rev-parse", "--git-common-dir"])
-            .await?;
         let common = PathBuf::from(common);
         let common = if common.is_absolute() {
             common
@@ -1986,7 +1974,6 @@ impl WorkspaceManager {
                 "integration checkout does not share retained child Git storage",
             ));
         }
-        let head = self.git(&integration, &["rev-parse", "HEAD"]).await?;
         for required in &record.required_merge_commits {
             if !self
                 .git_is_ancestor(
@@ -2013,7 +2000,7 @@ impl WorkspaceManager {
                 && !self
                     .git_is_ancestor(
                         &integration,
-                        &["merge-base", "--is-ancestor", &record.target_commit, &head],
+                        &["merge-base", "--is-ancestor", &record.target_commit, head],
                     )
                     .await?)
         {
@@ -2153,39 +2140,16 @@ impl WorkspaceManager {
                 self.reject_checkout_controlled_process_filters(child.workspace_path()),
             )
             .await?;
-            self.verify_checkout_with_worker_changes_timeout(&child, true, true, deadline)
+            let (_, facts) = self
+                .verify_checkout_facts_with_worker_changes_timeout(&child, true, true, deadline)
                 .await?;
-            let status = checkout_operation_with_timeout(
-                checkout_time_remaining(deadline),
-                child.workspace_path(),
-                "verify retained child cleanliness",
-                self.git(
-                    child.workspace_path(),
-                    &["status", "--porcelain", "--untracked-files=all"],
-                ),
-            )
-            .await?;
-            if !status.is_empty() {
+            if !facts.clean {
                 return Err(checkout_verification(
                     child.workspace_path(),
                     "retained child checkout is dirty",
                 ));
             }
-            let child_head = checkout_operation_with_timeout(
-                checkout_time_remaining(deadline),
-                child.workspace_path(),
-                "verify retained child head",
-                self.git(child.workspace_path(), &["rev-parse", "HEAD"]),
-            )
-            .await?;
-            let child_branch = checkout_operation_with_timeout(
-                checkout_time_remaining(deadline),
-                child.workspace_path(),
-                "verify retained child branch",
-                self.git(child.workspace_path(), &["branch", "--show-current"]),
-            )
-            .await?;
-            if child_head != retained.child_head || child_branch != retained.child_branch {
+            if facts.head != retained.child_head || facts.branch != retained.child_branch {
                 return Err(checkout_verification(
                     child.workspace_path(),
                     "retained child evidence no longer matches the pinned parent map",
@@ -2793,6 +2757,26 @@ impl WorkspaceManager {
         allow_shallow: bool,
         checkout_deadline: Option<Instant>,
     ) -> Result<CheckoutManifest, WorkspaceError> {
+        self.verify_checkout_facts_with_worker_changes_timeout(
+            workspace,
+            allow_worker_changes,
+            allow_shallow,
+            checkout_deadline,
+        )
+        .await
+        .map(|(manifest, _)| manifest)
+    }
+
+    /// Verifies a retained checkout and also returns the Git state observed
+    /// during verification, so callers do not query branch, HEAD, and
+    /// cleanliness a second time.
+    async fn verify_checkout_facts_with_worker_changes_timeout(
+        &self,
+        workspace: &WorkspaceHandle,
+        allow_worker_changes: bool,
+        allow_shallow: bool,
+        checkout_deadline: Option<Instant>,
+    ) -> Result<(CheckoutManifest, GitFacts), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
         let manifest = self
             .load_manifest::<CheckoutManifest>(workspace, &workspace.checkout_manifest_path())
@@ -2921,7 +2905,7 @@ impl WorkspaceManager {
                 reason: "instruction provenance does not match the recorded commit".to_owned(),
             });
         }
-        Ok(manifest)
+        Ok((manifest, facts))
     }
 
     pub async fn read_checkout_instructions(
@@ -3766,7 +3750,7 @@ impl WorkspaceManager {
         } else {
             None
         };
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("clone")
             .arg("--single-branch")
@@ -3916,10 +3900,37 @@ impl WorkspaceManager {
         require_remote_head: bool,
         allow_shallow: bool,
     ) -> Result<GitFacts, WorkspaceError> {
-        let inside = self
-            .git(checkout, &["rev-parse", "--is-inside-work-tree"])
+        // One rev-parse answers every repository-layout question. Outside a
+        // work tree `--show-toplevel` fails, so any failure means the same
+        // thing as `--is-inside-work-tree` not printing `true`.
+        let layout = self
+            .git(
+                checkout,
+                &[
+                    "rev-parse",
+                    "--is-inside-work-tree",
+                    "--show-toplevel",
+                    "--git-dir",
+                    "--git-common-dir",
+                    "--git-path",
+                    "objects",
+                    "--git-path",
+                    "info/grafts",
+                    "--is-shallow-repository",
+                ],
+            )
             .await
             .map_err(|_| checkout_verification(checkout, "not a Git worktree"))?;
+        let [
+            inside,
+            worktree_root,
+            git_dir,
+            git_common_dir,
+            object_dir,
+            grafts_path,
+            shallow,
+        ] = rev_parse_lines(&layout)
+            .ok_or_else(|| checkout_verification(checkout, "not a Git worktree"))?;
         if inside != "true" {
             return Err(checkout_verification(checkout, "not a Git worktree"));
         }
@@ -3927,12 +3938,8 @@ impl WorkspaceManager {
             .canonicalize_path(checkout)
             .await
             .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
-        let worktree_root = self
-            .git(checkout, &["rev-parse", "--show-toplevel"])
-            .await
-            .map_err(|_| checkout_verification(checkout, "Git worktree root is unavailable"))?;
         let canonical_worktree_root = self
-            .canonicalize_path(Path::new(&worktree_root))
+            .canonicalize_path(Path::new(worktree_root))
             .await
             .map_err(|error| checkout_verification(checkout, &error.to_string()))?;
         if canonical_worktree_root != canonical_checkout {
@@ -3941,9 +3948,8 @@ impl WorkspaceManager {
                 "Git worktree root does not equal the checkout generation",
             ));
         }
-        for git_path in ["--git-dir", "--git-common-dir"] {
-            let git_path = self.git(checkout, &["rev-parse", git_path]).await?;
-            let git_path = PathBuf::from(&git_path);
+        for git_path in [git_dir, git_common_dir] {
+            let git_path = PathBuf::from(git_path);
             let git_path = if git_path.is_absolute() {
                 git_path
             } else {
@@ -3960,12 +3966,9 @@ impl WorkspaceManager {
                 ));
             }
         }
-        self.verify_git_object_alternates(checkout, &canonical_checkout)
+        self.verify_git_object_alternates(checkout, &canonical_checkout, object_dir)
             .await?;
-        let grafts_path = self
-            .git(checkout, &["rev-parse", "--git-path", "info/grafts"])
-            .await?;
-        let grafts_path = PathBuf::from(&grafts_path);
+        let grafts_path = PathBuf::from(grafts_path);
         let grafts_path = if grafts_path.is_absolute() {
             grafts_path
         } else {
@@ -4039,7 +4042,21 @@ impl WorkspaceManager {
                 ));
             }
         }
-        let branch = self.git(checkout, &["branch", "--show-current"]).await?;
+        // `--symbolic-full-name HEAD` prints `refs/heads/<branch>` on a branch
+        // and `HEAD` when detached, matching `git branch --show-current`.
+        let head_state = self
+            .git(
+                checkout,
+                &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"],
+            )
+            .await?;
+        let [head, symbolic_head] = rev_parse_lines(&head_state)
+            .ok_or_else(|| checkout_verification(checkout, "HEAD is unavailable"))?;
+        let head = head.to_owned();
+        let branch = symbolic_head
+            .strip_prefix("refs/heads/")
+            .unwrap_or_default()
+            .to_owned();
         if enforce_worktree_state && branch != repository.target_branch {
             return Err(checkout_verification(checkout, "target branch mismatch"));
         }
@@ -4049,7 +4066,6 @@ impl WorkspaceManager {
             .map_err(|_| {
                 checkout_verification(checkout, "target branch is not present on origin")
             })?;
-        let head = self.git(checkout, &["rev-parse", "HEAD"]).await?;
         if require_remote_head {
             let remote_head = self.git(checkout, &["rev-parse", &remote_ref]).await?;
             if head != remote_head {
@@ -4059,10 +4075,7 @@ impl WorkspaceManager {
                 ));
             }
         }
-        let shallow = self
-            .git(checkout, &["rev-parse", "--is-shallow-repository"])
-            .await?
-            == "true";
+        let shallow = shallow == "true";
         if shallow && !allow_shallow {
             return Err(checkout_verification(checkout, "history is shallow"));
         }
@@ -4088,10 +4101,8 @@ impl WorkspaceManager {
         &self,
         checkout: &Path,
         canonical_checkout: &Path,
+        object_dir: &str,
     ) -> Result<(), WorkspaceError> {
-        let object_dir = self
-            .git(checkout, &["rev-parse", "--git-path", "objects"])
-            .await?;
         let object_dir = PathBuf::from(object_dir);
         let object_dir = if object_dir.is_absolute() {
             object_dir
@@ -4172,7 +4183,7 @@ impl WorkspaceManager {
             })?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(isolated_config.path());
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("-c")
             .arg("core.fsmonitor=")
@@ -4239,7 +4250,7 @@ impl WorkspaceManager {
             })?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_directory.path());
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("-c")
             .arg("core.fsmonitor=")
@@ -4300,7 +4311,7 @@ impl WorkspaceManager {
             })?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_directory.path());
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("-c")
             .arg("core.fsmonitor=")
@@ -4374,7 +4385,7 @@ impl WorkspaceManager {
             })?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_directory.path());
-        let mut command = Command::new("git");
+        let mut command = Command::new(git_program());
         command
             .arg("-c")
             .arg("core.fsmonitor=")
@@ -7369,6 +7380,14 @@ struct GitFacts {
     clean: bool,
 }
 
+/// Splits the output of a multi-option `git rev-parse` into exactly `N`
+/// answers, one per line. Returns `None` when the line count differs, for
+/// example because a path contains a newline, so callers fail closed.
+fn rev_parse_lines<const N: usize>(output: &str) -> Option<[&str; N]> {
+    let lines = output.lines().collect::<Vec<_>>();
+    lines.try_into().ok()
+}
+
 fn checkout_verification(path: &Path, reason: &str) -> WorkspaceError {
     WorkspaceError::CheckoutVerification {
         path: path.to_path_buf(),
@@ -7721,7 +7740,7 @@ async fn tracked_instruction_paths(
         .map_err(|_| checkout_verification(root, "tracked instruction probe failed"))?;
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_directory.path());
-    let mut command = Command::new("git");
+    let mut command = Command::new(git_program());
     command
         .arg("-c")
         .arg("core.fsmonitor=")
